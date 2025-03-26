@@ -1,0 +1,164 @@
+---
+title: By User ID
+---
+
+Per-user rate limiting tracks requests based on a user identifier. Unlike per-IP, this method follows a user identity header, ensuring each distinct user has their own rate limit.
+
+---
+
+## Overview
+
+- **What it does**: Controls how many requests each user (identified via header) can make.
+- **Common use cases**:
+  - Preventing account-level abuse.
+  - Ensuring fair usage among registered or authenticated users.
+
+## Basic Configuration
+
+Below is an example showing how to enable **per_user** limits:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "required_plugins": [
+      {
+        "name": "rate_limiter",
+        "enabled": true,
+        "stage": "pre_request",
+        "priority": 1,
+        "settings": {
+          "limits": {
+            "per_user": {
+              "limit": 5,
+              "window": "1m"
+            }
+          },
+          "actions": {
+            "type": "reject",
+            "retry_after": "60"
+          }
+        }
+      }
+    ]
+  }'
+```
+
+## User Detection
+
+The system detects user IDs from the following headers:
+
+- `X-User-ID`
+- `X-User-Id`
+- `X-UserID`
+- `User-ID`
+
+If none of these headers are present, the user is labeled as **anonymous**.
+Make sure you configure your application or identity provider to set a consistent user ID header.
+
+---
+
+# Configuration Fields
+
+- **limit**
+Maximum number of requests allowed for each user within the specified window.
+
+- **window**
+Time frame (e.g., `1m`, `30s`) for measuring requests.
+
+- **actions**
+    - **type**:
+        - `reject`: Returns 429 status with retry information
+        - `block`: Similar to reject but for permanent blocks
+    - **retry_after**: Seconds to wait before retrying
+
+---
+
+## Window Configuration
+
+The `window` parameter supports any valid duration string:
+- `s`: seconds (e.g., "30s")
+- `m`: minutes (e.g., "5m")
+- `h`: hours (e.g., "1h")
+- `d`: days (e.g., "1d")
+
+Example combinations:
+```json
+{
+  "limits": {
+    "per_ip": {
+      "limit": 30,
+      "window": "30s"
+    },
+    "per_user": {
+      "limit": 100,
+      "window": "1h"
+    },
+    "global": {
+      "limit": 1000,
+      "window": "1d"
+    }
+  }
+}
+```
+
+---
+
+## Response Headers
+
+The rate limiter adds the following headers to each response:
+
+### Per Limit Type Headers
+```
+X-RateLimit-{type}-Limit: [maximum requests]
+X-RateLimit-{type}-Remaining: [requests remaining]
+X-RateLimit-{type}-Reset: [reset timestamp]
+```
+Where `{type}` is one of:
+- `global`
+- `per_ip`
+- `per_user`
+
+### Rate Limit Exceeded Response
+```json
+{
+  "error": "per_ip rate limit exceeded",
+  "retry_after": "60"
+}
+```
+
+## Implementation Details
+
+### Storage and Tracking
+- Uses Redis sorted sets for tracking
+- Key format: `ratelimit:{level}:{id}:{limit_type}:{key}`
+- Automatic cleanup of expired entries
+- Thread-safe operations
+
+### Counter Implementation
+```go
+requestID := fmt.Sprintf("%d:%s", now.Unix(), uuid.New().String())
+pipe := redis.Pipeline()
+pipe.ZRemRangeByScore(ctx, key, "0", windowStart)
+pipe.ZAdd(ctx, key, &redis.Z{
+    Score:  float64(now.Unix()),
+    Member: requestID,
+})
+pipe.Expire(ctx, key, window)
+```
+
+---
+
+## Best Practices
+
+### Longer Windows
+Per-user limits can often use slightly longer windows (1m to 1h) since they typically handle authenticated requests with more consistent patterns.
+
+### Combine with Other Limits
+Even if you rate-limit by user, using per-IP and global limits as a fallback can prevent edge cases where multiple users share IP addresses or credentials.
+
+### Monitor Usage
+Track how often users hit their limit; this could indicate malicious scripts or legitimate high-volume needs that may require higher quotas.
+
+
+

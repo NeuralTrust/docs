@@ -1,0 +1,148 @@
+---
+title: Global System-Wide Limits
+---
+
+Global rate limiting imposes a system-wide limit on all requests passing through the gateway. This is useful as an upper bound for overall capacity protection, ensuring the gateway or downstream services aren’t overwhelmed by total traffic.
+
+---
+
+## Overview
+
+- **What it does**: Caps the total request volume across all IPs and users.
+- **Common use cases**:
+  - Protecting shared infrastructure.
+  - Enforcing service-level quotas or performance thresholds.
+
+## Basic Configuration
+
+Below is an example showing how to enable **global** limits:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "required_plugins": [
+      {
+        "name": "rate_limiter",
+        "enabled": true,
+        "stage": "pre_request",
+        "priority": 1,
+        "settings": {
+          "limits": {
+            "global": {
+              "limit": 15,
+              "window": "1m"
+            }
+          },
+          "actions": {
+            "type": "reject",
+            "retry_after": "60"
+          }
+        }
+      }
+    ]
+  }'
+```
+
+## Configuration Fields
+
+- **limit**
+Maximum number of requests allowed for each user within the specified window.
+
+- **window**
+Time frame (e.g., `1m`, `30s`) for measuring requests.
+
+- **actions**
+  - **type**:
+        - `reject`: Returns 429 status with retry information
+        - `block`: Similar to reject but for permanent blocks
+  - **retry_after**: Seconds to wait before retrying
+
+---
+
+## Window Configuration
+
+The `window` parameter supports any valid duration string:
+- `s`: seconds (e.g., "30s")
+- `m`: minutes (e.g., "5m")
+- `h`: hours (e.g., "1h")
+- `d`: days (e.g., "1d")
+
+Example combinations:
+```json
+{
+  "limits": {
+    "per_ip": {
+      "limit": 30,
+      "window": "30s"
+    },
+    "per_user": {
+      "limit": 100,
+      "window": "1h"
+    },
+    "global": {
+      "limit": 1000,
+      "window": "1d"
+    }
+  }
+}
+```
+
+---
+
+## Response Headers
+
+The rate limiter adds the following headers to each response:
+
+### Per Limit Type Headers
+```
+X-RateLimit-{type}-Limit: [maximum requests]
+X-RateLimit-{type}-Remaining: [requests remaining]
+X-RateLimit-{type}-Reset: [reset timestamp]
+```
+Where `{type}` is one of:
+- `global`
+- `per_ip`
+- `per_user`
+
+### Rate Limit Exceeded Response
+```json
+{
+  "error": "per_ip rate limit exceeded",
+  "retry_after": "60"
+}
+```
+
+## Implementation Details
+
+### Storage and Tracking
+- Uses Redis sorted sets for tracking
+- Key format: `ratelimit:{level}:{id}:{limit_type}:{key}`
+- Automatic cleanup of expired entries
+- Thread-safe operations
+
+### Counter Implementation
+```go
+requestID := fmt.Sprintf("%d:%s", now.Unix(), uuid.New().String())
+pipe := redis.Pipeline()
+pipe.ZRemRangeByScore(ctx, key, "0", windowStart)
+pipe.ZAdd(ctx, key, &redis.Z{
+    Score:  float64(now.Unix()),
+    Member: requestID,
+})
+pipe.Expire(ctx, key, window)
+```
+
+---
+
+## Use Cases and Considerations
+
+### System-Wide Quotas
+If you have a backend with limited capacity, global limiting ensures no single spike can breach that capacity.
+
+### Fallback Mechanism
+Even if you have per-IP or per-user limits, global limiting acts as a final line of defense when total traffic volume surges.
+
+### Fair Resource Distribution
+In multi-tenant environments, it prevents one tenant from consuming the entire capacity, ensuring all tenants receive a baseline service.
+
