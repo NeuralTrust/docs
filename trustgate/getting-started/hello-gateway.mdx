@@ -1,0 +1,227 @@
+---
+title: 'Quickstart: Hello Gateway'
+---
+
+After installing AI Gateway, the next step is to create your first gateway instance. This guide will walk you through creating and configuring a basic gateway.
+
+## API Reference
+[Explore the API Documentation](../api-reference/overview.md)
+
+## Step 1: Create a Gateway
+
+Use the Admin API to create your first gateway:
+
+```bash
+# Create a gateway
+curl -X POST http://localhost:8080/api/v1/gateways \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-first-gateway",
+    "subdomain": "api",
+    "required_plugins": [
+        {
+            "name": "rate_limiter",
+            "enabled": true,
+            "stage": "pre_request",
+            "priority": 1,
+            "settings": {
+                "limits": {
+                    "global": {
+                        "limit": 15,
+                        "window": "1m"
+                    },
+                    "per_ip": {
+                        "limit": 5,
+                        "window": "1m"
+                    },
+                    "per_user": {
+                        "limit": 5,
+                        "window": "1m"
+                    }
+                },
+                "actions": {
+                    "type": "reject",
+                    "retry_after": "60"
+                }
+            }
+        }
+    ]
+  }'
+```
+
+### Verify Gateway Creation
+
+Check if your gateway was created successfully:
+
+```bash
+# Get gateway details
+curl http://localhost:8080/api/v1/gateways/{gateway-id}
+
+# List all gateways
+curl http://localhost:8080/api/v1/gateways
+```
+
+## Step 2: Create an API Key
+
+```bash
+# Create a test API key
+curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id}/keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "test-key",
+    "expires_at": "2027-12-31T23:59:59Z"
+  }'
+```
+
+## Step 3: Create The Upstream
+
+```bash
+curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id}/upstreams \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "ai-providers-upstream",
+    "algorithm": "round-robin",
+    "targets": [
+      {
+        "path": "/v1/chat/completions",
+        "provider": "openai",
+        "weight": 50,
+        "priority": 1,
+        "default_model": "gpt-4o-mini",
+        "models": ["gpt-3.5-turbo", "gpt-4", "gpt-4o-mini"],
+        "credentials": {
+          "header_name": "Authorization",
+          "header_value": "Bearer your-openai-key"
+        }
+      },
+      {
+        "path": "/v1/messages",
+        "provider": "anthropic",
+        "weight": 50,
+        "priority": 1,
+        "default_model": "claude-3-5-sonnet-20241022",
+        "models": ["claude-3-5-sonnet-20241022"],
+        "headers": {
+          "anthropic-version": "2023-06-01"
+        },
+        "credentials": {
+          "header_name": "x-api-key",
+          "header_value": "your-anthropic-key"
+        }
+      }
+    ],
+    "health_checks": {
+      "passive": true,
+      "threshold": 3,
+      "interval": 60
+    }
+  }'
+```
+
+### Verify Configuration
+
+Check that your upstream is properly configured:
+
+```bash
+curl http://localhost:8080/api/v1/gateways/{gateway-id}/upstreams/{upstream-id}
+```
+
+## Step 4: Create the Service
+
+Create your service using the Admin API:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id}/services \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-service",
+    "upstream_id": "{upstream-id}",
+    "type": "upstream",
+    "description": "My Service"
+  }'
+```
+
+### Verify Configuration
+
+Check that your service is properly configured:
+
+```bash
+curl http://localhost:8080/api/v1/gateways/{gateway-id}/services/{service-id}
+```
+
+## Step 5: Create a Rule
+
+Create your first rule using the Admin API:
+
+
+```bash
+# Exact matching
+curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id}/rules \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service_id": "{service-id}",
+    "path": "/test",
+    "methods": ["POST"],
+    "strip_path": false,
+    "preserve_host": false
+  }'
+```
+
+### Verify Rules
+
+Check that your rules are properly configured:
+
+```bash
+curl http://localhost:8080/api/v1/gateways/{gateway-id}/rules
+```
+
+## Step 6: Test the Rules
+
+Test your rule configurations:
+
+**Host Header:** You need to set the `Host` header to the subdomain of your gateway in case you are running locally.
+
+**API Key:** You need to set the `x-api-key` header to the API key of your gateway, that you created in the [Step 2](#step-2-create-an-api-key).
+
+
+```bash
+# Test a route
+curl -X POST http://localhost:8080/test \
+  -H "Content-Type: application/json" \
+  -H "Host: my-first-gateway.example.com" \
+  -H "x-api-key: your-key" \
+  -d '{
+    "model": "gpt-3.5-turbo",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "max_tokens": 1024
+  }'
+```
+
+## Next Steps
+
+Now that you have configured your rules, read more about:
+- Learn about [Load Balancing](./load-balancing.md)
+- Explore [Rate Limiting](./rate-limiting.md)
+
+## Troubleshooting
+
+Common issues and solutions:
+
+1. **Routing Issues**
+- Verify path patterns
+- Check method restrictions
+- Review rule priorities
+
+2. **Path Handling**
+- Check strip_path setting
+- Verify preserve_host
+- Test path transformations
+
+3. **Header Problems**
+- Verify header requirements
+- Check header values
+- Test header matching
