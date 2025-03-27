@@ -1,0 +1,174 @@
+---
+title: Writing Custom Plugins
+---
+
+TrustGate allows developers to create their own plugins to extend the functionality of the gateway. Custom plugins run natively inside the gateway process and have full access to request and response contexts, making them ideal for advanced security checks, transformations, logging, or custom business logic.
+
+---
+
+## Plugin Location
+
+All custom plugins should be added to the folder:
+
+```
+pkg/plugins/
+```
+
+
+Each plugin should reside in its own subfolder within `pkg/plugins`, and be registered during initialization using the plugin manager.
+
+---
+
+## Plugin Interface
+
+To be recognized by TrustGate, every plugin must implement the following interface:
+
+```go
+type Plugin interface {
+  // Name returns the unique name of the plugin.
+  Name() string
+
+  // Stages defines the fixed stages where the plugin will always run.
+  // If this returns an empty slice, the stage is determined by configuration.
+  Stages() []types.Stage
+
+  // AllowedStages returns all stages where the plugin can legally be run.
+  // This is used to validate user-supplied plugin configurations.
+  AllowedStages() []types.Stage
+
+  // Execute is the core logic of the plugin.
+  // It receives the request, response, and plugin config.
+  Execute(
+    ctx context.Context,
+    cfg types.PluginConfig,
+    req *types.RequestContext,
+    resp *types.ResponseContext,
+  ) (*types.PluginResponse, error)
+
+  // ValidateConfig is called before execution to ensure the configuration is valid.
+  ValidateConfig(config types.PluginConfig) error
+}
+
+```
+
+## Stage Lifecycle
+
+Plugins can run at any of the following stages:
+
+- `pre_request`
+- `post_request`
+- `pre_response`
+- `post_response`
+
+You can restrict a plugin to run only at specific stages by implementing the `Stages()` method, or validate supported stages using the `AllowedStages()` method.
+
+
+## Plugin Registration
+
+To make your plugin available to TrustGate, you must register it inside the plugin manager.
+
+All plugin registrations happen in the `Manager`'s `initializePlugins()` method, located in:
+
+```
+pkg/plugins/manager.go
+```
+
+Within that file, locate the following function:
+
+```go
+func (m *Manager) initializePlugins() {
+  // existing registrations
+}
+
+```
+
+## Plugin Configuration
+
+Each plugin can be configured declaratively through the gateway configuration, a specific rule, or a consumer group. Below is an example of a plugin configuration block:
+
+```json
+{
+  "name": "my_custom_plugin",
+  "enabled": true,
+  "stage": "pre_request",
+  "priority": 1,
+  "settings": {
+    "example_setting": "value"
+  }
+}
+```
+
+- **name**: The name of the plugin, as returned by its `Name()` method.
+
+- **enabled**: Whether the plugin should be active.
+
+- **stage**: The execution stage (`pre_request`, `post_request`, etc.).
+
+- **priority**: Used when multiple plugins run sequentially; lower numbers run first.
+
+- **settings**: Custom key-value pairs passed into the plugin for configuration and validation.
+
+---
+
+## Example Plugin Skeleton
+
+```go
+package myplugin
+
+import (
+  "context"
+  "fmt"
+
+  "trustgate/pkg/types"
+)
+
+type MyPlugin struct{}
+
+func (p *MyPlugin) Name() string {
+  return "my_custom_plugin"
+}
+
+func (p *MyPlugin) Stages() []types.Stage {
+  return nil // allow stage to be set via config
+}
+
+func (p *MyPlugin) AllowedStages() []types.Stage {
+  return []types.Stage{
+    types.StagePreRequest,
+    types.StagePostRequest,
+  }
+}
+
+func (p *MyPlugin) Execute(
+  ctx context.Context,
+  cfg types.PluginConfig,
+  req *types.RequestContext,
+  resp *types.ResponseContext,
+) (*types.PluginResponse, error) {
+  fmt.Println("Executing custom plugin logic...")
+  return &types.PluginResponse{
+    Status: types.PluginStatusContinue,
+  }, nil
+}
+
+func (p *MyPlugin) ValidateConfig(config types.PluginConfig) error {
+  // Optional: validate plugin-specific settings
+  return nil
+}
+
+func New() types.Plugin {
+  return &MyPlugin{}
+}
+```
+
+## Tips for Writing Plugins
+
+- Always validate configuration using `ValidateConfig()` to avoid runtime errors.
+
+- Use `PluginResponse` to control execution flow (`continue`, `reject`, `halt`, etc.).
+
+- Plugins should be deterministic and fast — avoid long-running logic in the execution path.
+
+- Consider writing unit tests for plugin logic in isolation.
+
+- Avoid leaking sensitive data in logs unless explicitly masked or filtered.
