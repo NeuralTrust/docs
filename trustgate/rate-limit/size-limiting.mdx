@@ -2,140 +2,22 @@
 title: Request Size Limiting
 ---
 
-## Technical Overview
-The Request Size Limiter plugin provides precise control over HTTP request sizes through multi-component analysis and enforcement. It implements efficient size checking without buffering entire requests.
+The `request_size_limiter` plugin enforces strict request size boundaries for incoming HTTP requests to protect services from oversized payloads, abuse, and resource exhaustion.
 
-### Core Components
-
-1. **Size Analysis Engine**
-- Streaming size calculation
-- Header count tracking
-- Content-Length validation
-- Transfer-Encoding handling
-
-2. **Limit Enforcement**
-- Early request termination
-- Partial request handling
-- Chunked transfer support
-- Multi-part form handling
-
-3. **Resource Management**
-- Memory usage control
-- Buffer management
-- Connection handling
-- Timeout enforcement
-
-## Size Control Mechanisms
-
-### Header Control
-- **Size Calculation**
-- Individual header sizes
-- Total header size
-- Header count tracking
-- Name-value pair analysis
-
-- **Limit Enforcement**
-- Pre-parse rejection
-- Progressive checking
-- Early termination
-- Buffer management
-
-### Body Control
-- **Size Tracking**
-- Streaming measurement
-- Chunk size validation
-- Content-Length verification
-- Multi-part boundaries
-
-- **Transfer Handling**
-- Chunked encoding
-- Content-Length
-- Multi-part forms
-- Raw body data
-
-### URL Control
-- **Length Calculation**
-- Path length
-- Query string size
-- Fragment size
-- Total URL length
-
-## Processing Pipeline
-
-1. **Request Reception**
-- Initial size check
-- Header processing
-- Body streaming
-- Resource allocation
-
-2. **Size Validation**
-- Progressive checking
-- Limit comparison
-- Resource monitoring
-- Error detection
-
-3. **Limit Enforcement**
-- Request termination
-- Error response
-- Resource cleanup
-- Logging
-
-## Performance Optimization
-
-### Memory Management
-- No complete buffering
-- Streaming processing
-- Buffer pooling
-- Resource limits
-
-### Processing Efficiency
-- Early rejection
-- Progressive checking
-- Minimal copying
-- Zero allocations
-
-### Connection Handling
-- Keep-alive support
-- Connection termination
-- Timeout management
-- Resource cleanup
-
-## Error Handling
-
-### Size Violations
-- Header size exceeded
-- Body size exceeded
-- URL length exceeded
-- Header count exceeded
-
-### Protocol Errors
-- Invalid Content-Length
-- Malformed chunks
-- Invalid headers
-- Protocol violations
-
-### Resource Errors
-- Memory limits
-- Connection timeouts
-- System resources
-- Network errors
-
-## Features
-- Configurable size limits
-- Multiple request part checking
-- Customizable error responses
-- Byte-level precision
-- Header count limiting
+---
 
 ## Size Limits
-The plugin can limit:
 
-| Request Part | Description | Default |
-|-------------|-------------|----------|
-| Headers | Total headers size | 8KB |
-| Body | Request body size | 1MB |
-| URL | URL length | 2KB |
-| Header Count | Number of headers | 100 |
+The plugin can limit the following parts of the request:
+
+| Request Part   | Description              | Default |
+|----------------|--------------------------|---------|
+| Headers        | Total headers size       | 8KB     |
+| Body           | Request body size        | 1MB     |
+| URL            | URL length               | 2KB     |
+| Header Count   | Number of headers        | 100     |
+
+---
 
 ## Configuration
 
@@ -156,13 +38,41 @@ The plugin can limit:
 
 ### Configuration Parameters
 
-| Parameter | Type | Description | Required | Default |
-|-----------|------|-------------|-----------|----------|
-| max_header_size | number | Maximum headers size in bytes | No | 8192 |
-| max_body_size | number | Maximum body size in bytes | No | 1048576 |
-| max_url_length | number | Maximum URL length in bytes | No | 2048 |
-| max_header_count | number | Maximum number of headers | No | 100 |
-| error_message | string | Custom error message | No | "Request size exceeds limit" |
+| Parameter            | Type    | Description                                 | Required | Default                   |
+|----------------------|---------|---------------------------------------------|----------|---------------------------|
+| max_header_size      | number  | Maximum headers size in bytes               | No       | 8192                      |
+| max_body_size        | number  | Maximum body size in bytes                  | No       | 1048576                   |
+| max_url_length       | number  | Maximum URL length in bytes                 | No       | 2048                      |
+| max_header_count     | number  | Maximum number of headers                   | No       | 100                       |
+| error_message        | string  | Custom error message                        | No       | "Request size exceeds limit" |
+
+---
+
+## Character-Based Limits
+
+In addition to byte-based limits, the plugin supports request character limits and optional enforcement of the `Content-Length` header.
+
+| Parameter              | Type    | Description                                          | Default     |
+|------------------------|---------|------------------------------------------------------|--------------|
+| allowed_payload_size   | number  | Payload size threshold (unit configurable)           | 10MB         |
+| size_unit              | string  | Size unit: `bytes`, `kilobytes`, or `megabytes`      | `megabytes`  |
+| max_chars_per_request  | number  | Max allowed characters per request                   | 100,000      |
+| require_content_length | boolean | Whether `Content-Length` header must be present      | false        |
+
+---
+
+## Response Headers
+
+On success, the plugin returns informational headers:
+
+| Header Name              | Description                                      |
+|--------------------------|--------------------------------------------------|
+| X-Request-Size-Bytes     | Actual request size in bytes                     |
+| X-Request-Size-Chars     | Number of characters in the request              |
+| X-Size-Limit-Bytes       | Configured max size limit in bytes               |
+| X-Size-Limit-Chars       | Configured max character count limit             |
+
+---
 
 ## Usage Example
 
@@ -188,31 +98,13 @@ curl -X POST "http://localhost:8080/api/v1/gateways" \
   }'
 ```
 
-## Best Practices
+---
 
-1. **Size Limit Selection**
-- Set limits based on requirements
-- Consider application needs
-- Monitor rejection rates
+## Behavior Summary
 
-2. **Header Count Limits**
-- Set reasonable header limits
-- Account for standard headers
-- Consider proxy headers
-
-3. **Error Handling**
-- Use clear error messages
-- Log rejected requests
-- Monitor trends
-
-4. **Performance Tuning**
-- Adjust limits based on usage
-- Monitor resource usage
-- Balance security vs usability
-
-## Performance Considerations
-- Constant-time size checking
-- Minimal memory overhead
-- Early request rejection
-- Efficient header counting
-- No request buffering needed
+- Validates size and character limits against configured thresholds
+- Supports size units: bytes, kilobytes, megabytes
+- Blocks request with HTTP `413 Payload Too Large` when limits are exceeded
+- Optionally enforces presence of `Content-Length`
+- Adds response headers with diagnostics
+- Provides clear error messages for violations

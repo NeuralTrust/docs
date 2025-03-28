@@ -5,141 +5,178 @@ title: Injection Protection
 ## Technical Overview
 The Injection Protection plugin implements a multi-layered defense system to detect and block various injection attacks. It operates in the pre-request stage and analyzes all parts of incoming HTTP requests.
 
-### Core Components
+## Core Components
 
-1. **Pattern Detection Engine**
-- Pre-compiled regular expressions for performance
-- Case-insensitive pattern matching
-- Support for complex attack patterns
-- Custom pattern registration
+The detection system is composed of several core components designed to ensure high performance and accuracy in identifying malicious requests.
 
-2. **Request Analyzer**
-- Multi-part request analysis (headers, query, body)
-- JSON and form-data parsing
-- Recursive object traversal
-- UTF-8 encoding support
+### 1. Pattern Detection Engine
 
-3. **Attack Detection System**
-- Real-time pattern matching
-- Concurrent request processing
-- Early termination on detection
-- Detailed attack logging
+This component is responsible for identifying malicious patterns using optimized matching techniques.
 
-## Attack Detection Details
+- **Pre-compiled regular expressions** for faster performance.
+- **Case-insensitive pattern matching** to detect variations.
+- **Support for complex attack patterns** that span multiple tokens or formats.
+- **Custom pattern registration** to allow user-defined detection logic.
 
-### SQL Injection Detection
-- **Union-based Attacks**
-- UNION SELECT statements
-- Stacked queries
-- Comment-based injections
+### 2. Request Analyzer
 
-- **Error-based Attacks**
-- Type conversion attacks
-- XPATH errors
-- Syntax errors
+The Request Analyzer dissects incoming HTTP requests and prepares them for pattern inspection.
 
-- **Time-based Attacks**
-- SLEEP() functions
-- BENCHMARK() calls
-- Heavy queries
+- **Multi-part request analysis**, including headers, query parameters, and body content.
+- **JSON and form-data parsing** to normalize structured payloads.
+- **Recursive object traversal** for deeply nested content.
+- **UTF-8 encoding support** to handle all standard web formats.
 
-### Command Injection Detection
-- **Shell Commands**
-- System command execution
-- Process spawning
-- Command chaining
+### 3. Attack Detection System
 
-- **Shell Shock Patterns**
-- Environment variables
-- Function definitions
-- Command substitution
+This system evaluates parsed requests against all registered patterns and coordinates the response logic.
 
-- **Command Separators**
-- Semicolons
-- Pipes
-- Backticks
+- **Real-time pattern matching** to immediately detect threats.
+- **Concurrent request processing** for scalability under load.
+- **Early termination on detection** to prevent further processing of malicious requests.
+- **Detailed attack logging** for observability and forensic analysis.
 
-### Path Traversal Detection
-- **Directory Navigation**
-- Parent directory references
-- Absolute paths
-- Symbolic links
 
-- **Encoding Variations**
-- URL encoding
-- Double encoding
-- Unicode variants
+## SQL Injection Detection
 
-### SSRF Detection
-- **URL Schemes**
-- File protocol
-- HTTP/HTTPS
-- Data URIs
+| Category             | Techniques / Indicators                            |
+|----------------------|----------------------------------------------------|
+| **Union-based Attacks**   | `UNION SELECT` statements<br />Stacked queries<br />Comment-based injections |
+| **Error-based Attacks**   | Type conversion attacks<br />XPATH errors<br />Syntax errors |
+| **Time-based Attacks**    | `SLEEP()` functions<br />`BENCHMARK()` calls<br />Heavy queries |
 
-- **Internal Access**
-- Localhost references
-- Private IP ranges
-- DNS rebinding
+
+## Command Injection Detection
+
+Command injection occurs when untrusted input is used to build and execute system-level commands. This plugin detects several patterns commonly associated with command injection attempts.
+
+- ### Shell Commands
+
+    The plugin can identify execution of typical shell commands that indicate a potential attack:
+
+    - **System command execution**
+    - **Process spawning**
+    - **Command chaining**
+
+- ### Shell Shock Patterns
+
+    The following patterns associated with Shellshock vulnerabilities are detected:
+
+    - **Environment variables**
+    - **Function definitions**
+    - **Command substitution**
+
+- ### Command Separators
+
+    Special characters used to chain or separate commands are monitored, including:
+
+    - **Semicolons (`;`)**
+    - **Pipes (`|`)**
+    - **Backticks (`` ` ``)**
+
+## Path Traversal Detection
+
+Path Traversal vulnerabilities allow attackers to access files and directories outside the intended scope. This plugin detects such attempts using multiple strategies.
+
+- ### Directory Navigation
+
+        | Technique                  | Description |
+        |---------------------------|-------------|
+        | **Parent directory references** | Usage of `../` or `..\\` to move up in the file system hierarchy |
+        | **Absolute paths**              | Direct access to system paths like `/etc/passwd` or `C:\\Windows\\System32` |
+        | **Symbolic links**              | Use of symlinks to bypass file access restrictions |
+
+- ### Encoding Variations
+
+        | Technique         | Description |
+        |------------------|-------------|
+        | **URL encoding**     | Obfuscation using `%2e%2e%2f` (`../`) or similar |
+        | **Double encoding**  | Nested encoding such as `%252e%252e%252f` |
+        | **Unicode variants** | Alternate character representations like `￭￭/` |
+
+
+## SSRF Detection
+
+Server-Side Request Forgery (SSRF) occurs when an attacker tricks the server into making requests to unintended locations. The plugin detects SSRF attempts through URL patterns and internal access indicators.
+
+- ### URL Schemes
+
+        | Technique        | Description |
+        |------------------|-------------|
+        | **File protocol**   | Attempts to access local files using `file://` |
+        | **HTTP/HTTPS**      | Redirection or access to potentially unsafe endpoints |
+        | **Data URIs**       | Embedding data payloads using `data:` scheme |
+
+- ### Internal Access
+
+        | Technique              | Description |
+        |------------------------|-------------|
+        | **Localhost references** | Targets like `127.0.0.1`, `::1`, or `localhost` |
+        | **Private IP ranges**    | Access to internal network IPs (e.g., `192.168.x.x`, `10.x.x.x`) |
+        | **DNS rebinding**        | Manipulating DNS resolution to redirect to internal services |
+
 
 ## Processing Pipeline
 
-1. **Request Parsing**
-- Header extraction
-- Query parameter parsing
-- Body deserialization
-- Content type handling
+The processing pipeline defines the sequence of operations performed on each incoming request, from parsing to final response generation.
 
-2. **Pattern Matching**
-- Regular expression evaluation
-- Custom pattern checking
-- Threshold validation
-- Attack categorization
+- ### Request Parsing
 
-3. **Decision Making**
-- Threat scoring
-- Action determination
-- Response generation
-- Error handling
+        | Step                    | Description |
+        |-------------------------|-------------|
+        | **Header extraction**       | Collect and normalize request headers |
+        | **Query parameter parsing**| Extract and decode query string values |
+        | **Body deserialization**   | Parse request body (e.g., JSON, form-data) |
+        | **Content type handling**  | Determine how to interpret the body based on `Content-Type` |
 
-4. **Response Generation**
-- Status code selection
-- Error message formatting
-- Header modification
-- Logging and metrics
+- ### Pattern Matching
+
+        | Step                    | Description |
+        |-------------------------|-------------|
+        | **Regular expression evaluation** | Match request content against known attack patterns |
+        | **Custom pattern checking**       | Apply user-defined rules and patterns |
+        | **Threshold validation**          | Evaluate if pattern matches exceed configured limits |
+        | **Attack categorization**         | Classify the type of detected threat |
+
+- ### Decision Making
+
+        | Step                | Description |
+        |---------------------|-------------|
+        | **Threat scoring**      | Assign severity score based on matches and context |
+        | **Action determination**| Decide whether to block, log, or allow the request |
+        | **Response generation** | Prepare appropriate HTTP response |
+        | **Error handling**      | Capture and respond to internal processing issues |
+
+- ### Response Generation
+
+        | Step                    | Description |
+        |-------------------------|-------------|
+        | **Status code selection**     | Return appropriate HTTP status (e.g., 403, 422) |
+        | **Error message formatting**  | Include meaningful messages for blocked requests |
+        | **Header modification**       | Add or modify headers (e.g., for CORS, security) |
+        | **Logging and metrics**       | Record processing outcomes for observability |
+
 
 ## Configuration Details
 
+The plugin allows for flexible configuration of pattern types to adapt to various security needs.
+
 ### Pattern Types
-1. **Predefined Patterns**
-- Built-in security rules
-- Common attack signatures
-- Updated regularly
-- Performance optimized
 
-2. **Custom Patterns**
-- User-defined rules
-- Regular expressions
-- Pattern descriptions
-- Priority settings
+| Type                 | Description |
+|----------------------|-------------|
+| **Predefined Patterns** | - Built-in security rules<br />- Common attack signatures<br />- Updated regularly<br />- Performance optimized |
+| **Custom Patterns**     | - User-defined rules<br />- Regular expressions<br />- Pattern descriptions<br />- Priority settings |
 
-### Content Analysis
-1. **Header Analysis**
-- Key-value pair checking
-- Size validation
-- Encoding verification
-- Protocol compliance
 
-2. **Query Analysis**
-- Parameter inspection
-- Value validation
-- Encoding checks
-- Length limits
+## Content Analysis
 
-3. **Body Analysis**
-- Content parsing
-- Deep object inspection
-- Array handling
-- Size validation
+| Part            | Checks |
+|-----------------|--------|
+| **Header Analysis** | Key-value pair checking<br />Size validation<br />Encoding verification<br />Protocol compliance |
+| **Query Analysis**  | Parameter inspection<br />Value validation<br />Encoding checks<br />Length limits |
+| **Body Analysis**   | Content parsing<br />Deep object inspection<br />Array handling<br />Size validation |
+
 
 ## Performance Optimization
 
@@ -161,39 +198,15 @@ The Injection Protection plugin implements a multi-layered defense system to det
 - Garbage collection friendly
 - Memory limits
 
-## Error Handling
-
-### Types of Errors
-1. **Validation Errors**
-- Invalid patterns
-- Malformed requests
-- Size violations
-- Encoding issues
-
-2. **Runtime Errors**
-- Timeout errors
-- Resource exhaustion
-- System errors
-- Network issues
-
-3. **Security Events**
-- Attack detection
-- Pattern matches
-- Threshold violations
-- Policy breaches
-
-### Error Responses
-- Detailed error codes
-- Custom messages
-- Logging integration
-- Metrics collection
-
 ## Features
-- Multiple attack type detection (SQL, NoSQL, Command, Path Traversal, etc.)
-- Configurable blocking actions
-- Pattern-based detection with regular expressions
-- Support for custom patterns
-- Request content analysis (headers, path, query, body)
+
+| Feature |
+|---------|
+| Multiple attack type detection (SQL, NoSQL, Command, Path Traversal, etc.) |
+| Configurable blocking actions |
+| Pattern-based detection with regular expressions |
+| Support for custom patterns |
+| Request content analysis (headers, path, query, body) |
 
 ## Attack Types
 The plugin detects the following types of attacks:
