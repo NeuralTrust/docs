@@ -1,0 +1,115 @@
+---
+title: Contextual Security
+---
+
+The **Contextual Security** plugin (`contextual_security`) adds behavioral fingerprint-based rate limiting and fraud prevention to the TrustGate AI Gateway. It proactively monitors for repeated malicious activity, analyzes behavioral similarity across users, and applies configurable countermeasures such as throttling, blocking, or alerting.
+
+This plugin is especially useful in environments where prompt-level filtering (e.g., via Guardrails) is not sufficient, and where user behavior over time needs to be evaluated to prevent evasion or abuse.
+
+> ℹ️ The `contextual_security` plugin requires that the `neuraltrust_guardrail` plugin is also enabled in the plugin chain.
+
+---
+
+## How It Works
+
+- Each user/requestor is identified by a unique **fingerprint** (derived from contextual metadata).
+- TrustGate maintains a historical profile for each fingerprint, including:
+- Count of **malicious requests** (e.g., from Guardrail classifications).
+- Whether a fingerprint has been **blocked** in the past.
+- Behavioral **similarity** to other known malicious or blocked fingerprints.
+- Once thresholds are crossed, the plugin triggers **rate limit actions**:
+    - `block`: Reject future requests for a configured time.
+    - `throttle`: Delay requests to increase cost/friction.
+    - `alert_only`: Flag the request but let it proceed.
+
+---
+
+## Requirements
+.
+- The `neuraltrust_guardrail` plugin must be enabled in the same rule or plugin chain, as it provides the malicious prompt classification needed for contextual analysis.
+
+```json
+{
+  "name": "neuraltrust_guardrail",
+  "enabled": true,
+  ...
+}
+```
+
+## Configuration Parameters
+
+| Parameter                     | Type   | Description                                                                         | Required | Default |
+|-------------------------------|--------|-------------------------------------------------------------------------------------|----------|---------|
+| `max_failures`                | int    | Number of past malicious requests allowed before action is taken.                   | No       | 5       |
+| `block_duration`              | int    | Duration (in seconds) to block the fingerprint once threshold is reached.           | No       | 600     |
+| `rate_limit_mode`             | string | Action to apply when thresholds are exceeded: `block`, `throttle`, or `alert_only`. | Yes      | —       |
+| `similar_malicious_threshold` | int    | Number of similar fingerprints with malicious activity needed to trigger action.    | No       | 5       |
+| `similar_blocked_threshold`   | int    | Number of similar fingerprints that have been blocked to trigger action.            | No       | 5       |
+
+> ℹ️ Similarity between fingerprints is computed based on metadata and behavior using TrustGate's internal `fingerprint.Manager`.
+
+---
+
+## Response Behavior
+
+### ✅ 200 OK
+
+Request is allowed to proceed when no threshold is breached.
+
+### ⚠️ Alert Only
+
+When `rate_limit_mode` is set to `alert_only` or `throttle`, the request is allowed, but a custom header is added:
+
+```http
+X-TrustGate-Alert: malicious-request
+```
+
+### ⏱️ Throttle Mode
+
+When in `throttle` mode, the request is artificially delayed (e.g., 5 seconds) before proceeding. This helps rate-limit abuse without fully blocking the user.
+
+---
+
+### 🔒 403 Forbidden
+
+Returned when `rate_limit_mode` is set to `block` and one or more thresholds (`max_failures`, `similar_malicious_threshold`, or `similar_blocked_threshold`) have been exceeded.
+
+#### Response Body
+
+```json
+{
+  "error": "blocked request due fraudulent activity"
+}
+
+
+## Configuration Example
+
+This example enables full fingerprint monitoring and blocking when thresholds are exceeded:
+
+```json
+{
+  "name": "contextual_security",
+  "enabled": true,
+  "priority": 0,
+  "stage": "pre_request",
+  "parallel": false,
+  "settings": {
+    "max_failures": 5,
+    "block_duration": 600,
+    "rate_limit_mode": "block",
+    "similar_malicious_threshold": 2,
+    "similar_blocked_threshold": 2
+  }
+}
+```
+
+## Best Practices
+
+- **Always pair with `neuraltrust_guardrail`**
+This plugin relies on Guardrail to classify prompts as malicious. It must be active in the same rule or plugin chain.
+
+- **Tune thresholds based on risk tolerance**
+For higher-security environments, lower the values of `max_failures`, `similar_malicious_threshold`, and `similar_blocked_threshold` to detect and act on malicious behavior more aggressively.
+
+- **Monitor alerts**
+When operating in `alert_only` mode, capture and analyze the `X-TrustGate-Alert` response header to monitor potential fraudulent behavior without blocking users.
