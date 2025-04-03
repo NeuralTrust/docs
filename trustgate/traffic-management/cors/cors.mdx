@@ -1,0 +1,117 @@
+---
+title: CORS
+---
+
+The **CORS** plugin (`cors`) enforces [Cross-Origin Resource Sharing (CORS)](https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS) policies in TrustGate. It inspects the `Origin` header of incoming requests, applies validation rules based on configured allowed origins and methods, and dynamically sets appropriate CORS response headers. This plugin executes at the **pre-request** stage and is designed to prevent unauthorized cross-origin access.
+
+If a request violates the configured CORS policy, it is immediately rejected with a `403 Forbidden` or `405 Method Not Allowed` error.
+
+---
+
+## How It Works
+
+- Executes during the `pre_request` stage before TrustGate routes the request upstream.
+- Validates:
+- Origin header against an allowlist.
+- HTTP method in preflight (`OPTIONS`) requests.
+- Request and response headers as defined.
+- Adds CORS headers such as:
+    - `Access-Control-Allow-Origin`
+    - `Access-Control-Allow-Methods`
+    - `Access-Control-Allow-Credentials`
+    - `Access-Control-Allow-Headers`
+    - `Access-Control-Expose-Headers`
+    - `Access-Control-Max-Age`
+- If CORS checks fail, request is blocked immediately.
+
+---
+
+## Requirements
+
+This plugin operates independently and does not require any other plugins to be present in the rule chain.
+
+---
+
+## Configuration Parameters
+
+| Parameter                  | Type     | Description                                                                                 | Required | Default     |
+|----------------------------|----------|---------------------------------------------------------------------------------------------|----------|-------------|
+| `allowed_origins`          | array    | List of allowed origins. Use `["*"]` to allow all.                                          | Yes      | —           |
+| `allowed_methods`          | array    | List of allowed HTTP methods (e.g., `["GET", "POST"]`).                                     | Yes      | —           |
+| `allow_credentials`        | boolean  | Whether to allow credentialed requests (cookies/auth headers). Must not be `true` if `*`.   | No       | `false`     |
+| `expose_headers`           | array    | List of response headers to expose to the client.                                           | No       | `[]`        |
+| `max_age`                  | string   | How long (e.g., `12h`) preflight responses can be cached.                                   | No       | `"1h"`      |
+| `log_violations`           | boolean  | If `true`, log rejected requests due to origin or method violations.                        | No       | `false`     |
+
+> `allow_credentials` must be `false` if `allowed_origins` includes `"*"`.
+
+---
+
+## Example Configuration
+
+```json
+{
+  "name": "cors",
+  "enabled": true,
+  "stage": "pre_request",
+  "priority": 1,
+  "settings": {
+    "allowed_origins": ["https://example.com", "https://trusted-site.com"],
+    "allowed_methods": ["GET", "POST", "PUT", "DELETE"],
+    "allow_credentials": false,
+    "expose_headers": ["Content-Length", "X-Response-Time"],
+    "max_age": "12h",
+    "log_violations": true
+  }
+}
+```
+
+## Response Behavior
+
+### Successful Request
+
+If the request passes all CORS checks, the response will include the following headers (depending on configuration):
+
+```http
+Access-Control-Allow-Origin: https://example.com
+Access-Control-Allow-Credentials: true
+Vary: Origin
+Access-Control-Allow-Methods: GET, POST, PUT, DELETE
+Access-Control-Allow-Headers: Authorization, Content-Type
+Access-Control-Expose-Headers: Content-Length, X-Response-Time
+Access-Control-Max-Age: 43200
+```
+
+### Preflight Request Handling
+
+If the request method is `OPTIONS` and contains preflight headers:
+
+- The plugin validates the `Access-Control-Request-Method`.
+- Returns `405 Method Not Allowed` if the requested method is not included in the `allowed_methods` list.
+
+
+## Error Handling
+
+| Scenario                                                              | Response Code | Description                                    |
+|-----------------------------------------------------------------------|---------------|------------------------------------------------|
+| Origin not in `allowed_origins`                                       | 403           | Origin rejected.                               |
+| `allow_credentials` is `true` and `allowed_origins` includes `*`      | 403           | Invalid configuration.                         |
+| No `allowed_origins` specified                                        | 403           | No cross-origin requests allowed.              |
+| Invalid `Access-Control-Request-Method` in preflight                  | 405           | Preflight method not permitted.                |
+| Missing `Access-Control-Request-Method` in `OPTIONS` request          | 400           | Malformed preflight request.                   |
+| `max_age` is incorrectly formatted (e.g., `10hours` instead of `10h`) | 500           | Plugin fails to start due to validation error. |
+
+
+## Best Practices
+
+- **Explicitly define allowed origins**
+Avoid using `"*"` in production unless absolutely necessary. Define specific trusted origins to reduce risk.
+
+- **Avoid credentials with wildcard origins**
+The CORS specification disallows credentialed requests when `allowed_origins` includes `"*"`. TrustGate enforces this and will block such configurations.
+
+- **Use `log_violations`**
+Enable `log_violations` to record denied cross-origin attempts. This is especially useful during development and debugging.
+
+- **Preflight caching**
+Set the `max_age` parameter to cache preflight responses for a longer period. This reduces redundant `OPTIONS` requests and improves performance.

@@ -6,7 +6,7 @@ The **Contextual Security** plugin (`contextual_security`) adds behavioral finge
 
 This plugin is especially useful in environments where prompt-level filtering (e.g., via Guardrails) is not sufficient, and where user behavior over time needs to be evaluated to prevent evasion or abuse.
 
-> ℹ️ The `contextual_security` plugin requires that the `neuraltrust_guardrail` plugin is also enabled in the plugin chain.
+> ℹ️ **Dependency:** This plugin requires the [`neuraltrust_guardrail`](../prompt-guard/guard) plugin to be enabled in the same rule or plugin chain.
 
 ---
 
@@ -25,8 +25,9 @@ This plugin is especially useful in environments where prompt-level filtering (e
 ---
 
 ## Requirements
-.
-- The `neuraltrust_guardrail` plugin must be enabled in the same rule or plugin chain, as it provides the malicious prompt classification needed for contextual analysis.
+
+- The `neuraltrust_guardrail` plugin must be active in the same rule. It classifies prompts and flags malicious behavior, which this plugin uses as input.
+- The plugin must run at the `pre_request` stage to intercept abusive activity before request execution.
 
 ```json
 {
@@ -50,13 +51,90 @@ This plugin is especially useful in environments where prompt-level filtering (e
 
 ---
 
+## Execution Flow
+
+The `contextual_security` plugin follows a multi-step evaluation pipeline to determine whether a request should be allowed, throttled, alerted, or blocked. Below is a detailed breakdown of each step in the flow:
+
+---
+
+### 1. Fingerprint Resolution
+
+The plugin retrieves a **unique fingerprint identifier** for the current request. This fingerprint is expected to be injected into the request context by upstream middleware and typically encodes a combination of request metadata, such as:
+
+- IP address
+- User-Agent header
+- Authorization token
+- User ID
+
+If no fingerprint is found, the plugin will log an error and skip further checks.
+
+---
+
+### 2. Historical Analysis
+
+Once a fingerprint is identified, the plugin retrieves its **behavioral history** from TrustGate's internal storage
+
+This history includes:
+
+- **Malicious request count**: Number of previous requests flagged as malicious by `neuraltrust_guardrail`.
+- **Block status**: Whether the fingerprint is currently blocked due to prior abuse.
+
+If the fingerprint does not yet exist in the system (i.e., first-time request), it is initialized and persisted with a temporary TTL in Redis.
+
+---
+
+### 3. Similarity Checks
+
+To detect evasion techniques and coordinated abusive behavior, the plugin performs an internal similarity analysis by consulting TrustGate’s fingerprinting engine.
+
+This engine evaluates the **behavioral and contextual proximity** between the current fingerprint and other known fingerprints in the system. Similarity is determined using internal heuristics based on:
+
+- Historical behavior patterns (e.g., frequency and type of malicious activity)
+- Metadata characteristics (e.g., origin IP ranges, token, etc)
+- Request timing and flow characteristics
+
+Once evaluated, the plugin interprets the results to determine:
+
+- How many **similar fingerprints** have a history of malicious behavior.
+- How many **similar fingerprints** are currently blocked by the system.
+
+This analysis acts as a behavioral firewall layer, surfacing patterns of abuse that may not be visible through prompt-level inspection alone. It allows TrustGate to proactively respond to **coordinated attacks** or attempts to rotate identities (e.g., bots using IP cycling) while maintaining low friction for legitimate users.
+
+---
+
+### 4. Threshold Evaluation & Action
+
+The plugin checks whether any of the following **thresholds have been breached**:
+
+- **Local Malicious Count** ≥ `max_failures`
+- **Similar Malicious Fingerprints** ≥ `similar_malicious_threshold`
+- **Similar Blocked Fingerprints** ≥ `similar_blocked_threshold`
+
+If **any** of the above conditions are met, the plugin proceeds to execute the configured **`rate_limit_mode`** action:
+
+#### Mode: `block`
+- Immediately blocks the request.
+- Marks the fingerprint as blocked in Redis for `block_duration` seconds.
+- Returns `403 Forbidden`.
+
+#### Mode: `throttle`
+- Artificially delays the request (default: 5 seconds).
+- Adds the header `X-TrustGate-Alert: malicious-request` to the response.
+- Allows the request to proceed.
+
+#### Mode: `alert_only`
+- Adds the header `X-TrustGate-Alert: malicious-request` to the response.
+- Allows the request without delay or blocking.
+
+---
+
 ## Response Behavior
 
-### ✅ 200 OK
+### 200 OK
 
 Request is allowed to proceed when no threshold is breached.
 
-### ⚠️ Alert Only
+### Alert Only
 
 When `rate_limit_mode` is set to `alert_only` or `throttle`, the request is allowed, but a custom header is added:
 
@@ -64,13 +142,13 @@ When `rate_limit_mode` is set to `alert_only` or `throttle`, the request is allo
 X-TrustGate-Alert: malicious-request
 ```
 
-### ⏱️ Throttle Mode
+### Throttle Mode
 
 When in `throttle` mode, the request is artificially delayed (e.g., 5 seconds) before proceeding. This helps rate-limit abuse without fully blocking the user.
 
 ---
 
-### 🔒 403 Forbidden
+### 403 Forbidden
 
 Returned when `rate_limit_mode` is set to `block` and one or more thresholds (`max_failures`, `similar_malicious_threshold`, or `similar_blocked_threshold`) have been exceeded.
 
@@ -78,7 +156,7 @@ Returned when `rate_limit_mode` is set to `block` and one or more thresholds (`m
 
 ```json
 {
-  "error": "blocked request due fraudulent activity"
+  "error": "(eg. blocked request due fraudulent activity)"
 }
 ```
 
@@ -102,6 +180,15 @@ This example enables full fingerprint monitoring and blocking when thresholds ar
   }
 }
 ```
+
+## Troubleshooting
+
+| Symptom                                      | Resolution                                                                                  |
+|----------------------------------------------|---------------------------------------------------------------------------------------------|
+| Requests never blocked                       | Ensure `rate_limit_mode` is not set to `alert_only`. Check threshold values.                |
+| Guardrail not triggering malicious detection | Validate `neuraltrust_guardrail` plugin configuration and classification rules.             |
+| Unexpected 403 responses                     | Check logs to verify which thresholds were exceeded. Tune plugin configuration accordingly. |
+
 
 ## Best Practices
 
