@@ -1,6 +1,187 @@
 ---
-title: Simple RAG validation
+title: Automatic test generation with Knowledge Bases
 ---
 
-## Simple RAG validation
+In this guide we will see how to automatically generate tests with `KnwoledgeBase`.
+
+Knowledge Bases is a database with a collection of documents. This is usually used in RAG applications as the vector database to store the documents and the embeddings.
+
+## Configure the Knowledge Base
+
+For teaching purposes we will use a dummy knowledge base that will store the documents in memory.
+As you can see each document is grouped by a `topic`. So we can generate better questions for each topic.
+
+<Info>
+Currently we support AzureSearch, Upstash and Neo4j as Knowledge Bases.
+</Info>
+
+```python
+from trusttest.knowledge_base import Document, InMemoryKnowledgeBase
+
+documents = [
+    Document(
+        id="1",
+        content="""
+        Vic is of ancient origin. In past times it was called Ausa by the Romans.
+        Iberian coins bearing this name have been found there.
+        The Visigoths called it Ausona.
+        Sewage caps on sidewalks around the city will also read "Vich", an old spelling of the name.
+        """,
+        topic="City origins",
+    ),
+    Document(
+        id="2",
+        content="""
+        Vic (Catalan pronunciation: [bik]; Spanish: Vic) is the capital of the comarca of Osona,
+        in the province of Barcelona, Catalonia, Spain.
+        Vic is located 69 km (43 mi) from Barcelona and 60 km (37 mi) from Girona.
+        """,
+        topic="City location",
+    ),
+]
+
+knowledge_base = InMemoryKnowledgeBase(documents=documents)
+```
+
+## Generate Functional Questions
+
+Now we can generate questions for each topic. In this code we use the catalog to generate a `FunctionalRAGScenario`,
+we can create our own `EvaluationScenario` too, but `FunctionalRAGScenario` has already the right configuration for the functional evaluation.
+
+In this configuration we will generate 2 questions, one for each topic. And we will use the `BenignQuestion.SIMPLE` type,
+which is a simple question that the LLM should be able to answer.
+
+```python
+from trusttest.catalog import FunctionalRAGScenario
+
+knowledge_base = InMemoryKnowledgeBase(documents=documents)
+
+rag_scenario = FunctionalRAGScenario(
+    model=DummyEndpoint(),
+    knowledge_base=knowledge_base,
+    num_questions=2,
+    question_types=[BenignQuestion.SIMPLE]
+)
+````
+
+Then we only need to creates the `test_set` and check the results.
+
+```python
+test_set = rag_test.probe.get_test_set()
+results = rag_test.eval.evaluate(test_set)
+results.display()
+```
+
+## Generate Malicious Questions
+
+We can also automatically generate adversarial questions based to attack specific information domains.
+We just need to change the `question_types` to `MaliciousQuestion` and the scenario to `AdversarialRAGScenario`.
+
+```python
+rag_scenario = AdversarialRAGScenario(
+    model=DummyEndpoint(),
+    knowledge_base=knowledge_base,
+    num_questions=2,
+    question_types=[MaliciousQuestion.SPECIAL_TOKEN]
+)
+```
+
+# Complete Examples
+
+
+<CodeGroup>
+```python Functional tests [expandable]
+from dotenv import load_dotenv
+
+from trusttest.catalog import FunctionalRAGScenario
+from trusttest.knowledge_base import Document, InMemoryKnowledgeBase
+from trusttest.models.testing import DummyEndpoint
+from trusttest.probes.rag import BenignQuestion
+
+load_dotenv(override=True)
+
+documents = [
+    Document(
+        id="1",
+        content="""
+        Vic is of ancient origin. In past times it was called Ausa by the Romans.
+        Iberian coins bearing this name have been found there.
+        The Visigoths called it Ausona.
+        Sewage caps on sidewalks around the city will also read "Vich", an old spelling of the name.
+        """,
+        topic="City origins",
+    ),
+    Document(
+        id="2",
+        content="""
+        Vic (Catalan pronunciation: [bik]; Spanish: Vic) is the capital of the comarca of Osona,
+        in the province of Barcelona, Catalonia, Spain.
+        Vic is located 69 km (43 mi) from Barcelona and 60 km (37 mi) from Girona.
+        """,
+        topic="City location",
+    ),
+]
+
+knowledge_base = InMemoryKnowledgeBase(documents=documents)
+
+rag_test = FunctionalRAGScenario(
+    model=DummyEndpoint(),
+    knowledge_base=knowledge_base,
+    num_questions=2,
+    question_types=[BenignQuestion.SIMPLE]
+)
+
+test_set = rag_test.probe.get_test_set()
+results = rag_test.eval.evaluate(test_set)
+results.display()
+```
+
+```python Adversarial tests [expandable]
+from dotenv import load_dotenv
+
+from trusttest.catalog import AdversarialRAGScenario
+from trusttest.knowledge_base import Document, InMemoryKnowledgeBase
+from trusttest.models.testing import DummyEndpoint
+from trusttest.probes.rag import MaliciousQuestion
+
+load_dotenv(override=True)
+
+documents = [
+    Document(
+        id="1",
+        content="""
+        Vic is of ancient origin. In past times it was called Ausa by the Romans.
+        Iberian coins bearing this name have been found there.
+        The Visigoths called it Ausona.
+        Sewage caps on sidewalks around the city will also read "Vich", an old spelling of the name.
+        """,
+        topic="City origins",
+    ),
+    Document(
+        id="2",
+        content="""
+        Vic (Catalan pronunciation: [bik]; Spanish: Vic) is the capital of the comarca of Osona,
+        in the province of Barcelona, Catalonia, Spain.
+        Vic is located 69 km (43 mi) from Barcelona and 60 km (37 mi) from Girona.
+        """,
+        topic="City location",
+    ),
+]
+
+knowledge_base = InMemoryKnowledgeBase(documents=documents)
+
+rag_test = AdversarialRAGScenario(
+    model=DummyEndpoint(),
+    knowledge_base=knowledge_base,
+    num_questions=2,
+    question_types=[MaliciousQuestion.SPECIAL_TOKEN]
+)
+
+test_set = rag_test.probe.get_test_set()
+results = rag_test.eval.evaluate(test_set)
+results.display()
+```
+</CodeGroup>
+
+
 
