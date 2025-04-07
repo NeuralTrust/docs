@@ -11,368 +11,42 @@ Both implementations support LLM-based topic summarization and embedding models 
 
 
 
-# AzureKnowledgeBase Documentation
 
-The `AzureKnowledgeBase` class provides a was to access documents in Azure Knowledgebase with Azure Search functionality. The class facilitates document indexing, searching, and topic-based organization. In this implementation, Azure Search serves as the backend for indexing and querying documents, while an embedding model and an LLM client assist in document categorization and topic summarization.
 
 
-## Dependencies
-The following external dependencies are required:
-```
-uv pip install trusttest[azure]
-````
 
 
 
-## Class: `AzureKnowledgeBase`
 
-### Constructor: `__init__`
 
-#### Parameters:
 
-```ts
-service_endpoint?: string;
-index_name?: string;
-key?: string;
-language?: string = "en";
-fields_mapping?: Record<string, string>;
-llm_client?: LLMClient;
-embeddings_model?: EmbeddingsModel;
-seed_topics?: string[];
-max_doc_count?: number;
-```
 
-If `service_endpoint`, `index_name`, or `key` is not provided, the system will attempt to retrieve them from environment variables.
 
-## Methods
 
-### `initialize_topics()`
 
-Synchronously initializes topics by retrieving and categorizing documents.
 
-### `async_initialize_topics()`
 
-Asynchronous version of `initialize_topics()`.
 
-### Properties
 
-- `language`: Primary language of the knowledge base.
-- `documents`: All stored documents.
-- `topics`: List of topic names.
-- `documents_per_topic`: Mapping of topic names to their respective documents.
 
-### Document Retrieval Methods
 
-#### `_init_docs(seed_topics, max_doc_count, max_tokens = 8192)`
 
-Retrieves and organizes documents based on provided seed topics.
 
-#### `_load_docs_with_seed_topic(seed_topics, max_doc_count)`
 
-Loads documents based on seed topics, searching for relevant content.
 
-#### `_load_docs_without_seed_topic(max_doc_count, max_tokens = 8192)`
 
-Uses clustering techniques to group similar documents.
 
-#### `_get_topic_name(topic_documents, max_docs = 10, max_doc_length = 500, max_tokens = 8192)`
 
-Generates a summarized topic name using the LLM client.
 
-### Other Utility Methods
 
-#### `choose_document()`
 
-Selects an unused document from the pool.
 
-#### `get_neighbors(seed_document, n_neighbors = 5, similarity_threshold = 0.2)`
 
-Finds similar documents using Azure Search.
 
-#### `filter_by_topic(topic)`
 
-Filters the knowledge base to only include documents under a specific topic.
 
-#### `__len__()`
 
-Returns the number of documents in the knowledge base.
 
-#### `__getitem__(doc_id)`
-
-Retrieves a document by its ID.
-
-#### `_set_lang(docs, max_doc_count = 10)`
-
-Detects the primary language of the knowledge base based on a subset of documents.
-
-## How Topic Summarization Works
-
-1. **Document Retrieval**: Fetch documents from Azure Search.
-2. **Content Embedding**: Convert document content into vector embeddings.
-3. **Clustering**: Use UMAP for dimensionality reduction and HDBSCAN for clustering.
-4. **Summarization Prompt**: Generate a topic name using a summarization prompt.
-5. **Topic Assignment**: Assign topic names to document groups.
-
-## Usage Example
-
-```python
-import os
-
-from dotenv import load_dotenv
-
-from trusttest.catalog import FunctionalRAGScenario
-from trusttest.knowledge_base.azure_search import AzureKnowledgeBase
-from trusttest.models.testing import DummyEndpoint
-
-load_dotenv(override=True)
-
-url = os.getenv("UPSTASH_URL")
-token = os.getenv("UPSTASH_TOKEN")
-
-knowledge_base = AzureKnowledgeBase(
-    service_endpoint=os.getenv("AZURE_SEARCH_SERVICE_ENDPOINT"),
-    key=os.getenv("AZURE_SEARCH_KEY"),
-    index_name=os.getenv("AZURE_SEARCH_INDEX_NAME"),
-    fields_mapping={"content": "chunk", "id": "chunk_id"},
-    language="Spanish",
-)
-
-rag_test = FunctionalRAGScenario(
-    model=DummyEndpoint(), knowledge_base=knowledge_base, num_questions=2
-)
-
-test_set = rag_test.probe.get_test_set()
-results = rag_test.eval.evaluate(test_set)
-results.display_summary()
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# InMemoryKnowledgeBase Documentation
-
-
-The `InMemoryKnowledgeBase` class is an in-memory implementation of the `KnowledgeBase` interface. It provides fast, local storage for documents with support for topic-based organization. This implementation is ideal for lightweight applications that do not require a persistent database or cloud-based storage. Unlike cloud-based solutions, this implementation stores all documents in memory, making it extremely fast but limited by system memory.
-
-### Key Features
-- **In-Memory Storage**: Stores all documents in Python dictionaries for quick access.
-- **Topic-Based Organization**: Documents are grouped by topics for easy categorization.
-- **Fast Document Retrieval**: Provides O(1) access time for retrieving documents by ID.
-- **Random Document Selection**: Supports random selection of documents from the filtered set.
-- **Basic Similarity Search**: Returns random documents from the same topic as a given seed document.
-
-## Class: `InMemoryKnowledgeBase`
-### Constructor: `__init__`
-#### Parameters:
-- `documents` (List[Document]): List of documents to initialize the knowledge base.
-- `language` (Optional[str], default=`"en"`): Primary language of the stored documents.
-
-#### Initialization Process:
-1. Documents are stored in a dictionary keyed by their unique IDs.
-2. The topic mapping is built using `_initialize_topics()`, grouping documents by topic.
-
-### Methods
-
-#### `_initialize_topics(documents: List[Document])`
-Organizes documents by their assigned topics.
-
-#### `initialize_topics()`
-Synchronously rebuilds the topic mapping.
-
-#### `async_initialize_topics()`
-Asynchronously rebuilds the topic mapping (same functionality as `initialize_topics()` due to in-memory operations being fast).
-
-#### Properties
-- **`language`**: Returns the primary language of the knowledge base.
-- **`documents`**: Returns all stored documents (filtered if a topic filter is applied).
-- **`topics`**: Returns a list of unique topics in the knowledge base.
-- **`documents_per_topic`**: Returns a dictionary mapping topics to their associated documents.
-
-#### `choose_document()`
-Selects and returns a random document from the currently filtered set.
-
-#### `get_neighbors(seed_document: Document, n_neighbors: int = 5, similarity_threshold: float = 0.2)`
-Returns a list of documents that belong to the same topic as the given seed document.
-
-#### `filter_by_topic(topic: str)`
-Filters the knowledge base to only include documents from a specific topic.
-
-#### `__len__()`
-Returns the number of documents in the current filtered view.
-
-#### `__getitem__(doc_id: str)`
-Retrieves a document by its ID, raising a `KeyError` if the document does not exist.
-
-## How Topic Organization Works
-1. **Document Ingestion**: Documents are loaded into memory from a list.
-2. **Topic Mapping**: Documents are categorized into topics and stored in a dictionary.
-3. **Filtering**: Users can filter documents based on topics, modifying the active document set.
-4. **Retrieval**: Users can retrieve documents by ID, choose a random document, or get similar documents from a topic.
-
-## Usage Example
-```python
-from trusttest.knowledge_base.in_memory_knowledge_base import InMemoryKnowledgeBase
-from trusttest.knowledge_base.base import Document
-
-docs = [
-    Document(id="1", content="AI is transforming the world", topic="AI"),
-    Document(id="2", content="Python is great for data science", topic="Programming"),
-]
-
-kb = InMemoryKnowledgeBase(docs)
-kb.initialize_topics()
-print("Topics:", kb.topics)
-print("Random Document:", kb.choose_document())
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# **Neo4j Knowledge Base**
-
-## **Overview**
-The `Neo4jKnowledgeBase` class accesses the Neo4j graph database. It allows for efficient document storage, retrieval, and clustering of documents based on topic similarity. It supports topic discovery, document embedding, and language detection.
-
-## Dependencies
-The following external dependencies are required:
-```
-uv pip install trusttest[neo4j]
-```
-
-## **Key Features**
-- Connects to a Neo4j database for document management.
-- Supports topic-based document clustering.
-- Utilizes machine learning techniques (UMAP, HDBSCAN) for topic detection.
-- Integrates with an LLM client for topic summarization.
-- Supports asynchronous operations for improved performance.
-
-## **Setup and Initialization**
-### **Environment Variables**
-By default, the class reads the following environment variables if no explicit credentials are provided:
-
-```plaintext
-NEO4J_URI=<your_neo4j_uri>
-NEO4J_USERNAME=<your_username>
-NEO4J_PASSWORD=<your_password>
-NEO4J_DATABASE=<your_database>
-```
-
-### **Initializing an Instance**
-```python
-import os
-
-from dotenv import load_dotenv
-
-from trusttest.catalog import FunctionalRAGScenario
-from trusttest.knowledge_base.neo4j import Neo4jKnowledgeBase
-from trusttest.models.testing import DummyEndpoint
-
-load_dotenv(override=True)
-
-url = os.getenv("NEO4J_URL")
-username = os.getenv("NEO4J_USERNAME")
-password = os.getenv("NEO4J_PASSWORD")
-
-
-knowledge_base = Neo4jKnowledgeBase(
-    uri=url, username=username, password=password, language="English"
-)
-
-rag_test = FunctionalRAGScenario(
-    model=DummyEndpoint(), knowledge_base=knowledge_base, num_questions=2
-)
-
-test_set = rag_test.probe.get_test_set()
-results = rag_test.eval.evaluate(test_set)
-results.display_summary()
-
-```
-
-## **Class Methods**
-### **Database Operations**
-#### `get_document_count() -> int`
-Returns the total number of documents in the Neo4j database.
-
-#### `search(search_text: Optional[str], top: int = 20) -> List[Dict[str, str]]`
-Searches for documents matching the given `search_text`. If no search text is provided, it retrieves up to `top` documents.
-
-#### `get_neighbors(seed_document: Document, n_neighbors: int = 5, similarity_threshold: float = 0.2) -> Sequence[Document]`
-Finds similar documents based on content similarity.
-
-### **Topic Initialization**
-#### `initialize_topics() -> KnowledgeBase`
-Synchronously initializes topics and documents.
-
-#### `async_initialize_topics() -> KnowledgeBase`
-Asynchronously initializes topics.
-
-#### `filter_by_topic(topic: str) -> None`
-Filters the knowledge base to only include documents related to a specific topic.
-
-### **Document Handling**
-#### `choose_document() -> Optional[Document]`
-Selects a document from the knowledge base that hasn’t been used yet.
-
-#### `__getitem__(doc_id: str) -> Document`
-Retrieves a document by its unique ID.
-
-#### `__len__() -> int`
-Returns the total number of documents in the knowledge base.
-
-### **Topic Clustering**
-#### `async _load_docs_without_seed_topic(max_doc_count: Optional[int], max_tokens: int = 8192) -> Tuple[Dict[str, List[Document]], List[str], List[Document]]`
-Uses unsupervised clustering (UMAP + HDBSCAN) to organize documents into topics.
-
-#### `async _get_topic_name(topic_documents: List[Document]) -> str`
-Summarizes the key topic from a given set of documents using an LLM client.
-
-### **Language Detection**
-#### `_set_lang(docs: Sequence[Document]) -> None`
-Automatically detects and sets the primary language of the documents.
-
-## **Error Handling**
-- If required database credentials are missing, a `ValueError` is raised.
-- If the specified Neo4j label does not exist, an exception is raised.
-- If no documents are found in a query, a warning is logged.
-
-## **Performance Considerations**
-- Uses **asynchronous programming** for document retrieval and processing.
-- **UMAP & HDBSCAN** ensure efficient topic clustering.
-- Relies on **embeddings models** for similarity searches.
 
 
 
