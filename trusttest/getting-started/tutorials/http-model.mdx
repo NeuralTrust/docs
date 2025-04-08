@@ -1,0 +1,255 @@
+---
+title: HTTP Model
+---
+
+In this guide we will see how to configure and use the `HttpModel` class to interact with any HTTP-based LLM API endpoint.
+
+## Basic Configuration
+
+The `HttpModel` class requires a few essential parameters to work:
+
+```python
+from trusttest.models.http import HttpModel, PayloadConfig
+
+model = HttpModel(
+    url="https://api.example.com/chat",
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": "Bearer your-token"
+    },
+    payload_config=PayloadConfig(
+        format={
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "{{ message }}"}
+            ]
+        },
+        message_regex="{{ message }}"
+    ),
+    concatenate_field="choices.0.message.content"
+)
+```
+
+### Key Parameters
+
+- `url`: The endpoint URL for the LLM API
+- `headers`: HTTP headers to include in requests
+- `payload_config`: Configuration for request payload formatting
+- `concatenate_field`: Path to extract the response content from the JSON response
+
+### Validate Configuration
+
+To verify that your HttpModel is properly configured and working, you can test it with a simple message:
+
+```python
+from trusttest.models.http import HttpModel, PayloadConfig
+
+model = HttpModel(
+    url="https://api.example.com/chat",
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": "Bearer your-token"
+    },
+    payload_config=PayloadConfig(
+        format={
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "{{ message }}"}
+            ]
+        },
+        message_regex="{{ message }}"
+    ),
+    concatenate_field="choices.0.message.content"
+)
+
+
+response = model.respond("Hello World")
+print(response)
+```
+
+This will:
+1. Send a simple "Hello World" message to your configured endpoint
+2. Print the response if successful
+3. Raise an exception if there are any configuration issues
+
+## Advanced Configuration
+
+### Token Authentication
+
+For APIs that require token-based authentication on request, you can use the `TokenConfig`:
+```python
+from trusttest.models.http import HttpModel, PayloadConfig, TokenConfig
+
+model = HttpModel(
+    url="https://api.example.com/chat",
+    payload_config=PayloadConfig(
+        format={"prompt": "{{ message }}"},
+        message_regex="{{ message }}"
+    ),
+    token_config=TokenConfig(
+        url="https://auth.example.com/token",
+        payload={"client_id": "123", "service": "chat"},
+        secret="your-secret-key",
+        headers={"Content-Type": "application/json"}
+    )
+)
+```
+
+### Error Handling
+
+Returns the error message instead of raising an exception. Useful for firewall response detection.
+
+```python
+from trusttest.models.http import HttpModel, PayloadConfig, ErrorHandelingConfig
+
+model = HttpModel(
+    url="https://api.example.com/chat",
+    payload_config=PayloadConfig(
+        format={"prompt": "{{ message }}"},
+        message_regex="{{ message }}"
+    ),
+    error_config=ErrorHandelingConfig(
+        status_code=400,
+        concatenate_field="errors.0.message"
+    )
+)
+```
+
+### Retry Configuration
+
+Add retry logic for failed requests:
+
+```python
+from trusttest.models.http import HttpModel, PayloadConfig, RetryConfig
+
+model = HttpModel(
+    url="https://api.example.com/chat",
+    payload_config=PayloadConfig(
+        format={"prompt": "{{ message }}"},
+        message_regex="{{ message }}"
+    ),
+    retry_config=RetryConfig(
+        max_retries=3,
+        base_delay=1.0,
+        max_delay=10.0,
+        exponential_base=2.0
+    )
+)
+```
+
+## Using HttpModel in an Evaluation Scenario
+
+Here's how to use the HttpModel in an evaluation scenario:
+
+```python
+from dotenv import load_dotenv
+import os
+
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import (
+    CompletenessEvaluator,
+    CorrectnessEvaluator,
+    ToneEvaluator,
+)
+from trusttest.models.http import HttpModel, PayloadConfig
+from trusttest.probes import DatasetProbe
+
+load_dotenv()
+
+# Configure the HttpModel
+model = HttpModel(
+    url="https://chat.neuraltrust.ai/api/chat",
+    headers={
+        "Content-Type": "application/json",
+        "X-NeuralTrust-Id": "123",
+    },
+    payload_config=PayloadConfig(
+        format={
+            "messages": [
+                {"role": "system", "content": "**Welcome to Airline Assistant**."},
+                {"role": "user", "content": "{{ test }}"},
+            ]
+        },
+        message_regex="{{ test }}",
+    ),
+    concatenate_field=".",
+)
+
+# Create evaluation scenario
+scenario = EvaluationScenario(
+    name="Functional Test",
+    description="Functional test example.",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[
+            CorrectnessEvaluator(),
+            ToneEvaluator(),
+            CompletenessEvaluator(),
+        ],
+        criteria="any_fail",
+    ),
+)
+
+# Load and evaluate test set
+dataset_path = "data/qa_dataset.json"
+test_set = DatasetProbe.from_json(model=model, path=dataset_path).get_test_set()
+results = scenario.evaluate(test_set)
+results.display()
+```
+
+## Complete Example
+
+```python [expandable]
+from dotenv import load_dotenv
+import os
+
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import (
+    CompletenessEvaluator,
+    CorrectnessEvaluator,
+    ToneEvaluator,
+)
+from trusttest.models.http import HttpModel, PayloadConfig
+from trusttest.probes import DatasetProbe
+
+load_dotenv()
+
+# Configure the HttpModel
+model = HttpModel(
+    url="https://chat.neuraltrust.ai/api/chat",
+    headers={
+        "Content-Type": "application/json",
+        "X-NeuralTrust-Id": "123",
+    },
+    payload_config=PayloadConfig(
+        format={
+            "messages": [
+                {"role": "system", "content": "**Welcome to Airline Assistant**."},
+                {"role": "user", "content": "{{ test }}"},
+            ]
+        },
+        message_regex="{{ test }}",
+    ),
+    concatenate_field=".",
+)
+
+# Create evaluation scenario
+scenario = EvaluationScenario(
+    name="Functional Test",
+    description="Functional test example.",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[
+            CorrectnessEvaluator(),
+            ToneEvaluator(),
+            CompletenessEvaluator(),
+        ],
+        criteria="any_fail",
+    ),
+)
+
+# Load and evaluate test set
+dataset_path = "data/qa_dataset.json"
+test_set = DatasetProbe.from_json(model=model, path=dataset_path).get_test_set()
+results = scenario.evaluate(test_set)
+results.display()
