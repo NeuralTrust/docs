@@ -1,0 +1,213 @@
+---
+title: Custom LLM as a Judge
+---
+
+In this guide we will see how to create and configure a custom `Evaluator` using the **CustomEvaluator** class. This allows easly define your onw LLM as a judge for specific use cases.
+
+<Note>Custom evaluators are particularly useful when you need to evaluate specific aspects of LLM responses that aren't covered by the built-in evaluators, or when you need a specialized scoring system for your use case.</Note>
+
+## Creating a Custom Evaluator
+
+The `CustomEvaluator` class allows you to define your own evaluation criteria with a custom scoring system. Here's how to create one:
+
+```python
+from trusttest.evaluators import CustomEvaluator
+
+evaluator = CustomEvaluator(
+    name="Trip Plan Accuracy",
+    description="Validates that the trip plan matches the user's request and is logically consistent.",
+    instructions="""
+    **Instruction:** Evaluate the accuracy and completeness of the trip plan in the actual response against the user's prompt/question. Verify the following:
+    1. **Flights:** Ensure the flight details are correct and match the user's request.
+    2. **Itinerary:** Confirm that the daily activities and destinations align with the user's intended trip.
+    3. **Logical Consistency:** Check that the trip plan is feasible.
+    4. **Relevance:** Ensure the trip plan is relevant to the user's request.
+
+    Deduct points for:
+    - Missing or incorrect flight details.
+    - Inaccurate or irrelevant activities.
+    - Infeasible or illogical trip plans.
+    - Lack of alignment with the user's request.
+    """,
+    threshold=3,
+    score_range=(1, 5),
+    scores=[
+        {
+            "score": 1,
+            "description": "The trip plan is entirely incorrect or irrelevant to the user's request.",
+        },
+        {
+            "score": 2,
+            "description": "The trip plan is mostly incorrect or irrelevant.",
+        },
+        {
+            "score": 3,
+            "description": "The trip plan includes some correct elements but has multiple inaccuracies.",
+        },
+        {
+            "score": 4,
+            "description": "The trip plan matches the user's request with only minor inaccuracies.",
+        },
+        {
+            "score": 5,
+            "description": "The trip plan exactly matches the user's request with no inaccuracies.",
+        },
+    ],
+)
+```
+
+### Custom Evaluator Parameters
+
+- `name`: A descriptive name for your evaluator
+- `description`: A detailed description of what the evaluator checks
+- `instructions`: Detailed instructions for the LLM judge on how to evaluate responses
+- `threshold`: The minimum score needed to pass the evaluation
+- `score_range`: The range of possible scores (min, max)
+- `scores`: A list of score definitions with descriptions
+
+## Using the Custom Evaluator
+
+Once you've created your custom evaluator, you can use it in an evaluation scenario just like any other evaluator:
+
+```python
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.models.testing import DummyEndpoint
+from trusttest.probes import DatasetProbe
+
+scenario = EvaluationScenario(
+    description="This is a test scenario",
+    name="Test Scenario",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[evaluator],
+        criteria="all_fail",
+    ),
+)
+
+probe = DatasetProbe.from_json(
+    model=DummyEndpoint(),
+    path="data/qa_dataset.json"
+)
+
+test_set = probe.get_test_set()
+results = scenario.evaluate(test_set)
+results.display_summary()
+```
+
+## Saving and Loading Custom Evaluators
+
+<Warning>
+Saving custom evaluators is only supported for NeuralTrust type clients currently.
+</Warning>
+
+You can save your custom evaluator scenarios to the TrustTest platform for later use:
+
+```python
+import trusttest
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = trusttest.client(
+    type="neuraltrust",
+    token=os.getenv("NEURALTRUST_TOKEN")
+)
+
+# Save the scenario
+client.save_evaluation_scenario(scenario)
+
+# Save the test set
+client.save_evaluation_scenario_test_set(scenario.id, test_set)
+
+# Save the evaluation results
+client.save_evaluation_scenario_run(results)
+
+# Load the scenario later
+loaded_scenario = client.get_evaluation_scenario(scenario.id)
+```
+
+## Complete Example
+
+```python [expandable]
+import os
+from dotenv import load_dotenv
+
+import trusttest
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import CustomEvaluator
+from trusttest.models.testing import DummyEndpoint
+from trusttest.probes import DatasetProbe
+
+load_dotenv()
+
+client = trusttest.client(
+    type="neuraltrust",
+    token=os.getenv("NEURALTRUST_TOKEN")
+)
+
+dataset_path = "data/qa_dataset.json"
+probe = DatasetProbe.from_json(
+    model=DummyEndpoint(),
+    path=dataset_path
+)
+
+evaluator = CustomEvaluator(
+    name="Trip Plan Accuracy",
+    description="Validates that the trip plan matches the user's request and is logically consistent.",
+    instructions="""
+    **Instruction:** Evaluate the accuracy and completeness of the trip plan in the actual response against the user's prompt/question. Verify the following:
+    1. **Flights:** Ensure the flight details are correct and match the user's request.
+    2. **Itinerary:** Confirm that the daily activities and destinations align with the user's intended trip.
+    3. **Logical Consistency:** Check that the trip plan is feasible.
+    4. **Relevance:** Ensure the trip plan is relevant to the user's request.
+    """,
+    threshold=3,
+    score_range=(1, 5),
+    scores=[
+        {
+            "score": 1,
+            "description": "The trip plan is entirely incorrect or irrelevant to the user's request.",
+        },
+        {
+            "score": 2,
+            "description": "The trip plan is mostly incorrect or irrelevant.",
+        },
+        {
+            "score": 3,
+            "description": "The trip plan includes some correct elements but has multiple inaccuracies.",
+        },
+        {
+            "score": 4,
+            "description": "The trip plan matches the user's request with only minor inaccuracies.",
+        },
+        {
+            "score": 5,
+            "description": "The trip plan exactly matches the user's request with no inaccuracies.",
+        },
+    ],
+)
+
+scenario = EvaluationScenario(
+    description="This is a test scenario",
+    name="Test Scenario",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[evaluator],
+        criteria="all_fail",
+    ),
+)
+
+test_set = probe.get_test_set()
+results = scenario.evaluate(test_set)
+
+# Save to TrustTest platform
+client.save_evaluation_scenario(scenario)
+client.save_evaluation_scenario_test_set(scenario.id, test_set)
+client.save_evaluation_scenario_run(results)
+
+# Load and run again
+loaded_scenario = client.get_evaluation_scenario(scenario.id)
+results = loaded_scenario.evaluate(test_set)
+results.display_summary()
+```

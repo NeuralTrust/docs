@@ -1,0 +1,240 @@
+---
+title: HTTP Endpoints
+---
+
+TrustTest's `HttpModel` provides a flexible way to connect to any LLM API accessible through HTTP. 
+
+<Note>
+This is currently the only model type that can be fully utilized through the TrustTest web UI.
+</Note>
+
+### Overview
+
+The `HttpModel` class allows you to:
+- Connect to any REST API endpoint
+- Configure custom headers, payloads, and authentication
+- Handle multi-turn conversations
+- Process various response formats (JSON, plain text)
+- Implement error handling and retry mechanisms
+
+### Basic Usage
+
+Here's a simple example of how to configure an HttpModel:
+
+```python
+from trusttest.models.http import HttpModel, PayloadConfig
+
+model = HttpModel(
+    url="https://api.example.com/chat",
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": "Bearer your_token"
+    },
+    payload_config=PayloadConfig(
+        format={
+            "messages": [
+                {"role": "user", "content": "{{ message }}"}
+            ]
+        },
+        message_regex="{{ message }}"
+    ),
+    concatenate_field="choices.0.message.content"
+)
+```
+
+### Configuration Options
+
+The `HttpModel` accepts several configuration options:
+
+#### Required Parameters
+
+- `url`: The API endpoint URL
+- `payload_config`: Configures how messages are formatted in the request payload
+
+#### Optional Parameters
+
+- `headers`: HTTP headers to include in the request
+- `token_config`: Configuration for authentication token generation
+- `error_config`: How to handle error responses
+- `response_regex`: Extract specific content from responses
+- `concatenate_field`: Extract nested fields from JSON responses
+- `retry_config`: Configure automatic retries for failed requests
+
+### Payload Configuration
+
+The `PayloadConfig` class configures how messages are formatted in requests:
+
+```python
+PayloadConfig(
+    format={
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant"},
+            {"role": "user", "content": "{{ message }}"}
+        ]
+    },
+    message_regex="{{ message }}",
+    params={"temperature": 0.7}  # URL query parameters
+)
+```
+
+- `format`: The structure of your payload, with placeholders for message content
+- `message_regex`: Pattern to replace with the actual message (default: `{{ message }}`)
+- `date_regex`: Pattern to replace with the current date (default: `{{ date }}`)
+- `params`: URL query parameters to include in the request
+- `timeout`: Request timeout in seconds
+
+### Response Handling
+
+HttpModel provides several ways to extract the response content:
+
+- `concatenate_field`: Extract a specific field from JSON responses using dot notation
+- `response_regex`: Apply a regex pattern to extract specific content
+
+For example, to extract the message content from a nested JSON response:
+
+```python
+HttpModel(
+    # ... other config
+    concatenate_field="choices.0.message.content"
+)
+```
+
+### Example Implementation
+
+This example shows how to create an HttpModel for a chat API endpoint:
+
+```python
+from trusttest.models.http import HttpModel, PayloadConfig
+
+model = HttpModel(
+    url="https://chat.neuraltrust.ai/api/chat",
+    headers={
+        "Content-Type": "application/json",
+        "X-NeuralTrust-Id": "123",
+    },
+    payload_config=PayloadConfig(
+        format={
+            "messages": [
+                {"role": "system", "content": "**Welcome to Airline Assistant**."},
+                {"role": "user", "content": "{{ test }}"},
+            ]
+        },
+        message_regex="{{ test }}",
+    ),
+    concatenate_field=".",
+)
+```
+
+### Using HttpModel in Evaluation Scenarios
+
+After configuring your model, you can use it in evaluation scenarios:
+
+```python
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import CorrectnessEvaluator, ToneEvaluator
+from trusttest.probes import DatasetProbe
+
+# Create an evaluation scenario
+scenario = EvaluationScenario(
+    name="Functional Test",
+    description="Testing API functionality and responses",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[
+            CorrectnessEvaluator(),
+            ToneEvaluator(),
+        ],
+        criteria="any_fail",
+    ),
+)
+
+# Load test data and run the evaluation
+test_set = DatasetProbe.from_json(model=model, path="data/qa_dataset.json").get_test_set()
+results = scenario.evaluate(test_set)
+results.display()
+```
+
+### Configure Web UI
+
+Currently, the `HttpModel` is the only model type that can be used to run tests through the TrustTest web UI. This makes it an essential component for teams looking to set up continuous evaluation of their LLM APIs.
+
+When configuring your model through the web UI, you'll define the same HttpModel configuration but in YAML format in the Target section. Here's an example of how your configuration should look:
+
+```yaml
+url: "https://chat.neuraltrust.ai/api/chat"
+headers:
+  Content-Type: "application/json"
+  X-NeuralTrust-Id: "neuraltrust"
+payload_config:
+  format:
+    messages:
+      - role: "system"
+        content: "**Welcome to Airline Assistant**."
+      - role: "user"
+        content: "{{ test }}"
+  message_regex: "{{ test }}"
+concatenate_field: "."
+```
+
+This YAML configuration maps directly to the HttpModel parameters you would use in Python. Once configured, you should be able to run any test directly through the web UI with the same functionality as programmatic tests.
+
+The web UI will provide fields for:
+- API endpoint URL
+- Headers (including authentication)
+- Payload format
+- Response extraction configuration
+
+### Advanced Features
+
+#### Authentication with TokenConfig
+
+For APIs requiring token-based authentication with expiration:
+
+```python
+from trusttest.models.http import TokenConfig
+
+model = HttpModel(
+    # ... other config
+    token_config=TokenConfig(
+        url="https://auth.example.com/token",
+        payload={"data": {"client_id": "123", "service": "chat"}},
+        secret="your-secret-key",
+        headers={"Content-Type": "application/json"}
+    )
+)
+```
+
+#### Error Handling
+
+Configure how errors are returned as a normal response, this is useful for firewall issues or other issues where you want to return a normal response instead of rising an error.
+
+```python
+from trusttest.models.http import ErrorHandelingConfig
+
+model = HttpModel(
+    # ... other config
+    error_config=ErrorHandelingConfig(
+        status_code=400,
+        concatenate_field="errors.0.message"
+    )
+)
+```
+
+#### Retry Configuration
+
+Set up automatic retries for failed requests:
+
+```python
+from trusttest.models.http import RetryConfig
+
+model = HttpModel(
+    # ... other config
+    retry_config=RetryConfig(
+        max_retries=3,
+        base_delay=1.0,
+        max_delay=10.0,
+        exponential_base=2.0
+    )
+)
+```
+

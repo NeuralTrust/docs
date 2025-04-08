@@ -1,0 +1,113 @@
+# **Neo4jKnowledgeBase**
+
+The `Neo4jKnowledgeBase` class accesses the Neo4j graph database. It allows for efficient document storage, retrieval, and clustering of documents based on topic similarity. It supports topic discovery, document embedding, and language detection.
+
+## Dependencies
+The following external dependencies are required:
+```
+uv pip install trusttest[neo4j]
+```
+
+## **Key Features**
+- Connects to a Neo4j database for document management.
+- Supports topic-based document clustering.
+- Utilizes machine learning techniques (UMAP, HDBSCAN) for topic detection.
+- Integrates with an LLM client for topic summarization.
+- Supports asynchronous operations for improved performance.
+
+## **Setup and Initialization**
+### **Environment Variables**
+By default, the class reads the following environment variables if no explicit credentials are provided:
+
+```plaintext
+NEO4J_URI=<your_neo4j_uri>
+NEO4J_USERNAME=<your_username>
+NEO4J_PASSWORD=<your_password>
+NEO4J_DATABASE=<your_database>
+```
+
+### **Initializing an Instance**
+```python
+import os
+
+from dotenv import load_dotenv
+
+from trusttest.catalog import FunctionalRAGScenario
+from trusttest.knowledge_base.neo4j import Neo4jKnowledgeBase
+from trusttest.models.testing import DummyEndpoint
+
+load_dotenv(override=True)
+
+url = os.getenv("NEO4J_URL")
+username = os.getenv("NEO4J_USERNAME")
+password = os.getenv("NEO4J_PASSWORD")
+
+
+knowledge_base = Neo4jKnowledgeBase(
+    uri=url, username=username, password=password, language="English"
+)
+
+rag_test = FunctionalRAGScenario(
+    model=DummyEndpoint(), knowledge_base=knowledge_base, num_questions=2
+)
+
+test_set = rag_test.probe.get_test_set()
+results = rag_test.eval.evaluate(test_set)
+results.display_summary()
+
+```
+
+## **Class Methods**
+### **Database Operations**
+#### `get_document_count() -> int`
+Returns the total number of documents in the Neo4j database.
+
+#### `search(search_text: Optional[str], top: int = 20) -> List[Dict[str, str]]`
+Searches for documents matching the given `search_text`. If no search text is provided, it retrieves up to `top` documents.
+
+#### `get_neighbors(seed_document: Document, n_neighbors: int = 5, similarity_threshold: float = 0.2) -> Sequence[Document]`
+Finds similar documents based on content similarity.
+
+### **Topic Initialization**
+#### `initialize_topics() -> KnowledgeBase`
+Synchronously initializes topics and documents.
+
+#### `async_initialize_topics() -> KnowledgeBase`
+Asynchronously initializes topics.
+
+#### `filter_by_topic(topic: str) -> None`
+Filters the knowledge base to only include documents related to a specific topic.
+
+### **Document Handling**
+#### `choose_document() -> Optional[Document]`
+Selects a document from the knowledge base that hasn’t been used yet.
+
+#### `__getitem__(doc_id: str) -> Document`
+Retrieves a document by its unique ID.
+
+#### `__len__() -> int`
+Returns the total number of documents in the knowledge base.
+
+### **Topic Clustering**
+#### `async _load_docs_without_seed_topic(max_doc_count: Optional[int], max_tokens: int = 8192) -> Tuple[Dict[str, List[Document]], List[str], List[Document]]`
+Uses unsupervised clustering (UMAP + HDBSCAN) to organize documents into topics.
+
+#### `async _get_topic_name(topic_documents: List[Document]) -> str`
+Summarizes the key topic from a given set of documents using an LLM client.
+
+### **Language Detection**
+#### `_set_lang(docs: Sequence[Document]) -> None`
+Automatically detects and sets the primary language of the documents.
+
+## **Error Handling**
+- If required database credentials are missing, a `ValueError` is raised.
+- If the specified Neo4j label does not exist, an exception is raised.
+- If no documents are found in a query, a warning is logged.
+
+## **Performance Considerations**
+- Uses **asynchronous programming** for document retrieval and processing.
+- **UMAP & HDBSCAN** ensure efficient topic clustering.
+- Relies on **embeddings models** for similarity searches.
+
+
+

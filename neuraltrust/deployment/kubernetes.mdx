@@ -1,0 +1,153 @@
+---
+title: Kubernetes
+---
+
+# Kubernetes Installation
+
+NeuralTrust's infrastructure is deployed to Kubernetes using Helm charts. This guide walks you through setting up the self-hosted **Data Plane**.
+
+---
+
+## Step-by-Step Setup
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/NeuralTrust/neuraltrust-helm-charts.git
+cd neuraltrust-helm-charts
+```
+
+### 2. Create an Environment File
+
+```bash
+cp .env.example .env.dev
+nano .env.dev
+```
+
+> Fill in the required values such as API keys and image tags.
+
+---
+
+## Required Tools
+
+Ensure the following are installed on your system:
+
+- [`kubectl`](https://kubernetes.io/docs/tasks/tools/)
+- [`helm`](https://helm.sh/docs/intro/install/)
+- [`jq`](https://stedolan.github.io/jq/)
+- [`yq`](https://github.com/mikefarah/yq)
+
+---
+
+### 3. Run the Installer
+
+```bash
+export ENVIRONMENT=dev  # or prod
+./install-data-plane.sh
+```
+
+> You'll be prompted for secrets (OpenAI API key, HuggingFace token, and GCR key) unless they're already set in `.env`.
+
+---
+
+## DNS Setup
+
+### 1. Create a Subdomain
+
+Example: `dataplane.yourdomain.com`
+
+### 2. Set DNS Records
+
+**CNAME (preferred):**
+
+```
+dataplane.yourdomain.com.  IN  CNAME  <your-ingress-controller-address>
+```
+
+**OR A record:**
+
+```
+dataplane.yourdomain.com.  IN  A  <your-ingress-controller-ip>
+```
+
+Find your ingress IP:
+
+```bash
+kubectl get svc -n <namespace> ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+```
+
+---
+
+## TLS Certificates
+
+- Let's Encrypt is automatically configured.
+- Make sure:
+  - DNS is fully propagated
+  - The domain is publicly accessible
+  - `EMAIL` is correctly set in your `.env` file
+
+---
+
+## Connect to the Control Plane
+
+After deploying the Data Plane:
+
+1. Log in to the [NeuralTrust Portal](https://neuraltrust.ai)
+2. Go to **Data Plane > Add New**
+3. Fill in:
+   - **API Endpoint** (`DATA_PLANE_API_URL`)
+   - **JWT Secret** (`DATA_PLANE_JWT_SECRET`)
+4. Save the connection
+
+> Keep your `DATA_PLANE_JWT_SECRET` safe. You'll need it to connect.
+
+---
+
+## ClickHouse Configuration
+
+The Data Plane installs a single ClickHouse server with:
+- Single server deployment (sharding not currently supported)
+- 100Gi persistent volume for data storage
+- Optimized for standard workloads
+
+Preconfigured tables include:
+- Raw trace data
+- Analytics
+- Security and user engagement metrics
+
+> **Note**: Multi-node ClickHouse deployments with sharding are not supported in the current version.
+
+---
+
+## Upgrading
+
+To apply updates:
+
+1. Update `.env.dev` with new values
+2. Re-run the install script:
+
+```bash
+./install-data-plane.sh
+```
+
+Helm will detect and apply changes without wiping existing data.
+
+---
+
+## Troubleshooting
+
+| Issue                         | Solution                                                             |
+|------------------------------|----------------------------------------------------------------------|
+| Pods not starting            | `kubectl logs -n neuraltrust <pod-name>`                             |
+| ClickHouse issues            | `kubectl get pods -n neuraltrust | grep clickhouse`                 |
+| Ingress not working          | `kubectl get ingress -n neuraltrust`                                 |
+| Certificate errors           | `kubectl get certificates -n neuraltrust`                            |
+| Control Plane can't connect  | Check public access to your API and verify `DATA_PLANE_JWT_SECRET`   |
+
+---
+
+## Support
+
+For any issues not covered above, reach out to us at:
+
+**support@neuraltrust.ai**

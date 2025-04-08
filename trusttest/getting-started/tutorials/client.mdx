@@ -1,0 +1,162 @@
+---
+title: Save and load Scenarios
+---
+
+In this guide we will see how to save and load `EvaluationScenario`, `TestSet` and `EvaluationTestResult`.
+
+
+# Client
+
+To track all our evaluation result we use the `trusttest.client`. 
+Currently, we support two client types:
+
+- **file-system**: Save the results in the local filesystem.
+- **neuraltrust**: Save the results in the remote NeuralTrust server.
+
+To define the client:
+
+<CodeGroup>
+```python neuraltrust
+import os
+import trusttest
+
+client = trusttest.client(type="neuraltrust", token=os.getenv("NEURALTRUST_TOKEN"))
+```
+
+```python file-system
+import trusttest
+
+client = trusttest.client()
+# or
+client = trusttest.client(type="file-system")
+```
+</CodeGroup>
+
+
+# Save a scenario results
+
+First we need to define our scenario, run the evaluation and get the results.
+
+```python [expandable]
+from trusttest.evaluation_contexts import ExpectedResponseContext
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import BleuEvaluator
+from trusttest.models.testing import DummyEndpoint
+from trusttest.probes.dataset import DatasetItem, DatasetProbe
+
+model = DummyEndpoint()
+probe = DatasetProbe(
+    model=model,
+    dataset=[
+        [
+            DatasetItem(
+                question="What is Python?",
+                context=ExpectedResponseContext(
+                    expected_response="Python is a high-level, interpreted programming language."
+                ),
+            )
+        ]
+    ],
+)
+
+test_set = probe.get_test_set()
+scenario = EvaluationScenario(
+    name="Quickstart Functional Test",
+    description="Functional test example.",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[BleuEvaluator(threshold=0.3)],
+        criteria="any_fail",
+    ),
+)
+
+results = scenario.evaluate(test_set)
+```
+
+Then we can save the evaluation scenario with just one line:
+```python
+client.save_evaluation_scenario(scenario)
+```
+To save the scenario `TestSet`:
+```python
+client.save_evaluation_scenario_test_set(scenario.id, test_set)
+```
+Finally, to save the `EvaluationTestResult`:
+```python
+client.save_evaluation_scenario_run(results)
+```
+
+Got to your [NeuralTrust dashboard](https://dashboard.neuraltrust.ai) to see the results.
+Or if you are using the `file-system` client, you can see the results in the `trusttest_db` folder.
+
+
+# Load a scenario results
+
+We can also load any scenario, test set or evaluation test result from the client.
+And re-run the evaluation, clone it, etc.
+
+```python
+loaded_scenario = client.get_evaluation_scenario(scenario.id)
+loaded_scenario_result = client.get_evaluation_scenario_run(scenario.id)
+loaded_test_set = client.get_evaluation_scenario_test_set(scenario.id)
+
+result = loaded_scenario.evaluate(loaded_test_set)
+result.display()
+```
+
+# Complete example
+
+```python [expandable]
+import trusttest
+import os
+from trusttest.evaluation_contexts import ExpectedResponseContext
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import BleuEvaluator
+from trusttest.models.testing import DummyEndpoint
+from trusttest.probes.dataset import DatasetItem, DatasetProbe
+
+model = DummyEndpoint()
+probe = DatasetProbe(
+    model=model,
+    dataset=[
+        [
+            DatasetItem(
+                question="What is Python?",
+                context=ExpectedResponseContext(
+                    expected_response="Python is a high-level, interpreted programming language."
+                ),
+            )
+        ]
+    ],
+)
+
+test_set = probe.get_test_set()
+scenario = EvaluationScenario(
+    name="Quickstart Functional Test",
+    description="Functional test example.",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[BleuEvaluator(threshold=0.3)],
+        criteria="any_fail",
+    ),
+)
+
+results = scenario.evaluate(test_set)
+
+client = trusttest.client(type="neuraltrust", token=os.getenv("NEURALTRUST_TOKEN"))
+
+client.save_evaluation_scenario(scenario)
+client.save_evaluation_scenario_test_set(scenario.id, test_set)
+client.save_evaluation_scenario_run(results)
+
+loaded_scenario = client.get_evaluation_scenario(scenario.id)
+loaded_scenario_result = client.get_evaluation_scenario_run(scenario.id)
+loaded_test_set = client.get_evaluation_scenario_test_set(scenario.id)
+
+result = loaded_scenario.evaluate(loaded_test_set)
+result.display()
+```
+
+
+
+

@@ -1,0 +1,221 @@
+---
+title: LLM as a Judge
+---
+
+In this guide we will see how to configure trusttest to use any `Evaluator` of type **LLM as a Judge**.
+
+<Note>For our experience LLM as a Judge Evaluators offer a better evaluation for evaluating LLM outputs
+than other metrics. As they are able to capture more complex patterns and relationships between the input and output.</Note>
+
+
+## Configure LLM client
+
+For this example we will use OpenAI `gpt-4o-mini` as our LLM client. so we need a **token** to use the OpenAI API.
+and to install the `openai` optional dependency.
+<Info>
+Currently we support OpenAI, AzureOpenAI, Anthropic, Google and Ollama as LLM clients.
+</Info>
+
+```shell
+uv add "trusttest[openai]"
+```
+
+Define OpenAI token in your `.env` file.
+
+```shell
+OPENAI_API_KEY="your_openai_token"
+```
+
+Once we have installed the optional dependency and we have a token, we can configure the LLM client.
+
+```python
+from dotenv import load_dotenv
+
+from trusttest.llm_clients import OpenAiClient
+
+load_dotenv()
+
+client = OpenAiClient(
+    model="gpt-4o-mini",
+    temperature=0.2,
+)
+```
+
+### Validate the LLM client
+
+To check that the LLM client is working correctly, you can run:
+```python
+from dotenv import load_dotenv
+
+from trusttest.llm_clients import OpenAiClient
+
+load_dotenv()
+
+llm_client = OpenAiClient(
+    model="gpt-4o-mini",
+    temperature=0.2,
+)
+
+async def main():
+    response = await llm_client.complete(
+        system_prompt="""
+        You are a helpful assistant that can answer questions about the world. 
+        Return as json with the key 'answer'.
+        """,
+        instructions="What is the capital of Madagascar?",
+    )
+    print(response)
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+
+## Configure and run the Evaluator
+
+For this tutorial we will use the `CorrectnessEvaluator` as our evaluator. This evaluator will check if the information provided by the LLM is correct.
+
+```python
+llm_client = OpenAiClient(...)
+evaluator = CorrectnessEvaluator(llm_client=llm_client)
+```
+
+To run the evaluator we can do it directly:
+
+```python
+from dotenv import load_dotenv
+
+from trusttest.evaluation_contexts import ExpectedResponseContext
+from trusttest.evaluators import CorrectnessEvaluator
+from trusttest.llm_clients import OpenAiClient
+
+load_dotenv()
+
+llm_client = OpenAiClient(...)
+evaluator = CorrectnessEvaluator(llm_client=llm_client)
+
+async def main():
+    result = await evaluator.evaluate(
+        context=ExpectedResponseContext(
+            expected_response="The capital of Madagascar is Antananarivo."
+        ),
+        response="Madagascar's capital is Antananarivo.",
+    )
+    print(result)
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+```
+
+
+## Use the Evaluator in a Evaluation Scenario
+
+So usually you won't run the evaluator directly, but rather use it in a evaluation scenario.
+So we will define a scenario that will use the evaluator to check if the LLM is correct.
+
+```python
+evaluator = CorrectnessEvaluator(llm_client=llm_client)
+scenario = EvaluationScenario(
+    name="Functional Test",
+    description="Functional test example.",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[evaluator],
+        criteria="any_fail",
+    ),
+)
+
+probe = DatasetProbe(
+    model=DummyEndpoint(),
+    dataset=[
+        [
+            DatasetItem(
+                question="What is Python?",
+                context=ExpectedResponseContext(
+                    expected_response="Python is a high-level, interpreted programming language."
+                ),
+            )
+        ]
+    ],
+)
+
+test_set = probe.get_test_set()
+
+results = scenario.evaluate(test_set)
+results.display_summary()
+```
+
+## Global Configuration
+
+LLM clients can be configured globally, so you don't need to pass the `llm_client` to the evaluator or other use cases.
+
+```python
+import trusttest
+
+trusttest.set_config(
+    {
+        "evaluator": {"provider": "google", "model": "gemini-2.0-flash", "temperature": 0.2},
+        "question_generator": {"provider": "openai", "model": "gpt-4o-mini"},
+        "embeddings": {"provider": "openai", "model": "text-embedding-3-small"},
+        "topic_summarizer": {"provider": "google", "model": "gemini-2.0-flash"},
+    }
+)
+
+# Now we can use the evaluator without passing the llm_client
+# the evaluator will use google gemini-2.0-flash as the llm client
+evaluator = CorrectnessEvaluator() 
+```
+
+## Complete Example
+
+```python [expandable]
+from dotenv import load_dotenv
+
+from trusttest.evaluation_contexts import ExpectedResponseContext
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import (
+    CorrectnessEvaluator,
+)
+from trusttest.llm_clients import OpenAiClient
+from trusttest.models.testing import DummyEndpoint
+from trusttest.probes.dataset import DatasetItem, DatasetProbe
+
+load_dotenv()
+
+llm_client = OpenAiClient(
+    model="gpt-4o-mini",
+    temperature=0.2,
+)
+
+evaluator = CorrectnessEvaluator(llm_client=llm_client)
+
+scenario = EvaluationScenario(
+    name="Functional Test",
+    description="Functional test example.",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[evaluator],
+        criteria="any_fail",
+    ),
+)
+
+probe = DatasetProbe(
+    model=DummyEndpoint(),
+    dataset=[
+        [
+            DatasetItem(
+                question="What is Python?",
+                context=ExpectedResponseContext(
+                    expected_response="Python is a high-level, interpreted programming language."
+                ),
+            )
+        ]
+    ],
+)
+
+test_set = probe.get_test_set()
+
+results = scenario.evaluate(test_set)
+results.display_summary()
+```

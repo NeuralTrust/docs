@@ -1,0 +1,134 @@
+# **AzureKnowledgeBase**
+
+The `AzureKnowledgeBase` class provides a was to access documents in Azure Knowledgebase with Azure Search functionality. The class facilitates document indexing, searching, and topic-based organization. In this implementation, Azure Search serves as the backend for indexing and querying documents, while an embedding model and an LLM client assist in document categorization and topic summarization.
+
+
+## Dependencies
+The following external dependencies are required:
+```
+uv pip install trusttest[azure]
+````
+
+
+
+## Class: `AzureKnowledgeBase`
+
+### Constructor: `__init__`
+
+#### Parameters:
+
+```ts
+service_endpoint?: string;
+index_name?: string;
+key?: string;
+language?: string = "en";
+fields_mapping?: Record<string, string>;
+llm_client?: LLMClient;
+embeddings_model?: EmbeddingsModel;
+seed_topics?: string[];
+max_doc_count?: number;
+```
+
+If `service_endpoint`, `index_name`, or `key` is not provided, the system will attempt to retrieve them from environment variables.
+
+## Methods
+
+### `initialize_topics()`
+
+Synchronously initializes topics by retrieving and categorizing documents.
+
+### `async_initialize_topics()`
+
+Asynchronous version of `initialize_topics()`.
+
+### Properties
+
+- `language`: Primary language of the knowledge base.
+- `documents`: All stored documents.
+- `topics`: List of topic names.
+- `documents_per_topic`: Mapping of topic names to their respective documents.
+
+### Document Retrieval Methods
+
+#### `_init_docs(seed_topics, max_doc_count, max_tokens = 8192)`
+
+Retrieves and organizes documents based on provided seed topics.
+
+#### `_load_docs_with_seed_topic(seed_topics, max_doc_count)`
+
+Loads documents based on seed topics, searching for relevant content.
+
+#### `_load_docs_without_seed_topic(max_doc_count, max_tokens = 8192)`
+
+Uses clustering techniques to group similar documents.
+
+#### `_get_topic_name(topic_documents, max_docs = 10, max_doc_length = 500, max_tokens = 8192)`
+
+Generates a summarized topic name using the LLM client.
+
+### Other Utility Methods
+
+#### `choose_document()`
+
+Selects an unused document from the pool.
+
+#### `get_neighbors(seed_document, n_neighbors = 5, similarity_threshold = 0.2)`
+
+Finds similar documents using Azure Search.
+
+#### `filter_by_topic(topic)`
+
+Filters the knowledge base to only include documents under a specific topic.
+
+#### `__len__()`
+
+Returns the number of documents in the knowledge base.
+
+#### `__getitem__(doc_id)`
+
+Retrieves a document by its ID.
+
+#### `_set_lang(docs, max_doc_count = 10)`
+
+Detects the primary language of the knowledge base based on a subset of documents.
+
+## How Topic Summarization Works
+
+1. **Document Retrieval**: Fetch documents from Azure Search.
+2. **Content Embedding**: Convert document content into vector embeddings.
+3. **Clustering**: Use UMAP for dimensionality reduction and HDBSCAN for clustering.
+4. **Summarization Prompt**: Generate a topic name using a summarization prompt.
+5. **Topic Assignment**: Assign topic names to document groups.
+
+## Usage Example
+
+```python
+import os
+
+from dotenv import load_dotenv
+
+from trusttest.catalog import FunctionalRAGScenario
+from trusttest.knowledge_base.azure_search import AzureKnowledgeBase
+from trusttest.models.testing import DummyEndpoint
+
+load_dotenv(override=True)
+
+url = os.getenv("UPSTASH_URL")
+token = os.getenv("UPSTASH_TOKEN")
+
+knowledge_base = AzureKnowledgeBase(
+    service_endpoint=os.getenv("AZURE_SEARCH_SERVICE_ENDPOINT"),
+    key=os.getenv("AZURE_SEARCH_KEY"),
+    index_name=os.getenv("AZURE_SEARCH_INDEX_NAME"),
+    fields_mapping={"content": "chunk", "id": "chunk_id"},
+    language="Spanish",
+)
+
+rag_test = FunctionalRAGScenario(
+    model=DummyEndpoint(), knowledge_base=knowledge_base, num_questions=2
+)
+
+test_set = rag_test.probe.get_test_set()
+results = rag_test.eval.evaluate(test_set)
+results.display_summary()
+```
