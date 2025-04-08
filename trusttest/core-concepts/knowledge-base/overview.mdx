@@ -84,6 +84,108 @@ These capabilities make the framework adaptable across a wide range of use cases
 
 ---
 
+
+## Topic Creation Process
+
+The topic creation pipeline groups unlabeled documents into coherent topics using embeddings, dimensionality reduction, clustering, and LLM-based summarization. This process is triggered when no predefined (seed) topics are provided.
+
+---
+
+### Workflow Steps
+
+1. **Document Retrieval**
+   - Pulls all documents from Azure Cognitive Search using the mapped `id` and `content` fields.
+   - Filters out empty or whitespace-only content.
+
+2. **Embedding Generation**
+   - Applies an embedding model to each document’s content (truncated to `3 * max_tokens`).
+   - Produces high-dimensional semantic vectors for clustering.
+
+3. **Dimensionality Reduction**
+   - Uses **UMAP** to reduce embedding vectors to a lower-dimensional space for clustering.
+   - Parameters such as `n_neighbors`, `n_components`, and initialization strategy are tuned based on document count.
+
+4. **Topic Clustering**
+   - Runs **HDBSCAN** over the reduced vectors to group documents into topic clusters.
+   - Noise and outliers are discarded (`label = -1`).
+
+5. **LLM-based Topic Naming**
+   - For each valid topic cluster, generates a name using a language model.
+   - Uses up to `max_docs` samples per topic and truncates each sample to `max_doc_length`.
+
+6. **Return Structure**
+   - Returns:
+     - A dictionary mapping topic names to associated documents.
+     - A flat list of all topic names.
+     - A flat list of all processed documents.
+
+---
+
+### Function Signature
+
+```python
+async def _load_docs_without_seed_topic(
+    max_doc_count: Optional[int] = None,
+    max_tokens: int = 8192
+) -> Tuple[Dict[str, List[Document]], List[str], List[Document]]:
+```
+
+---
+
+### Arguments
+
+#### `max_doc_count: Optional[int]`
+- Limits the number of documents retrieved from the search backend.
+- If `None`, fetches all available documents.
+
+#### `max_tokens: int = 8192`
+- Controls the amount of content used per document during embedding and topic naming.
+- Helps fit within model context windows when summarizing.
+
+#### Internal Argument Notes:
+- `content_field` and `id_field` are resolved from `self._fields_mapping`, used to extract text and IDs from search results.
+- UMAP and HDBSCAN settings are dynamically adjusted based on the number of documents to ensure quality results.
+
+---
+
+### Topic Naming Helper
+
+```python
+async def _get_topic_name(
+    topic_documents: List[Document],
+    max_docs: int = 10,
+    max_doc_length: int = 500,
+    max_tokens: int = 8192
+) -> str:
+```
+
+#### `max_docs: int = 10`
+- Number of documents sampled per topic to generate the label.
+
+#### `max_doc_length: int = 500`
+- Character limit per document snippet included in the prompt.
+
+#### `max_tokens: int = 8192`
+- Overall token budget for the LLM input prompt, including all sampled documents.
+
+---
+
+### Example Output
+
+```json
+{
+  "Topic A": [Document(...), Document(...)],
+  "Topic B": [Document(...), Document(...)],
+  ...
+}
+```
+
+Each topic is enriched with a name and contains relevant documents, enabling dynamic topic discovery without predefined categories.
+
+
+---
+
+
 ## Summary
 
 The knowledge base connectors in this module abstract the complexity of storage and retrieval while offering advanced features like:
