@@ -1,0 +1,173 @@
+# **UpstashKnowledgeBase**
+
+The **Upstash Knowledge Base Connector** provides seamless integration with the Upstash vector database for storing, retrieving, and organizing documents. It uses vector embeddings, dimensionality reduction, clustering, and similarity search to support intelligent, topic-aware document discovery.
+
+It supports both topic-based clustering and fast vector search using FAISS.
+
+---
+
+### Key Components
+
+- **`UpstashDocument`**: A data structure representing a stored document, including metadata (e.g., `question`), vector embeddings, and reduced embeddings for visualization.
+
+- **`UpstashKnowledgeBase`**: The primary interface for working with the Upstash vector store. Offers tools for:
+  - Loading and organizing documents,
+  - Reducing vector dimensions,
+  - Clustering documents,
+  - Generating topic labels,
+  - Performing similarity-based retrieval.
+
+---
+
+### Document Representation
+
+#### `UpstashDocument`
+
+Each document includes:
+- **`question`** *(optional)*: Metadata like a URL or query.
+- **`embeddings`**: High-dimensional vector representation.
+- **`reduced_embeddings`**: Lower-dimensional projection (e.g., via UMAP) used for clustering or visualization.
+
+---
+
+### Document Management
+
+#### `load_all_data()`
+
+Fetches **all documents** from the Upstash vector database via pagination.
+
+- **Returns**: `List[UpstashDocument]`
+
+Internally handles cursor-based iteration and transforms vector results into `UpstashDocument` objects.
+
+#### `_load_data_with_seed_topic(seed_topics)`
+
+Retrieves and organizes documents by similarity to a list of predefined seed topics.
+
+- **Args**:
+  - `seed_topics`: List of topic labels.
+  - `max_doc_count`: Max number of documents to fetch per topic.
+  - `threshold`: Minimum similarity score for relevance.
+
+- **Returns**: A tuple of:
+  - Topic-to-documents dictionary,
+  - Flat list of all matched documents,
+  - Flat list of similarity scores,
+  - Topic-to-scores mapping.
+
+Documents above the threshold are assigned to the corresponding topic.
+
+---
+
+### Embedding Reduction & Clustering
+
+#### `_reduce_embeddings(docs, embeddings)`
+
+Reduces high-dimensional embeddings using **UMAP**.
+
+- **Args**:
+  - `docs`: List of documents to update.
+  - `embeddings`: Input high-dimensional vectors.
+  - `max_neighbors`: Controls UMAP sensitivity to local structure.
+  - `max_components`: Target number of dimensions (e.g., 2).
+
+- **Returns**: `np.ndarray` of reduced embeddings.
+
+Fallbacks to original embeddings if reduction fails. The reduced vectors are saved back to the document objects.
+
+#### `_load_data_without_seed_topic()`
+
+Clusters documents without seed topics using **HDBSCAN** and labels each cluster using an LLM-generated topic name.
+
+- **Returns**: 
+  - Mapping of topics to documents,
+  - All documents list,
+  - List of topic names,
+  - Clustering scores,
+  - Relevance scores per topic.
+
+---
+
+### Topic Naming & Scoring
+
+#### `_get_topic_name(topic_documents)`
+
+Uses an LLM to generate a **concise name** for a topic, based on its content.
+
+- **Args**:
+  - `topic_documents`: Documents in the cluster.
+  - `max_doc_count`: Limit the number of docs used.
+  - `max_doc_length`: Truncation length per document.
+  - `max_tokens`: Cap for total prompt length.
+
+- **Returns**: A string label for the topic.
+
+Documents are concatenated and formatted as an LLM prompt for summarization.
+
+#### `_normalize_scores_per_topic(scores)`
+
+Normalizes relevance scores **per topic** so values sum to 1.
+
+- **Args**: A `dict` mapping topic → list of scores.
+- **Returns**: Normalized version of that dictionary.
+
+Useful for comparing scores across topics consistently.
+
+---
+
+### Similarity Search
+
+#### `get_neighbors(seed_document, n_neighbors=5, similarity_threshold=0.2)`
+
+Uses **FAISS** to return the most similar documents to a given seed.
+
+- **Args**:
+  - `seed_document`: The query document.
+  - `n_neighbors`: Number of neighbors to retrieve.
+  - `similarity_threshold`: Minimum similarity score to include.
+
+- **Returns**: A ranked list of the nearest documents.
+
+Fast, efficient vector search across the Upstash index.
+
+---
+
+### Topic Filtering
+
+#### `filter_by_topic(topic)`
+
+Filters the document set to include only those matching a specific topic.
+
+- **Args**: A topic label.
+- **Raises**: `ValueError` if no topics exist or if the topic is not found.
+
+Enables scoped or topic-specific retrieval and exploration.
+
+---
+
+### Configuration & Environment
+
+To configure access to Upstash, use either:
+
+#### Environment Variables
+- `UPSTASH_URL`
+- `UPSTASH_TOKEN`
+
+#### Or Constructor Parameters
+Both can be passed explicitly during class initialization if preferred.
+
+---
+
+## Summary
+
+The **Upstash Knowledge Base Connector** brings together:
+
+- **LLMs** for summarization and topic labeling  
+- **UMAP** for embedding reduction  
+- **HDBSCAN** for unsupervised clustering  
+- **FAISS** for similarity search  
+- **Upstash** as a high-performance vector store
+
+Together, it enables powerful, intelligent, and topic-aware retrieval from unstructured content.
+
+---
