@@ -25,39 +25,21 @@ Tests the model's ability to handle harmful, illegal, or inappropriate content r
 - Harassment and bullying
 - Discrimination and hate speech
 
-### 2. SQL Injection
-Evaluates the model's resistance to SQL injection attacks, testing:
-- Basic injection attempts
-- Data exfiltration
-- Database structure disclosure
-- Command execution
-- Time-based attacks
-- Blind injection
-- System command execution
-- Password extraction
-- Data manipulation
+### 2. Bias
+Evaluates the model's ability to handle sensitive topics and avoid biased responses, including:
+- Gender bias
+- Racial bias
+- Cultural bias
+- Age bias
+- Disability bias
 
-### 3. Off Policy
-Tests the model's ability to avoid discussing or promoting other companies, including:
-- Competitor companies
-- Alternative products
-- Competing services
-- Third-party solutions
-
-### 4. System Configuration Leak
-Tests the model's resistance to revealing its system prompt or configuration details, including:
-- System prompt content
-- Model instructions
-- Configuration parameters
-- Internal guidelines
-- System constraints
-
-### 5. Off Tone
-Assesses the model's ability to maintain appropriate communication style and:
-- Match brand voice
-- Use appropriate language
-- Maintain professional tone
-- Avoid inappropriate expressions
+### 3. Accessibility
+Tests the model's ability to provide accessible and inclusive responses, including:
+- Language accessibility
+- Cultural sensitivity
+- Disability awareness
+- Age-appropriate content
+- Educational accessibility
 
 ## How It Works
 
@@ -69,38 +51,57 @@ The Responsibility Evaluator uses a binary scoring system:
 
 ### Basic Compliance Testing
 
-Basic `ComplianceDatasetProbe` testing attacks the model with a set of predefined single-turn prompts and evaluates the model's response.
+Basic `ResponsibilityScenario` testing uses a predefined dataset to evaluate the model's responses against various responsibility objectives.
 
 ```python
-from trusttest.catalog import IterateComplianceScenario
-from trusttest.models.testing import RepeatModel
+from trusttest.catalog import ResponsibilityScenario
+from trusttest.models.http import HttpModel, PayloadConfig
+from trusttest.probes.responsibility import Category
 
-probe = ComplianceDatasetProbe(
-    model=RepeatModel(),
-    categories={"toxicity", "off_policy"},
-    max_objectives_per_category=5
+model = HttpModel(
+    url="https://chat.neuraltrust.ai/api/chat",
+    headers={
+        "Content-Type": "application/json"
+    },
+    payload_config=PayloadConfig(
+        format={
+            "messages": [
+                {"role": "system", "content": "**Welcome to Airline Assistant**."},
+                {"role": "user", "content": "{{ test }}"},
+            ]
+        },
+        message_regex="{{ test }}",
+    ),
+    concatenate_field=".",
 )
 
-test_set = probe.get_test_set()
-results = evaluator.evaluate(test_set)
+scenario = ResponsibilityScenario(
+    name="Responsibility: Bias",
+    description="Evaluate the bias of the model.",
+    model=model,
+    categories={Category.BIAS},
+    max_objectives_per_category=10,
+    use_jailbreaks=False,
+    sampling="random",
+)
+
+test_set = scenario.probe.get_test_set()
+results = scenario.eval.evaluate(test_set)
 results.display_summary()
 ```
 
 ### Iterative Compliance Testing
 
-Given an objective, the `IterateComplianceScenario` will generate a conversation iteratively based on the model's response until the objective is met, or reaches a maximum number of turns.
-
-<Note>
-This probe needs a LLM client configured to generate the test set.
-</Note>
+The `CtfResponsibilityScenario` uses a capture-the-flag approach to iteratively test the model's compliance through multi-turn conversations.
 
 ```python
-from trusttest.catalog import IterateComplianceScenario
+from trusttest.catalog import CtfResponsibilityScenario
 from trusttest.models.testing import RepeatModel
+from trusttest.probes.responsibility import Category
 
-scenario = IterateComplianceScenario(
+scenario = CtfResponsibilityScenario(
     model=RepeatModel(),
-    categories={"system_configuration_leak"},
+    categories={Category.BIAS},
     max_objectives_per_category=2,
     max_turns=4,
 )

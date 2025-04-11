@@ -2,94 +2,119 @@
 title: Off-Topic
 ---
 
-In this guide we will see how to configure and run an **Off-Topic Scenario** to evaluate if your LLM model properly handles requests about topics that should be outside its intended scope, such as politics, economics, history, or other potentially sensitive subjects.
+The Off-Topic Evaluator is a specialized tool designed to assess a model's ability to stay within its intended scope and handle requests about topics that should be outside its domain. It tests the model's compliance with content boundaries and ensures it responds appropriately to potentially sensitive subjects.
 
-## Configure the Off-Topic Scenario
+## Purpose
 
-For this example, we'll create an off-topic scenario that tests the model's ability to stay within its intended scope:
+The Off-Topic Evaluator is particularly useful when you need to:
+- Test model's ability to stay within intended scope
+- Ensure compliance with content boundaries
+- Prevent engagement in sensitive topics
+- Evaluate model's handling of inappropriate requests
+- Assess system's ability to maintain focus
+
+## Available Compliance Categories
+
+The Off-Topic Evaluator includes several categories of compliance tests:
+
+### 1. Disallowed Content
+Tests the model's ability to handle requests about content outside its scope, including:
+- Political discussions
+- Economic analysis
+- Historical events
+- Legal advice
+- Medical information
+
+### 2. Disallowed Uses
+Evaluates the model's ability to handle requests for inappropriate or unauthorized LLM usage, including:
+- Translation services
+- Code generation
+- Content creation
+- Data analysis
+- Text summarization
+- Question answering
+- Writing assistance
+- Research tasks
+
+### 3. Competitors Check
+Tests the model's ability to handle requests about competing services, including:
+- Product comparisons
+- Service evaluations
+- Market analysis
+- Competitor information
+- Business strategies
+
+### 4. Public Figures
+Evaluates the model's ability to handle requests about public figures, including:
+- Celebrity information
+- Political figures
+- Historical personalities
+- Public opinions
+- Personal details
+
+## How It Works
+
+The Off-Topic Evaluator uses a binary scoring system:
+- **Score: 0 (Compliant)**: The model responds appropriately, staying within its intended scope
+- **Score: 1 (Non-Compliant)**: The model fails to maintain appropriate boundaries, engaging in off-topic discussions
+
+## Usage Examples
+
+### Basic Off-Topic Testing
+
+Basic `OffTopicScenario` testing uses a predefined dataset to evaluate the model's responses against various off-topic objectives.
 
 ```python
-from dotenv import load_dotenv
-from trusttest.catalog import ComplianceScenario
-from trusttest.models.testing import DummyEndpoint
+from trusttest.catalog import OffTopicScenario
+from trusttest.models.http import HttpModel, PayloadConfig
+from trusttest.probes.off_topic import Category
 
-load_dotenv()
-
-scenario = ComplianceScenario(
-    model=DummyEndpoint(),
-    categories={"off_topic"},
-    max_objectives_per_category=1,
-    use_jailbreaks=False,
+model = HttpModel(
+    url="https://chat.neuraltrust.ai/api/chat",
+    headers={
+        "Content-Type": "application/json"
+    },
+    payload_config=PayloadConfig(
+        format={
+            "messages": [
+                {"role": "system", "content": "**Welcome to Airline Assistant**."},
+                {"role": "user", "content": "{{ test }}"},
+            ]
+        },
+        message_regex="{{ test }}",
+        timeout=40,
+    ),
+    concatenate_field=".",
 )
-```
 
-Let's break down the configuration parameters:
-- `model`: The LLM model you want to evaluate (in this case, a dummy endpoint for demonstration)
-- `categories`: Set to `{"off_topic"}` to specifically test for off-topic scenarios
-- `max_objectives_per_category`: Maximum number of test objectives to generate per category
-- `use_jailbreaks`: Whether to include jailbreak attempts in the evaluation
+scenario = OffTopicScenario(
+    name="Off Topic: Disallowed Content",
+    description="Evaluate the model's response to off-topic queries.",
+    model=model,
+    categories={Category.DISALLOWED_CONTENT},
+    max_objectives_per_category=10,
+    use_jailbreaks=False,
+    sampling="random",
+)
 
-## Run the Evaluation
-
-Once you have configured your off-topic scenario, you can run the evaluation with these simple steps:
-
-```python
 test_set = scenario.probe.get_test_set()
 results = scenario.eval.evaluate(test_set)
 results.display()
 results.display_summary()
 ```
 
-This will:
-1. Generate a test set containing various attempts to engage the model in off-topic discussions
-2. Run the evaluation against your model
-3. Display detailed results showing how your model handled each test case
-4. Show a summary of the evaluation
+### Iterative Off-Topic Testing
 
-## Complete Example
+The `CtfOffTopicScenario` uses a capture-the-flag approach to iteratively test the model's compliance through multi-turn conversations.
 
-Here's a complete example that puts everything together:
-
-```python [expandable]
-from dotenv import load_dotenv
-from trusttest.catalog import ComplianceScenario
-from trusttest.models.testing import DummyEndpoint
-
-load_dotenv()
-
-# Configure the off-topic scenario
-scenario = ComplianceScenario(
-    model=DummyEndpoint(),
-    categories={"off_topic"},
-    max_objectives_per_category=1,
-    use_jailbreaks=False,
-)
-
-# Run the evaluation
-test_set = scenario.probe.get_test_set()
-results = scenario.eval.evaluate(test_set)
-results.display()
-results.display_summary()
-```
-
-## Advanced Usage: Iterative Testing
-
-For more thorough testing, you can use the `IterateComplianceScenario` which allows for multi-turn conversations to test how the model handles persistent attempts to engage in off-topic discussions:
-
-<Note>
-This probe needs a LLM client configured to generate the test set.
-</Note>
-
-```python [expandable]
-from dotenv import load_dotenv
-from trusttest.catalog import IterateComplianceScenario
+```python
+from trusttest.catalog import CtfOffTopicScenario
 from trusttest.models.testing import RepeatModel
+from trusttest.probes.off_topic import Category
 
-load_dotenv()
-
-scenario = IterateComplianceScenario(
+scenario = CtfOffTopicScenario(
     model=RepeatModel(),
-    categories={"off_topic"},
+    categories={Category.DISALLOWED_CONTENT},
     max_objectives_per_category=2,
     max_turns=4,
 )
@@ -99,7 +124,14 @@ results = scenario.eval.evaluate(test_set)
 results.display_summary()
 ```
 
-This advanced scenario:
-- Tests the model across multiple conversation turns
-- Allows for more sophisticated attempts to engage in off-topic discussions
-- Provides a more comprehensive evaluation of your model's ability to stay within its intended scope
+## When to Use
+
+Use the Off-Topic Evaluator when you need to:
+- Test model's content boundaries
+- Ensure scope compliance
+- Prevent inappropriate engagement
+- Evaluate topic handling
+- Assess boundary maintenance
+- Test system focus
+- Validate content scope
+- Ensure domain consistency
