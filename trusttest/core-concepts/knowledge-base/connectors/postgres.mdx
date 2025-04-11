@@ -1,0 +1,164 @@
+# **PostgresKnowledgeBase**
+
+`PostgresKnowledgeBase` is a PostgreSQL-backed vector knowledge base class that supports fast document retrieval using semantic vector search and traditional text-based queries. It leverages the [`pgvector`](https://github.com/pgvector/pgvector) extension for similarity search and is built to integrate with LLMs and embeddings models.
+
+
+
+## Installation
+
+```bash
+pip install trusttest[postgres]
+```
+
+---
+
+## Key Features
+
+- Vector similarity search using `pgvector`
+- Text fallback search using `ILIKE`
+- Embedding integration for semantic search
+- LLM-compatible document clustering
+- Topic seeding for automatic topic grouping
+
+---
+
+## Constructor
+
+```python
+PostgresKnowledgeBase(
+    uri=None,
+    username=None,
+    password=None,
+    database=None,
+    language="en",
+    fields_mapping=None,
+    llm_client=None,
+    embeddings_model=None,
+    seed_topics=None,
+    max_doc_count=None,
+)
+```
+
+### Parameters
+
+| Name | Type | Description |
+|------|------|-------------|
+| `uri` | `str` | PostgreSQL connection string. Fallback: `POSTGRES_URL` env var. |
+| `username` | `str` | PostgreSQL username. Fallback: `POSTGRES_USERNAME`. |
+| `password` | `str` | PostgreSQL password. |
+| `database` | `str` | PostgreSQL database name. |
+| `language` | `str` | Document language. Defaults to `"en"`. |
+| `fields_mapping` | `dict` | Field mapping: `{id, content, embedding, table}`. |
+| `llm_client` | `LLMClient` | Used for summarizing topic clusters. |
+| `embeddings_model` | `EmbeddingsModel` | Used for vector search. |
+| `seed_topics` | `List[str]` | List of initial topic keywords. |
+| `max_doc_count` | `int` | Max number of documents to use for clustering. |
+
+
+
+## Methods
+
+### `get_document_count()` → `int`
+
+Returns the total number of documents stored in the database.
+
+```python
+count = kb.get_document_count()
+```
+
+
+### `search(search_text=None, top=20)` → `List[Dict[str, str]]`
+
+Performs a **text-based search** on the `content` field. Uses `ILIKE` for fuzzy matching. Falls back to vector search if enabled.
+
+```python
+docs = kb.search("climate")
+```
+
+
+### `search_embeddings(search_text, top=20)` → `List[Dict[str, Any]]`
+
+Executes a **semantic vector search** using embeddings. Requires pgvector and the embedding field.
+
+```python
+docs = kb.search_embeddings("deep learning in medicine")
+```
+
+Returns documents ranked by similarity.
+
+> Raises `ValueError` if `search_text` is not provided.
+
+---
+
+## Seed Topic Clustering
+
+The `PostgresKnowledgeBase` supports topic seeding by fetching documents related to predefined keywords:
+
+```python
+kb = PostgresKnowledgeBase(
+    seed_topics=["health", "technology", "nature"],
+    max_doc_count=100
+)
+```
+
+Each seed topic is used as a search query to retrieve documents for clustering.
+
+
+## Environment Variables
+
+You can use environment variables for seamless config:
+
+```bash
+POSTGRES_URL=localhost
+POSTGRES_USERNAME=postgres
+POSTGRES_PASSWORD=secret
+POSTGRES_DATABASE=docs
+```
+
+
+## Example Usage
+
+```python
+from trusttest.kb import PostgresKnowledgeBase
+from trusttest.embeddings import EmbeddingsOpenAi
+
+kb = PostgresKnowledgeBase(
+    database="music",
+    uri="localhost",
+    username="postgres",
+    password="password",
+    fields_mapping={
+        "id": "id",
+        "content": "lyrics",
+        "embedding": "embedding",
+        "table": "Song",
+    },
+    embeddings_model=EmbeddingsOpenAi(api="openai", model="text-embedding-3-small"),
+    seed_topics=["love", "party", "nature", "sadness"]
+)
+
+results = kb.search("ocean")
+```
+
+
+
+##  Notes & Tips
+
+- If the `embedding` field is not specified, semantic search will be disabled.
+- To enable `pgvector`, make sure your database has the extension installed:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+- Semantic similarity uses the `<->` operator for efficient ANN search.
+
+
+
+##  Internal Design Highlights
+
+- Uses `psycopg` for PostgreSQL connection
+- Leverages language detection (when language not provided)
+- Inherits from `KBCommon` for core logic reuse
+- Supports fallback to text search if vectors are unavailable
+
