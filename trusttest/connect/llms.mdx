@@ -1,0 +1,194 @@
+---
+title: LLMs & Embeddings
+---
+
+## LLM Clients
+
+TrustTest provides a flexible abstraction layer for working with different LLM providers through its `LLMClient` interface. This architecture allows for seamless integration with various LLM services while maintaining a consistent interface for generating questions, evaluations, and other LLM-powered features.
+
+### Architecture
+
+The core of this system is the `LLMClient` abstract base class, which defines two main methods:
+
+- `complete(instructions, system_prompt)`: For single-prompt completions
+- `complete_conversation(messages)`: For multi-turn conversations
+
+Each implementation handles provider-specific details while exposing a unified interface.
+
+### Supported Providers
+
+TrustTest currently supports the following LLM providers:
+
+- **OpenAI**  
+```python 
+uv add "trusttest[openai]"
+```
+- **Anthropic**
+```python 
+uv add "trusttest[anthropic]"
+```
+- **Google**
+```python 
+uv add "trusttest[google]"
+```
+- **Ollama**
+```python 
+uv add "trusttest[ollama]"
+```
+- **vLLM**
+```python 
+uv add "trusttest[vllm]"
+```
+- **Azure OpenAI**
+```python 
+uv add "trusttest[azure]"
+```
+- **Deepseek**
+```python 
+uv add "trusttest[deepseek]"
+```
+
+### Usage Example
+
+```python
+import asyncio
+import os
+from trusttest.llm_clients import get_llm_client
+
+# Set up environment variables for the provider
+os.environ["DEEPSEEK_BASE_URL"] = "https://api.deepseek.com"
+os.environ["DEEPSEEK_API_KEY"] = "<your-api-key>"
+
+# Initialize the client
+llm = get_llm_client(model="deepseek-chat", provider="deepseek")
+
+# Make a completion request
+response = asyncio.run(llm.complete("Return a json saying hello"))
+print(response)
+```
+
+The abstraction allows for easy switching between providers while maintaining consistent behavior across the application.
+
+## Embeddings Clients
+
+TrustTest provides a flexible abstraction layer for working with different embedding providers through its `EmbeddingsModel` interface. This architecture allows for seamless integration with various embedding services while maintaining a consistent interface for generating vector representations of text.
+
+### Architecture
+
+The core of this system is the `EmbeddingsModel` abstract base class, which defines the main method:
+
+- `embed(texts)`: Converts a sequence of texts into numerical vector representations
+
+Each implementation handles provider-specific details while exposing a unified interface.
+
+### Supported Providers
+
+TrustTest currently supports the following embedding providers:
+
+- **OpenAI**
+- **Google**
+- **Ollama**
+
+### Usage Example
+
+```python
+import os
+
+from trusttest.embeddings import get_embeddings_model
+
+os.environ["OPENAI_API_KEY"] = "<your-api-key>"
+
+embeddings = get_embeddings_model(
+    provider="openai",
+    model="text-embedding-3-small",
+)
+
+texts = ["Hello world", "TrustTest is great"]
+vectors = embeddings.embed(texts)
+print(vectors.shape)
+```
+
+The abstraction allows for easy switching between providers while maintaining consistent behavior across the application.
+
+## Global Configuration
+
+TrustTest provides a global configuration system to manage LLM and embeddings settings across your application. The configuration can be set using the `set_config()` function, which accepts a dictionary with settings for different components:
+
+```python
+import trusttest
+
+trusttest.set_config({
+    "evaluator": {
+        "provider": "openai",
+        "model": "gpt-4",
+        "temperature": 0.2
+    },
+    "question_generator": {
+        "provider": "openai",
+        "model": "gpt-4",
+        "temperature": 0.5
+    },
+    "embeddings": {
+        "provider": "openai",
+        "model": "text-embedding-3-small"
+    },
+    "topic_summarizer": {
+        "provider": "openai",
+        "model": "gpt-4",
+        "temperature": 0.2
+    }
+})
+```
+
+The configuration supports the following components:
+- `evaluator`: LLM settings for evaluation tasks
+- `question_generator`: LLM settings for generating test questions
+- `embeddings`: Settings for the embeddings model
+- `topic_summarizer`: LLM settings for topic summarization
+
+Each component accepts:
+- `provider`: One of "openai", "azure", "google", "anthropic", "ollama" (for LLMs) or "openai", "azure", "google", "ollama" (for embeddings)
+- `model`: The specific model name for the chosen provider
+- `temperature`: (LLMs only) Controls randomness in model outputs (0.0 to 1.0)
+
+## Implementing Custom Clients
+
+Both LLM and Embeddings clients can be easily extended by implementing custom providers. The base classes provide a clear interface that you need to implement.
+
+### Custom LLM Client
+
+To create a custom LLM client, inherit from `LLMClient` and implement the required methods:
+
+```python
+from trusttest.llm_clients import LLMClient, ChatMessage
+
+class CustomLLMClient(LLMClient):
+    async def complete(self, instructions: str, system_prompt: str | None = None) -> dict[str, Any]:
+        # Implement your custom completion logic
+        pass
+
+    async def complete_conversation(self, messages: list[ChatMessage]) -> dict[str, Any]:
+        # Implement your custom conversation logic
+        pass
+```
+
+### Custom Embeddings Client
+
+To create a custom embeddings client, inherit from `EmbeddingsModel` and implement the required method:
+
+```python
+from trusttest.embeddings import EmbeddingsModel
+import numpy as np
+
+class CustomEmbeddingsModel(EmbeddingsModel):
+    def embed(self, texts: list[str]) -> np.ndarray:
+        # Implement your custom embedding logic
+        pass
+```
+
+Once implemented, you are ready to use them:
+
+```python
+custom_llm = CustomLLMClient()
+evaluator = CorrectnessEvaluator(llm_client=custom_llm)
+```

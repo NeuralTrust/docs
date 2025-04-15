@@ -1,5 +1,5 @@
 ---
-title: Evaluation strategy
+title: Evaluation Context
 ---
 
 The evaluation system in TrustTest is built around three main concepts: `EvaluationScenarios`, `EvaluatorSuites` and `EvaluationContext`.
@@ -14,6 +14,85 @@ An Evaluation Scenario represents a specific test case or situation where we wan
 - An Evaluator Suite that defines how the response should be evaluated
 
 Scenarios provide a structured way to define test cases and their expected outcomes, making it easier to maintain and understand the testing requirements.
+
+## Evaluation Context
+
+Each evaluator recives the model response and the evaluation context.
+
+The EvaluationContext system provides a structured way to define what data an evaluator needs to perform its assessment. This is implemented through different context types that specify the required information for each evaluation scenario.
+
+### Context Types
+
+The system defines several context types that can be mixed if they are child classes:
+
+- **QuestionContext**: Contains the question being asked to the language model
+  ```python
+  from trusttest.evaluation_context import QuestionContext
+
+  QuestionContext(question="What is the capital of France?")
+  ```
+
+- **ExpectedResponseContext**: Contains the expected response and optionally the original question. Since it inherits from QuestionContext, it can be used in the same suite as QuestionContext.
+  ```python
+  from trusttest.evaluation_context import ExpectedResponseContext
+
+  ExpectedResponseContext(
+      expected_response="The capital of France is Paris",
+      question="What is the capital of France?"  # Optional
+  )
+  ```
+
+- **ObjectiveContext**: Contains descriptions for what is a correct and incorrect response. Since it doesn't inherit from QuestionContext, it cannot be mixed with QuestionContext or ExpectedResponseContext.
+  ```python
+  from trusttest.evaluation_context import ObjectiveContext
+
+  ObjectiveContext(
+      true_description="The response correctly identifies Paris as the capital",
+      false_description="The response does not identify Paris as the capital"
+  )
+  ```
+
+### Usage in Evaluators
+
+Each evaluator can specify which context type it requires to perform its evaluation. This ensures that:
+
+1. Evaluators have all the necessary information to make their assessment
+2. The evaluation system can validate that required context is provided
+3. Different evaluators can work with different types of context data
+4. Context requirements are clearly documented and type-safe
+
+For example, an evaluator that checks if a response matches an expected answer would require an `ExpectedResponseContext`, while an evaluator that checks for specific keywords might only need a `QuestionContext`.
+
+This context system makes the evaluation process more robust and maintainable by clearly defining the data requirements for each type of evaluation.
+
+#### Mixing Context Types
+
+You can mix context types in the same suite if they are child classes. For example:
+
+- `ExpectedResponseContext` is a child class of `QuestionContext`, so they can be used together in the same suite
+- `ExpectedResponseContext` is not a child of `ObjectiveContext`, so they cannot be used together
+
+<Note>
+With a propper IDE with static type configured checking like `mypy` or `pylance`, you will be able to see if a context is valid to be used in a suite.
+</Note>
+
+```python
+# This is valid because ExpectedResponseContext inherits from QuestionContext
+suite = EvaluatorSuite(
+    evaluators=[
+        QuestionEvaluator(),  # Uses QuestionContext
+        ExpectedResponseEvaluator()  # Uses ExpectedResponseContext
+    ]
+)
+
+# This is invalid because ExpectedResponseContext and ObjectiveContext are not related
+suite = EvaluatorSuite(
+    evaluators=[
+        ExpectedResponseEvaluator(),  # Uses ExpectedResponseContext
+        ObjectiveEvaluator()  # Uses ObjectiveContext
+    ]
+)
+```
 
 ## Evaluator Suites
 
@@ -59,55 +138,4 @@ scenario = EvaluationScenario(
 
 This example shows how different evaluators can work together to provide a comprehensive assessment of a response's quality.
 So we are able to check if a url is correct and if the response language is the same as the question language.
-
-## Evaluation Context
-
-Each evaluator recives the model response and the evaluation context.
-
-The EvaluationContext system provides a structured way to define what data an evaluator needs to perform its assessment. This is implemented through different context types that specify the required information for each evaluation scenario.
-
-### Context Types
-
-The system defines several context types:
-
-- **QuestionContext**: Contains the question being asked to the language model
-  ```python
-  from trusttest.evaluation_context import QuestionContext
-
-  QuestionContext(question="What is the capital of France?")
-  ```
-
-- **ExpectedResponseContext**: Contains the expected response and optionally the original question
-  ```python
-  from trusttest.evaluation_context import ExpectedResponseContext
-
-  ExpectedResponseContext(
-      expected_response="The capital of France is Paris",
-      question="What is the capital of France?"  # Optional
-  )
-  ```
-
-- **ObjectiveContext**: Contains descriptions for what is a correct and incorrect response.
-  ```python
-  from trusttest.evaluation_context import ObjectiveContext
-
-  ObjectiveContext(
-      true_description="The response correctly identifies Paris as the capital",
-      false_description="The response does not identify Paris as the capital"
-  )
-  ```
-
-### Usage in Evaluators
-
-Each evaluator can specify which context type it requires to perform its evaluation. This ensures that:
-
-1. Evaluators have all the necessary information to make their assessment
-2. The evaluation system can validate that required context is provided
-3. Different evaluators can work with different types of context data
-4. Context requirements are clearly documented and type-safe
-
-For example, an evaluator that checks if a response matches an expected answer would require an `ExpectedResponseContext`, while an evaluator that checks for specific keywords might only need a `QuestionContext`.
-
-This context system makes the evaluation process more robust and maintainable by clearly defining the data requirements for each type of evaluation.
-
 
