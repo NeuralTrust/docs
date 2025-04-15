@@ -1,0 +1,228 @@
+---
+title: Kafka Exporter
+---
+
+The `kafka` telemetry exporter enables TrustGate to emit real-time telemetry events to an Apache Kafka topic. This includes both **request-level traces** and **plugin execution metrics**, which are serialized into structured JSON messages and delivered using a Kafka producer.
+
+This exporter allows seamless integration with downstream consumers, including observability platforms, security analytics pipelines, and operational dashboards.
+
+---
+
+### Configuration Example
+
+```curl
+curl -X POST "http://localhost:8080/api/v1/gateways" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Kafka Exporter Gateway",
+    "subdomain": "your-subdomain",
+    "telemetry": {
+      "enable_request_traces": true,
+      "enable_plugin_traces": true,
+      "extra_params": {
+        "app_id": "12345"
+      },
+      "exporters": [
+        {
+          "name": "kafka",
+          "settings": {
+            "host": "localhost",
+            "port": "9092",
+            "topic": "metrics"
+          }
+        }
+      ]
+    }
+  }'
+```
+
+---
+
+### Configuration Parameters
+
+To activate the Kafka exporter, include it in the gateway's telemetry section:
+
+| Parameter | Type   | Required | Description                                             |
+|-----------|--------|----------|---------------------------------------------------------|
+| `host`    | string | Yes      | Kafka broker host (e.g., `"localhost"`).                |
+| `port`    | string | Yes      | Kafka broker port (e.g., `"9092"`).                     |
+| `topic`   | string | Yes      | Kafka topic where telemetry messages will be published. |
+
+---
+
+### Field Descriptions
+
+#### `enable_request_traces`
+
+Enables top-level request tracing.
+Each incoming request will emit a single summary event containing:
+
+- Latency (`latency_ms`)
+- Request and response headers
+- HTTP method and status code
+- Device and client metadata (when available)
+
+This provides end-to-end visibility into the request lifecycle.
+
+#### `enable_plugin_traces`
+
+Enables plugin-level tracing.
+Each plugin executed during the request lifecycle will produce a separate telemetry event containing:
+
+- Input and output values for the plugin
+- Error messages or failure states (if any)
+- Execution timing and plugin identifier
+
+This allows for detailed diagnostics and plugin performance monitoring.
+
+#### `extra_params`
+
+A flexible key-value object that appends static metadata to **every telemetry event** emitted—both request and plugin traces.
+
+For example:
+
+```json
+"extra_params": {
+  "app_id": "12345"
+}
+```
+
+This configuration results in all Kafka events including the field `"app_id": "12345"` in their payloads.
+
+This is useful for:
+
+- **Multi-tenant tracing**
+Distinguish metrics between different applications, clients, or tenants.
+
+- **Environment or region tagging**
+Identify the source environment (e.g., staging, production) or deployment region.
+
+- **Custom labeling for analytics or filtering**
+Enhance downstream processing by attaching meaningful, queryable metadata to every event.
+
+
+---
+
+### Kafka Message Format
+
+Each Kafka message represents a telemetry event associated with a request processed by TrustGate. The structure differs slightly based on whether the event is a **plugin execution trace** or a **request trace**, but both share a common schema foundation.
+
+#### Plugin Metrics Event
+
+This message is emitted for each plugin executed during a request:
+
+```json
+{
+    "trace_id": "31a679ea-b752-4546-856a-8cde573500a2",
+    "interaction_id": "15ccac5a-dace-4c9d-9e5b-192c1f1530fc",
+    "conversation_id": "4d8c6abd-bcfb-4022-8f0c-00d905533f94",
+    "input": "{...}",
+    "output": "{...}",
+    "task": "message",
+    "type": "trace",
+    "start_timestamp": 1744713336,
+    "end_timestamp": 1744713345,
+    "latency_ms": 8836,
+    "ip": "::1",
+    "params": {
+        "app_id": "12345"
+    },
+    "method": "POST",
+    "error": "Post \"http://...\": context deadline exceeded",
+    "request_headers": {
+        "User-Agent": [
+            "..."
+        ]
+    },
+    "response_headers": {
+        "Content-Type": [
+            "application/json"
+        ]
+    },
+    "plugin": {
+        "plugin_name": "external_api",
+        "stage": "pre-request",
+        "extras": {
+            "endpoint": "https://api.example.com/validate",
+            "method": "POST",
+            "status_code": 200,
+            "duration_ms": 512,
+            "response": "response body"
+        }
+    },
+    "status_code": 502
+}
+```
+
+### Request-Level Trace Event
+
+```json
+{
+  "trace_id": "66b3877b-b124-4e41-a538-4191d5630f3b",
+  "interaction_id": "ceca3cf6-faa9-4f7c-8b85-788c4f853f96",
+  "conversation_id": "d6b2e0f5-5648-44be-8344-ec18f6b6dfea",
+  "input": "",
+  "output": "{\"message\":\"pong\"}",
+  "task": "message",
+  "type": "trace",
+  "start_timestamp": 1744382780,
+  "end_timestamp": 1744382780,
+  "latency_ms": 6,
+  "ip": "192.168.1.1",
+  "params": {
+    "app_id": "12345"
+  },
+  "method": "GET",
+  "device": "Computer",
+  "os": "OSWindows 10.0",
+  "browser": "BrowserUnknown 0.0",
+  "upstream": {
+    "target": {
+      "path": "/__/ping",
+      "host": "localhost",
+      "port": 8081
+    }
+  },
+  "request_headers": {
+    "User-Agent": ["Mozilla/5.0 ..."],
+    ...
+  },
+  "response_headers": {
+    "Content-Type": ["application/json"],
+    ...
+  },
+  "status_code": 200
+}
+```
+
+**Note: Both event types share the same trace_id, allowing downstream systems to correlate plugin metrics with the parent request.**
+
+### How It Works
+
+#### Initialization
+
+A Kafka producer is initialized using the specified broker address (`host:port`) and target topic. This setup prepares the exporter to begin sending telemetry events as soon as they are generated.
+
+#### Message Construction
+
+Each telemetry event is serialized into a JSON-formatted message.
+These messages commonly include fields such as:
+
+- `trace_id`
+- `latency_ms`
+- `method`
+- `status_code`
+- `headers`
+- `input` / `output`
+- Device context (e.g., `device`, `os`, `browser`)
+
+#### Message Delivery
+
+Messages are published asynchronously to the configured Kafka topic.
+A delivery channel is used to confirm whether the message was successfully received or if a transmission error occurred.
+
+#### Failure Tolerance
+
+The exporter includes error handling for all stages of message transmission:
+
+- If the Kafka producer is uninitialized or has been closed
