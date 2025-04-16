@@ -1,0 +1,202 @@
+---
+title: Quickstart with Local LLM
+---
+
+In this guide we will see how to configure and use TrustTest with a local LLM using Ollama, without requiring any external API keys.
+
+## Prerequisites
+
+Before starting, make sure you have:
+
+1. Ollama installed and running locally
+2. A model pulled in Ollama (e.g., `gemma3:1b` or `llama3.2`)
+
+## Model Requirements and Hardware Considerations
+
+This example uses two different models:
+- `gemma3:1b` (1 billion parameters) as the model being evaluated
+- `llama3.2` (4 billion parameters) as the judge model for evaluation
+
+With a PC having 8GB of RAM, you should be able to run this example. The smaller `gemma3:1b` model requires less memory, while the `llama3.2` model will be used only for evaluation purposes. Make sure to pull both models in Ollama before running the example:
+
+```bash
+ollama pull gemma3:1b
+ollama pull llama3.2
+```
+
+Then install the Ollama Python client:
+
+```bash
+uv add "trusttest[ollama]"
+```
+
+## Target Model
+
+The `LocalLLMTarget` defines the model being evaluated. In this case, it's the `gemma3:1b` model:
+
+```python
+import os
+from trusttest.models import Model
+import ollama
+
+os.environ["OLLAMA_HOST"] = "http://localhost:11434"
+
+class LocalLLMTarget(Model):
+    def __init__(self):
+        self.client = ollama.Client(host=os.getenv("OLLAMA_HOST"))
+
+    async def async_respond(self, message: str):
+        res = self.client.chat(
+            model="gemma3:1b",
+            messages=[{"role": "user", "content": message}]
+        )
+        return res.message.content
+```
+
+## Creating a Test Dataset
+
+You can create a simple test dataset with questions and expected answers:
+
+```python
+from trusttest.dataset_builder import Dataset, DatasetItem
+from trusttest.evaluation_contexts import ExpectedResponseContext
+
+dataset = Dataset([
+    [
+        DatasetItem(
+            question="What's the capital of Osona?",
+            context=ExpectedResponseContext(
+                expected_response="The capital of Osona is Vic.",
+                question="What's the capital of Osona?"
+            )
+        )
+    ],
+    [
+        DatasetItem(
+            question="What's the capital of Italy?",
+            context=ExpectedResponseContext(
+                expected_response="The capital of Italy is Rome.",
+                question="What's the capital of Italy?"
+            )
+        )
+    ]
+])
+```
+
+## Setting Up Evaluation
+
+Configure your evaluation scenario with the desired evaluators. In this case, we'll use the `CorrectnessEvaluator` to evaluate the model's correctness, and the `llama3.2` model as the judge model:
+
+```python
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import CorrectnessEvaluator
+from trusttest.llm_clients import get_llm_client
+
+llm_judge = get_llm_client(provider="ollama", model="llama3.2")
+scenario = EvaluationScenario(
+    description="Local LLM model scenario",
+    name="Local LLM model scenario",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[
+            CorrectnessEvaluator(
+                llm_client=llm_judge
+            )
+        ],
+        criteria="any_fail"
+    )
+)
+```
+
+## Running the Evaluation
+
+Finally, run your evaluation:
+
+```python
+from trusttest.probes import DatasetProbe
+
+model_target = LocalLLMTarget()
+probe = DatasetProbe(model=model_target, dataset=dataset)
+test_set = probe.get_test_set()
+results = scenario.evaluate(test_set)
+
+# Display results
+results.display()
+results.display_summary()
+```
+
+## Complete Example
+
+```python [expandable]
+import os
+from typing import Optional
+
+import ollama
+
+from trusttest.dataset_builder import Dataset, DatasetItem
+from trusttest.evaluation_contexts import ExpectedResponseContext
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import CorrectnessEvaluator
+from trusttest.llm_clients import get_llm_client
+from trusttest.models import Model
+from trusttest.probes import DatasetProbe
+
+os.environ["OLLAMA_HOST"] = "http://localhost:11434"
+
+class LocalLLMTarget(Model):
+    def __init__(self):
+        self.client = ollama.Client(host=os.getenv("OLLAMA_HOST"))
+
+    async def async_respond(self, message: str) -> Optional[str]:
+        res = self.client.chat(
+            model="gemma3:1b",
+            messages=[{"role": "user", "content": message}]
+        )
+        return res.message.content
+
+model_target = LocalLLMTarget()
+
+dataset = Dataset([
+    [
+        DatasetItem(
+            question="What's the capital of Osona?",
+            context=ExpectedResponseContext(
+                expected_response="The capital of Osona is Vic.",
+                question="What's the capital of Osona?"
+            )
+        )
+    ],
+    [
+        DatasetItem(
+            question="What's the capital of Italy?",
+            context=ExpectedResponseContext(
+                expected_response="The capital of Italy is Rome.",
+                question="What's the capital of Italy?"
+            )
+        )
+    ]
+])
+
+probe = DatasetProbe(model=model_target, dataset=dataset)
+scenario = EvaluationScenario(
+    description="Local LLM model scenario",
+    name="Local LLM model scenario",
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[
+            CorrectnessEvaluator(
+                llm_client=get_llm_client(provider="ollama", model="llama3.2")
+            )
+        ],
+        criteria="any_fail"
+    )
+)
+
+test_set = probe.get_test_set()
+results = scenario.evaluate(test_set)
+
+results.display()
+results.display_summary()
+```
+
+
