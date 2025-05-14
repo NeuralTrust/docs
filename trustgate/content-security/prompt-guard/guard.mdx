@@ -62,19 +62,30 @@ We identify, among others:
 
 ## Configuration Parameters
 
-| Parameter              | Type    | Description                                                              | Required | Default |
-|------------------------|---------|--------------------------------------------------------------------------|----------|---------|
-| `credentials`          | object  | API credentials for TrustGate. Includes `token` and `base_url`.          | Yes      | —       |
-| `credentials.token`    | string  | API token provided by TrustGate.                                         | Yes      | —       |
-| `credentials.base_url` | string  | TrustGate API base URL (e.g., `https://data.neuraltrust.ai`).            | Yes      | —       |
-| `toxicity`             | object  | Enables or disables prompt classification via moderation endpoint.       | No       | —       |
-| `toxicity.enabled`     | boolean | Whether to enable the toxicity check.                                    | No       | false   |
-| `toxicity.threshold`   | float   | Threshold between `0.0` and `1.0` to flag the input.                     | No       | 0       |
-| `jailbreak`            | object  | Enables or disables jailbreak detection.                                 | No       | —       |
-| `jailbreak.enabled`    | boolean | Whether to enable the jailbreak firewall check.                          | No       | false   |
-| `jailbreak.threshold`  | float   | Threshold between `0.0` and `1.0` to flag the input.                     | No       | 0       |
-| `mapping_field`        | string  | Dot-separated path to the field to extract and classify as prompt input. | No       | ""      |
-| `retention_period`     | int     | Duration for which the guardrail results should be retained in seconds.  | No       | 60      |
+| Parameter                                              | Type    | Description                                                                | Required | Default |
+|--------------------------------------------------------|---------|----------------------------------------------------------------------------|----------|---------|
+| `credentials`                                          | object  | API credentials for TrustGate. Includes `token` and `base_url`.            | Yes      | —       |
+| `credentials.token`                                    | string  | API token provided by TrustGate.                                           | Yes      | —       |
+| `credentials.base_url`                                 | string  | TrustGate API base URL (e.g., `https://data.neuraltrust.ai`).              | Yes      | —       |
+| `toxicity`                                             | object  | Enables or disables prompt classification via moderation endpoint.         | No       | —       |
+| `toxicity.enabled`                                     | boolean | Whether to enable the toxicity check.                                      | No       | false   |
+| `toxicity.threshold`                                   | float   | Threshold between `0.0` and `1.0` to flag the input.                       | No       | 0       |
+| `jailbreak`                                            | object  | Enables or disables jailbreak detection.                                   | No       | —       |
+| `jailbreak.enabled`                                    | boolean | Whether to enable the jailbreak firewall check.                            | No       | false   |
+| `jailbreak.threshold`                                  | float   | Threshold between `0.0` and `1.0` to flag the input.                       | No       | 0       |
+| `moderation`                                           | object  | Enables or disables semantic similarity-based content moderation.          | No       | —       |
+| `moderation.enabled`                                   | boolean | Whether to enable the moderation check.                                    | No       | false   |
+| `moderation.threshold`                                 | float   | Threshold between `0.0` and `1.0` to flag the input.                       | No       | 0       |
+| `moderation.deny_topic_action`                         | string  | Action to take when content matches deny samples (only "block" supported). | No       | —       |
+| `moderation.deny_samples`                              | array   | List of text samples to block (semantic similarity comparison).            | No       | []      |
+| `moderation.embedding_config`                          | object  | Configuration for the embedding service used for similarity detection.     | No       | —       |
+| `moderation.embedding_config.provider`                 | string  | Embedding provider (currently only "openai" supported).                    | No       | —       |
+| `moderation.embedding_config.model`                    | string  | Model to use for generating embeddings.                                    | No       | —       |
+| `moderation.embedding_config.credentials`              | object  | Credentials for the embedding service.                                     | No       | —       |
+| `moderation.embedding_config.credentials.header_name`  | string  | Name of the header for authentication.                                     | No       | —       |
+| `moderation.embedding_config.credentials.header_value` | string  | Value of the header for authentication.                                    | No       | —       |
+| `mapping_field`                                        | string  | Dot-separated path to the field to extract and classify as prompt input.   | No       | ""      |
+| `retention_period`                                     | int     | Duration for which the guardrail results should be retained in seconds.    | No       | 60      |
 
 
 
@@ -95,16 +106,25 @@ Returned when the prompt content is blocked by a TrustGate policy, either due to
 }
 ```
 
-| Field         | Type        | Description                                                                                     |
-|---------------|-------------|-------------------------------------------------------------------------------------------------|
-| `error`       | string      | Description of the reason for blocking. Indicates the type (`toxicity`, `jailbreak`) and score. |
-| `retry_after` | number/null | Reserved for future use. Currently always `null`.                                               |
+Or for moderation-based blocking:
+
+```json
+{
+  "error": "content blocked: with similarity score 0.85 exceeds threshold 0.80",
+  "retry_after": null
+}
+```
+
+| Field         | Type        | Description                                                                                                |
+|---------------|-------------|----------------------------------------------------------------------------------------------------------|
+| `error`       | string      | Description of the reason for blocking. Indicates the type (`toxicity`, `jailbreak`, `moderation`) and score. |
+| `retry_after` | number/null | Reserved for future use. Currently always `null`.                                                          |
 
 
 ## Configuration Examples
 
 ### Basic Configuration
-A simple configuration that enables toxicity detection with default settings:
+A simple configuration that enables jailbreak detection with default settings:
 
 ```json
 {
@@ -126,6 +146,51 @@ A simple configuration that enables toxicity detection with default settings:
                         "threshold": 0.6
                    },
                    "mapping_field": "input.test"
+            }
+}
+```
+
+### Advanced Configuration with Moderation
+A more advanced configuration that enables semantic similarity-based content moderation:
+
+```json
+{
+    "name": "neuraltrust_guardrail",
+    "enabled": true,
+    "stage": "pre_request",
+    "priority": 1,
+            "settings": {
+                   "credentials": {
+                        "token": "{{ NEURALTRUST_API_KEY }}",
+                        "base_url": "https://data.neuraltrust.ai"
+                   },
+                   "toxicity":{
+                        "enabled": true,
+                        "threshold": 0.7
+                   },
+                   "jailbreak":{
+                        "enabled": true,
+                        "threshold": 0.6
+                   },
+                   "moderation":{
+                        "enabled": true,
+                        "threshold": 0.8,
+                        "deny_topic_action": "block",
+                        "deny_samples": [
+                            "This is an example of content that should be blocked",
+                            "Another example of prohibited content"
+                        ],
+                        "embedding_config": {
+                            "provider": "openai",
+                            "model": "text-embedding-ada-002",
+                            "credentials": {
+                                "header_name": "Authorization",
+                                "header_value": "Bearer {{ OPENAI_API_KEY }}"
+                            }
+                        }
+                   },
+                   "mapping_field": "input.prompt",
+                   "retention_period": 120
             }
 }
 ```
