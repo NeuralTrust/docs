@@ -2,65 +2,311 @@
 title: NeuralTrust Content Moderation
 ---
 
-NeuralTrust Guardrail includes semantic similarity-based content moderation capabilities as part of its defense system. This feature is designed to identify and block content that matches predefined samples, providing a flexible way to moderate content based on semantic similarity rather than exact keyword matching.
+NeuralTrust Moderation is a comprehensive content filtering system designed to protect your AI gateway from potentially harmful, inappropriate, or unwanted content. It employs multiple layers of content analysis to ensure robust protection while maintaining high performance.
 
-## Content Moderation
+## Overview
 
-The NeuralTrust content moderation system uses embedding-based semantic similarity to detect content that is similar to predefined deny samples. This approach allows for more nuanced content moderation compared to simple keyword matching, as it can detect content with similar meaning even when different words are used.
+The NeuralTrust Moderation plugin offers three powerful moderation approaches that can be used independently or in combination:
+
+1. **Embedding-Based Moderation**: Uses semantic similarity to detect content similar to predefined deny samples
+2. **Keyword & Regex Moderation**: Employs fuzzy keyword matching and regular expression pattern matching
+3. **LLM-Based Moderation**: Leverages large language models to analyze content for policy violations
+
+This multi-layered approach provides comprehensive protection against various types of harmful content, from simple keyword matching to sophisticated semantic analysis.
+
+## Features
+
+### Embedding-Based Moderation
+
+- **Semantic Similarity Detection**: Identifies content similar in meaning to predefined deny samples
+- **Configurable Threshold**: Adjust sensitivity to balance protection and false positives
+- **Vector Database Integration**: Efficiently stores and searches embeddings
+- **Multiple Embedding Providers**: Support for various embedding models
+
+### Keyword & Regex Moderation
+
+- **Fuzzy Keyword Matching**: Detects similar words using Levenshtein distance
+- **Configurable Similarity Threshold**: Adjust sensitivity for word matching
+- **Case-Insensitive Matching**: Catches variations regardless of capitalization
+- **Regular Expression Support**: Complex pattern matching for sophisticated detection
+- **Pre-compiled Patterns**: Optimized for performance
+
+### LLM-Based Moderation
+
+- **AI-Powered Content Analysis**: Uses LLMs to detect policy violations
+- **Multiple Provider Support**: Compatible with OpenAI and Gemini models
+- **Customizable Instructions**: Define specific content policies
+- **Structured Response Format**: Clear categorization of detected issues
+
+### Additional Features
+
+- **Customizable Actions**: Configure how to handle detected violations
+- **Detailed Error Reporting**: Clear explanations of why content was blocked
+- **Performance Optimization**: Efficient processing for minimal latency
+- **Fingerprint Tracking**: Monitor and manage repeated violation attempts
 
 ## Configuration
 
-The moderation feature can be configured in the NeuralTrust Guardrail plugin:
+The NeuralTrust Moderation plugin can be configured with various options to suit your specific needs:
 
 ```json
 {
-    "name": "neuraltrust_guardrail",
-    "enabled": true,
-    "stage": "pre_request",
-    "priority": 1,
-    "settings": {
+  "name": "neuraltrust_moderation",
+  "enabled": true,
+  "stage": "pre_request",
+  "priority": 1,
+  "settings": {
+    "mapping_field": "prompt",
+    "retention_period": 3600,
+    
+    "embedding_param_bag": {
+      "enabled": true,
+      "threshold": 0.8,
+      "deny_topic_action": "block",
+      "deny_samples": [
+        "This is an example of content that should be blocked",
+        "Another example of prohibited content"
+      ],
+      "embeddings_config": {
+        "provider": "openai",
+        "model": "text-embedding-ada-002",
         "credentials": {
-            "token": "{{ NEURALTRUST_API_KEY }}",
-            "base_url": "https://data.neuraltrust.ai"
-        },
-        "moderation":{
-            "enabled": true,
-            "threshold": 0.8,
-            "deny_topic_action": "block",
-            "deny_samples": [
-                "This is an example of content that should be blocked",
-                "Another example of prohibited content"
-            ],
-            "embedding_config": {
-                "provider": "openai",
-                "model": "text-embedding-ada-002",
-                "credentials": {
-                    "header_name": "Authorization",
-                    "header_value": "Bearer {{ OPENAI_API_KEY }}"
-                }
-            }
+          "header_name": "Authorization",
+          "header_value": "Bearer {{ OPENAI_API_KEY }}"
         }
+      }
+    },
+    
+    "key_reg_param_bag": {
+      "enabled": true,
+      "similarity_threshold": 0.8,
+      "keywords": [
+        "hack",
+        "exploit",
+        "vulnerability"
+      ],
+      "regex": [
+        "password.*dump",
+        "sql.*injection",
+        "CVE-\\d{4}-\\d{4,7}"
+      ],
+      "actions": {
+        "type": "block",
+        "message": "Content blocked due to prohibited content: %s"
+      }
+    },
+    
+    "llm_param_bag": {
+      "enabled": true,
+      "provider": "openai",
+      "model": "gpt-4",
+      "max_tokens": 1000,
+      "instructions": "Analyze the following content for policy violations",
+      "credentials": {
+        "header_name": "Authorization",
+        "header_value": "Bearer {{ OPENAI_API_KEY }}"
+      }
     }
+  }
 }
 ```
 
-### Configuration Parameters
+### Common Configuration Parameters
 
-| Parameter                                  | Type    | Description                                                                | Required | Default |
-|--------------------------------------------|---------|----------------------------------------------------------------------------|----------|---------|
-| `moderation`                               | object  | Enables or disables semantic similarity-based content moderation.          | No       | —       |
-| `moderation.enabled`                       | boolean | Whether to enable the moderation check.                                    | No       | false   |
-| `moderation.threshold`                     | float   | Threshold between `0.0` and `1.0` to flag the input.                       | No       | 0       |
-| `moderation.deny_topic_action`             | string  | Action to take when content matches deny samples (only "block" supported). | No       | —       |
-| `moderation.deny_samples`                  | array   | List of text samples to block (semantic similarity comparison).            | No       | []      |
-| `moderation.embedding_config`              | object  | Configuration for the embedding service used for similarity detection.     | No       | —       |
-| `moderation.embedding_config.provider`     | string  | Embedding provider (currently only "openai" supported).                    | No       | —       |
-| `moderation.embedding_config.model`        | string  | Model to use for generating embeddings.                                    | No       | —       |
-| `moderation.embedding_config.credentials`  | object  | Credentials for the embedding service.                                     | No       | —       |
+| Parameter          | Type    | Description                                                                           | Required | Default |
+|--------------------|---------|---------------------------------------------------------------------------------------|----------|---------|
+| `mapping_field`    | string  | JSON path to extract content from request body (e.g., "prompt" or "messages.content") | No       | —       |
+| `retention_period` | integer | Time in seconds to retain fingerprint data for violation tracking                     | No       | 60      |
+
+### Embedding-Based Moderation Parameters
+
+| Parameter                                           | Type    | Description                                                               | Required | Default |
+|-----------------------------------------------------|---------|---------------------------------------------------------------------------|----------|---------|
+| `embedding_param_bag.enabled`                       | boolean | Whether to enable embedding-based moderation                              | No       | false   |
+| `embedding_param_bag.threshold`                     | float   | Similarity threshold (0.0-1.0) to flag content                            | Yes      | —       |
+| `embedding_param_bag.deny_topic_action`             | string  | Action to take when content matches deny samples (only "block" supported) | Yes      | —       |
+| `embedding_param_bag.deny_samples`                  | array   | List of text samples to block (semantic similarity comparison)            | No       | []      |
+| `embedding_param_bag.embeddings_config.provider`    | string  | Embedding provider (e.g., "openai")                                       | Yes      | —       |
+| `embedding_param_bag.embeddings_config.model`       | string  | Model to use for generating embeddings                                    | Yes      | —       |
+| `embedding_param_bag.embeddings_config.credentials` | object  | Credentials for the embedding service                                     | Yes      | —       |
+
+### Keyword & Regex Moderation Parameters
+
+| Parameter                                | Type    | Description                                                     | Required | Default |
+|------------------------------------------|---------|-----------------------------------------------------------------|----------|---------|
+| `key_reg_param_bag.enabled`              | boolean | Whether to enable keyword and regex moderation                  | No       | false   |
+| `key_reg_param_bag.similarity_threshold` | float   | Word similarity threshold (0.0-1.0)                             | No       | 0.8     |
+| `key_reg_param_bag.keywords`             | array   | List of keywords to block                                       | No       | []      |
+| `key_reg_param_bag.regex`                | array   | List of regex patterns to block                                 | No       | []      |
+| `key_reg_param_bag.actions.type`         | string  | Action to take when content is blocked (only "block" supported) | Yes      | —       |
+| `key_reg_param_bag.actions.message`      | string  | Custom message for blocked content                              | No       | —       |
+
+### LLM-Based Moderation Parameters
+
+| Parameter                    | Type    | Description                              | Required | Default |
+|------------------------------|---------|------------------------------------------|----------|---------|
+| `llm_param_bag.enabled`      | boolean | Whether to enable LLM-based moderation   | No       | false   |
+| `llm_param_bag.provider`     | string  | LLM provider ("openai" or "gemini")      | Yes      | —       |
+| `llm_param_bag.model`        | string  | Model to use for content analysis        | Yes      | —       |
+| `llm_param_bag.max_tokens`   | integer | Maximum tokens for LLM response          | No       | 1000    |
+| `llm_param_bag.instructions` | string  | Custom instructions for content analysis | No       | —       |
+| `llm_param_bag.credentials`  | object  | Credentials for the LLM service          | Yes      | —       |
+
+## Configuration Examples
+
+### Basic Embedding-Based Moderation
+
+```json
+{
+  "name": "neuraltrust_moderation",
+  "enabled": true,
+  "stage": "pre_request",
+  "settings": {
+    "embedding_param_bag": {
+      "enabled": true,
+      "threshold": 0.8,
+      "deny_topic_action": "block",
+      "deny_samples": [
+        "How to hack into a system",
+        "Instructions for creating malware"
+      ],
+      "embeddings_config": {
+        "provider": "openai",
+        "model": "text-embedding-ada-002",
+        "credentials": {
+          "header_name": "Authorization",
+          "header_value": "Bearer {{ OPENAI_API_KEY }}"
+        }
+      }
+    }
+  }
+}
+```
+
+### Keyword & Regex Moderation for Security
+
+```json
+{
+  "name": "neuraltrust_moderation",
+  "enabled": true,
+  "stage": "pre_request",
+  "settings": {
+    "key_reg_param_bag": {
+      "enabled": true,
+      "similarity_threshold": 0.8,
+      "keywords": [
+        "hack",
+        "exploit",
+        "vulnerability",
+        "injection",
+        "overflow",
+        "backdoor"
+      ],
+      "regex": [
+        "CVE-\\d{4}-\\d{4,7}",
+        "password.*dump",
+        "sql.*injection",
+        "(union|select|delete|drop|update|insert).*table",
+        "exec.*\\(.*\\)",
+        "system\\(.*\\)"
+      ],
+      "actions": {
+        "type": "block",
+        "message": "Security violation detected: %s. This incident will be logged."
+      }
+    }
+  }
+}
+```
+
+### LLM-Based Moderation
+
+```json
+{
+  "name": "neuraltrust_moderation",
+  "enabled": true,
+  "stage": "pre_request",
+  "settings": {
+    "llm_param_bag": {
+      "enabled": true,
+      "provider": "openai",
+      "model": "gpt-4",
+      "instructions": "Analyze the following content for policy violations including: harmful instructions, illegal activities, hate speech, or explicit content.",
+      "credentials": {
+        "header_name": "Authorization",
+        "header_value": "Bearer {{ OPENAI_API_KEY }}"
+      }
+    }
+  }
+}
+```
+
+### Comprehensive Multi-Layer Protection
+
+```json
+{
+  "name": "neuraltrust_moderation",
+  "enabled": true,
+  "stage": "pre_request",
+  "settings": {
+    "mapping_field": "messages.0.content",
+    "retention_period": 3600,
+    
+    "embedding_param_bag": {
+      "enabled": true,
+      "threshold": 0.8,
+      "deny_topic_action": "block",
+      "deny_samples": [
+        "How to hack into a system",
+        "Instructions for creating malware"
+      ],
+      "embeddings_config": {
+        "provider": "openai",
+        "model": "text-embedding-ada-002",
+        "credentials": {
+          "header_name": "Authorization",
+          "header_value": "Bearer {{ OPENAI_API_KEY }}"
+        }
+      }
+    },
+    
+    "key_reg_param_bag": {
+      "enabled": true,
+      "similarity_threshold": 0.8,
+      "keywords": [
+        "hack",
+        "exploit",
+        "bypass"
+      ],
+      "regex": [
+        "security.*bypass",
+        "password.*crack"
+      ],
+      "actions": {
+        "type": "block",
+        "message": "Content blocked due to prohibited content: %s"
+      }
+    },
+    
+    "llm_param_bag": {
+      "enabled": true,
+      "provider": "openai",
+      "model": "gpt-4",
+      "instructions": "Analyze the following content for policy violations",
+      "credentials": {
+        "header_name": "Authorization",
+        "header_value": "Bearer {{ OPENAI_API_KEY }}"
+      }
+    }
+  }
+}
+```
 
 ## Error Responses
 
-When moderated content is detected, the plugin returns a 403 Forbidden error:
+When moderated content is detected, the plugin returns a 403 Forbidden error with a message indicating the reason for blocking:
+
+### Embedding-Based Moderation Error
 
 ```json
 {
@@ -68,3 +314,112 @@ When moderated content is detected, the plugin returns a 403 Forbidden error:
   "retry_after": null
 }
 ```
+
+### Keyword & Regex Moderation Error
+
+```json
+{
+  "error": "content blocked: word 'h4ck' is similar to blocked keyword 'hack'",
+  "retry_after": null
+}
+```
+
+or
+
+```json
+{
+  "error": "content blocked: regex pattern sql.*injection found in request body",
+  "retry_after": null
+}
+```
+
+### LLM-Based Moderation Error
+
+```json
+{
+  "error": "content blocked",
+  "retry_after": null
+}
+```
+
+## Best Practices
+
+### Embedding-Based Moderation
+
+1. **Carefully Select Deny Samples**
+   - Choose clear examples of content you want to block
+   - Include variations to improve detection coverage
+   - Keep samples focused on specific categories of harmful content
+
+2. **Threshold Tuning**
+   - Start with a threshold around 0.8
+   - Increase for fewer false positives (stricter matching)
+   - Decrease for broader protection (may increase false positives)
+
+3. **Embedding Model Selection**
+   - Choose models with good semantic understanding
+   - Consider performance vs. accuracy tradeoffs
+   - Test with your specific use cases
+
+### Keyword & Regex Moderation
+
+1. **Keyword Selection**
+   - Start with a focused list of clearly harmful terms
+   - Avoid overly common words that may cause false positives
+   - Consider language variations and common misspellings
+   - Regularly update keywords based on new threats
+
+2. **Pattern Crafting**
+   - Use specific regex patterns targeting known attack vectors
+   - Test patterns thoroughly before deployment
+   - Consider performance impact of complex patterns
+   - Document pattern purposes for maintenance
+
+3. **Similarity Threshold Tuning**
+   - Start with the default 0.8 threshold
+   - Increase for stricter matching
+   - Lower to catch more variations
+   - Monitor false positive/negative rates
+
+### LLM-Based Moderation
+
+1. **Provider and Model Selection**
+   - Choose models with strong understanding of policy violations
+   - Consider latency requirements for your application
+   - Test different models to find the best balance of accuracy and performance
+
+2. **Instruction Crafting**
+   - Be specific about what constitutes a violation
+   - Include examples if possible
+   - Clearly define categories of prohibited content
+
+3. **Response Handling**
+   - Implement appropriate error messages for users
+   - Consider logging violations for analysis
+   - Monitor false positive rates
+
+## Performance Considerations
+
+The NeuralTrust Moderation plugin is designed for optimal performance through several key optimizations:
+
+1. **Efficient Resource Management**
+   - Memory pooling for reduced allocations
+   - Pre-compiled regex patterns
+   - Optimized string comparison algorithms
+
+2. **Parallel Processing**
+   - Concurrent execution of different moderation methods
+   - Early termination when violations are detected
+   - Efficient context cancellation
+
+3. **Caching and Reuse**
+   - Embedding caching for similar content
+   - Fingerprint tracking to identify repeat offenders
+   - Pooled resources for reduced memory pressure
+
+4. **Scalability**
+   - Linear scaling with increasing workloads
+   - Minimal CPU utilization
+   - Low memory footprint
+
+These optimizations ensure the plugin can handle high throughput while maintaining robust content filtering capabilities.
