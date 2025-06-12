@@ -2,79 +2,238 @@
 title: Overview
 ---
 
-# NeuralTrust Infrastructure
+# NeuralTrust Architecture
 
-This repository contains the infrastructure code for [NeuralTrust](https://neuraltrust.ai), a comprehensive platform designed to monitor, secure, and analyze AI interactions.
+NeuralTrust provides enterprise-grade AI security protection, testing, and vulnerability management through a distributed architecture designed for scalability, security, and performance. The platform operates with a unique **data sovereignty model** where your Data Plane runs entirely within your cloud environment while the Control Plane operates in NeuralTrust's secure infrastructure.
 
-## Architecture
-
-NeuralTrust is structured into two primary components:
-
-1. **Data Plane**: Manages data ingestion, processing, and storage. It comprises:
-
-   - **API Service**: Serves as the entry point for incoming telemetry data from client applications. It validates, processes, and forwards this data to the appropriate backend services.
-
-   - **ClickHouse Database**: A high-performance columnar database optimized for analytical queries, used to store processed telemetry data, enabling efficient retrieval and analysis.
-
-   - **Kafka**: A distributed event streaming platform that decouples data ingestion from processing. It ensures reliable message delivery between services, allowing the system to handle high-throughput data streams.
-
-   - **Worker Service**: Performs background tasks such as data enrichment, anomaly detection, and other asynchronous processing jobs. It consumes messages from Kafka, processes them, and stores the results in ClickHouse or other storage systems as needed.
-
-2. **Control Plane**: Provides the user interface and management API for overseeing applications. It includes:
-
-   - **Web Application**: A user-friendly interface that allows users to configure settings, view analytics, and manage their applications.
-
-   - **API Service**: Handles business logic and serves as an intermediary between the web application and the underlying data stores.
-
-   - **PostgreSQL Database**: Stores application metadata, user configurations, and other relational data required for the Control Plane's operations.
-
-> **Note**: The Control Plane is hosted and managed by [NeuralTrust](https://neuraltrust.ai) and does not require installation or maintenance by users.
-
-## Connectivity
-
-### Network Requirements
-
-The NeuralTrust architecture has specific connectivity needs:
-
-1. **Data Plane API**: This is the sole component that requires exposure to the public internet for two main purposes:
-
-   - **Receiving Telemetry Data**: Client applications, integrated with the NeuralTrust SDK, send telemetry data to the Data Plane API over HTTPS.
-
-   - **Control Plane Communication**: The Control Plane connects to the Data Plane API to manage configurations, retrieve analytics, and perform other management tasks.
-
-2. **Internal Components**: The following services are designed to operate within a secure, internal network and should not be exposed publicly:
-
-   - **Kafka**: Handles internal message brokering between services.
-
-   - **ClickHouse**: Stores analytical data and serves internal queries.
-
-   - **Worker Service**: Processes background tasks and consumes messages from Kafka.
-
-   - **Schema Registry**: Manages schemas for data serialization and deserialization, ensuring data compatibility across services.
-
-### Network Diagram
-
-Below is a simplified representation of the NeuralTrust architecture:
+## High-Level Architecture
 
 ```mermaid
 graph LR
-    Internet[Internet] --> IC[Ingress Controller]
-    subgraph Kubernetes Cluster
-        IC --> DPA[Data Plane API]
-        DPA --> Kafka
-        Kafka --> WS[Worker Service]
-        WS --> CH[ClickHouse Database]
+    subgraph CustomerVPC ["VPC (Customer)"]
+        subgraph DP ["DP"]
+            DPAPI[DP API] --> DPQUEUE[DP Queue]
+            DPQUEUE --> DPWORKER[DP Worker]
+            DPWORKER --> DPDB[(DP DB)]
+        end
+        
+        subgraph TrustGate ["TrustGate"]
+            DPGATEWAY[DP Gateway]
+            CPGATEWAY[CP Gateway]
+        end
+        
+        AWS[AWS]
+        GCP[GCP]
+        AZURE[Azure]
+        
+        DPWORKER --> DPGATEWAY
     end
+    
+    subgraph NeuralTrustVPC ["VPC (NeuralTrust)"]
+        subgraph CP ["CP"]
+            CPAPI[CP API] --> CPAPP[CP App]
+            CPAPI --> CPSCHEDULER[CP Scheduler]
+            CPAPI --> CPDB[(CP DB)]
+        end
+        
+        subgraph TrustTest ["TrustTest"]
+            AITEST[AI Testing]
+        end
+        
+        subgraph TrustScan ["TrustScan"]
+            AISCAN[AI Scanner]
+        end
+        
+        subgraph AISPM ["AISPM"]
+            AIPOSTURE[AI Posture Manager]
+        end
+        
+        GCPNT[GCP]
+        
+        CPGATEWAY --> CPAPI
+        CPAPI --> AITEST
+        CPAPI --> AISCAN
+        CPAPI --> AIPOSTURE
+    end
+    
+    DPGATEWAY -.->|Privacy-Safe Data| CPGATEWAY
+    
+    classDef customerStyle fill:#e8f5e8,stroke:#4caf50,stroke-width:3px
+    classDef neuraltrustStyle fill:#e1f5fe,stroke:#2196f3,stroke-width:3px
+    classDef trustgateStyle fill:#fff3e0,stroke:#ff9800,stroke-width:2px
+    classDef productStyle fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px
+    classDef dbStyle fill:#fff,stroke:#333,stroke-width:2px
+    classDef cloudStyle fill:#fffde7,stroke:#ffc107,stroke-width:2px
+    
+    class CustomerVPC customerStyle
+    class NeuralTrustVPC neuraltrustStyle
+    class DP,CP trustgateStyle
+    class TrustGate,TrustTest,TrustScan,AISPM productStyle
+    class DPDB,CPDB dbStyle
+    class AWS,GCP,AZURE,GCPNT cloudStyle
 ```
 
-> NeuralTrust can provide IP allowlists to improve firewall security.
+## Data Plane Components (Your VPC)
 
-### Firewall Configuration
+The Data Plane operates entirely within your cloud environment, providing complete data sovereignty while delivering enterprise-grade AI capabilities.
 
-To ensure proper operation, configure your firewall to allow:
+### DP API (Data Plane API)
+Your **DP API** serves as the primary ingestion endpoint for AI monitoring data from your applications and systems. This high-performance service provides:
 
-1. **Inbound HTTPS Traffic (Port 443)**: Direct this to the Kubernetes Ingress Controller to facilitate secure communication from client applications and the Control Plane.
+- **High-Throughput Ingestion**: Handles millions of AI monitoring events per second with minimal latency
+- **Real-Time Validation**: Validates and enriches incoming data streams for immediate processing
+- **Secure Authentication**: Implements robust API key management and authentication mechanisms
+- **Auto-Scaling**: Automatically scales based on incoming data volume and processing demands
 
-2. **Outbound HTTPS Traffic (Port 443)**: Permit this from the Data Plane API to the Control Plane for management operations.
+### DP Worker (Background Processing)
+The **DP Worker** performs all data processing operations within your environment, ensuring sensitive data never leaves your infrastructure:
 
-3. **Outbound HTTPS Traffic (Port 443)**: Allow this from the Worker Service to external AI services (e.g., OpenAI, HuggingFace) for tasks that require external data or processing.
+- **Real-Time Analysis**: Processes AI monitoring events for immediate insights and anomaly detection
+- **Privacy-Preserving Analytics**: Performs analysis while keeping raw data within your environment
+- **Alert Generation**: Triggers immediate alerts for critical AI security and performance events
+
+### DP Message Queue
+The **DP Message Queue** provides reliable, high-performance message processing between Data Plane components:
+
+- **Event Sourcing**: Maintains complete audit trails of all AI monitoring events
+- **Guaranteed Delivery**: Ensures no data loss during processing with configurable durability
+- **Stream Processing**: Enables real-time data processing and analysis workflows
+- **Backpressure Management**: Automatically manages load balancing during traffic spikes
+
+### DP Database
+Your **DP Database** stores all sensitive AI monitoring data within your controlled environment:
+
+- **Complete Data Sovereignty**: All raw AI monitoring data remains in your VPC
+- **High-Performance Analytics**: Optimized for real-time queries and complex analytics
+- **Automated Encryption**: All data encrypted at rest with your managed keys
+- **Compliance Ready**: Designed for GDPR, HIPAA, SOX, and other regulatory requirements
+
+## Control Plane Components (NeuralTrust VPC)
+
+The Control Plane provides centralized management, advanced AI security capabilities, and global insights while never accessing your raw data.
+
+### CP API (Control Plane API)
+The **CP API** provides the backbone for all Control Plane operations and customer interactions:
+
+- **Customer Portal Integration**: Powers the NeuralTrust dashboard and customer interfaces
+- **Multi-Tenant Architecture**: Securely isolates customer environments and data
+- **Global Orchestration**: Coordinates across multiple customer Data Plane deployments
+
+### CP Application
+The **CP Application** delivers the comprehensive NeuralTrust user experience:
+
+- **Real-Time Dashboards**: Interactive dashboards showing AI security and performance insights
+- **Global Analytics**: Cross-environment insights that don't compromise individual data privacy
+- **Alert Management**: Centralized alert configuration and notification management
+
+### CP Scheduler
+The **CP Scheduler** manages automated testing and monitoring operations:
+
+- **TrustTest Job Scheduling**: Schedules and orchestrates TrustTest execution jobs across customer environments
+- **TrustScan Job Scheduling**: Schedules and coordinates TrustScan security analysis jobs and vulnerability assessments
+- **Metrics Check Scheduling**: Coordinates periodic metrics checks for alert generation and monitoring
+- **Automated Test Execution**: Manages the timing and execution of AI testing and scanning workflows
+
+### CP Database
+The **CP Database** stores only basic operational data for CRUD operations:
+
+- **Zero Raw Data**: Never stores customer's sensitive AI monitoring data
+- **Configuration Management**: Stores system configurations and user preferences
+- **User Management**: Handles user accounts, permissions, and authentication data
+- **Operational Metadata**: Basic CRUD operations for system management and administration
+
+## Data Flow and Privacy Model
+
+NeuralTrust's architecture ensures complete data sovereignty while enabling comprehensive AI security protection, testing, and vulnerability management through privacy-preserving data flows.
+
+### AI Application Data Flow (Your Environment)
+1. **AI Applications** → **TrustGate Gateway Service**: AI applications route through the Gateway service for real-time validation against configured security policies
+2. **TrustGate Gateway Service** → **DP Queue**: Validated and protected AI interaction data is written directly to the queue for processing
+3. **DP Queue** → **DP Worker**: Workers process and analyze data while keeping everything in your VPC
+4. **DP Worker** → **DP Database**: All raw AI interaction data is stored in your controlled environment
+
+**Policy Management Flow**:
+- **TrustGate Admin Service**: Configure security policies, routing rules, rate limits, and access controls that govern the Gateway service behavior
+
+### Cross-VPC Security Operations (Privacy-Safe Only)
+
+**Privacy-Preserving Security Analysis**:
+NeuralTrust's security products provide comprehensive AI security analysis through different operational models:
+
+- **TrustTest**: Operates in NeuralTrust Control Plane for comprehensive red teaming and testing capabilities
+- **Local Analysis**: TrustScan and AISPM perform analysis within your Data Plane using your complete data
+- **Privacy-Safe Results**: Only aggregated, anonymized security insights cross the VPC boundary  
+- **No Raw Data Transfer**: Customer prompts, responses, and user data never leave your environment for vulnerability scanning and posture management
+
+**Security Product Operations**:
+- **TrustTest Red Teaming**: Runs in NeuralTrust Control Plane to maintain centralized, up-to-date jailbreak database and threat intelligence
+- **TrustScan Vulnerability Assessment**: Conducts security scanning within your environment, shares only privacy-safe threat detection results
+- **AISPM Posture Management**: Scans your complete AI environment including cloud artifacts, Hugging Face models, MCP servers, and external AI service integrations to assess overall security posture and provide comprehensive risk metrics and improvement recommendations
+
+> **Why TrustTest Runs in Control Plane**
+> 
+> TrustTest operates exclusively within NeuralTrust's Control Plane infrastructure to maintain a centralized, continuously updated jailbreak database containing the latest AI attack techniques, prompt injection methods, and adversarial strategies. This centralized approach is critical because new jailbreak techniques emerge daily across the AI security landscape, and maintaining an up-to-date threat intelligence database requires continuous research, monitoring of security communities, and analysis of emerging attack vectors. By running TrustTest in our Control Plane, we ensure that all customers immediately benefit from the latest red teaming capabilities without each organization needing to independently research and catalog new attack methods. Our security research team continuously updates this database with novel jailbreak techniques, sophisticated prompt injection attacks, adversarial examples, and emerging AI vulnerabilities discovered across the global AI security community.
+
+## Multi-Cloud Deployment Support
+
+### Universal Cloud Provider Support
+Your Data Plane can be deployed on any major cloud provider while maintaining identical functionality:
+
+- **Amazon Web Services (AWS)**: Full integration with AWS services and global regions
+- **Google Cloud Platform (GCP)**: Native GCP service integration and optimization  
+- **Microsoft Azure**: Complete Azure ecosystem integration and enterprise features
+
+### Cloud-Agnostic Benefits
+- **Consistent Experience**: Identical features and capabilities across all cloud providers
+- **Provider Independence**: No vendor lock-in to any specific cloud platform
+
+## Security and Compliance
+
+### Data Sovereignty Guarantees
+- **Legal Guarantees**: Your data never leaves your cloud environment or jurisdiction
+- **Audit Trails**: Complete documentation of all data flows and access patterns
+- **Compliance Ready**: Meets requirements for GDPR, HIPAA, SOX, PCI, and other frameworks
+
+### Zero-Trust Architecture
+- **Mutual Authentication**: All communication requires cryptographic verification
+- **Encrypted Channels**: End-to-end encryption for all data in transit
+- **Least Privilege**: Minimal necessary permissions for all system components
+- **Continuous Verification**: Ongoing validation of all system connections and data flows
+
+## Cloud Provider Support
+
+NeuralTrust provides managed deployment across all major cloud providers, handling infrastructure complexity while ensuring your data remains within your environment and under your control.
+
+### Amazon Web Services (AWS)
+Our comprehensive AWS integration provides native support for AWS services and capabilities across all regions. The Data Plane deploys seamlessly into your AWS VPC with full integration into AWS security services, encryption capabilities, and monitoring tools.
+
+**Getting Started**: [AWS Deployment Guide](./aws)
+
+### Microsoft Azure
+Our enterprise Azure integration provides seamless connectivity with Microsoft's cloud platform and enterprise services ecosystem. Deploy your Data Plane into Azure VNets with native integration to Azure security and monitoring services.
+
+**Getting Started**: [Azure Deployment Guide](./azure)
+
+### Google Cloud Platform (GCP)
+Our Google Cloud native architecture leverages GCP's advanced capabilities for enhanced functionality. Data Plane deployment integrates with Google Cloud security services and monitoring capabilities.
+
+**Getting Started**: [GCP Deployment Guide](./gcp)
+
+## Getting Started
+
+### Deployment Process
+1. **Cloud Environment Setup**: Configure your cloud environment with required permissions
+2. **Data Plane Deployment**: Deploy Data Plane components in your VPC
+3. **TrustGate Configuration**: Establish secure connection to NeuralTrust Control Plane
+4. **AI System Integration**: Connect your AI applications to the DP API
+5. **Monitoring Activation**: Begin receiving insights through the Control Plane dashboard
+
+### Support and Maintenance
+- **24/7 Support**: Round-the-clock technical support for deployment and operations
+- **Managed Updates**: Automated security updates and feature deployments
+- **Performance Optimization**: Continuous monitoring and optimization of Data Plane performance
+- **Compliance Assistance**: Expert help with audit preparation and compliance reporting
+
+---
+
+> **Data Sovereignty First**: NeuralTrust's unique architecture ensures your sensitive AI data never leaves your environment while providing enterprise-grade AI security monitoring and insights through our advanced Control Plane services.
