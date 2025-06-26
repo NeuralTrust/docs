@@ -1,0 +1,221 @@
+---
+title: Bot Detection
+---
+
+The Bot Detector plugin provides advanced protection against automated traffic and bot activity. It analyzes client-side data to identify suspicious patterns and behaviors commonly associated with bots, scrapers, and automated tools.
+
+This plugin helps you:
+- **Detect headless browsers** and automation tools
+- **Identify suspicious client behaviors**
+- **Take configurable actions** against detected bots
+- **Protect your APIs** from scraping, credential stuffing, and other automated attacks
+
+---
+
+## How It Works
+
+The Bot Detector plugin works by analyzing client-side data collected through the TrustGate client library. This data includes:
+
+1. **Automation detection signals** - Identifies headless browsers and automation tools
+2. **Browser inconsistencies** - Detects mismatches in reported browser capabilities
+3. **Storage capabilities** - Checks for disabled cookies and storage
+4. **Visual fingerprinting** - Analyzes canvas and WebGL rendering characteristics
+
+The plugin calculates a bot score based on these signals and takes action according to your configuration.
+
+When malicious activity is detected, the plugin feeds metrics to the fingerprint tracking system, which can be used by the [Contextual Security](/trustgate/content-security/context-security/context-security) plugin to block users based on their fingerprint. This creates a powerful layered defense against persistent bad actors who might try to evade detection by changing their behavior.
+
+> **Important**: This plugin requires the frontend to use the [trustgate-client](https://www.npmjs.com/package/trustgate-client) npm package to collect and send client-side data.
+
+---
+
+## Configuration Options
+
+| Option             | Type    | Description                                        | Default         |
+|--------------------|---------|----------------------------------------------------|-----------------|
+| `threshold`        | float   | Bot score threshold (0.0-1.0) that triggers action | Required        |
+| `action`           | string  | Action to take when bot is detected                | Required        |
+| `retention_period` | integer | Period in seconds to retain fingerprint data       | 300 (5 minutes) |
+
+### Available Actions
+
+| Action       | Description                                                          |
+|--------------|----------------------------------------------------------------------|
+| `alert_only` | Logs the detection but allows the request to proceed                 |
+| `throttle`   | Adds a delay to suspicious requests to discourage automated activity |
+| `block`      | Blocks requests identified as bots with a 403 Forbidden response     |
+
+### Example Configuration
+
+```json
+{
+  "plugins": [
+    {
+      "name": "bot_detector",
+      "settings": {
+        "threshold": 0.6,
+        "action": "block",
+        "retention_period": 3600
+      }
+    }
+  ]
+}
+```
+
+> **Note**: When `action` is set to `block`, requests identified as bots will be rejected with a 403 Forbidden status code.
+
+---
+
+## Client Integration
+
+To use the Bot Detector plugin, your frontend application must integrate with the TrustGate client library:
+
+```bash
+npm install trustgate-client
+```
+
+### JavaScript Integration Example
+
+#### Basic Usage
+
+```javascript
+import { TrustGateClient } from 'trustgate-client';
+
+// Create a new client with default options
+const botDetection = new TrustGateClient();
+
+// Collect bot detection data
+const data = botDetection.collectData();
+console.log(data);
+```
+
+#### Wrapping an Existing HTTP Client
+
+```javascript
+import axios from 'axios';
+import { TrustGateClient } from 'trustgate-client';
+
+// Create a new client that wraps axios
+const botDetection = new TrustGateClient({
+  httpClient: axios,
+  appendTo: 'headers' // Add data to request headers (default)
+});
+
+// Now use axios as normal, bot detection data will be automatically added
+// Using async/await
+const fetchData = async () => {
+  try {
+    const response = await axios.get('https://api.example.com/data');
+    console.log(response.data);
+  } catch (error) {
+    console.error(error);
+  }
+};
+
+fetchData();
+```
+
+#### Using the Built-in HTTP Client
+
+```javascript
+import { TrustGateClient } from 'trustgate-client';
+
+// Create a new client
+const botDetection = new TrustGateClient({
+  appendTo: 'body' // Add data to request body instead of headers
+});
+
+// Create a simple HTTP client with bot detection
+const httpClient = botDetection.createHttpClient();
+
+// Use the HTTP client with async/await
+const fetchData = async () => {
+  try {
+    const response = await httpClient.get('https://api.example.com/data');
+    console.log(response.data);
+  } catch (error) {
+    console.error(error);
+  }
+};
+
+fetchData();
+```
+
+#### Configuration Options
+
+```javascript
+import { TrustGateClient } from 'trustgate-client';
+
+const botDetection = new TrustGateClient({
+  // Where to append the collected data ('headers' or 'body')
+  appendTo: 'headers',
+
+  // HTTP client to wrap (optional)
+  httpClient: null,
+
+  // Enable/disable specific collectors
+  collectEnvironment: true,
+  collectVisualFingerprint: true,
+  collectNetworkInfo: true,
+  detectAutomation: true,
+  checkPersistence: true
+});
+```
+
+The client library automatically collects browser fingerprinting data and sends it with each request, either in request headers or in the request body based on your configuration.
+
+---
+
+## Bot Detection Signals
+
+The plugin analyzes multiple signals to calculate a bot score:
+
+### Automation Detection
+
+| Signal                | Weight    | Description                                       |
+|-----------------------|-----------|---------------------------------------------------|
+| WebDriver             | High      | Detects when a browser is controlled by WebDriver |
+| Chrome Headless       | Very High | Identifies headless Chrome instances              |
+| Automation Properties | Medium    | Checks for properties exposed by automation tools |
+
+### Browser Inconsistencies
+
+| Signal                 | Weight | Description                                                       |
+|------------------------|--------|-------------------------------------------------------------------|
+| Common Resolution      | Low    | Detects exact common resolutions often used by bots               |
+| UTC Timezone           | Low    | Identifies browsers reporting UTC timezone (common in containers) |
+| Missing Hardware Info  | Low    | Detects missing hardware concurrency or device memory info        |
+| Platform Inconsistency | Medium | Identifies mismatches between reported platform and behavior      |
+
+### Storage Capabilities
+
+| Signal                  | Weight | Description                                 |
+|-------------------------|--------|---------------------------------------------|
+| Cookies Disabled        | Low    | Detects when cookies are disabled           |
+| LocalStorage Disabled   | Low    | Identifies when localStorage is unavailable |
+| SessionStorage Disabled | Low    | Checks if sessionStorage is disabled        |
+
+### Visual Fingerprinting
+
+| Signal             | Weight | Description                                     |
+|--------------------|--------|-------------------------------------------------|
+| Canvas Fingerprint | Low    | Analyzes canvas rendering characteristics       |
+| WebGL Support      | Low    | Checks WebGL support and rendering capabilities |
+
+---
+
+## Best Practices
+
+1. **Start with alert_only mode**: Monitor bot detection before blocking to avoid false positives
+2. **Adjust threshold based on your traffic**: Lower thresholds catch more bots but may increase false positives
+3. **Use with rate limiting**: Combine with rate limiting for comprehensive protection
+4. **Consider user experience**: Use throttling instead of blocking for borderline cases
+5. **Monitor logs**: Watch for patterns in bot detection to refine your configuration
+
+---
+
+## Related Documentation
+
+- [Rate Limiting](/trustgate/rate-limit/rate-limit)
+- [Contextual Security](/trustgate/content-security/context-security/context-security)
+- [TrustGate Client Library](https://www.npmjs.com/package/trustgate-client)
