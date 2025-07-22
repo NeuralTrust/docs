@@ -29,6 +29,9 @@ Define your own patterns or keywords to mask, giving you fine-grained control ov
 - **Flexible Application**
 Apply masking rules to requests, responses, or both, depending on your security and auditing requirements.
 
+- **Reversible Hashing**
+Temporarily mask sensitive data during processing while preserving the ability to restore original values in the final response.
+
 - **Logging-Friendly**
 Ensures logs remain useful for debugging while preventing unauthorized disclosure of sensitive information.
 
@@ -37,27 +40,34 @@ The Data Masking plugin implements sophisticated pattern matching and text proce
 
 ### Configuration Parameters
 
-| Parameter | Type | Description | Default |
-|-----------|------|-------------|---------|
-| `apply_all` | boolean | Enable all predefined entities | false |
-| `similarity_threshold` | float | Threshold for fuzzy matching (0.0-1.0) | 0.8 |
-| `max_edit_distance` | integer | Maximum allowed character differences | 1 |
-| `predefined_entities` | array | List of predefined entities to enable | [] |
-| `rules` | array | Custom masking rules | [] |
+| Parameter              | Type    | Description                            | Default            |
+|------------------------|---------|----------------------------------------|--------------------|
+| `apply_all`            | boolean | Enable all predefined entities         | false              |
+| `similarity_threshold` | float   | Threshold for fuzzy matching (0.0-1.0) | 0.8                |
+| `max_edit_distance`    | integer | Maximum allowed character differences  | 1                  |
+| `predefined_entities`  | array   | List of predefined entities to enable  | []                 |
+| `rules`                | array   | Custom masking rules                   | []                 |
+| `reversible_hashing`   | object  | Configuration for reversible hashing   | `{enabled: false}` |
 
 #### Predefined Entity Options
-| Parameter | Type | Description | Required |
-|-----------|------|-------------|-----------|
-| `entity` | string | Entity type from predefined list | Yes |
-| `enabled` | boolean | Enable/disable this entity | Yes |
-| `mask_with` | string | Custom mask to apply | No |
+| Parameter   | Type    | Description                      | Required |
+|-------------|---------|----------------------------------|----------|
+| `entity`    | string  | Entity type from predefined list | Yes      |
+| `enabled`   | boolean | Enable/disable this entity       | Yes      |
+| `mask_with` | string  | Custom mask to apply             | No       |
 
 #### Custom Rule Options
-| Parameter | Type | Description | Required |
-|-----------|------|-------------|-----------|
-| `type` | string | "regex" or "keyword" | Yes |
-| `pattern` | string | Pattern to match | Yes |
-| `mask_with` | string | Mask to apply | No |
+| Parameter   | Type   | Description          | Required |
+|-------------|--------|----------------------|----------|
+| `type`      | string | "regex" or "keyword" | Yes      |
+| `pattern`   | string | Pattern to match     | Yes      |
+| `mask_with` | string | Mask to apply        | No       |
+
+#### Reversible Hashing Options
+| Parameter | Type    | Description                                      | Required |
+|-----------|---------|--------------------------------------------------|----------|
+| `enabled` | boolean | Enable/disable reversible hashing                | Yes      |
+| `secret`  | string  | Secret key used for generating secure hash values | Yes (if enabled) |
 
 ### Core Components
 
@@ -78,6 +88,37 @@ The Data Masking plugin implements sophisticated pattern matching and text proce
 - Context-aware masking
 - Format preservation
 - Custom mask rules
+- Reversible hashing capability
+
+### Reversible Hashing
+
+The Data Masking plugin supports a powerful feature called **Reversible Hashing** that allows sensitive data to be temporarily masked during processing but restored in the final response.
+
+#### How It Works
+
+1. **Pre-Request Stage**:
+   - When enabled, instead of replacing sensitive data with mask placeholders, the plugin generates secure HMAC-SHA256 hashes of the sensitive values
+   - These hashes are used as replacements in the processed data
+   - The original values and their corresponding hashes are stored in a temporary memory cache
+
+2. **Processing Stage**:
+   - All operations work with the hashed values, keeping sensitive data protected during processing
+
+3. **Post-Response Stage**:
+   - Before returning the response, the plugin replaces all hash values with their original sensitive data
+   - This ensures that the final output contains the original values, while keeping them protected during processing
+
+#### Use Cases
+
+- **API Proxying**: Mask sensitive data while it passes through your API gateway, but deliver the original data to the end client
+- **Logging & Analytics**: Process and analyze data in a secure form, but maintain the ability to restore original values when needed
+- **Temporary Protection**: Provide an additional layer of security during multi-step processing without permanently altering the data
+
+#### Security Considerations
+
+- The secret key used for hashing should be strong and kept secure
+- Hashed values are only stored in memory temporarily and are automatically cleared after processing
+- This feature should be used with caution, as it does ultimately reveal the original sensitive data in the final response
 
 ## Implementation Details
 
