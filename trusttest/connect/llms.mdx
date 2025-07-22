@@ -11,7 +11,7 @@ TrustTest provides a flexible abstraction layer for working with different LLM p
 The core of this system is the `LLMClient` abstract base class, which defines two main methods:
 
 - `complete(instructions, system_prompt)`: For single-prompt completions
-- `complete_conversation(messages)`: For multi-turn conversations
+- `complete_chat(messages)`: For multi-turn conversations
 
 Each implementation handles provider-specific details while exposing a unified interface.
 
@@ -41,7 +41,7 @@ uv add "trusttest[vllm]"
 ```
 - **Azure OpenAI**
 ```python 
-uv add "trusttest[azure]"
+uv add "trusttest[openai]"
 ```
 - **Deepseek**
 ```python 
@@ -160,17 +160,37 @@ Both LLM and Embeddings clients can be easily extended by implementing custom pr
 To create a custom LLM client, inherit from `LLMClient` and implement the required methods:
 
 ```python
-from trusttest.llm_clients import LLMClient, ChatMessage
+from trusttest.llm_clients.base import LLMClient, ChatMessage, BaseLLMResponse
 
 class CustomLLMClient(LLMClient):
-    async def complete(self, instructions: str, system_prompt: str | None = None) -> dict[str, Any]:
-        # Implement your custom completion logic
-        pass
+    async def complete(
+        self,
+        instructions: str,
+        system_prompt: Optional[str] = None,
+        response_schema: Type[BaseModel] = BaseLLMResponse,
+    ) -> Dict[str, Any]:
+        # implement your custom logic here
+        raise NotImplementedError
 
-    async def complete_conversation(self, messages: list[ChatMessage]) -> dict[str, Any]:
-        # Implement your custom conversation logic
-        pass
+    async def complete_chat(
+        self,
+        messages: Sequence[ChatMessage],
+        response_schema: Type[BaseModel] = BaseLLMResponse,
+    ) -> Dict[str, Any]:
+        # implement your custom logic here
+        raise NotImplementedError
+
 ```
+
+The LLMClient expects to define the response schema, this is a pydantic model that will be used to parse the response from the LLM.
+
+Once implemented, you are ready to use them:
+
+```python
+custom_llm = CustomLLMClient()
+evaluator = CorrectnessEvaluator(llm_client=custom_llm)
+```
+
 
 ### Custom Embeddings Client
 
@@ -184,11 +204,4 @@ class CustomEmbeddingsModel(EmbeddingsModel):
     def embed(self, texts: list[str]) -> np.ndarray:
         # Implement your custom embedding logic
         pass
-```
-
-Once implemented, you are ready to use them:
-
-```python
-custom_llm = CustomLLMClient()
-evaluator = CorrectnessEvaluator(llm_client=custom_llm)
 ```
