@@ -34,6 +34,127 @@ Each policy type can be configured through AWS Bedrock's guardrail configuration
 - Detailed error reporting
 - Comprehensive logging
 
+## Authentication
+
+The AWS Bedrock Guardrail plugin supports two authentication methods for connecting to AWS services. Proper authentication configuration is essential for the plugin to access AWS Bedrock guardrail services.
+
+### Authentication Methods
+
+#### 1. AWS Access Key/Secret Key Authentication
+This is the traditional method using AWS access keys. Best suited for development environments or when using dedicated service accounts.
+
+```json
+{
+    "settings": {
+        "guardrail_id": "<your-guardrail-id>",
+        "version": "1",
+        "credentials": {
+            "aws_access_key": "AKIA...",
+            "aws_secret_key": "your-secret-key",
+            "aws_region": "us-east-1",
+            "aws_session_token": "optional-session-token"
+        },
+        "actions": {
+            "message": "%s"
+        }
+    }
+}
+```
+
+#### 2. IAM Role-Based Authentication (Recommended)
+This method uses AWS STS (Security Token Service) to assume an IAM role. This is the recommended approach for production environments as it provides better security through temporary credentials.
+
+```json
+{
+    "settings": {
+        "guardrail_id": "<your-guardrail-id>",
+        "version": "1",
+        "credentials": {
+            "use_role": true,
+            "role_arn": "arn:aws:iam::123456789012:role/TrustGateBedrockRole",
+            "session_name": "trustgate-bedrock-session",
+            "aws_region": "us-east-1"
+        },
+        "actions": {
+            "message": "%s"
+        }
+    }
+}
+```
+
+### Authentication Configuration Parameters
+
+<h4 align="center"><strong><u>Credentials Configuration</u></strong></h4>
+
+| Parameter         | Description                                    | Required | Authentication Method |
+|-------------------|------------------------------------------------|----------|----------------------|
+| aws_access_key    | AWS access key ID                              | Yes*     | Access Key/Secret    |
+| aws_secret_key    | AWS secret access key                          | Yes*     | Access Key/Secret    |
+| aws_region        | AWS region for Bedrock service                 | Yes      | Both                 |
+| aws_session_token | Optional AWS session token for temporary creds| No       | Access Key/Secret    |
+| use_role          | Enable IAM role-based authentication           | No       | Role-based           |
+| role_arn          | ARN of the IAM role to assume                  | Yes**    | Role-based           |
+| session_name      | Name for the assumed role session             | No       | Role-based           |
+
+*Required when `use_role` is false or not specified  
+**Required when `use_role` is true
+
+### Authentication Best Practices
+
+#### Security Recommendations
+
+1. **Use IAM Roles in Production**: Role-based authentication is more secure as it uses temporary credentials and follows AWS security best practices.
+
+2. **Principle of Least Privilege**: Ensure the IAM user or role has only the minimum permissions required:
+   ```json
+   {
+       "Version": "2012-10-17",
+       "Statement": [
+           {
+               "Effect": "Allow",
+               "Action": [
+                   "bedrock:ApplyGuardrail"
+               ],
+               "Resource": [
+                   "arn:aws:bedrock:*:*:guardrail/*"
+               ]
+           }
+       ]
+   }
+   ```
+
+3. **Region Selection**: Choose the AWS region closest to your deployment for optimal performance and compliance.
+
+4. **Credential Management**: 
+   - Never hardcode credentials in configuration files
+   - Use environment variables or secure credential management systems
+   - Rotate access keys regularly when using access key authentication
+
+#### Environment-Specific Configurations
+
+**Development Environment**:
+```json
+{
+    "credentials": {
+        "aws_access_key": "${AWS_ACCESS_KEY_ID}",
+        "aws_secret_key": "${AWS_SECRET_ACCESS_KEY}",
+        "aws_region": "us-east-1"
+    }
+}
+```
+
+**Production Environment**:
+```json
+{
+    "credentials": {
+        "use_role": true,
+        "role_arn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/TrustGateBedrockRole",
+        "session_name": "trustgate-bedrock-prod",
+        "aws_region": "us-east-1"
+    }
+}
+```
+
 ## Configuration Examples
 
 ### Basic Configuration
@@ -55,11 +176,11 @@ Key components of the basic configuration:
 
 <h4 align="center"><strong><u>Configuration Parameters</u></strong></h4>
 
-| Parameter | Description | Required |
-|-----------|-------------|----------|
-| guardrail_id | AWS Bedrock Guardrail identifier | Yes |
-| version | Guardrail version (defaults to "1") | No |
-| actions.message | Custom message template for blocked content | No |
+| Parameter       | Description                                 | Required |
+|-----------------|---------------------------------------------|----------|
+| guardrail_id    | AWS Bedrock Guardrail identifier            | Yes      |
+| version         | Guardrail version (defaults to "1")         | No       |
+| actions.message | Custom message template for blocked content | No       |
 
 ### Security-Focused Configuration
 For environments requiring strict security controls:
