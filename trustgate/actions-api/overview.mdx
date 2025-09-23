@@ -1,0 +1,101 @@
+---
+title: Overview
+---
+
+## Actions API overview
+
+This page explains what the Actions API is, what it does, how it is accessed, and where to find practical examples.
+
+---
+
+## Summary and purpose
+
+The Actions API lets you:
+- Execute action chains defined in policies (`/v1/actions`).
+- Manage policies (create policies with actions, telemetry, and TrustLens) via admin endpoints (`/v1/policies`).
+- Manage administrative API keys (`/v1/iam/api-keys`).
+
+It is designed to run action flows with high performance and report execution telemetry and metrics.
+
+---
+
+## Authentication and access control
+
+- Execution (`/v1/actions`): requires an API key that is allowed to use the requested policy (allowed policies list).
+- Administration (`/v1/policies`, `/v1/iam/api-keys`): requires an API key with admin privileges.
+
+Notes:
+- If the requested policy is not allowed for the API key, the service returns 403 Forbidden.
+
+---
+
+## Endpoints
+
+### 1) Execute actions
+- Method and path: `POST /v1/actions`
+- Authentication: execution API key.
+- Body: `policy_id` and `payload` with the data to be processed by the policy.
+- Typical responses:
+  - `200 OK` with the result of the action chain.
+  - `400 Bad Request` if the input is invalid or the policy does not exist.
+  - `403 Forbidden` if the policy is not allowed for the API key.
+  - `5xx` for internal errors.
+
+How it works (high level): the policy defines the sequence of actions (including order and optional parallelization). The service runs the flow over your `payload` and emits metrics/telemetry if enabled.
+
+See examples on the [Examples](/trustgate/actions-api/examples) page.
+
+### 2) Create policy
+- Method and path: `POST /v1/policies`
+- Authentication: admin API key.
+- Body: optional name, one or more actions (with order and configuration), and optional telemetry and TrustLens settings.
+- Typical responses:
+  - `201 Created` with the policy identifier.
+  - `400 Bad Request` if the request is invalid.
+  - `500 Internal Server Error` if a storage error occurs.
+
+See examples on the [Examples](/trustgate/actions-api/examples) page.
+
+### 3) API keys management (admin)
+- Group: `/v1/iam/api-keys`
+- Authentication: admin API key.
+- Endpoints:
+  - `POST /v1/iam/api-keys` to create keys.
+  - `DELETE /v1/iam/api-keys` to delete keys.
+
+Note: requests usually include key metadata (name, expiration, and restrictions such as allowed policies). See the [Examples](/trustgate/actions-api/examples) page.
+
+---
+
+## Actions and policies model (high level)
+
+- A policy contains a list of actions and optional telemetry and TrustLens configuration.
+- Each action includes at least:
+  - `name`: the action or plugin to run.
+  - `priority`: relative order (integer).
+  - `parallel`: whether it may run in parallel when applicable.
+  - `settings`: action-specific configuration.
+- The execution endpoint applies the policy’s actions to your request payload and returns the result.
+
+---
+
+## Errors and status codes
+
+- `400 Bad Request`: the request is invalid (for example, malformed or unknown `policy_id`).
+- `403 Forbidden`: the API key is not authorized for the requested policy.
+- `5xx`: internal service errors.
+
+---
+
+## Best practices
+
+- Create the policy first (`/v1/policies`), keep its `id`, then call `/v1/actions` with that `policy_id`.
+- Limit access using API keys with allowed policies to scope execution.
+- Configure telemetry to match your observability needs; enable plugin-level traces when diagnosing performance.
+- Validate and sanitize your `payload` client-side; the server enforces basic validation.
+
+---
+
+For a complete creation-and-execution flow, see the end-to-end example on the [Examples](/trustgate/actions-api/examples) page.
+
+
