@@ -1,0 +1,134 @@
+---
+title: API Examples
+---
+
+## Execute actions (`POST /v1/actions`)
+
+### Request example
+```bash
+curl -X POST \
+  https://<host>/v1/actions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <API_KEY>" \
+  -d '{
+    "policy_id": "1d9d3ad5-3d7a-4f0a-b1b5-5c2f9d6a1234",
+    "payload": {
+      "input_text": "Hello world",
+      "user_id": "u-123"
+    }
+  }'
+```
+
+### Successful response example (representative)
+```json
+{
+  "status": 200,
+  "headers": {
+    "Content-Type": ["application/json"]
+  },
+  "payload": {
+    "result": "...result of the action chain...",
+    "metadata": {"latency_ms": 42}
+  }
+}
+```
+
+### Error example: policy not allowed
+```json
+{
+  "error": "policy not allowed"
+}
+```
+
+### Validation error example
+```json
+{
+  "error": "invalid policy_id"
+}
+```
+
+---
+
+## Create policy (`POST /v1/policies`)
+
+### Request example
+```bash
+curl -X POST \
+  https://<host>/v1/policies \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <ADMIN_API_KEY>" \
+  -d '{
+    "name": "policy-textops",
+    "actions": [
+      {
+        "name": "sanitize",
+        "priority": 1,
+        "parallel": false,
+        "settings": {"level": "standard"}
+      },
+      {
+        "name": "classify",
+        "priority": 2,
+        "parallel": false,
+        "settings": {"labels": ["spam", "ham"]}
+      }
+    ],
+    "telemetry": {
+      "exporters": [
+        {"name": "otlp", "settings": {"endpoint": "https://otel.example"}}
+      ],
+      "extra_params": {"tenant": "acme"},
+      "enable_plugin_traces": true,
+      "enable_request_traces": false,
+      "header_mapping": {"x-request-id": "trace_id"}
+    },
+    "trustlens": {
+      "app_id": "app-123",
+      "team_id": "team-xyz",
+      "type": "sync",
+      "mapping": {
+        "input": {
+          "extract_fields": {"text": "$.payload.input_text"},
+          "data_projection": {"user": "$.payload.user_id"}
+        },
+        "output": {
+          "extract_fields": {"result": "$.payload.result"},
+          "data_projection": {}
+        }
+      }
+    }
+  }'
+```
+
+### Successful response
+```json
+{ "id": "7d1a02e1-8b17-4a28-8f8a-6f8b6c9b8e52" }
+```
+
+---
+
+## API Keys management (admin) (`/v1/iam/api-keys`)
+
+### Create example
+```bash
+curl -X POST \
+  https://<host>/v1/iam/api-keys \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <ADMIN_API_KEY>" \
+  -d '{
+    "name": "ci-bot",
+    "expires_at": "2025-12-31T23:59:59Z",
+    "scopes": ["actions:execute", "policies:write"],
+    "policies": ["1d9d3ad5-3d7a-4f0a-b1b5-5c2f9d6a1234"]
+  }'
+```
+
+---
+
+## End-to-end example
+
+1) Create a policy → save the `id`.
+2) Execute actions with that `policy_id` and a `payload`.
+3) Observe exported metrics (based on your `telemetry` configuration).
+
+
