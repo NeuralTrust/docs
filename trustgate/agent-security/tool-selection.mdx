@@ -1,0 +1,194 @@
+---
+title: Tool Selection
+---
+
+The Tool Selection plugin validates that tool calls produced by the model match the tools declared by the client request and, optionally, performs schema and semantic checks before allowing execution.
+
+---
+
+## Why use Tool Selection?
+
+LLM agents may attempt to call tools that are not authorized, pass malformed arguments, or hallucinate capabilities. Tool Selection prevents these failures by:
+
+- Enforcing a contract between the client (declared tools) and the model (tool calls)
+- Reducing runtime errors by validating tool-call arguments against schemas
+- Providing an optional semantic guardrail to detect risky or incorrect tool invocations even when arguments look syntactically valid
+- Offering explicit, actionable feedback (allow vs. block) before tools are actually executed
+
+Common scenarios:
+- Multi-tool agents with critical or expensive tools (payment, DB write, infra actions)
+- Tiered access where only some users/tenants can use certain tools
+- Strict safety posture requiring both schema and semantic validation
+
+---
+
+## What it does
+
+- Parses the request to collect the list of declared tools (names and optional schemas)
+- Parses the model response to extract tool calls
+- Validates each tool call:
+  - Is the tool in the declared tools list?
+  - If a JSON schema is provided for the tool, do the arguments conform?
+  - Optional semantic validation via LLM (OpenAI) to catch risky or incorrect tool calls
+- Actions:
+  - Allow when all validations pass
+  - Block with an error (HTTP 403) if a tool call is not declared, violates schema, or fails semantic validation
+- Stage: PreResponse
+
+---
+
+## Validation flow (step‑by‑step)
+
+1) Extract declared tools (from the client request):
+- Names are required; schemas are optional but recommended
+
+2) Extract tool calls (from the model response):
+- Includes tool name and arguments
+
+3) Structural checks:
+- Tool must exist in the declared tools list
+- If a schema is present for that tool, arguments must validate against the schema
+
+4) Optional semantic check (if `openai_api_key` set):
+- Uses OpenAI to reason about the suitability of the tool call given the request context and model reasoning summary
+- Returns a compact allow/deny decision with a short rationale
+
+5) Decision:
+- If any check fails → block with HTTP 403 (and include diagnostics in telemetry)
+- Otherwise → allow the response to proceed
+
+---
+
+## Configuration Parameters
+
+| Parameter         | Type   | Description                                                    | Required | Default        |
+|-------------------|--------|----------------------------------------------------------------|----------|----------------|
+| `openai_api_key`  | string | API key for semantic validation via OpenAI (optional)         | No       | —              |
+| `model`           | string | OpenAI model for semantic validation                          | No       | `gpt-4o-mini`  |
+
+Behavior notes:
+
+- Stage: PreResponse
+- If parsing fails or there are no tools/tool calls, the request is allowed
+- Schema validation runs when schemas are provided in the request tool definitions
+- Semantic validation runs only when `openai_api_key` is configured
+
+---
+
+## Prerequisites
+
+These agent security plugins require upstreams configured in provider mode. See Upstream Services & Routing for details: /trustgate/core-concepts/upstream-services-overview
+
+Example upstream (provider mode):
+
+```json
+{
+  "name": "{{upstream_service_name}}",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "openai",
+      "provider_options": { "api": "responses" },
+      "weight": 50,
+      "priority": 1,
+      "default_model": "gpt-4o-mini",
+      "models": ["gpt-4", "gpt-4o-mini"],
+      "stream": false,
+      "credentials": { "api_key": "" }
+    }
+  ]
+}
+```
+
+---
+
+## Example configuration
+
+With schema and semantic validation:
+
+```json
+{
+  "name": "tool_selection",
+  "enabled": true,
+  "stage": "pre_response",
+  "priority": 1,
+  "parallel": false,
+  "settings": {
+    "openai_api_key": "${OPENAI_API_KEY}",
+    "model": "gpt-4o-mini"
+  }
+}
+```
+
+---
+
+## Request and response examples
+
+Example request (declares tools with schemas):
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "Book a meeting for tomorrow at 3pm with Alice." }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "create_calendar_event",
+        "description": "Create a calendar event",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "title": { "type": "string" },
+            "datetime": { "type": "string", "format": "date-time" },
+            "attendees": { "type": "array", "items": { "type": "string" } }
+          },
+          "required": ["title", "datetime"]
+        }
+      }
+    }
+  ]
+}
+```
+
+Example model response with a tool call:
+
+```json
+{
+  "tool_calls": [
+    {
+      "name": "create_calendar_event",
+      "arguments": {
+        "title": "Meeting with Alice",
+        "datetime": "2025-11-14T15:00:00Z",
+        "attendees": ["alice@example.com"]
+      }
+    }
+  ],
+  "reasoning_summary": "User asked to book a meeting for tomorrow at 3pm."
+}
+```
+
+Outcomes:
+- If the tool is undeclared → block
+- If required fields missing or invalid schema → block
+- If semantic validator denies (e.g., risky context) → block
+- Otherwise → allow
+
+---
+
+## Compatibility
+
+Currently supports agents using the OpenAI LLM request/response format only.
+
+---
+
+## Best practices
+
+- Always declare tool schemas in the client request to enable strict validation
+- Start without semantic validation to establish baseline; then enable with an appropriate model
+- Combine with Tool Permission (allow/deny) and Tool Budget Limiter for layered agent security
+
+
+
