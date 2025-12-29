@@ -1,0 +1,103 @@
+---
+title: Tool Guard
+---
+
+The Tool Guard plugin detects jailbreak-like content in agent tool usage and applies a configured action. It integrates with a firewall service to score content and mitigate risky requests before tools are executed.
+
+---
+
+## What it does
+
+- Analyzes request content for jailbreak signals (PreRequest)
+- Uses an external firewall to score content risk
+- Compares the maximum score against a threshold
+- Actions when threshold is exceeded:
+  - Block: return Forbidden (HTTP 403)
+  - Throttle: delay the request, then allow
+  - Alert only: allow and log/telemetry
+- Adds a response header `X-Jailbreak-Detected` set to `true`/`false`
+
+---
+
+## Configuration Parameters
+
+| Parameter               | Type   | Description                                           | Required | Default |
+|-------------------------|--------|-------------------------------------------------------|----------|---------|
+| `mode`                  | string | `throttle`, `block`, or `alert_only`                  | Yes      | —       |
+| `credentials.base_url`  | string | Firewall service base URL                             | Yes      | —       |
+| `credentials.token`     | string | Firewall service token                                | Yes      | —       |
+| `mapping_field`         | string | JSON path to extract content to analyze               | No       | —       |
+| `threshold`             | number | Detection threshold (`0–1`)                           | Yes      | —       |
+
+Behavior notes:
+
+- Stage: PreRequest
+- If no content or parsing fails, the request is allowed (with telemetry)
+- Uses a provider-specific parser internally (e.g., OpenAI)
+
+---
+
+## Prerequisites
+
+These agent security plugins require upstreams configured in provider mode. See Upstream Services & Routing for details: /trustgate/core-concepts/upstream-services-overview
+
+Example upstream (provider mode):
+
+```json
+{
+  "name": "{{upstream_service_name}}",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "openai",
+      "provider_options": { "api": "responses" },
+      "weight": 50,
+      "priority": 1,
+      "default_model": "gpt-4o-mini",
+      "models": ["gpt-4", "gpt-4o-mini"],
+      "stream": false,
+      "credentials": { "api_key": "" }
+    }
+  ]
+}
+```
+
+---
+
+## Example configuration
+
+```json
+{
+  "name": "tool_guard",
+  "enabled": true,
+  "stage": "pre_request",
+  "priority": 1,
+  "parallel": false,
+  "settings": {
+    "mode": "block",
+    "credentials": {
+      "base_url": "https://firewall.example.com",
+      "token": "${FIREWALL_TOKEN}"
+    },
+    "mapping_field": "prompt",
+    "threshold": 0.7
+  }
+}
+```
+
+---
+
+## Best practices
+
+- Start with `alert_only` to tune the threshold using real traffic
+- Use `mapping_field` to point to relevant content (e.g., nested prompt fields)
+- Pair with Tool Budget Limiter for cost control and layered agent security
+- Monitor telemetry and headers to track detections over time
+
+---
+
+## Compatibility
+
+Currently supports agents using the OpenAI LLM request/response format only.
+
+

@@ -8,139 +8,138 @@ NeuralTrust provides enterprise-grade AI security protection, testing, and vulne
 
 ## High-Level Architecture
 
-```mermaid
-graph LR
-    subgraph CustomerVPC ["VPC (Customer)"]
-        subgraph DP ["DP"]
-            DPAPI[DP API] --> DPQUEUE[DP Queue]
-            DPQUEUE --> DPWORKER[DP Worker]
-            DPWORKER --> DPDB[(DP DB)]
-        end
-        
-        subgraph TrustGate ["TrustGate"]
-            DPGATEWAY[DP Gateway]
-            CPGATEWAY[CP Gateway]
-        end
-        
-        AWS[AWS]
-        GCP[GCP]
-        AZURE[Azure]
-        
-        DPWORKER --> DPGATEWAY
-    end
-    
-    subgraph NeuralTrustVPC ["VPC (NeuralTrust)"]
-        subgraph CP ["CP"]
-            CPAPI[CP API] --> CPAPP[CP App]
-            CPAPI --> CPSCHEDULER[CP Scheduler]
-            CPAPI --> CPDB[(CP DB)]
-        end
-        
-        subgraph TrustTest ["TrustTest"]
-            AITEST[AI Testing]
-        end
-        
-        subgraph TrustScan ["TrustScan"]
-            AISCAN[AI Scanner]
-        end
-        
-        subgraph AISPM ["AISPM"]
-            AIPOSTURE[AI Posture Manager]
-        end
-        
-        GCPNT[GCP]
-        
-        CPGATEWAY --> CPAPI
-        CPAPI --> AITEST
-        CPAPI --> AISCAN
-        CPAPI --> AIPOSTURE
-    end
-    
-    DPGATEWAY -.->|Privacy-Safe Data| CPGATEWAY
-    
-    classDef customerStyle fill:#e8f5e8,stroke:#4caf50,stroke-width:3px
-    classDef neuraltrustStyle fill:#e1f5fe,stroke:#2196f3,stroke-width:3px
-    classDef trustgateStyle fill:#fff3e0,stroke:#ff9800,stroke-width:2px
-    classDef productStyle fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px
-    classDef dbStyle fill:#fff,stroke:#333,stroke-width:2px
-    classDef cloudStyle fill:#fffde7,stroke:#ffc107,stroke-width:2px
-    
-    class CustomerVPC customerStyle
-    class NeuralTrustVPC neuraltrustStyle
-    class DP,CP trustgateStyle
-    class TrustGate,TrustTest,TrustScan,AISPM productStyle
-    class DPDB,CPDB dbStyle
-    class AWS,GCP,AZURE,GCPNT cloudStyle
-```
+<img
+  className="block dark:hidden"
+  src="/images/static/img/nt-architecture-ligth.drawio.svg"
+  alt="NeuralTrust architecture diagram"
+ />
+<img
+  className="hidden dark:block"
+  src="/images/static/img/nt-architecture-dark.drawio.svg"
+  alt="NeuralTrust architecture diagram"
+ />
 
-## Data Plane Components (Your VPC)
 
-The Data Plane operates entirely within your cloud environment, providing complete data sovereignty while delivering enterprise-grade AI capabilities.
+## Deployment modes
 
-### DP API (Data Plane API)
-Your **DP API** serves as the primary ingestion endpoint for AI monitoring data from your applications and systems. This high-performance service provides:
+NeuralTrust provides several deployment modes to suit your needs:
+
+| Mode | Control Plane location | Data Plane location | Ideal for |
+| --- | --- | --- | --- |
+| 🏢 On-Premises | Your infrastructure | Your infrastructure | Maximum data sovereignty and regulatory control |
+| ☁️ SaaS | NeuralTrust infrastructure | NeuralTrust infrastructure | Fully managed operations with minimal upkeep |
+| 🔗 Hybrid | NeuralTrust infrastructure | Your infrastructure | Balance of managed services with local data residency |
+
+All modes deploy on any Kubernetes cluster or Red Hat OpenShift environment. For implementation examples, [visit NeuralTrust's Helm charts repository](https://github.com/NeuralTrust/neuraltrust-helm-charts/tree/main/helm#neuraltrust---kubernetesopenshift).
+
+## LLM endpoint
+
+Some Neuraltrust components require access to a LLM endpoint to perform their operations. Such as LLM as a Judge evaluators, Topic summarizer, etc.
+
+<Warning>
+Take into account that the cluster where you deploy the Data Plane components needs to have access to the LLM endpoint.
+</Warning>
+
+You can configure your LLM provider in the NeuralTrust dashboard. We currently support:
+
+| | |
+| --- | --- |
+| **OpenAI** | Direct REST integration |
+| **OpenAI-compatible APIs** | Any provider implementing the OpenAI API shape |
+| **Google Gemini** | Direct REST integration |
+| **Ollama** | Self-hosted models served from your infrastructure |
+| **Anthropic** | Claude models across regions |
+| **Azure OpenAI** | Azure-hosted OpenAI endpoints |
+
+<Note>
+In SaaS mode you can use our LLM endpoint
+</Note>
+
+
+## LLM target/upstream
+
+Some Neuraltrust components require access to your LLM that you want to protect or test. 
+- For testing purposes check our [TrustTest](/trusttest/connect/overview) documentation.
+- For protecting purposes check our [TrustGate](/trustgate/core-concepts/upstream-services-overview) documentation.
+
+<Warning>
+Take into account that the cluster where you deploy the Data Plane components and TrustGate needs to have access to the LLM target/upstream.
+</Warning>
+
+## Data Plane Components
+
+The Data Plane components manage your private data and endpoints, like user conversations, traces, metrics and more.
+
+### API
+Your **Data Plane API** serves as the primary ingestion endpoint for AI monitoring data from your applications and systems. This high-performance service provides:
 
 - **High-Throughput Ingestion**: Handles millions of AI monitoring events per second with minimal latency
 - **Real-Time Validation**: Validates and enriches incoming data streams for immediate processing
 - **Secure Authentication**: Implements robust API key management and authentication mechanisms
 - **Auto-Scaling**: Automatically scales based on incoming data volume and processing demands
 
-### DP Worker (Background Processing)
-The **DP Worker** performs all data processing operations within your environment, ensuring sensitive data never leaves your infrastructure:
+### Worker
+The **Data Plane Worker** performs all observability metrics processing operations.
 
 - **Real-Time Analysis**: Processes AI monitoring events for immediate insights and anomaly detection
 - **Privacy-Preserving Analytics**: Performs analysis while keeping raw data within your environment
 - **Alert Generation**: Triggers immediate alerts for critical AI security and performance events
 
-### DP Message Queue
-The **DP Message Queue** provides reliable, high-performance message processing between Data Plane components:
+### Message Queue
+The **Data Plane Message Queue** provides reliable, high-performance message processing between Data Plane components:
 
 - **Event Sourcing**: Maintains complete audit trails of all AI monitoring events
 - **Guaranteed Delivery**: Ensures no data loss during processing with configurable durability
 - **Stream Processing**: Enables real-time data processing and analysis workflows
 - **Backpressure Management**: Automatically manages load balancing during traffic spikes
 
-### DP Database
-Your **DP Database** stores all sensitive AI monitoring data within your controlled environment:
+<Note>Currenlty we only support Kafka for the Data Plane Message Queue. Being deployed in the same cluster or as external service.</Note>
+
+### Database
+The **Data Plane Database** stores all sensitive AI monitoring, tests, conversations and more data within a controlled environment:
 
 - **Complete Data Sovereignty**: All raw AI monitoring data remains in your VPC
 - **High-Performance Analytics**: Optimized for real-time queries and complex analytics
 - **Automated Encryption**: All data encrypted at rest with your managed keys
 - **Compliance Ready**: Designed for GDPR, HIPAA, SOX, and other regulatory requirements
 
-## Control Plane Components (NeuralTrust VPC)
+<Note>Currenlty we only support ClickHouse for the Data Plane Database. Being deployed in the same cluster or as external service.</Note>
 
-The Control Plane provides centralized management, advanced AI security capabilities, and global insights while never accessing your raw data.
+## Control Plane Components
 
-### CP API (Control Plane API)
-The **CP API** provides the backbone for all Control Plane operations and customer interactions:
+The Control Plane components provide centralized management, advanced AI security capabilities.
+
+### API
+The **Control Plane API** provides the backbone for all Control Plane operations and customer interactions:
 
 - **Customer Portal Integration**: Powers the NeuralTrust dashboard and customer interfaces
 - **Multi-Tenant Architecture**: Securely isolates customer environments and data
 - **Global Orchestration**: Coordinates across multiple customer Data Plane deployments
 
-### CP Application
-The **CP Application** delivers the comprehensive NeuralTrust user experience:
+### Application
+The **Control Plane Application** web app delivers the comprehensive NeuralTrust user experience:
 
 - **Real-Time Dashboards**: Interactive dashboards showing AI security and performance insights
 - **Global Analytics**: Cross-environment insights that don't compromise individual data privacy
 - **Alert Management**: Centralized alert configuration and notification management
 
-### CP Scheduler
-The **CP Scheduler** manages automated testing and monitoring operations:
+### Scheduler
+The **Control Plane Scheduler** manages automated testing and monitoring operations:
 
 - **TrustTest Job Scheduling**: Schedules and orchestrates TrustTest execution jobs across customer environments
 - **TrustScan Job Scheduling**: Schedules and coordinates TrustScan security analysis jobs and vulnerability assessments
 - **Metrics Check Scheduling**: Coordinates periodic metrics checks for alert generation and monitoring
 - **Automated Test Execution**: Manages the timing and execution of AI testing and scanning workflows
 
-### CP Database
-The **CP Database** stores only basic operational data for CRUD operations:
+### Database
+The **Control Plane Database** stores only basic operational data for CRUD operations:
 
 - **Zero Raw Data**: Never stores customer's sensitive AI monitoring data
 - **Configuration Management**: Stores system configurations and user preferences
 - **User Management**: Handles user accounts, permissions, and authentication data
 - **Operational Metadata**: Basic CRUD operations for system management and administration
+
+<Note>Currenlty we only support PostgreSQL for the Control Plane Database. Being deployed in the same cluster or as external service.</Note>
 
 ## Data Flow and Privacy Model
 

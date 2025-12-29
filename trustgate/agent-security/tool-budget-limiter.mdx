@@ -1,0 +1,128 @@
+---
+title: Tool Budget Limiter
+---
+
+The Tool Budget Limiter plugin controls the total and per-tool token usage of agent tool calls. It prevents runaway costs by enforcing configurable token budgets and reacting when limits are exceeded (block, throttle, or alert-only).
+
+---
+
+## What it does
+
+- Parses agent tool usage in requests and responses
+- Enforces an overall token budget and optional per-tool budgets
+- Actions when exceeding limits:
+  - Block: return an error (HTTP 429)
+  - Throttle: add a delay then allow
+  - Alert only: allow and log/telemetry
+- Adds a response header `X-TOKEN-LIMIT` with `within` or `exceeded`
+- Works in both PreRequest and PreResponse stages
+
+---
+
+## Configuration Parameters
+
+| Parameter                     | Type    | Description                                              | Required | Default |
+|-------------------------------|---------|----------------------------------------------------------|----------|---------|
+| `mode`                        | string  | Action when limits exceed: `throttle`, `block`, `alert_only` | Yes      | —       |
+| `max_limit.max_tokens`        | int     | Overall token budget                                     | Yes      | —       |
+| `max_limit.window`            | int     | Budget window in seconds                                 | Yes      | —       |
+| `max_limit.ttl`               | int     | Cache TTL in seconds                                     | Yes      | —       |
+| `tool_limits[].name`          | string  | Tool name                                                | No       | —       |
+| `tool_limits[].max_tokens`    | int     | Per-tool token budget                                    | No       | —       |
+| `tool_limits[].window`        | int     | Per-tool window in seconds                               | No       | —       |
+| `tool_limits[].ttl`           | int     | Per-tool TTL in seconds                                  | No       | —       |
+| `throttle_delay`              | int     | Delay (seconds) when `mode=throttle`                     | No       | `0`     |
+
+Behavior notes:
+
+- Stages: PreRequest (checks before execution), PreResponse (updates usage after execution)
+- Keys usage by gateway and rule internally; safe for multi-tenant setups
+- If parsing fails or no tools found, request is allowed
+
+---
+
+## Prerequisites
+
+These agent security plugins require upstreams configured in provider mode. See Upstream Services & Routing for details: /trustgate/core-concepts/upstream-services-overview
+
+Example upstream (provider mode):
+
+```json
+{
+  "name": "{{upstream_service_name}}",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "openai",
+      "provider_options": { "api": "responses" },
+      "weight": 50,
+      "priority": 1,
+      "default_model": "gpt-4o-mini",
+      "models": ["gpt-4", "gpt-4o-mini"],
+      "stream": false,
+      "credentials": { "api_key": "" }
+    }
+  ]
+}
+```
+
+---
+
+## Example configuration
+
+```json
+{
+  "name": "tool_budget_limiter",
+  "enabled": true,
+  "stage": "pre_request",
+  "priority": 1,
+  "parallel": false,
+  "settings": {
+    "mode": "block",
+    "max_limit": { "max_tokens": 50000, "window": 3600, "ttl": 3600 },
+    "tool_limits": [
+      { "name": "web_search", "max_tokens": 10000, "window": 1800, "ttl": 1800 },
+      { "name": "db_query", "max_tokens": 5000, "window": 1800, "ttl": 1800 }
+    ],
+    "throttle_delay": 5
+  }
+}
+```
+
+To record usage, also add the plugin in `pre_response` stage with the same settings:
+
+```json
+{
+  "name": "tool_budget_limiter",
+  "enabled": true,
+  "stage": "pre_response",
+  "priority": 100,
+  "parallel": false,
+  "settings": {
+    "mode": "block",
+    "max_limit": { "max_tokens": 50000, "window": 3600, "ttl": 3600 },
+    "tool_limits": [
+      { "name": "web_search", "max_tokens": 10000, "window": 1800, "ttl": 1800 },
+      { "name": "db_query", "max_tokens": 5000, "window": 1800, "ttl": 1800 }
+    ],
+    "throttle_delay": 5
+  }
+}
+```
+
+---
+
+## Best practices
+
+- Start with alert-only to observe typical budgets, then switch to block/throttle
+- Use per-tool budgets for expensive tools to prevent localized spikes
+- Prefer reasonable windows (e.g., 30–60 minutes) and align TTL with window
+- Surface the `X-TOKEN-LIMIT` header to clients/ops dashboards for visibility
+
+---
+
+## Compatibility
+
+Currently supports agents using the OpenAI LLM request/response format only.
+
+

@@ -4,6 +4,23 @@ title: 'Quickstart: Hello Gateway'
 
 After installing AI Gateway, the next step is to create your first gateway instance. This guide will walk you through creating and configuring a basic gateway.
 
+## Before you begin: Generate an Admin JWT
+To interact with the Admin API (control plane), you need a valid JWT. Use the repository script to generate it:
+
+Script: scripts/generate_jwt_token.sh
+
+Requirement: The environment variable SERVER_SECRET_KEY must be set, and it must be exactly the same value used when starting TrustGate. If these differ, the generated JWT will be rejected by the control plane.
+
+Example:
+
+1) Set the server secret (must match the value used to start TrustGate): `export SERVER_SECRET_KEY="your-secure-shared-secret"`
+
+2) Generate the admin JWT (the script prints a token to stdout; you can capture it into an env var): `export ADMIN_JWT=$(bash scripts/generate_jwt_token.sh)`
+
+3) Use the token in Admin API requests, e.g.: `curl -H "Authorization: Bearer $ADMIN_JWT" http://localhost:8080/api/v1/gateways` 
+
+Note: The examples below use an Authorization header placeholder. Replace it with your real token, for example: `-H "Authorization: Bearer $ADMIN_JWT"`.
+
 <Accordion title="Step 1: Create a Gateway" description="Set up your first gateway instance with rate limiting configuration">
 Use the Admin API to create your first gateway:
 
@@ -61,20 +78,8 @@ curl http://localhost:8080/api/v1/gateways \
 ```
 </Accordion>
 
-<Accordion title="Step 2: Create an API Key" description="Generate an API key for authentication and access control">
-```bash
-# Create a test API key
-curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id}/keys \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer jwt example" \
-  -d '{
-    "name": "test-key",
-    "expires_at": "2027-12-31T23:59:59Z"
-  }'
-```
-</Accordion>
 
-<Accordion title="Step 3: Create The Upstream" description="Configure upstream providers like OpenAI and Anthropic with load balancing">
+<Accordion title="Step 2: Create The Upstream" description="Configure upstream providers like OpenAI and Anthropic with load balancing">
 ```bash
 curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id}/upstreams \
   -H "Content-Type: application/json" \
@@ -129,7 +134,7 @@ curl http://localhost:8080/api/v1/gateways/{gateway-id}/upstreams/{upstream-id} 
 ```
 </Accordion>
 
-<Accordion title="Step 4: Create the Service" description="Set up a service to handle routing and manage upstream connections">
+<Accordion title="Step 3: Create the Service" description="Set up a service to handle routing and manage upstream connections">
 Create your service using the Admin API:
 
 ```bash
@@ -154,7 +159,7 @@ curl http://localhost:8080/api/v1/gateways/{gateway-id}/services/{service-id} \
 ```
 </Accordion>
 
-<Accordion title="Step 5: Create a Rule" description="Define routing rules to direct traffic to your service">
+<Accordion title="Step 4: Create a Rule" description="Define routing rules to direct traffic to your service">
 Create your first rule using the Admin API:
 
 ```bash
@@ -181,10 +186,10 @@ curl http://localhost:8080/api/v1/gateways/{gateway-id}/rules \
 ```
 </Accordion>
 
-<Accordion title="Step 6: Test the Rules" description="Verify your configuration by making test requests to the gateway">
+<Accordion title="Step 5: Test the Rules" description="Verify your configuration by making test requests to the gateway">
 Test your rule configurations:
 
-**API Key:** You need to set the `x-api-key` header to the API key of your gateway, that you created in the Step 2.
+API Key (optional): If you plan to use API key authentication, create one in the Final Step below and set the `X-TG-API-Key` header to your key.
 
 ```bash
 # Test a route
@@ -200,6 +205,22 @@ curl -X POST http://localhost:8080/test \
       "include_usage": true
     },
     "max_tokens": 1024
+  }'
+```
+</Accordion>
+
+<Accordion title="Final Step: Create an API Key" description="Generate an API key for authentication and access control">
+```bash
+# Create an API key for your gateway and rule
+curl -X POST {{admin_host}}/api/v1/iam/api-keys \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer jwt example" \
+  -d '{
+    "name": "test-key",
+    "expires_at": "2026-01-01T00:00:00Z",
+    "subject_type": "gateway",
+    "subject": "{{gateway_id}}",
+    "policies": ["{{rule_id}}"]
   }'
 ```
 </Accordion>

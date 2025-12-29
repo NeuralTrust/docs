@@ -13,7 +13,7 @@ Below is a sample **Upstream** object with its fields and a brief explanation of
 
 - **algorithm** (`string`)
 Specifies the load balancing algorithm used for distributing requests among multiple targets.
-Common values might include `round_robin`, `least_conn`, or other supported algorithms.
+Valid values: `round-robin`, `weighted-round-robin`, `least-conn`, `semantic`.
 
 - **health_checks** (`object`)
 Defines active or passive health checks for monitoring the availability of upstream targets.
@@ -26,6 +26,25 @@ An optional array of metadata tags. Useful for organizing, filtering, or searchi
 
 - **targets** (`array of objects`)
 Lists one or more backend endpoints (targets) that the gateway routes requests to. Each target contains its own configuration and credentials.
+
+- **embedding_config** (`object`, required when `algorithm` = `semantic`)
+Provider, model and credentials used by semantic load balancing. Fields:
+  - `provider` (`string`)
+  - `model` (`string`)
+  - `credentials` (`object`) with `header_name` and `header_value`
+
+- **websocket_config** (`object`)
+Controls WebSocket behavior when routing to upstream targets. Fields:
+  - `enable_direct_communication` (`boolean`)
+  - `return_error_details` (`boolean`)
+  - `ping_period` (`string` duration)
+  - `pong_wait` (`string` duration)
+  - `handshake_timeout` (`string` duration)
+  - `read_buffer_size` (`number`)
+  - `write_buffer_size` (`number`)
+
+- **proxy** (`object`)
+Optional upstream-level proxy configuration with `host`, `port`, and `protocol`.
 
 ---
 
@@ -69,10 +88,12 @@ The protocol used to communicate with the target (e.g., `http`, `https`, `grpc`)
 The path appended to the base URL when routing requests to this target.
 
 - **provider** (`string`)
-An optional identifier to denote the provider type or environment (e.g., `aws`, `azure`, `gcp`, or a custom provider name).
+When set, designates a provider-style target (e.g., `openai`, `anthropic`). In this mode do not set `host`/`port`. You must include:
+  - `credentials` (required)
+  - `models` (array, at least one)
+  - `default_model` (must be one of `models`)
 
-- **priority** (`number`)
-A numerical priority, which can influence how load balancing is handled, depending on the chosen algorithm.
+// priority not supported by the current entity; use `weight` for weighted strategies.
 
 - **weight** (`number`)
 For load balancing methods that support weights, this value affects how many requests are sent to the target relative to others.
@@ -88,6 +109,12 @@ If applicable, specifies a default model (e.g., for AI or ML deployments) used w
 
 - **models** (`array of strings`)
 Lists model identifiers supported by this target (e.g., AI models or deployment versions).
+
+- **stream** (`boolean`)
+Enable streaming behavior for this target when supported.
+
+- **insecure_ssl** (`boolean`)
+Allow insecure SSL for this target (use only in trusted environments).
 
 ---
 
@@ -145,7 +172,7 @@ Value of the parameter used for authentication.
 You can define multiple targets to distribute traffic among different hosts or providers, all managed under the same upstream configuration.
 
 ### Load Balancing
-The `algorithm` and `weight`/`priority` fields define how traffic is distributed across targets.
+The `algorithm` and `weight` fields define how traffic is distributed across targets.
 
 ### Health Checks
 Proper configuration of `health_checks` ensures that the gateway only routes requests to healthy targets.
@@ -155,4 +182,78 @@ Sensitive credentials should be stored securely (e.g., via a vault or environmen
 
 ### Tags
 Use `tags` to organize or categorize upstream objects and targets, especially helpful in large-scale environments.
+
+## Examples
+
+### Example: Semantic Load Balancing Upstream
+
+```json
+{
+  "name": "upstream-semantic",
+  "algorithm": "semantic",
+  "embedding_config": {
+    "provider": "openai",
+    "model": "text-embedding-3-large",
+    "credentials": {
+      "header_name": "Authorization",
+      "header_value": "Bearer ${OPENAI_API_KEY}"
+    }
+  },
+  "health_checks": {
+    "path": "/health",
+    "interval": 10,
+    "threshold": 3,
+    "passive": true
+  },
+  "targets": [
+    {
+      "host": "svc-1.internal.example.com",
+      "port": 443,
+      "protocol": "https",
+      "path": "/v1/chat",
+      "weight": 1,
+      "description": "General-purpose chat inference"
+    },
+    {
+      "host": "svc-2.internal.example.com",
+      "port": 443,
+      "protocol": "https",
+      "path": "/v1/chat",
+      "weight": 2,
+      "description": "High-capacity inference node"
+    }
+  ],
+  "tags": ["prod", "semantic-routing"]
+}
+```
+
+Notes:
+- `semantic` requires `embedding_config`.
+- Each `target.description` is required for the semantic algorithm.
+
+### Example: Provider-Based Target with Streaming
+
+```json
+{
+  "name": "upstream-openai",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "openai",
+      "models": ["gpt-4o-mini", "gpt-4o"],
+      "default_model": "gpt-4o-mini",
+      "credentials": {
+        "header_name": "Authorization",
+        "header_value": "Bearer ${OPENAI_API_KEY}"
+      },
+      "stream": true,
+      "insecure_ssl": false
+    }
+  ]
+}
+```
+
+Notes:
+- Provider targets must NOT set `host`/`port`.
+- `credentials`, `models` (≥1) and `default_model` are required.
 

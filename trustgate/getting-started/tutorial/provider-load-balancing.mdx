@@ -39,27 +39,23 @@ curl -X POST "http://localhost:8080/api/v1/gateways/{gateway_id}/upstreams" \
         "path": "/v1/chat/completions",
         "provider": "openai",
         "weight": 50,
-        "priority": 1,
-        "default_model": "gpt-4",
-        "models": ["gpt-3.5-turbo", "gpt-4"],
+        "default_model": "gpt-4o-mini",
+        "models": ["gpt-3.5-turbo", "gpt-4", "gpt-4o-mini"],
         "credentials": {
-          "header_name": "Authorization",
-          "header_value": "Bearer your-openai-key"
+          "api_key": "your-openai-key"
         }
       },
       {
         "path": "/v1/messages",
         "provider": "anthropic",
         "weight": 50,
-        "priority": 1,
         "default_model": "claude-3-sonnet",
         "models": ["claude-3-sonnet"],
         "headers": {
           "anthropic-version": "2023-06-01"
         },
         "credentials": {
-          "header_name": "x-api-key",
-          "header_value": "your-anthropic-key"
+          "api_key": "your-anthropic-key"
         }
       }
     ],
@@ -71,13 +67,211 @@ curl -X POST "http://localhost:8080/api/v1/gateways/{gateway_id}/upstreams" \
   }'
 ```
 
+#### Provider-specific examples
+
+The following examples show minimal upstream definitions for individual providers.
+
+- OpenAI:
+
+```json
+{
+  "name": "{{upstream_service_name}}",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "openai",
+      "provider_options": {"api": "responses"},
+      "weight": 50,
+      "priority": 1,
+      "default_model": "gpt-4o-mini",
+      "models": ["gpt-3.5-turbo", "gpt-4", "gpt-4o-mini"],
+      "stream": false,
+      "credentials": {
+        "api_key": "sk-proj-"
+      }
+    }
+  ],
+  "health_checks": {
+    "passive": true,
+    "threshold": 3,
+    "interval": 60
+  }
+}
+```
+
+Nota sobre OpenAI provider_options:
+- El campo `provider_options` permite especificar `{"api": "responses"}` o `{"api": "completions"}`.
+- Usa `api: "completions"` cuando quieras hacer load balancing entre OpenAI y otros proveedores (Anthropic, Gemini, etc.).
+- Importante: `api: "responses"` no es compatible con el balanceo de carga multi‑proveedor; si configuras un upstream con varios providers, evita `responses` y utiliza `completions` para mantener la compatibilidad.
+
+ - Anthropic:
+
+```json
+{
+  "name": "{{upstream_service_name}}",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "anthropic",
+      "weight": 50,
+      "default_model": "claude-3-5-sonnet-20241022",
+      "models": ["claude-3-5-sonnet-20241022"],
+      "stream": false,
+      "headers": {
+        "anthropic-version": "2023-06-01"
+      },
+      "credentials": {
+        "api_key": ""
+      }
+    }
+  ],
+  "health_checks": {
+    "passive": true,
+    "threshold": 3,
+    "interval": 60
+  }
+}
+```
+
+ - Google Gemini:
+
+```json
+{
+  "name": "{{upstream_service_name}}",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "gemini",
+      "weight": 50,
+      "default_model": "gemini-2.0-flash-001",
+      "models": ["gemini-2.0-flash-001"],
+      "stream": false,
+      "credentials": {
+        "api_key": ""
+      }
+    }
+  ],
+  "health_checks": {
+    "passive": true,
+    "threshold": 3,
+    "interval": 60
+  }
+}
+```
+
+ - AWS Bedrock (standalone):
+
+```json
+{
+  "name": "{{upstream_service_name}}",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "bedrock",
+      "weight": 50,
+      "default_model": "eu.anthropic.claude-3-5-sonnet-20240620-v1:0",
+      "models": [
+        "eu.anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "amazon.titan-text-express-v1",
+        "eu.meta.llama3-2-1b-instruct-v1:0",
+        "eu.mistral.pixtral-large-2502-v1:0",
+        "deepseek-llm-r1-distill-llama-8b"
+      ],
+      "stream": true,
+      "headers": {
+        "anthropic-version": "2023-06-01"
+      },
+      "credentials": {
+        "aws_access_key_id": "",
+        "aws_secret_access_key": "",
+        "aws_session_token": "",
+        "aws_region": "eu-west-1"
+      }
+    }
+  ],
+  "health_checks": {
+    "passive": true,
+    "threshold": 3,
+    "interval": 60
+  }
+}
+```
+
+ 
+
+- AWS Bedrock (example with Anthropic via Bedrock):
+
+```json
+{
+  "name": "{{upstream_service_name}}",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "bedrock",
+      "weight": 50,
+      "default_model": "eu.anthropic.claude-3-5-sonnet-20240620-v1:0",
+      "models": [
+        "eu.anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "amazon.titan-text-express-v1",
+        "eu.meta.llama3-2-1b-instruct-v1:0",
+        "eu.mistral.pixtral-large-2502-v1:0",
+        "deepseek-llm-r1-distill-llama-8b"
+      ],
+      "stream": true,
+      "headers": {
+        "anthropic-version": "2023-06-01"
+      },
+      "credentials": {
+        "aws_access_key_id": "A....",
+        "aws_secret_access_key": "u1H49D0GfnbtDhYF...",
+        "aws_session_token": "I...",
+        "aws_region": "eu-west-1"
+      }
+    }
+  ],
+  "health_checks": {
+    "passive": true,
+    "threshold": 3,
+    "interval": 60
+  }
+}
+```
+
+- Azure OpenAI:
+
+```json
+{
+  "name": "{{upstream_service_name}}",
+  "algorithm": "round-robin",
+  "targets": [
+    {
+      "provider": "azure",
+      "weight": 50,
+      "default_model": "gpt-4o-mini",
+      "models": ["gpt-4o-mini"],
+      "credentials": {
+        "api_key": "7LQ...",
+        "azure_endpoint": "https://example2.cognitiveservices.azure.com",
+        "azure_version": "",
+        "azure_use_managed_identity": false
+      }
+    }
+  ],
+  "health_checks": {
+    "passive": true,
+    "threshold": 3,
+    "interval": 60
+  }
+}
+```
+
 ### Configuration Parameters
 
 - **algorithm**: Load balancing algorithm (e.g., round-robin)
 - **weight**: Relative traffic distribution weight for each target
-- **priority**: Failover priority (lower numbers have higher priority)
 - **path**: Provider-specific API endpoint path
 - **provider**: AI provider identifier
+- **provider_options**: Provider-specific options. Para OpenAI, `{"api": "responses"}` o `{"api": "completions"}`. Importante: `responses` no es compatible con el balanceo de carga con otros proveedores; usa `completions` para escenarios multi‑proveedor.
 - **models**: List of supported models for each provider
 - **default_model**: Default model when none is specified
 - **headers**: Provider-specific headers

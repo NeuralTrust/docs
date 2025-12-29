@@ -1,0 +1,82 @@
+---
+title: Observability
+---
+
+Configure telemetry on policies to export metrics and traces from the Actions API. You can enable request-level and plugin-level traces, attach extra metadata, and send data to multiple exporters such as Kafka and TrustLens.
+
+---
+
+## Telemetry Settings
+
+| Parameter                 | Type    | Description                                                     | Required | Default |
+|---------------------------|---------|-----------------------------------------------------------------|----------|---------|
+| `enable_request_traces`   | boolean | Export traces at the request level                              | No       | `false` |
+| `enable_plugin_traces`    | boolean | Export traces at the plugin/action level                        | No       | `false` |
+| `extra_params`            | object  | Key-value metadata to include with telemetry                    | No       | `{}`     |
+| `exporters`               | array   | List of exporters with `name` and provider-specific `settings`  | No       | `[]`    |
+| `header_mapping`          | object  | Map internal telemetry fields to incoming HTTP headers          | No       | `{}`     |
+
+---
+
+## Example: policy with telemetry
+
+```json
+{
+  "name": "policy-with-telemetry",
+  "actions": [
+    {"name": "sanitize", "priority": 1, "parallel": false, "settings": {"level": "standard"}},
+    {"name": "classify", "priority": 2, "parallel": false, "settings": {"labels": ["spam", "ham"]}}
+  ],
+  "telemetry": {
+    "enable_request_traces": true,
+    "enable_plugin_traces": true,
+    "extra_params": {
+      "app_id": "12345"
+    },
+    "exporters": [
+      {
+        "name": "kafka",
+        "settings": {
+          "host": "localhost",
+          "port": "9092",
+          "topic": "metrics"
+        }
+      },
+      {
+        "name": "trustlens",
+        "settings": {
+          "host": "localhost",
+          "mapping": {
+            "input": {
+              "data_projection": {
+                "input": "payload.input"
+              }
+            },
+            "output": {}
+          },
+          "port": "9092",
+          "topic": "traces"
+        }
+      }
+    ],
+    "header_mapping": {
+      "conversation_id": "X-CONV-ID",
+      "interaction_id": "X-INT-ID",
+      "session_id": "X-SESSION-ID"
+    }
+  }
+}
+```
+
+---
+
+## Tips
+
+- Start with request traces, then add plugin traces for deeper diagnostics
+- Use header mapping to propagate correlation IDs from your clients
+- Include stable fields in extra_params (e.g., app_id, tenant) to segment telemetry
+- Send data to multiple exporters if you use more than one backend (e.g., Kafka + TrustLens)
+
+
+
+
