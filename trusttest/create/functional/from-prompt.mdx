@@ -1,0 +1,262 @@
+---
+title: From Prompt
+description: Generate functional tests dynamically using LLM-powered prompt generation
+---
+
+Generate functional tests dynamically using LLM-powered dataset builders. This approach creates diverse, contextually relevant test cases based on your specifications.
+
+## Overview
+
+Prompt-based test generation allows you to:
+
+- **Generate diverse tests**: Create varied test cases automatically
+- **Customize generation**: Control test complexity and focus areas
+- **Scale testing**: Generate large test suites efficiently
+- **Adapt to domains**: Generate domain-specific tests
+
+---
+
+## How It Works
+
+1. **Define instructions**: Specify what kind of tests to generate
+2. **Provide examples**: Give the LLM examples of good test cases
+3. **Generate**: LLM creates new test cases based on patterns
+4. **Evaluate**: Run generated tests against your model
+
+---
+
+## Code Example
+
+### Basic Usage
+
+```python
+from trusttest.dataset_builder.single_prompt import SinglePromptDatasetBuilder, DatasetItem
+from trusttest.probes.dataset import PromptDatasetProbe
+from trusttest.evaluation_contexts import ExpectedResponseContext
+from trusttest.targets.http import HttpTarget, PayloadConfig
+from trusttest.evaluators.llm_judges import CorrectnessEvaluator
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluation_scenarios import EvaluationScenario
+
+# Configure target
+target = HttpTarget(
+    url="https://your-model-endpoint.com/chat",
+    headers={"Content-Type": "application/json"},
+    payload_config=PayloadConfig(
+        format={"messages": [{"role": "user", "content": "{{ test }}"}]},
+        message_regex="{{ test }}",
+    ),
+)
+
+# Create dataset builder
+builder = SinglePromptDatasetBuilder(
+    instructions="""
+    Generate questions that a customer might ask a support chatbot for an e-commerce platform.
+    
+    Include questions about:
+    - Order status and tracking
+    - Returns and refunds
+    - Product information
+    - Account management
+    - Shipping options
+    
+    Each question should be realistic and varied.
+    """,
+    examples=[
+        DatasetItem(
+            question="Where is my order #12345?",
+            context=ExpectedResponseContext(
+                expected_response="I can help you track your order. Please provide your order number and I'll look up the current status."
+            ),
+        ),
+        DatasetItem(
+            question="How do I return a defective item?",
+            context=ExpectedResponseContext(
+                expected_response="To return a defective item, go to your Orders page, select the item, and click 'Return'. We'll provide a prepaid shipping label."
+            ),
+        ),
+    ],
+    context_type=ExpectedResponseContext,
+    language="English",
+    num_items=50,
+)
+
+# Create probe
+probe = PromptDatasetProbe(target=target, dataset_builder=builder)
+
+# Generate test set
+test_set = probe.get_test_set()
+
+# Evaluate
+evaluator = CorrectnessEvaluator()
+suite = EvaluatorSuite(evaluators=[evaluator])
+scenario = EvaluationScenario(evaluator_suite=suite)
+
+results = scenario.evaluate(test_set)
+results.display_summary()
+```
+
+---
+
+## Custom Dataset Builder
+
+Create your own dataset builder for specialized test generation:
+
+```python
+from typing import Sequence
+from trusttest.dataset_builder.single_prompt import SinglePromptDatasetBuilder, DatasetItem
+from trusttest.evaluation_contexts import ExpectedResponseContext
+
+class DomainSpecificBuilder(SinglePromptDatasetBuilder[ExpectedResponseContext]):
+    """Generate domain-specific functional tests."""
+    
+    def __init__(
+        self,
+        domain: str,
+        num_items: int = 20,
+    ) -> None:
+        super().__init__(
+            instructions=f"""
+            Generate realistic questions for a {domain} assistant.
+            
+            Questions should:
+            - Be specific to the {domain} domain
+            - Vary in complexity (simple to complex)
+            - Cover different aspects of the domain
+            - Be phrased as real users would ask them
+            """,
+            examples=[
+                DatasetItem(
+                    question=f"What is the most important thing to know about {domain}?",
+                    context=ExpectedResponseContext(
+                        expected_response=f"A comprehensive overview of key {domain} concepts."
+                    ),
+                ),
+            ],
+            context_type=ExpectedResponseContext,
+            language="English",
+            num_items=num_items,
+        )
+        self.domain = domain
+
+    async def _build_batch_instructions(
+        self,
+        batch_size: int,
+        previous_questions: Sequence[str],
+    ) -> str:
+        base = f"""
+        Generate {batch_size} questions for the {self.domain} domain.
+        
+        Make them diverse and realistic.
+        """
+        
+        if previous_questions:
+            return f"{base}\n\nAvoid these already generated questions:\n{list(previous_questions)}"
+        return base
+
+
+# Use custom builder
+builder = DomainSpecificBuilder(domain="healthcare", num_items=30)
+probe = PromptDatasetProbe(target=target, dataset_builder=builder)
+```
+
+---
+
+## Configuration Options
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `instructions` | `str` | Required | Instructions for the LLM |
+| `examples` | `List[DatasetItem]` | Required | Example test cases |
+| `context_type` | `Type` | Required | Type of context for tests |
+| `language` | `LanguageType` | `"English"` | Language for generated tests |
+| `num_items` | `int` | `10` | Number of tests to generate |
+| `batch_size` | `int` | `5` | Tests per generation batch |
+| `llm_client` | `LLMClient` | `None` | Custom LLM client |
+
+---
+
+## Generation Tips
+
+### Write Good Instructions
+
+```python
+# ❌ Too vague
+instructions = "Generate customer questions"
+
+# ✅ Specific and detailed
+instructions = """
+Generate questions that customers of a SaaS project management tool might ask.
+
+Focus on:
+- Feature discovery ("How do I...")
+- Troubleshooting ("Why isn't X working...")
+- Best practices ("What's the best way to...")
+
+Questions should be:
+- Realistic and natural-sounding
+- Specific to project management
+- Varied in complexity
+"""
+```
+
+### Provide Diverse Examples
+
+```python
+examples = [
+    # Simple factual question
+    DatasetItem(
+        question="How do I create a new project?",
+        context=ExpectedResponseContext(
+            expected_response="Click the '+' button in the top right..."
+        ),
+    ),
+    # Troubleshooting question
+    DatasetItem(
+        question="Why can't I see my team member's tasks?",
+        context=ExpectedResponseContext(
+            expected_response="This might be due to permission settings..."
+        ),
+    ),
+    # Best practice question
+    DatasetItem(
+        question="What's the best way to organize sprints?",
+        context=ExpectedResponseContext(
+            expected_response="We recommend starting with 2-week sprints..."
+        ),
+    ),
+]
+```
+
+---
+
+## Multi-Turn Conversation Tests
+
+Generate multi-turn conversations:
+
+```python
+from trusttest.dataset_builder.conversation import ConversationDatasetBuilder
+
+builder = ConversationDatasetBuilder(
+    instructions="""
+    Generate multi-turn customer support conversations.
+    
+    Conversations should:
+    - Start with a customer issue
+    - Include follow-up questions
+    - End with resolution
+    """,
+    num_turns=3,
+    num_conversations=20,
+)
+
+probe = PromptDatasetProbe(target=target, dataset_builder=builder)
+```
+
+---
+
+## Related Topics
+
+- [From RAG](/trusttest/create/functional/from-rag) - Generate from knowledge bases
+- [From Dataset](/trusttest/create/functional/from-dataset) - Use existing datasets
+- [Creating Custom Probes](/trusttest/create/creating-custom-probes) - Build custom probe classes

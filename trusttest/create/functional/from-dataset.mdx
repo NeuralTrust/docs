@@ -1,0 +1,209 @@
+---
+title: From Dataset
+description: Create functional tests from existing question-answer datasets
+---
+
+Use existing datasets to create functional tests for your AI model. This approach is ideal when you have curated Q&A pairs, golden datasets, or historical test cases.
+
+## Overview
+
+Dataset-based functional testing allows you to:
+
+- **Use curated test cases**: Leverage carefully crafted Q&A pairs
+- **Ensure reproducibility**: Same tests across runs
+- **Import existing datasets**: Use your organization's test data
+- **Track regressions**: Compare results over time
+
+---
+
+## Supported Formats
+
+| Format | Description | Best For |
+|--------|-------------|----------|
+| **YAML** | Human-readable, easy to edit | Small to medium datasets |
+| **JSON** | Structured, programmatic access | API-generated datasets |
+| **Parquet** | Efficient storage, large scale | Large datasets |
+
+---
+
+## Dataset Structure
+
+### Basic Structure
+
+Each test case consists of:
+- **question**: The input to send to the model
+- **context**: Expected response or evaluation criteria
+
+```yaml
+# functional_tests.yaml
+- - question: "What is the capital of France?"
+    context:
+      expected_response: "The capital of France is Paris."
+
+- - question: "How do I reset my password?"
+    context:
+      expected_response: "To reset your password, go to Settings > Security > Reset Password."
+```
+
+### With Evaluation Criteria
+
+```yaml
+- - question: "Explain machine learning in simple terms"
+    context:
+      expected_response: "Machine learning is a type of AI where computers learn from data."
+      evaluation_criteria: "Should mention learning from data, avoid technical jargon"
+```
+
+---
+
+## Code Example
+
+### Loading from YAML
+
+```python
+from trusttest.probes.dataset import DatasetProbe
+from trusttest.dataset_builder.base import Dataset
+from trusttest.targets.http import HttpTarget, PayloadConfig
+from trusttest.evaluators.llm_judges import CorrectnessEvaluator
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluation_scenarios import EvaluationScenario
+
+# Configure target
+target = HttpTarget(
+    url="https://your-model-endpoint.com/chat",
+    headers={"Content-Type": "application/json"},
+    payload_config=PayloadConfig(
+        format={"messages": [{"role": "user", "content": "{{ test }}"}]},
+        message_regex="{{ test }}",
+    ),
+)
+
+# Load dataset
+dataset = Dataset.from_yaml("functional_tests.yaml")
+
+# Create probe
+probe = DatasetProbe(target=target, dataset=dataset)
+
+# Generate test set
+test_set = probe.get_test_set()
+
+# Evaluate
+evaluator = CorrectnessEvaluator()
+suite = EvaluatorSuite(evaluators=[evaluator])
+scenario = EvaluationScenario(evaluator_suite=suite)
+
+results = scenario.evaluate(test_set)
+results.display_summary()
+```
+
+### Loading from JSON
+
+```python
+dataset = Dataset.from_json("functional_tests.json")
+probe = DatasetProbe(target=target, dataset=dataset)
+```
+
+### Loading from Parquet
+
+```python
+dataset = Dataset.from_parquet("functional_tests.parquet")
+probe = DatasetProbe(target=target, dataset=dataset)
+```
+
+---
+
+## Creating Datasets Programmatically
+
+```python
+from trusttest.dataset_builder.base import Dataset, DatasetItem
+from trusttest.evaluation_contexts import ExpectedResponseContext
+
+# Create test cases
+items = [
+    [DatasetItem(
+        question="What are your business hours?",
+        context=ExpectedResponseContext(
+            expected_response="We are open Monday to Friday, 9 AM to 5 PM."
+        ),
+    )],
+    [DatasetItem(
+        question="How can I contact support?",
+        context=ExpectedResponseContext(
+            expected_response="You can reach support at support@example.com or call 1-800-SUPPORT."
+        ),
+    )],
+]
+
+dataset = Dataset(items=items)
+
+# Save for later use
+dataset.to_yaml("my_tests.yaml")
+dataset.to_json("my_tests.json")
+```
+
+---
+
+## Combining Multiple Datasets
+
+```python
+# Load multiple datasets
+general_tests = Dataset.from_yaml("general_tests.yaml")
+edge_cases = Dataset.from_yaml("edge_cases.yaml")
+regression_tests = Dataset.from_yaml("regression_tests.yaml")
+
+# Combine
+combined_items = (
+    general_tests.items + 
+    edge_cases.items + 
+    regression_tests.items
+)
+
+combined_dataset = Dataset(items=combined_items)
+probe = DatasetProbe(target=target, dataset=combined_dataset)
+```
+
+---
+
+## Evaluation Options
+
+### Exact Match
+
+```python
+from trusttest.evaluators.heuristics import EqualsEvaluator
+
+evaluator = EqualsEvaluator()  # Exact string match
+```
+
+### Semantic Similarity
+
+```python
+from trusttest.evaluators.llm_judges import CorrectnessEvaluator
+
+evaluator = CorrectnessEvaluator()  # LLM judges semantic correctness
+```
+
+### BLEU Score
+
+```python
+from trusttest.evaluators.heuristics import BleuEvaluator
+
+evaluator = BleuEvaluator(threshold=0.7)  # BLEU score threshold
+```
+
+---
+
+## Best Practices
+
+1. **Diverse test cases**: Include various question types and topics
+2. **Clear expectations**: Write unambiguous expected responses
+3. **Edge cases**: Include boundary conditions and unusual inputs
+4. **Regular updates**: Add new test cases as you discover issues
+5. **Version control**: Track dataset changes alongside code
+
+---
+
+## Related Topics
+
+- [From RAG](/trusttest/create/functional/from-rag) - Generate tests from knowledge bases
+- [From Prompt](/trusttest/create/functional/from-prompt) - Generate tests dynamically
+- [Heuristic Evaluators](/trusttest/evaluate-result/heuristics/overview)
