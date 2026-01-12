@@ -1,0 +1,179 @@
+---
+title: From RAG
+description: Generate functional tests from your Retrieval-Augmented Generation knowledge base
+---
+
+Generate functional tests directly from your RAG knowledge base to validate that your model correctly retrieves and synthesizes information from your documents.
+
+## Overview
+
+Testing RAG applications requires validating that:
+
+1. **Retrieval works correctly**: Relevant documents are found
+2. **Synthesis is accurate**: Information is correctly combined
+3. **Responses are grounded**: Answers are based on the knowledge base
+4. **No hallucinations**: Model doesn't make up information
+
+## How It Works
+
+TrustTest automatically:
+
+1. Connects to your knowledge base (vector store, database, etc.)
+2. Retrieves document chunks
+3. Generates question-answer pairs based on the content
+4. Creates test cases with expected responses
+5. Evaluates your model's actual responses against expectations
+
+---
+
+## Supported Knowledge Bases
+
+| Connector | Description |
+|-----------|-------------|
+| [In-Memory](/trusttest/create/knowledge-base/connectors/in-memory) | Local vector store for testing |
+| [Azure AI Search](/trusttest/create/knowledge-base/connectors/azure) | Azure's cognitive search |
+| [Neo4j](/trusttest/create/knowledge-base/connectors/neo4j) | Graph database |
+| [PostgreSQL + pgvector](/trusttest/create/knowledge-base/connectors/postgres) | PostgreSQL with vector extension |
+| [Upstash](/trusttest/create/knowledge-base/connectors/upstash) | Serverless Redis vector store |
+
+---
+
+## Code Example
+
+### Using In-Memory Knowledge Base
+
+```python
+from trusttest.knowledge_base import InMemoryKnowledgeBase
+from trusttest.probes.rag import RAGProbe
+from trusttest.targets.http import HttpTarget, PayloadConfig
+from trusttest.evaluators.llm_judges import CorrectnessEvaluator
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluation_scenarios import EvaluationScenario
+
+# Your document chunks
+documents = [
+    "TrustTest is a framework for testing AI models for safety and reliability.",
+    "TrustTest supports multiple knowledge base connectors including Azure, Neo4j, and PostgreSQL.",
+    "Probes in TrustTest generate test cases to evaluate model behavior.",
+]
+
+# Create knowledge base
+kb = InMemoryKnowledgeBase(documents=documents)
+
+# Configure target
+target = HttpTarget(
+    url="https://your-rag-endpoint.com/chat",
+    headers={"Content-Type": "application/json"},
+    payload_config=PayloadConfig(
+        format={"messages": [{"role": "user", "content": "{{ test }}"}]},
+        message_regex="{{ test }}",
+    ),
+)
+
+# Create RAG probe
+probe = RAGProbe(
+    target=target,
+    knowledge_base=kb,
+    num_questions=20,
+)
+
+# Generate test set
+test_set = probe.get_test_set()
+
+# Evaluate with correctness judge
+evaluator = CorrectnessEvaluator()
+suite = EvaluatorSuite(evaluators=[evaluator])
+scenario = EvaluationScenario(evaluator_suite=suite)
+
+results = scenario.evaluate(test_set)
+results.display_summary()
+```
+
+### Using Azure AI Search
+
+```python
+from trusttest.knowledge_base import AzureSearchKnowledgeBase
+
+kb = AzureSearchKnowledgeBase(
+    endpoint="https://your-search.search.windows.net",
+    index_name="your-index",
+    api_key="your-api-key",
+)
+
+probe = RAGProbe(
+    target=target,
+    knowledge_base=kb,
+    num_questions=50,
+)
+```
+
+### Using PostgreSQL with pgvector
+
+```python
+from trusttest.knowledge_base import PgVectorKnowledgeBase
+
+kb = PgVectorKnowledgeBase(
+    connection_string="postgresql://user:pass@localhost/db",
+    table_name="documents",
+    embedding_column="embedding",
+    content_column="content",
+)
+
+probe = RAGProbe(
+    target=target,
+    knowledge_base=kb,
+    num_questions=50,
+)
+```
+
+---
+
+## Configuration Options
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `target` | `Target` | Required | The RAG model to test |
+| `knowledge_base` | `KnowledgeBase` | Required | Your knowledge base connector |
+| `num_questions` | `int` | `20` | Number of test questions to generate |
+| `question_types` | `List[str]` | `["factual", "inferential"]` | Types of questions to generate |
+| `language` | `LanguageType` | `"English"` | Language for generated questions |
+
+---
+
+## Question Types
+
+TrustTest generates different types of questions:
+
+| Type | Description | Example |
+|------|-------------|---------|
+| **Factual** | Direct fact retrieval | "What connectors does TrustTest support?" |
+| **Inferential** | Requires combining information | "How would you test a RAG app with Azure?" |
+| **Comparative** | Comparing entities | "What's the difference between probes and evaluators?" |
+
+---
+
+## Evaluating RAG Responses
+
+For RAG applications, use these evaluators:
+
+```python
+from trusttest.evaluators.llm_judges import (
+    CorrectnessEvaluator,
+    CompletenessEvaluator,
+    RAGPoisoningEvaluator,
+)
+
+evaluators = [
+    CorrectnessEvaluator(),      # Is the answer factually correct?
+    CompletenessEvaluator(),     # Does it cover all relevant points?
+    RAGPoisoningEvaluator(),     # Is the response grounded in context?
+]
+```
+
+---
+
+## Related Topics
+
+- [Knowledge Base Connectors](/trusttest/create/knowledge-base/overview)
+- [Automatic Test Generation](/trusttest/create/automatic-test-generation)
+- [RAG Poisoning Evaluation](/trusttest/evaluate-result/llm-as-a-judge/rag-poisoning)
