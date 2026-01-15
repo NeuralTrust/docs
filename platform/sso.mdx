@@ -1,0 +1,212 @@
+---
+title: Microsoft Entra ID SSO
+description: "Step-by-step guide to configure Microsoft Entra ID (Azure AD) Single Sign-On for NeuralTrust. Enable corporate authentication for your team."
+---
+
+# Microsoft Entra ID Single Sign-On
+
+Single Sign-On (SSO) allows your team members to sign in to NeuralTrust using their corporate Microsoft credentials instead of a separate password.
+
+## Benefits
+
+- **Simplified access**: One less password for users to remember
+- **Centralized control**: Manage access through your IT department
+- **Automatic provisioning**: Combine with SCIM for seamless user management
+- **Enhanced security**: Option to enforce SSO-only login (disable passwords)
+
+## Prerequisites
+
+Before you begin, ensure you have:
+
+- Microsoft Entra ID (Azure AD) tenant
+- Global Administrator or Application Administrator role in Azure
+- Owner or Admin role in NeuralTrust
+
+---
+
+## Part 1: Configure Azure Portal
+
+### Step 1: Create an App Registration
+
+1. Go to <a href="https://portal.azure.com" target="_blank">Azure Portal</a>
+2. Navigate to **Microsoft Entra ID** → **App registrations**
+3. Click **+ New registration**
+4. Enter the following:
+   - **Name**: `NeuralTrust SSO`
+   - **Supported account types**: Accounts in this organizational directory only
+   - **Redirect URI**: Leave empty for now
+5. Click **Register**
+
+### Step 2: Copy Your Credentials
+
+1. On the app's **Overview** page, copy:
+   - **Application (client) ID**
+   - **Directory (tenant) ID**
+2. Save both values securely — you'll need them later
+
+### Step 3: Create a Client Secret
+
+1. Go to **Certificates & secrets**
+2. Click **+ New client secret**
+3. Enter a description: `NeuralTrust SSO`
+4. Select expiration: **24 months** (recommended)
+5. Click **Add**
+
+<Warning>
+Copy the **Value** immediately after creating the secret. It's only shown once and cannot be retrieved later. Do not copy the Secret ID — you need the Value field.
+</Warning>
+
+### Step 4: Configure Redirect URI
+
+1. Go to **Authentication**
+2. Click **+ Add a platform**
+3. Select **Web**
+4. Enter Redirect URI:
+   ```
+   https://app.neuraltrust.ai/api/auth/callback/azure-ad
+   ```
+5. Click **Configure**
+
+### Step 5: Add API Permissions (Optional)
+
+<Note>
+Only required if you plan to use the Manual User Sync feature.
+</Note>
+
+1. Go to **API permissions**
+2. Click **+ Add a permission**
+3. Select **Microsoft Graph** → **Application permissions**
+4. Add these permissions:
+   - `User.Read.All`
+   - `GroupMember.Read.All`
+   - `Group.Read.All`
+5. Click **Grant admin consent for [Your Organization]**
+6. Verify all permissions show ✓ Granted
+
+---
+
+## Part 2: Configure NeuralTrust
+
+### Step 1: Open SSO Settings
+
+1. Log in to <a href="https://app.neuraltrust.ai" target="_blank">NeuralTrust</a> as Owner or Admin
+2. Go to <a href="https://app.neuraltrust.ai/settings/sso" target="_blank">**Settings** → **SSO**</a>
+
+### Step 2: Enter Your Azure Credentials
+
+1. Paste your **Tenant ID**
+2. Paste your **Client ID**
+3. Paste your **Client Secret**
+
+### Step 3: Test the Connection
+
+1. Click **Test Connection**
+2. You should see "Connection successful"
+3. Click **Save**
+
+---
+
+## Part 3: Verify Your Email Domain
+
+Domain verification prevents unauthorized users from claiming your company's domain and ensures only legitimate employees can use SSO.
+
+### Step 1: Add Your Domain
+
+1. Go to <a href="https://app.neuraltrust.ai/settings/sso" target="_blank">**Settings** → **SSO** → **Domains**</a>
+2. Click **Add Domain**
+3. Enter your company domain (e.g., `yourcompany.com`)
+4. Click **Add**
+
+### Step 2: Get the Verification Token
+
+You'll receive a verification token like:
+
+```
+neuraltrust-verify-abc123-def456-ghi789
+```
+
+Copy this token for the next step.
+
+### Step 3: Add DNS TXT Record
+
+1. Log in to your DNS provider (GoDaddy, Cloudflare, Route53, etc.)
+2. Add a new TXT record with:
+
+| Field | Value |
+|-------|-------|
+| Type | `TXT` |
+| Name | `@` (or leave empty depending on provider) |
+| Value | Your verification token |
+| TTL | 3600 (or default) |
+
+3. Save the record
+
+### Step 4: Verify
+
+1. Back in NeuralTrust, click **Verify**
+2. If verification fails, wait up to 48 hours for DNS propagation
+3. Once verified, status changes to ✓ **Verified**
+
+<Note>
+DNS changes can take up to 48 hours to propagate globally. If verification fails immediately, try again later.
+</Note>
+
+---
+
+## Part 4: Enable SSO-Only Mode (Optional)
+
+Enforcing SSO-only mode disables password login for your entire team, requiring all users to sign in with Microsoft.
+
+1. Go to <a href="https://app.neuraltrust.ai/settings/sso" target="_blank">**Settings** → **SSO**</a>
+2. Toggle **Enforce SSO** to ON
+3. Confirm the action
+
+<Warning>
+Before enabling SSO-only mode, ensure all team members have Microsoft accounts linked. Users without Microsoft accounts will be locked out.
+</Warning>
+
+<Note>
+To prevent lockouts during identity provider outages, configure [Break the Glass](/platform/break-glass) users who can log in with password even when SSO is enforced.
+</Note>
+
+---
+
+## User Experience
+
+Once SSO is configured, users will see a **Sign in with Microsoft** button on the login page. After clicking it:
+
+1. Users are redirected to Microsoft's login page
+2. They enter their corporate credentials
+3. They're automatically signed in to NeuralTrust
+
+For new users whose email domain is verified, accounts are created automatically on first login.
+
+---
+
+## Troubleshooting
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `AADSTS50011` | Redirect URI mismatch | Verify the redirect URI in Azure matches exactly: `https://app.neuraltrust.ai/api/auth/callback/azure-ad` (check for trailing slashes) |
+| "Connection failed" | Invalid credentials | Verify your Tenant ID, Client ID, and Client Secret are correct |
+| "Unauthorized team access" | Domain not registered | Add and verify your email domain in SSO settings |
+| "Domain not verified" | DNS not propagated | Wait up to 48 hours, then click Verify again |
+| "SSO enforced" | Password login disabled | Use the "Sign in with Microsoft" button instead |
+| `AADSTS7000215` | Invalid client secret | Generate a new client secret in Azure and update NeuralTrust |
+| `AADSTS700016` | App not found in tenant | Verify the Application ID and ensure you're using the correct Azure tenant |
+
+---
+
+## Security Best Practices
+
+1. **Rotate client secrets** before they expire (24 months recommended)
+2. **Enable SSO-only mode** once all users are onboarded
+3. **Verify all email domains** your organization uses
+4. **Combine with SCIM** for automatic user lifecycle management
+5. **Monitor audit logs** for suspicious login patterns
+
+## Next Steps
+
+- [Configure Break the Glass](/platform/break-glass) — Set up emergency access for IdP outages
+- [Configure SCIM Provisioning](/platform/scim) — Automate user account creation and removal
+- [Set Up Audit Logs](/platform/audit-logs) — Monitor SSO-related security events

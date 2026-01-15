@@ -1,0 +1,263 @@
+---
+title: SCIM Provisioning
+description: "Set up SCIM automatic user provisioning with Microsoft Entra ID. Automatically sync users between Azure AD and NeuralTrust."
+---
+
+# SCIM Automatic User Provisioning
+
+SCIM (System for Cross-domain Identity Management) automatically creates, updates, and removes NeuralTrust user accounts when changes happen in your Microsoft Entra ID directory. No manual user management needed.
+
+## Benefits
+
+- **Automatic onboarding**: Users get NeuralTrust access when added to your directory
+- **Automatic offboarding**: Users lose access when removed from your directory
+- **No manual invitations**: Eliminate manual user management tasks
+- **Always in sync**: User accounts stay synchronized with your corporate directory
+
+## Prerequisites
+
+Before configuring SCIM, ensure:
+
+- [SSO is configured](/platform/sso) and working
+- Enterprise Applications access in Azure Portal
+- Owner role in NeuralTrust
+
+<Warning>
+SSO must be configured before setting up SCIM provisioning.
+</Warning>
+
+---
+
+## Part 1: Generate SCIM Token in NeuralTrust
+
+### Step 1: Open SCIM Settings
+
+1. Log in to <a href="https://app.neuraltrust.ai" target="_blank">NeuralTrust</a> as Owner
+2. Go to <a href="https://app.neuraltrust.ai/settings/sso" target="_blank">**Settings** → **SSO** → **SCIM Provisioning**</a>
+
+### Step 2: Generate Token
+
+1. Click **Generate Token**
+2. Copy the following values:
+
+| Field | Value |
+|-------|-------|
+| **Tenant URL** | `https://app.neuraltrust.ai/api/scim/v2` |
+| **Secret Token** | Your generated token |
+
+<Warning>
+Save the Secret Token securely. It's only shown once and cannot be retrieved later. If you lose it, you'll need to generate a new one.
+</Warning>
+
+---
+
+## Part 2: Configure Azure Provisioning
+
+### Step 1: Create Enterprise Application
+
+1. Go to <a href="https://portal.azure.com" target="_blank">Azure Portal</a>
+2. Navigate to **Enterprise Applications**
+3. Click **+ New application**
+4. Click **Create your own application**
+5. Enter name: `NeuralTrust SCIM`
+6. Select **Integrate any other application you don't find in the gallery**
+7. Click **Create**
+
+### Step 2: Configure Provisioning Mode
+
+1. In your new application, go to **Provisioning**
+2. Click **Get started**
+3. Set **Provisioning Mode** to **Automatic**
+
+### Step 3: Enter Admin Credentials
+
+Under **Admin Credentials**, enter:
+
+| Field | Value |
+|-------|-------|
+| **Tenant URL** | `https://app.neuraltrust.ai/api/scim/v2` |
+| **Secret Token** | Paste your token from NeuralTrust |
+
+Click **Test Connection**. You should see:
+
+> "The supplied credentials are authorized to enable provisioning."
+
+### Step 4: Configure Attribute Mappings
+
+1. Expand **Mappings**
+2. Click **Provision Azure Active Directory Users**
+3. Verify these mappings exist:
+
+| Azure AD Attribute | NeuralTrust Attribute |
+|-------------------|----------------------|
+| `userPrincipalName` | `userName` |
+| `displayName` | `displayName` |
+| `Switch([IsSoftDeleted]...)` | `active` |
+| `mail` | `emails[type eq "work"].value` |
+| `givenName` | `name.givenName` |
+| `surname` | `name.familyName` |
+
+4. Click **Save**
+
+### Step 5: Assign Users and Groups
+
+1. Go to **Users and groups**
+2. Click **+ Add user/group**
+3. Select the users or groups you want to provision
+4. Click **Assign**
+
+<Note>
+You can assign individual users or entire Azure AD groups. When you assign a group, all members of that group will be provisioned to NeuralTrust.
+</Note>
+
+### Step 6: Start Provisioning
+
+1. Go back to **Provisioning**
+2. Set **Provisioning Status** to **On**
+3. Click **Save**
+
+Azure will begin an initial provisioning cycle, which can take 20-40 minutes depending on the number of users.
+
+---
+
+## Part 3: Test Provisioning
+
+### Test with a Single User
+
+Before enabling provisioning for your entire organization, test with a single user:
+
+1. Go to **Provisioning** → **Provision on demand**
+2. Search for and select a test user
+3. Click **Provision**
+4. Review the provisioning steps and results
+5. Check NeuralTrust — the user should appear in your team
+
+### Verify User in NeuralTrust
+
+1. Go to <a href="https://app.neuraltrust.ai/settings/team" target="_blank">**Settings** → **Team**</a> in NeuralTrust
+2. Confirm the provisioned user appears in the member list
+3. Verify their display name and email are correct
+
+---
+
+## Token Management
+
+### Token Lifecycle
+
+| Property | Value |
+|----------|-------|
+| **Expiration** | 90 days |
+| **Renewable** | Yes, before expiration |
+| **Revocable** | Yes, immediately |
+
+### Managing Tokens
+
+| Action | Steps | Effect |
+|--------|-------|--------|
+| **View status** | Settings → SSO → SCIM | Shows expiration date and last used timestamp |
+| **Regenerate token** | Settings → SSO → SCIM → Regenerate Token | Creates new token, revokes old one immediately |
+| **Revoke token** | Settings → SSO → SCIM → Revoke | Stops all provisioning until new token is created |
+
+<Warning>
+When you regenerate a token, you must update the Secret Token in Azure immediately. Provisioning will fail until the new token is configured.
+</Warning>
+
+### Token Expiration Workflow
+
+1. NeuralTrust sends email reminders at 30, 14, and 7 days before expiration
+2. Generate a new token before the old one expires
+3. Update the Secret Token in Azure Enterprise Application
+4. Test the connection to verify the new token works
+
+---
+
+## Provisioning Behavior
+
+### What Happens When You Add a User
+
+1. User is added to an assigned Azure AD group
+2. Azure detects the change (within 40 minutes, or immediately with on-demand)
+3. Azure sends SCIM request to NeuralTrust
+4. NeuralTrust creates the user account
+5. User can immediately sign in via SSO
+
+### What Happens When You Remove a User
+
+1. User is removed from all assigned Azure AD groups
+2. Azure detects the change (within 40 minutes)
+3. Azure sends SCIM deprovisioning request
+4. NeuralTrust deactivates the user account
+5. User can no longer access NeuralTrust
+
+### What Happens When User Attributes Change
+
+1. User's display name, email, or other attributes change in Azure AD
+2. Azure detects the change (within 40 minutes)
+3. Azure sends SCIM update request
+4. NeuralTrust updates the user's profile
+
+---
+
+## Monitoring Provisioning
+
+### View Provisioning Logs in Azure
+
+1. Go to your Enterprise Application in Azure
+2. Navigate to **Provisioning** → **View provisioning logs**
+3. Filter by date, status, or user to find specific events
+
+### Common Log Entries
+
+| Status | Description |
+|--------|-------------|
+| **Success** | User successfully provisioned/updated/deprovisioned |
+| **Failure** | Provisioning failed — check error details |
+| **Skipped** | User skipped due to scoping filter or already exists |
+
+### View Provisioning Events in NeuralTrust
+
+Provisioning events are logged in NeuralTrust Audit Logs:
+
+1. Go to <a href="https://app.neuraltrust.ai/settings/audit-logs" target="_blank">**Settings** → **Audit Logs**</a>
+2. Filter by Category: **SSO Security**
+3. Look for events like:
+   - `scim.user.provisioned`
+   - `scim.user.updated`
+   - `scim.user.deprovisioned`
+
+---
+
+## Troubleshooting
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| "Test Connection failed" | Invalid or expired token | Generate a new SCIM token in NeuralTrust |
+| Users not provisioning | Provisioning status is Off | Turn on provisioning in Azure |
+| Users not provisioning | Not assigned to application | Assign users/groups in Azure Enterprise Application |
+| Duplicate users | User exists with different identifier | Delete duplicate in NeuralTrust, re-provision |
+| Attributes not updating | Mapping not configured | Verify attribute mappings in Azure |
+| Provisioning delayed | Azure sync interval | Use "Provision on demand" for immediate sync |
+
+### Force Immediate Sync
+
+If you need changes to sync immediately:
+
+1. Go to **Provisioning** in Azure
+2. Click **Provision on demand**
+3. Select the user to sync
+4. Click **Provision**
+
+---
+
+## Security Best Practices
+
+1. **Set calendar reminders** to regenerate tokens before the 90-day expiration
+2. **Use Azure AD groups** to manage access rather than individual user assignments
+3. **Monitor provisioning logs** regularly for failed operations
+4. **Test with a small group** before assigning your entire organization
+5. **Review NeuralTrust audit logs** for provisioning-related events
+
+## Next Steps
+
+- [Configure Audit Logs](/platform/audit-logs) — Monitor SCIM provisioning events
+- [Manual User Sync](/platform/user-sync) — Use on-demand sync for additional control
