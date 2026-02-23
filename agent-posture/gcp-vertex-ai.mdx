@@ -1,9 +1,15 @@
 ---
 title: GCP Vertex AI Integration
-description: "Connect Agent Posture to Google Cloud to discover and monitor Vertex AI Reasoning Engines (agents). Covers required IAM roles, API enablement, service account setup, and troubleshooting."
+icon: "/images/integrations/googlecloud.svg"
 ---
 
-# GCP Vertex AI Integration
+<div style={{display:'flex', alignItems:'center', gap:'14px', padding:'16px 20px', borderRadius:'10px', border:'1px solid #e5e7eb', marginBottom:'28px', background:'#fafafa'}}>
+  <img src="/images/integrations/googlecloud.svg" style={{width:'40px', height:'40px', flexShrink:0}} />
+  <div>
+    <p style={{margin:0, fontWeight:'600', fontSize:'15px'}}>Google Cloud</p>
+    <p style={{margin:0, fontSize:'13px', color:'#6b7280'}}>Vertex AI Reasoning Engines</p>
+  </div>
+</div>
 
 Agent Posture connects to **Google Cloud Vertex AI** to discover and monitor your AI agents deployed as **Reasoning Engines**. In addition to agent discovery, it collects usage metrics, tool call data, and security events from Cloud Monitoring, Cloud Trace, and Cloud Logging.
 
@@ -52,15 +58,15 @@ To ensure tool calls appear in the correct category in Agent Posture dashboards,
 
 Enable all five APIs in your GCP project before creating the integration:
 
-| API | Purpose | Required |
-|-----|---------|---------|
-| `aiplatform.googleapis.com` | List and read agents, models, and datasets | **Yes** |
-| `storage.googleapis.com` | Download agent configuration files from GCS | **Yes** |
-| `monitoring.googleapis.com` | Read usage metrics (requests, latency, CPU, memory) | **Yes** |
-| `cloudtrace.googleapis.com` | Read invocation traces for tool call extraction | **Yes** |
-| `logging.googleapis.com` | Read structured logs for telemetry, conversations, and security events | **Yes** |
+| API | Purpose |
+|-----|---------|
+| `aiplatform.googleapis.com` | List and read agents, models, and datasets |
+| `storage.googleapis.com` | Download agent configuration files from GCS |
+| `monitoring.googleapis.com` | Read usage metrics (requests, latency, CPU, memory) |
+| `cloudtrace.googleapis.com` | Read invocation traces for tool call extraction |
+| `logging.googleapis.com` | Read structured logs for telemetry, conversations, and security events |
 
-**Enable all at once via CLI:**
+**Enable all at once:**
 ```bash
 gcloud services enable \
   aiplatform.googleapis.com \
@@ -112,78 +118,126 @@ logging.logEntries.list
 
 ## Step-by-step setup
 
-### Step 1 — Create a service account
+<Steps>
+  <Step title="Create a service account">
+    <Tabs>
+      <Tab title="CLI">
+        ```bash
+        PROJECT_ID="your-project-id"
 
-**Via Google Cloud Console:**
-1. Go to **IAM & Admin** → **Service Accounts**
-2. Click **+ Create Service Account**
-3. Name: `neuraltrust-agent-posture` (or any name you prefer)
-4. Click **Create and continue**
-5. Skip role assignment here — you will grant roles in Step 2
-6. Click **Done**
+        gcloud iam service-accounts create neuraltrust-agent-posture \
+          --project=$PROJECT_ID \
+          --display-name="NeuralTrust Agent Posture"
+        ```
+      </Tab>
+      <Tab title="Google Cloud Console">
+        1. Go to **IAM & Admin** → **Service Accounts**
+        2. Click **+ Create Service Account**
+        3. Name: `neuraltrust-agent-posture` (or any name you prefer)
+        4. Click **Create and continue**
+        5. Skip role assignment here — you will grant roles in the next step
+        6. Click **Done**
+      </Tab>
+    </Tabs>
+  </Step>
 
-**Via CLI:**
-```bash
-PROJECT_ID="your-project-id"
+  <Step title="Grant IAM roles">
+    <Tabs>
+      <Tab title="CLI">
+        ```bash
+        PROJECT_ID="your-project-id"
+        SA_EMAIL="neuraltrust-agent-posture@${PROJECT_ID}.iam.gserviceaccount.com"
 
-gcloud iam service-accounts create neuraltrust-agent-posture \
-  --project=$PROJECT_ID \
-  --display-name="NeuralTrust Agent Posture"
-```
+        for ROLE in \
+          roles/aiplatform.viewer \
+          roles/storage.objectViewer \
+          roles/monitoring.viewer \
+          roles/cloudtrace.user \
+          roles/logging.viewer; do
+          gcloud projects add-iam-policy-binding $PROJECT_ID \
+            --member="serviceAccount:$SA_EMAIL" \
+            --role="$ROLE"
+        done
+        ```
+      </Tab>
+      <Tab title="Google Cloud Console">
+        1. Go to **IAM & Admin** → **IAM**
+        2. Click **+ Grant Access**
+        3. Enter the service account email
+        4. Add all five roles listed above
+        5. Click **Save**
+      </Tab>
+    </Tabs>
+  </Step>
 
-### Step 2 — Grant IAM roles
+  <Step title="Create a JSON key">
+    <Tabs>
+      <Tab title="CLI">
+        ```bash
+        gcloud iam service-accounts keys create neuraltrust-key.json \
+          --iam-account="neuraltrust-agent-posture@${PROJECT_ID}.iam.gserviceaccount.com"
+        ```
+      </Tab>
+      <Tab title="Google Cloud Console">
+        1. Go to **IAM & Admin** → **Service Accounts** → click your service account
+        2. Go to the **Keys** tab → **Add key** → **Create new key**
+        3. Select **JSON** → **Create**
+        4. The key file downloads automatically
+      </Tab>
+    </Tabs>
+  </Step>
 
-**Via CLI:**
-```bash
-PROJECT_ID="your-project-id"
-SA_EMAIL="neuraltrust-agent-posture@${PROJECT_ID}.iam.gserviceaccount.com"
+  <Step title="Configure the integration in Agent Posture">
+    Provide the following when creating the GCP integration:
 
-for ROLE in \
-  roles/aiplatform.viewer \
-  roles/storage.objectViewer \
-  roles/monitoring.viewer \
-  roles/cloudtrace.user \
-  roles/logging.viewer; do
-  gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:$SA_EMAIL" \
-    --role="$ROLE"
-done
-```
+    | Field | Description | Example |
+    |-------|-------------|---------|
+    | **Project ID** | Your GCP project ID | `my-project-123` |
+    | **Service Account JSON** | Contents of the JSON key file from Step 3 | `{"type": "service_account", ...}` |
 
-**Via Console:**
-1. Go to **IAM & Admin** → **IAM**
-2. Click **+ Grant Access**
-3. Enter the service account email
-4. Add all five roles listed above
-5. Click **Save**
+    ### Location configuration
 
-### Step 3 — Create a JSON key
+    Agent Posture supports three location modes:
 
-**Via CLI:**
-```bash
-gcloud iam service-accounts keys create neuraltrust-key.json \
-  --iam-account="neuraltrust-agent-posture@${PROJECT_ID}.iam.gserviceaccount.com"
-```
+    <Tabs>
+      <Tab title="Auto-discover all regions (recommended)">
+        Leave the location field empty in the UI, or pass `discover_all: true`. Agent Posture probes all known Vertex AI regions and syncs any that contain resources.
 
-**Via Console:**
-1. Go to **IAM & Admin** → **Service Accounts** → click your service account
-2. Go to the **Keys** tab → **Add key** → **Create new key**
-3. Select **JSON** → **Create**
-4. The key file is downloaded automatically
+        ```json
+        {
+          "project_id": "my-project-123",
+          "discover_all": true
+        }
+        ```
+      </Tab>
+      <Tab title="Explicit region list">
+        Provide a JSON array of region strings when you know exactly which regions you use.
 
-### Step 4 — Configure the integration in Agent Posture
+        ```json
+        {
+          "project_id": "my-project-123",
+          "discover_all": false,
+          "selected_locations": ["us-central1", "europe-west4"]
+        }
+        ```
+      </Tab>
+      <Tab title="Single region (legacy)">
+        Provide a single region string. Equivalent to `selected_locations` with one entry. Supported for backwards compatibility.
 
-Provide the following when creating the GCP integration:
+        ```json
+        {
+          "project_id": "my-project-123",
+          "location": "us-central1"
+        }
+        ```
+      </Tab>
+    </Tabs>
 
-| Field | Description | Example |
-|-------|-------------|---------|
-| **Project ID** | Your GCP project ID | `my-project-123` |
-| **Location** | GCP region where your agents are deployed | `us-central1` |
-| **Service Account JSON** | Contents of the JSON key file from Step 3 | `{"type": "service_account", ...}` |
-
-<Tip>
-If your agents are deployed across multiple regions, Agent Posture can auto-discover all locations. Leave the location field empty to enable multi-region discovery, or specify a comma-separated list of regions.
-</Tip>
+    <Warning>
+    Do not pass a comma-separated string (e.g. `"us-central1,europe-west4"`) — use `selected_locations` as a JSON array instead.
+    </Warning>
+  </Step>
+</Steps>
 
 ---
 
@@ -214,17 +268,17 @@ Non-instrumented agents will show `total_runs > 0` (from Cloud Monitoring) but a
 
 ## Feature availability by permission level
 
-| Feature | Minimum (aiplatform.viewer only) | Full (all 5 roles) |
-|---------|----------------------------------|-------------------|
-| Agent discovery | ✅ | ✅ |
-| Model discovery | ✅ | ✅ |
-| Dataset discovery | ✅ | ✅ |
-| Security posture assessment | ✅ | ✅ |
-| Tools and instructions | ❌ (needs storage.objectViewer) | ✅ |
-| Usage metrics (requests, latency, CPU, memory) | ❌ (needs monitoring.viewer) | ✅ |
-| Tool call breakdown | ❌ (needs cloudtrace.user + logging.viewer) | ✅ |
-| Conversation discovery | ❌ (needs logging.viewer) | ✅ |
-| Security event detection | ❌ (needs logging.viewer) | ✅ |
+| Feature | Minimum (`aiplatform.viewer` only) | Full (all 5 roles) |
+|---------|:----------------------------------:|:-----------------:|
+| Agent discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Model discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Dataset discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Security posture assessment | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tools and instructions | <span style={{color:'#dc2626'}}>No</span> — needs `storage.objectViewer` | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Usage metrics (requests, latency, CPU, memory) | <span style={{color:'#dc2626'}}>No</span> — needs `monitoring.viewer` | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tool call breakdown | <span style={{color:'#dc2626'}}>No</span> — needs `cloudtrace.user` + `logging.viewer` | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Conversation discovery | <span style={{color:'#dc2626'}}>No</span> — needs `logging.viewer` | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Security event detection | <span style={{color:'#dc2626'}}>No</span> — needs `logging.viewer` | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
 
 ---
 
@@ -236,7 +290,7 @@ Non-instrumented agents will show `total_runs > 0` (from Cloud Monitoring) but a
 | Non-instrumented agents | Custom cloudpickle agents without OpenTelemetry tracing show zero tool call counts unless they emit structured JSON logs. |
 | Metrics delay | Cloud Monitoring metrics may take up to 24 hours to appear for newly deployed agents. |
 | No conversation content | Agent Posture collects conversation metadata (count, errors) but not message content. |
-| Location-specific discovery | Agents, models, and datasets in a region that is not configured will not be discovered. Use multi-region auto-discovery to avoid missing resources. |
+| Location-specific discovery | Agents, models, and datasets in a region that is not configured will not be discovered. Use `discover_all: true` or include the region in `selected_locations` to avoid missing resources. |
 
 ---
 
@@ -251,35 +305,37 @@ Non-instrumented agents will show `total_runs > 0` (from Cloud Monitoring) but a
 
 ## Troubleshooting
 
-### No agents discovered
+<AccordionGroup>
+  <Accordion title="No agents discovered">
+    - Verify `roles/aiplatform.viewer` is granted at the project level.
+    - Confirm your agents are deployed in the configured region. If using auto-discovery, set `discover_all: true` rather than specifying individual regions.
+    - Enable the `aiplatform.googleapis.com` API in the project.
+  </Accordion>
 
-→ Verify `roles/aiplatform.viewer` is granted at the project level.
-→ Confirm your agents are deployed in the configured region. If using auto-discovery, leave the location field empty.
-→ Enable the `aiplatform.googleapis.com` API in the project.
+  <Accordion title="Tools and instructions show as unavailable">
+    - Verify `roles/storage.objectViewer` is granted at the project level (not just on specific buckets).
+    - Confirm the agent has a pickle file URI in `spec.packageSpec.pickleObjectGcsUri`.
+  </Accordion>
 
-### Tools and instructions show as unavailable
+  <Accordion title="Usage metrics show as zero or unavailable">
+    - Verify `roles/monitoring.viewer` is granted.
+    - Enable the `monitoring.googleapis.com` API.
+    - Metrics may take up to 24 hours to appear for new agents.
+  </Accordion>
 
-→ Verify `roles/storage.objectViewer` is granted at the project level (not just on specific buckets).
-→ Confirm the agent has a pickle file URI in `spec.packageSpec.pickleObjectGcsUri`.
+  <Accordion title="Tool call counts all showing zero">
+    - Check whether the agent is built with ADK, LangChain, or LangGraph (instrumented). Custom cloudpickle agents require structured JSON log emission for tool call data.
+    - Verify `roles/cloudtrace.user` and `roles/logging.viewer` are granted.
+    - Enable `cloudtrace.googleapis.com` and `logging.googleapis.com` APIs.
+  </Accordion>
 
-### Usage metrics show as zero or unavailable
+  <Accordion title="Conversations or security events not appearing">
+    - Verify `roles/logging.viewer` is granted.
+    - Enable the `logging.googleapis.com` API.
+    - Cloud Logging entries may take a few minutes to appear after agent invocations.
+  </Accordion>
 
-→ Verify `roles/monitoring.viewer` is granted.
-→ Enable the `monitoring.googleapis.com` API.
-→ Metrics may take up to 24 hours to appear for new agents.
-
-### Tool call counts all showing zero
-
-→ Check whether the agent is built with ADK, LangChain, or LangGraph (instrumented). Custom cloudpickle agents require structured JSON log emission for tool call data.
-→ Verify `roles/cloudtrace.user` and `roles/logging.viewer` are granted.
-→ Enable `cloudtrace.googleapis.com` and `logging.googleapis.com` APIs.
-
-### Conversations or security events not appearing
-
-→ Verify `roles/logging.viewer` is granted.
-→ Enable the `logging.googleapis.com` API.
-→ Cloud Logging entries may take a few minutes to appear after agent invocations.
-
-### All agents show the same tools and instructions
-
-→ Multiple agents are likely sharing the same GCS pickle file. Each agent needs its own unique pickle file to show distinct configurations.
+  <Accordion title="All agents show the same tools and instructions">
+    Multiple agents are likely sharing the same GCS pickle file. Each agent needs its own unique pickle file to show distinct configurations.
+  </Accordion>
+</AccordionGroup>

@@ -1,9 +1,15 @@
 ---
 title: Azure Integration
-description: "Connect Agent Posture to your Azure environment to discover and monitor Azure AI Foundry agents (v2) and Azure OpenAI Classic assistants (v1). Covers required RBAC roles, telemetry setup, and troubleshooting."
+icon: "/images/integrations/azure.svg"
 ---
 
-# Azure Integration
+<div style={{display:'flex', alignItems:'center', gap:'14px', padding:'16px 20px', borderRadius:'10px', border:'1px solid #e5e7eb', marginBottom:'28px', background:'#fafafa'}}>
+  <img src="/images/integrations/azure.svg" style={{width:'40px', height:'40px', flexShrink:0}} />
+  <div>
+    <p style={{margin:0, fontWeight:'600', fontSize:'15px'}}>Microsoft Azure</p>
+    <p style={{margin:0, fontSize:'13px', color:'#6b7280'}}>Azure AI Foundry (v2) · Azure OpenAI Classic (v1)</p>
+  </div>
+</div>
 
 Agent Posture supports two types of Azure AI agents under a single integration:
 
@@ -25,7 +31,7 @@ A single integration discovers both types automatically from your subscription.
 | Knowledge bases (vector stores) | Azure AI Foundry Agents API |
 | Content filters / RAI policies | Cognitive Services Management API |
 | Guardrails configuration | Derived from RAI policies |
-| Usage metrics (runs, tokens, latency, errors) | Log Analytics (requires telemetry setup) |
+| Usage metrics (runs, tokens, latency, errors, tool calls) | Application Insights via Log Analytics (requires telemetry setup — see below) |
 
 ### Azure OpenAI Classic assistants (v1)
 
@@ -34,7 +40,7 @@ A single integration discovers both types automatically from your subscription.
 | Assistant name, description, status | Azure OpenAI Assistants API |
 | Model, instructions, tools | Azure OpenAI Assistants API |
 | Vector stores (knowledge bases) | Azure OpenAI Assistants API |
-| Usage metrics (runs, tokens, latency) | Azure Monitor / Threads & Runs API |
+| Usage metrics (runs, conversations, tool call counts) | Assistants API — Threads & Run Steps (no Log Analytics required) |
 
 <Note>
 Content filters and guardrails are not exposed via the Azure OpenAI Assistants (v1) API. These fields will show as unavailable for Classic assistants.
@@ -71,15 +77,17 @@ If your security policy requires strictly minimal permissions, you can use two m
 With the granular approach, you must assign `Cognitive Services OpenAI User` on **each** AI Services resource individually. Using Azure AI User at subscription level is simpler and equally secure for read-only access.
 </Note>
 
-### Optional — telemetry (usage metrics)
+### Optional — telemetry (usage metrics, v2 only)
 
-To enable usage metrics (run counts, token consumption, latency, error rates), Agent Posture queries Log Analytics. This requires:
+For **Azure AI Foundry (v2)** agents, Agent Posture collects usage metrics, token counts, latency, error rates, and tool call breakdowns (code interpreter, file search, function calls) from **Application Insights** via a linked Log Analytics workspace. This requires:
 
 | Role | Scope | Purpose |
 |------|-------|---------|
-| `Log Analytics Reader` | Log Analytics Workspace | Query telemetry data from Diagnostic Logs |
+| `Log Analytics Reader` | Log Analytics Workspace | Query Application Insights traces (AppDependencies table) |
 
-**What you lose without this:** Usage statistics will be unavailable. Agent discovery, security posture assessment, and content filter visibility are not affected.
+**What you lose without this:** v2 usage statistics and tool call metrics will be unavailable. v1 Classic usage is collected directly via the Assistants API and does **not** require this role.
+
+**What you gain:** Per-agent usage metrics, conversation-level telemetry signals (used for aggregation, not enumeration), per-tool call breakdown by type (code interpreter, file search, custom functions), token consumption, and latency.
 
 ---
 
@@ -89,122 +97,186 @@ Before configuring the integration, ensure you have:
 
 - An Azure subscription containing AI Services or Azure OpenAI resources
 - Permission to create app registrations and assign RBAC roles (User Access Administrator or Owner on the subscription)
-- For telemetry: a Log Analytics workspace with Diagnostic Settings enabled on your Cognitive Services resources (see [Enabling telemetry](#enabling-telemetry))
+- For v2 telemetry: an **Application Insights** resource connected to your AI Foundry project, linked to a Log Analytics workspace (see [Enabling telemetry](#enabling-telemetry))
 
 ---
 
 ## Step-by-step setup
 
-### Step 1 — Create a service principal
+<Steps>
+  <Step title="Create a service principal">
+    <Tabs>
+      <Tab title="Azure CLI">
+        ```bash
+        az ad sp create-for-rbac --name "neuraltrust-agent-posture" --skip-assignment
+        ```
+        Save the output — you will need `appId` (client ID), `password` (client secret), and `tenant` (tenant ID).
+      </Tab>
+      <Tab title="Azure Portal">
+        1. Go to **Microsoft Entra ID** → **App registrations** → **New registration**
+        2. Name the app (e.g., `neuraltrust-agent-posture`)
+        3. Select **Single tenant**
+        4. Click **Register**
+        5. Go to **Certificates & secrets** → **New client secret**, set an expiry, and copy the secret value immediately
+      </Tab>
+    </Tabs>
+  </Step>
 
-**Via Azure CLI:**
-```bash
-az ad sp create-for-rbac --name "neuraltrust-agent-posture" --skip-assignment
-```
+  <Step title="Assign the Azure AI User role">
+    <Tabs>
+      <Tab title="Azure CLI">
+        ```bash
+        SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+        APP_ID="<your-app-id>"
 
-Save the output — you will need `appId` (client ID), `password` (client secret), and `tenant` (tenant ID).
+        az role assignment create \
+          --assignee $APP_ID \
+          --role "Azure AI User" \
+          --scope /subscriptions/$SUBSCRIPTION_ID
+        ```
+      </Tab>
+      <Tab title="Azure Portal">
+        1. Go to **Subscriptions** → select your subscription → **Access control (IAM)**
+        2. Click **+ Add** → **Add role assignment**
+        3. Search for and select **Azure AI User**
+        4. Assign it to your service principal
+        5. Click **Save**
+      </Tab>
+    </Tabs>
+  </Step>
 
-**Via Azure Portal:**
-1. Go to **Microsoft Entra ID** → **App registrations** → **New registration**
-2. Name the app (e.g., `neuraltrust-agent-posture`)
-3. Select **Single tenant**
-4. Click **Register**
-5. Go to **Certificates & secrets** → **New client secret**, set an expiry, and copy the secret value immediately
+  <Step title="(Optional) Assign Log Analytics Reader for telemetry">
+    Skip this step if you do not need v2 usage metrics.
 
-### Step 2 — Assign the Azure AI User role
+    <Tabs>
+      <Tab title="Azure CLI">
+        ```bash
+        WORKSPACE_ID=$(az monitor log-analytics workspace show \
+          --resource-group <resource-group> \
+          --workspace-name <workspace-name> \
+          --query id -o tsv)
 
-**Via Azure CLI (recommended):**
-```bash
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-APP_ID="<your-app-id>"
+        az role assignment create \
+          --assignee $APP_ID \
+          --role "Log Analytics Reader" \
+          --scope $WORKSPACE_ID
+        ```
+      </Tab>
+      <Tab title="Azure Portal">
+        1. Go to the **Log Analytics workspace** → **Access control (IAM)**
+        2. Click **+ Add role assignment** → select **Log Analytics Reader**
+        3. Assign to your service principal → click **Save**
+      </Tab>
+    </Tabs>
+  </Step>
 
-az role assignment create \
-  --assignee $APP_ID \
-  --role "Azure AI User" \
-  --scope /subscriptions/$SUBSCRIPTION_ID
-```
+  <Step title="Configure the integration in Agent Posture">
+    Provide the following credentials when creating the Azure integration:
 
-**Via Azure Portal:**
-1. Go to **Subscriptions** → select your subscription → **Access control (IAM)**
-2. Click **+ Add** → **Add role assignment**
-3. Search for and select **Azure AI User**
-4. Assign it to your service principal
-5. Click **Save**
-
-### Step 3 — (Optional) Assign Log Analytics Reader for telemetry
-
-```bash
-WORKSPACE_ID=$(az monitor log-analytics workspace show \
-  --resource-group <resource-group> \
-  --workspace-name <workspace-name> \
-  --query id -o tsv)
-
-az role assignment create \
-  --assignee $APP_ID \
-  --role "Log Analytics Reader" \
-  --scope $WORKSPACE_ID
-```
-
-### Step 4 — Configure the integration in Agent Posture
-
-Provide the following credentials when creating the Azure integration:
-
-| Field | Where to find it |
-|-------|-----------------|
-| **Tenant ID** | Azure Portal → Microsoft Entra ID → Overview → Directory (tenant) ID |
-| **Client ID** | Azure Portal → App registrations → your app → Application (client) ID |
-| **Client Secret** | Copied in Step 1 |
-| **Subscription ID** | Azure Portal → Subscriptions → your subscription → Subscription ID |
+    | Field | Where to find it |
+    |-------|-----------------|
+    | **Tenant ID** | Azure Portal → Microsoft Entra ID → Overview → Directory (tenant) ID |
+    | **Client ID** | Azure Portal → App registrations → your app → Application (client) ID |
+    | **Client Secret** | Copied in Step 1 |
+    | **Subscription ID** | Azure Portal → Subscriptions → your subscription → Subscription ID |
+  </Step>
+</Steps>
 
 ---
 
 ## Enabling telemetry
 
-Agent Posture retrieves usage metrics from **Log Analytics** via Azure Diagnostic Settings. To enable this:
-
-### Via Azure Portal
-
-1. Go to your **Cognitive Services** resource → **Monitoring** → **Diagnostic settings**
-2. Click **+ Add diagnostic setting**
-3. Configure:
-   - **Name:** `neuraltrust-diagnostics`
-   - **Logs:** Select `Audit` and `RequestResponse`
-   - **Metrics:** Select `AllMetrics`
-   - **Destination:** Send to **Log Analytics workspace**
-4. Click **Save**
-
-### Via Azure CLI
-
-```bash
-RESOURCE_ID="/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.CognitiveServices/accounts/<account-name>"
-WORKSPACE_ID="/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>"
-
-az monitor diagnostic-settings create \
-  --name "neuraltrust-diagnostics" \
-  --resource $RESOURCE_ID \
-  --workspace $WORKSPACE_ID \
-  --logs '[{"category":"Audit","enabled":true},{"category":"RequestResponse","enabled":true}]' \
-  --metrics '[{"category":"AllMetrics","enabled":true}]'
-```
+Agent Posture retrieves v2 usage metrics from **Application Insights** via a linked Log Analytics workspace. Azure AI Foundry automatically writes server-side OpenTelemetry traces (`gen_ai.*` semantic conventions) to the `AppDependencies` table when a Foundry project is connected to Application Insights. Agent Posture queries this table to produce per-agent usage, token counts, latency, and tool call breakdowns.
 
 <Note>
-Metrics may take up to 24 hours to appear in Log Analytics after enabling Diagnostic Settings for the first time.
+**Classic (v1) assistants do not require this setup.** Usage for v1 assistants is collected directly from the Assistants API (Threads and Run Steps) and is always available once the core RBAC role is in place.
 </Note>
+
+<Steps>
+  <Step title="Connect Application Insights to your AI Foundry project">
+    <Tabs>
+      <Tab title="AI Foundry Portal">
+        1. Open [Azure AI Foundry](https://ai.azure.com) and navigate to your project
+        2. Go to **Settings** → **Tracing**
+        3. Select or create an **Application Insights** resource
+        4. Save — Azure will begin writing traces automatically; no SDK instrumentation is required
+      </Tab>
+      <Tab title="Azure CLI">
+        ```bash
+        az ml workspace update \
+          --name <foundry-project-name> \
+          --resource-group <resource-group> \
+          --application-insights /subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/microsoft.insights/components/<appinsights-name>
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Grant Log Analytics Reader on the linked workspace">
+    Application Insights stores trace data in a linked Log Analytics workspace. Find the workspace and grant access:
+
+    <Tabs>
+      <Tab title="Azure CLI">
+        ```bash
+        WORKSPACE_ID=$(az monitor log-analytics workspace show \
+          --resource-group <resource-group> \
+          --workspace-name <workspace-name> \
+          --query id -o tsv)
+
+        az role assignment create \
+          --assignee $APP_ID \
+          --role "Log Analytics Reader" \
+          --scope $WORKSPACE_ID
+        ```
+      </Tab>
+      <Tab title="Azure Portal">
+        1. Go to the **Log Analytics workspace** → **Access control (IAM)**
+        2. Click **+ Add role assignment** → select **Log Analytics Reader**
+        3. Assign to your service principal → click **Save**
+
+        The workspace is found in the Application Insights resource under **Settings** → **Linked workspace**.
+      </Tab>
+    </Tabs>
+
+    <Note>
+    Traces may take a few minutes to appear after the first agent invocations.
+    </Note>
+  </Step>
+</Steps>
+
+### Telemetry source summary
+
+| Data type | Source | Requires |
+|-----------|--------|----------|
+| v2 usage metrics (runs, tokens, latency, errors) | Application Insights — AppDependencies | App Insights connected to Foundry project + Log Analytics Reader |
+| v2 tool call breakdown (code interpreter, file search, functions) | Application Insights — AppDependencies | Same as above |
+| v1 usage metrics (runs, conversations, tool call counts) | Assistants API (Threads + Run Steps) | Core RBAC role only — no Log Analytics needed |
 
 ---
 
 ## Feature availability by permission level
 
+### Azure AI Foundry (v2)
+
 | Feature | Azure AI User only | + Log Analytics Reader |
-|---------|-------------------|----------------------|
-| Agent discovery (v2 + v1) | ✅ | ✅ |
-| Model discovery | ✅ | ✅ |
-| Dataset / vector store discovery | ✅ | ✅ |
-| Security posture assessment | ✅ | ✅ |
-| Tools and instructions | ✅ | ✅ |
-| Knowledge bases | ✅ | ✅ |
-| Content filters / RAI policies (v2 only) | ✅ | ✅ |
-| Usage statistics (runs, tokens, latency) | ❌ | ✅ |
+|---------|:-----------------:|:---------------------:|
+| Agent discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Model and dataset discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Security posture assessment | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tools, instructions, knowledge bases | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Content filters / RAI policies | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Usage metrics (runs, tokens, latency, errors) | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tool call breakdown (code interpreter, file search, functions) | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Conversation-level telemetry (aggregation signals) | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+
+### Azure OpenAI Classic (v1)
+
+| Feature | Azure AI User only |
+|---------|:-----------------:|
+| Assistant discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tools, instructions, vector stores | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Usage metrics (runs, conversations, tool call counts) | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Content filters / RAI policies | <span style={{color:'#6b7280'}}>No — Azure API limitation</span> |
 
 ---
 
@@ -212,11 +284,11 @@ Metrics may take up to 24 hours to appear in Log Analytics after enabling Diagno
 
 | Limitation | Details |
 |------------|---------|
-| No conversation listing | The Azure AI Foundry API does not expose a `conversations.list()` endpoint. Agent Posture collects aggregate metrics but cannot enumerate individual conversations. |
-| No tool call telemetry | Azure telemetry logs all operations as `chat`. Individual tool invocations (code interpreter, file search, function calls) are not tracked as separate events. |
+| No conversation enumeration for v2 | The Azure AI Foundry API does not expose a `conversations.list()` endpoint. App Insights provides conversation-level telemetry signals (conversation ID, message count, latency per conversation) used for aggregation — not a list of conversations you can browse. |
+| Tool call telemetry requires App Insights (v2) | Tool call breakdown (code interpreter, file search, function calls) requires Application Insights connected to the Foundry project. Foundry automatically emits `gen_ai.tool.name` spans — no client instrumentation needed. |
 | Content filters unavailable for v1 | The Azure OpenAI Assistants (v1) API does not expose content filter or RAI policy configuration. These fields show as unavailable for Classic assistants. |
-| Metrics delay | Log Analytics data for new agents may take up to 24 hours to appear. |
-| Conversation ID mismatch | Telemetry `conversation_id` values (UUID format) do not match API conversation IDs (`conv_xxx` format). Agent Posture uses telemetry-level aggregation. |
+| App Insights trace delay | Traces may take a few minutes to appear in Log Analytics after initial agent invocations. |
+| Conversation ID mismatch (v2) | Application Insights `conversation_id` values (UUID format) do not match Foundry API conversation IDs (`conv_xxx` format). Agent Posture uses telemetry-level aggregation. |
 
 ---
 
@@ -231,27 +303,35 @@ Metrics may take up to 24 hours to appear in Log Analytics after enabling Diagno
 
 ## Troubleshooting
 
-### No agents found in my subscription
+<AccordionGroup>
+  <Accordion title="No agents found in my subscription">
+    - Verify the service principal has **Azure AI User** at the subscription level (not at a resource group or resource level only).
+    - Confirm your AI agents are deployed in AI Services accounts with `kind=AIServices` or `kind=OpenAI`. If they are in a different resource type, contact support.
+    - Check that the **Subscription ID** entered in the integration matches the subscription where your agents are deployed.
+  </Accordion>
 
-- Verify the service principal has **Azure AI User** at the subscription level (not at a resource group or resource level only).
-- Confirm your AI agents are deployed in AI Services accounts with `kind=AIServices` or `kind=OpenAI`. If they are in a different resource type, contact support.
-- Check that the `Subscription ID` entered in the integration matches the subscription where your agents are deployed.
+  <Accordion title="Usage statistics show as zero or unavailable (v2)">
+    - Verify that **Application Insights is connected** to your AI Foundry project (Foundry Portal → Settings → Tracing).
+    - Verify the service principal has **Log Analytics Reader** on the Log Analytics workspace linked to Application Insights (found under App Insights → Settings → Linked workspace).
+    - Traces appear within minutes of the first agent invocation. If no invocations have occurred, usage metrics will correctly show zero.
+  </Accordion>
 
-### Usage statistics show as zero or unavailable
+  <Accordion title="Usage statistics show as zero or unavailable (v1 Classic)">
+    - Classic usage is collected via the Assistants API (Threads and Run Steps) — no Log Analytics configuration is needed.
+    - Verify the service principal has data plane access (`Azure AI User` or `Cognitive Services OpenAI User`) on the Azure OpenAI resource.
+    - If no threads or runs exist for an assistant, usage will correctly show zero.
+  </Accordion>
 
-- Verify that Diagnostic Settings are configured on your Cognitive Services resources and that they send to a Log Analytics workspace.
-- Verify the service principal has **Log Analytics Reader** on the workspace.
-- Metrics take up to 24 hours to appear for newly configured Diagnostic Settings.
+  <Accordion title="Content filters showing as unavailable for some agents">
+    Content filter data is only available for **Azure AI Foundry (v2)** agents. Classic (v1) assistants do not expose this via API — this is an Azure limitation, not a configuration issue.
+  </Accordion>
 
-### Content filters showing as unavailable for some agents
+  <Accordion title="403 Forbidden errors during sync">
+    - The service principal may not have the role assigned at the correct scope. Verify the role assignment is at **subscription** level, not resource group or resource level only.
+    - Role assignments can take a few minutes to propagate after being created.
+  </Accordion>
 
-- Content filter data is only available for **Azure AI Foundry (v2)** agents. Classic (v1) assistants do not expose this via API — this is an Azure limitation, not a configuration issue.
-
-### 403 Forbidden errors during sync
-
-- The service principal may not have the role assigned at the correct scope. Verify the role assignment is at **subscription** level, not resource group or resource level only.
-- Role assignments can take a few minutes to propagate after being created.
-
-### Classic assistants not being discovered
-
-- Classic assistants require the service principal to have data plane access to the Azure OpenAI resource. With `Azure AI User` at subscription level this is covered automatically. With the granular setup, verify that `Cognitive Services OpenAI User` is assigned on the specific OpenAI resource.
+  <Accordion title="Classic assistants not being discovered">
+    Classic assistants require the service principal to have data plane access to the Azure OpenAI resource. With `Azure AI User` at subscription level this is covered automatically. With the granular setup, verify that `Cognitive Services OpenAI User` is assigned on the specific OpenAI resource.
+  </Accordion>
+</AccordionGroup>

@@ -1,9 +1,15 @@
 ---
 title: M365 Copilot & Copilot Studio Integration
-description: "Connect Agent Posture to Microsoft 365 Copilot and Copilot Studio to discover and monitor bots and agents. Covers required Entra ID permissions, Dataverse setup, and troubleshooting."
+icon: "/images/integrations/m365.svg"
 ---
 
-# M365 Copilot & Copilot Studio Integration
+<div style={{display:'flex', alignItems:'center', gap:'14px', padding:'16px 20px', borderRadius:'10px', border:'1px solid #e5e7eb', marginBottom:'28px', background:'#fafafa'}}>
+  <img src="/images/integrations/m365.svg" style={{width:'40px', height:'40px', flexShrink:0}} />
+  <div>
+    <p style={{margin:0, fontWeight:'600', fontSize:'15px'}}>Microsoft Copilot Studio</p>
+    <p style={{margin:0, fontSize:'13px', color:'#6b7280'}}>Copilot Studio bots · M365 Copilot agents</p>
+  </div>
+</div>
 
 Agent Posture connects to **Microsoft 365 Copilot** and **Copilot Studio** using an Azure AD service principal. It discovers bots and agents from three sources:
 
@@ -48,21 +54,11 @@ Token counts, latency, and per-user metrics are not available for Copilot Studio
 
 ## Required permissions
 
-### Core permissions (agent discovery + usage)
+The minimum viable setup requires only the Dataverse configuration below. The Graph permission is needed only if you also want to discover M365 Copilot agents (distinct from Copilot Studio bots).
 
-These permissions are required for the integration to work:
+### Copilot Studio bots (Dataverse) — always required
 
-#### 1. Microsoft Graph application permission — `AgentInstance.Read.All`
-
-Required to discover M365 Copilot agents via the Graph Agent Registry.
-
-- **Permission type:** Application (not delegated)
-- **Admin consent required:** Yes — a Global Administrator or Privileged Role Administrator must grant consent
-- **API:** Microsoft Graph (beta)
-
-#### 2. Dataverse — System Customizer role (as Application User)
-
-Required to discover Copilot Studio bots and read conversation transcripts.
+**Dataverse — System Customizer role (as Application User)**
 
 The service principal must be registered as an **Application User** in your Power Platform environment and granted the **System Customizer** security role. This role provides read access to the `bot`, `botcomponent`, and `conversationtranscript` Dataverse tables that Agent Posture queries.
 
@@ -70,7 +66,7 @@ The service principal must be registered as an **Application User** in your Powe
 **System Administrator** is not required and grants excessive permissions. **System Customizer** is the correct minimum role for this integration.
 </Note>
 
-#### 3. Dataverse URL
+**Dataverse URL**
 
 You must provide the URL of the Dataverse environment where your Copilot Studio bots are deployed. This is not auto-discovered (unless you grant the optional Power Platform Administrator role below).
 
@@ -78,163 +74,182 @@ You must provide the URL of the Dataverse environment where your Copilot Studio 
 
 Example: `https://org1234567.crm4.dynamics.com`
 
----
+### M365 Copilot agents (Graph Agent Registry) — for M365 agent discovery only
+
+**Microsoft Graph application permission — `AgentInstance.Read.All`**
+
+Required only to discover **M365 Copilot agents** via the Graph Agent Registry (beta). If you only need Copilot Studio bot discovery, you can skip this permission — the integration will still work via Dataverse.
+
+| Property | Value |
+|----------|-------|
+| Permission type | Application (not delegated) |
+| Admin consent required | Yes — Global Administrator or Privileged Role Administrator |
+| API | Microsoft Graph (beta) |
+| Graceful degradation | If missing, Agent Posture skips the Agent Registry. Copilot Studio discovery continues unaffected. |
+
+<Note>
+If `AgentInstance.Read.All` is not granted and the integration returns a `403` or `404` from the Graph Agent Registry endpoint, this is expected when skipping M365 agent discovery. Only Dataverse-sourced bots will appear.
+</Note>
 
 ### Optional permissions
 
-#### Power Platform Administrator (Azure AD directory role) — environment auto-discovery
-
-Grants the service principal the ability to enumerate all Power Platform environments automatically, so you do not need to provide the Dataverse URL manually.
-
-**What you gain:** The integration can list all your Power Platform environments and you can select which one to connect.
-**What you lose without it:** You must manually provide the Dataverse URL. The integration works identically — only the setup convenience differs.
+| Permission | Purpose | Notes |
+|------------|---------|-------|
+| **Power Platform Administrator** (Azure AD directory role) | Enumerate all Power Platform environments automatically — removes the need to provide the Dataverse URL manually | Requires a one-time management application registration (see Step 5) |
+| `AppCatalog.Read.All` | Discover organisation-published Teams apps with bots | Disabled by default |
 
 <Warning>
-This role assignment requires an extra one-time registration step (registering the service principal as a Power Platform management application). See [Step 5](#step-5--optional-register-as-power-platform-management-application) below. Without this step, the role assignment alone is not sufficient.
+The Power Platform Administrator role alone is not sufficient for auto-discovery. The service principal must also be registered as a Power Platform management application (Step 5).
 </Warning>
-
-#### `AppCatalog.Read.All` — Teams app catalog agents
-
-Required only if you want to include organisation-published Teams apps with bots in the discovery results. Disabled by default.
 
 ---
 
 ## Step-by-step setup
 
-### Step 1 — Create an app registration
+<Steps>
+  <Step title="Create an app registration">
+    1. Go to [Azure Portal → App registrations](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
+    2. Click **New registration**
+    3. Name: `neuraltrust-agent-posture` (or any name you prefer)
+    4. Supported account types: **Single tenant** (This organization only)
+    5. Click **Register**
+    6. Note the **Application (client) ID** and **Directory (tenant) ID**
+    7. Go to **Certificates & secrets** → **New client secret**, set an expiry, and copy the value immediately
+  </Step>
 
-1. Go to [Azure Portal → App registrations](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
-2. Click **New registration**
-3. Name: `neuraltrust-agent-posture` (or any name you prefer)
-4. Supported account types: **Single tenant** (This organization only)
-5. Click **Register**
-6. Note the **Application (client) ID** and **Directory (tenant) ID**
-7. Go to **Certificates & secrets** → **New client secret**, set an expiry, and copy the value immediately
+  <Step title="Add Microsoft Graph API permissions">
+    1. In the app registration, go to **API permissions** → **Add a permission**
+    2. Select **Microsoft Graph** → **Application permissions**
+    3. Add the following permissions:
 
-### Step 2 — Add Microsoft Graph API permissions
+    | Permission | Purpose | Required |
+    |------------|---------|:--------:|
+    | `AgentInstance.Read.All` | Discover M365 Copilot agents via Agent Registry | For M365 agents only |
+    | `AppCatalog.Read.All` | Discover Teams app catalog agents | Optional |
 
-1. In the app registration, go to **API permissions** → **Add a permission**
-2. Select **Microsoft Graph** → **Application permissions**
-3. Add the following permissions:
+    4. Click **Grant admin consent for [your tenant]** — a Global Administrator must approve
 
-| Permission | Purpose | Required |
-|------------|---------|---------|
-| `AgentInstance.Read.All` | Discover M365 Copilot agents via Agent Registry | **Yes** |
-| `AppCatalog.Read.All` | Discover Teams app catalog agents | Optional |
+    <Tabs>
+      <Tab title="Azure CLI">
+        ```bash
+        APP_ID="<your-app-id>"
+        GRAPH_API="00000003-0000-0000-c000-000000000000"
 
-4. Click **Grant admin consent for [your tenant]** — a Global Administrator must approve
+        # AgentInstance.Read.All
+        az ad app permission add --id $APP_ID --api $GRAPH_API \
+          --api-permissions 799a4732-85b8-4c67-b048-75f0e88a232b=Role
 
-**Via Azure CLI:**
-```bash
-APP_ID="<your-app-id>"
-GRAPH_API="00000003-0000-0000-c000-000000000000"
+        # AppCatalog.Read.All (optional)
+        az ad app permission add --id $APP_ID --api $GRAPH_API \
+          --api-permissions e12dae10-5a57-4817-b79d-dfbec5348930=Role
 
-# AgentInstance.Read.All
-az ad app permission add --id $APP_ID --api $GRAPH_API \
-  --api-permissions 799a4732-85b8-4c67-b048-75f0e88a232b=Role
+        # Grant admin consent
+        az ad app permission admin-consent --id $APP_ID
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
 
-# AppCatalog.Read.All (optional)
-az ad app permission add --id $APP_ID --api $GRAPH_API \
-  --api-permissions e12dae10-5a57-4817-b79d-dfbec5348930=Role
+  <Step title="Register the service principal as a Dataverse Application User">
+    The service principal must be added as an Application User in your Power Platform environment and granted the **System Customizer** security role.
 
-# Grant admin consent
-az ad app permission admin-consent --id $APP_ID
-```
+    <Tabs>
+      <Tab title="Power Platform Admin Center">
+        1. Go to [Power Platform Admin Center](https://admin.powerplatform.microsoft.com)
+        2. Select **Environments** → click your environment → **Settings** → **Users + permissions** → **Application users**
+        3. Click **+ New app user**
+        4. Select your app registration
+        5. Assign the **System Customizer** security role
+        6. Click **Create**
+      </Tab>
+      <Tab title="Admin API">
+        ```bash
+        ENV_ID="<your-environment-id>"
+        APP_ID="<your-app-id>"
+        ADMIN_TOKEN=$(az account get-access-token \
+          --resource "https://service.powerapps.com/" \
+          --query accessToken -o tsv)
 
-### Step 3 — Register the service principal as a Dataverse Application User
+        curl -X POST \
+          "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments/$ENV_ID/addAppUser?api-version=2023-06-01" \
+          -H "Authorization: Bearer $ADMIN_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "{\"servicePrincipalAppId\": \"$APP_ID\"}"
+        ```
 
-The service principal must be added as an Application User in your Power Platform environment and granted the **System Customizer** security role.
+        <Note>
+        The `addAppUser` call creates the Application User record. You still need to assign the **System Customizer** role via the Power Platform Admin Center UI or the Dataverse security role assignment API.
+        </Note>
+      </Tab>
+    </Tabs>
+  </Step>
 
-**Via Power Platform Admin Center:**
-1. Go to [Power Platform Admin Center](https://admin.powerplatform.microsoft.com)
-2. Select **Environments** → click your environment → **Settings** → **Users + permissions** → **Application users**
-3. Click **+ New app user**
-4. Select your app registration
-5. Assign the **System Customizer** security role
-6. Click **Create**
+  <Step title="Find your Dataverse URL">
+    1. Go to [Power Platform Admin Center](https://admin.powerplatform.microsoft.com)
+    2. Select **Environments** → click your environment
+    3. Copy the **Environment URL** (e.g., `https://org1234567.crm4.dynamics.com`)
 
-**Via Power Platform Admin API:**
-```bash
-ENV_ID="<your-environment-id>"
-APP_ID="<your-app-id>"
-ADMIN_TOKEN=$(az account get-access-token \
-  --resource "https://service.powerapps.com/" \
-  --query accessToken -o tsv)
+    You will enter this URL when configuring the integration in Agent Posture.
+  </Step>
 
-# Add service principal as application user
-curl -X POST \
-  "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments/$ENV_ID/addAppUser?api-version=2023-06-01" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"servicePrincipalAppId\": \"$APP_ID\"}"
-```
+  <Step title="(Optional) Register as Power Platform management application">
+    Required **only** if you want environment auto-discovery. This is a one-time operation that must be performed by a Global Admin or Power Platform Admin **user account** (not the service principal itself).
 
-<Note>
-The `addAppUser` call creates the Application User record in Dataverse. You still need to assign the **System Customizer** role to it via the Power Platform Admin Center UI or the Dataverse security role assignment API.
-</Note>
+    <Tabs>
+      <Tab title="Azure CLI">
+        ```bash
+        APP_ID="<your-app-id>"
+        ADMIN_TOKEN=$(az account get-access-token \
+          --resource "https://service.powerapps.com/" \
+          --query accessToken -o tsv)
 
-### Step 4 — Find your Dataverse URL
+        curl -X PUT \
+          "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/adminApplications/$APP_ID?api-version=2020-06-01" \
+          -H "Authorization: Bearer $ADMIN_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{}'
+        ```
+      </Tab>
+      <Tab title="PowerShell">
+        ```powershell
+        $token = Get-AzAccessToken -ResourceUrl "https://service.powerapps.com/"
+        Invoke-RestMethod -Method PUT `
+          -Uri "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/adminApplications/$APP_ID?api-version=2020-06-01" `
+          -Headers @{ Authorization = "Bearer $($token.Token)" } `
+          -Body '{}' -ContentType 'application/json'
+        ```
+      </Tab>
+    </Tabs>
 
-1. Go to [Power Platform Admin Center](https://admin.powerplatform.microsoft.com)
-2. Select **Environments** → click your environment
-3. Copy the **Environment URL** (e.g., `https://org1234567.crm4.dynamics.com`)
+    Then assign the **Power Platform Administrator** directory role to the service principal:
 
-You will enter this URL when configuring the integration in Agent Posture.
+    ```bash
+    SP_OBJECT_ID=$(az ad sp show --id $APP_ID --query "id" -o tsv)
+    PP_ROLE_ID=$(az rest --method GET \
+      --url "https://graph.microsoft.com/v1.0/directoryRoles" \
+      --query "value[?roleTemplateId=='11648597-926c-4cf3-9c36-bcebb0ba8dcc'].id" -o tsv)
 
-### Step 5 — (Optional) Register as Power Platform management application
+    az rest --method POST \
+      --url "https://graph.microsoft.com/v1.0/directoryRoles/$PP_ROLE_ID/members/\$ref" \
+      --body "{\"@odata.id\": \"https://graph.microsoft.com/v1.0/directoryObjects/$SP_OBJECT_ID\"}"
+    ```
 
-Required **only** if you want environment auto-discovery (so you don't have to provide the Dataverse URL manually). This is a one-time operation that must be performed by a Global Admin or Power Platform Admin **user account** (not the service principal itself):
+    <Note>
+    Directory role assignments can take up to 60 minutes to propagate.
+    </Note>
+  </Step>
 
-**Via Azure CLI:**
-```bash
-APP_ID="<your-app-id>"
-ADMIN_TOKEN=$(az account get-access-token \
-  --resource "https://service.powerapps.com/" \
-  --query accessToken -o tsv)
+  <Step title="Configure the integration in Agent Posture">
+    Provide the following when creating the M365 Copilot integration:
 
-curl -X PUT \
-  "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/adminApplications/$APP_ID?api-version=2020-06-01" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{}'
-```
-
-**Via PowerShell:**
-```powershell
-$token = Get-AzAccessToken -ResourceUrl "https://service.powerapps.com/"
-Invoke-RestMethod -Method PUT `
-  -Uri "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/adminApplications/$APP_ID?api-version=2020-06-01" `
-  -Headers @{ Authorization = "Bearer $($token.Token)" } `
-  -Body '{}' -ContentType 'application/json'
-```
-
-Then assign the **Power Platform Administrator** directory role to the service principal:
-
-```bash
-SP_OBJECT_ID=$(az ad sp show --id $APP_ID --query "id" -o tsv)
-PP_ROLE_ID=$(az rest --method GET \
-  --url "https://graph.microsoft.com/v1.0/directoryRoles" \
-  --query "value[?roleTemplateId=='11648597-926c-4cf3-9c36-bcebb0ba8dcc'].id" -o tsv)
-
-az rest --method POST \
-  --url "https://graph.microsoft.com/v1.0/directoryRoles/$PP_ROLE_ID/members/\$ref" \
-  --body "{\"@odata.id\": \"https://graph.microsoft.com/v1.0/directoryObjects/$SP_OBJECT_ID\"}"
-```
-
-<Note>
-Directory role assignments can take up to 60 minutes to propagate.
-</Note>
-
-### Step 6 — Configure the integration in Agent Posture
-
-Provide the following when creating the M365 Copilot integration:
-
-| Field | Description | Where to find it |
-|-------|-------------|-----------------|
-| **Tenant ID** | Azure AD tenant ID | Azure Portal → Microsoft Entra ID → Overview → Directory (tenant) ID |
-| **Client ID** | App registration client ID | App registration → Application (client) ID |
-| **Client Secret** | App registration secret | Copied in Step 1 |
-| **Dataverse URL** | Power Platform environment URL | Power Platform Admin Center → Environments → Environment URL |
+    | Field | Description | Where to find it |
+    |-------|-------------|-----------------|
+    | **Tenant ID** | Azure AD tenant ID | Azure Portal → Microsoft Entra ID → Overview → Directory (tenant) ID |
+    | **Client ID** | App registration client ID | App registration → Application (client) ID |
+    | **Client Secret** | App registration secret | Copied in Step 1 |
+    | **Dataverse URL** | Power Platform environment URL | Power Platform Admin Center → Environments → Environment URL |
+  </Step>
+</Steps>
 
 ---
 
@@ -257,6 +272,7 @@ For each Copilot Studio bot, Agent Posture evaluates the following security cont
 | Limitation | Details |
 |------------|---------|
 | No token or latency metrics | Microsoft does not expose per-request token counts or latency for Copilot Studio bots via Dataverse or Graph. |
+| Usage is all-time only | Conversation counts are aggregated across all time (period = `all-time`). Day, week, month, or year breakdowns are not currently available for this integration. |
 | No per-topic usage | Which topics or actions were invoked per conversation is not available via the Dataverse API. |
 | Graph Agent Registry is in beta | The `AgentInstance.Read.All` permission and the `/beta/agentRegistry` endpoint are subject to change by Microsoft. |
 | M365 Copilot licenses required | The Graph Agent Registry endpoint requires M365 Copilot licenses to be active in the tenant. |
@@ -275,30 +291,31 @@ For each Copilot Studio bot, Agent Posture evaluates the following security cont
 
 ## Troubleshooting
 
-### `403 Forbidden` on Power Platform environments endpoint
+<AccordionGroup>
+  <Accordion title="403 Forbidden on Power Platform environments endpoint">
+    - The service principal has not been registered as a Power Platform management application (Step 5). This is required in addition to the directory role assignment.
+    - The Power Platform Administrator directory role assignment may not have propagated yet — wait up to 60 minutes.
+    - This error only affects environment auto-discovery. If you provide the Dataverse URL manually, the integration works without this role.
+  </Accordion>
 
-→ The service principal has not been registered as a Power Platform management application (Step 5). This is required in addition to the directory role assignment.
-→ The Power Platform Administrator directory role assignment may not have propagated yet — wait up to 60 minutes.
-→ This error only affects environment auto-discovery. If you provide the Dataverse URL manually, the integration works without this role.
+  <Accordion title="Copilot Studio bots not appearing">
+    - Verify the Application User exists in your Dataverse environment: Power Platform Admin Center → Environment → Settings → Users + permissions → Application users.
+    - Verify the Application User has the **System Customizer** security role.
+    - Verify the `dataverse_url` provided is correct and corresponds to the environment where your bots are deployed.
+  </Accordion>
 
-### Copilot Studio bots not appearing
+  <Accordion title="Usage metrics showing zero for all bots">
+    - Verify the Application User has access to the `conversationtranscript` entity — this is covered by the **System Customizer** role.
+    - Bots must have actual user conversations to generate transcript records. Bots with no usage correctly show zero.
+  </Accordion>
 
-→ Verify the Application User exists in your Dataverse environment: Power Platform Admin Center → Environment → Settings → Users + permissions → Application users.
-→ Verify the Application User has the **System Customizer** security role.
-→ Verify the `dataverse_url` provided is correct and corresponds to the environment where your bots are deployed.
-→ Verify `admin consent` was granted for the `AgentInstance.Read.All` permission.
+  <Accordion title="401 Unauthorized on Dataverse API">
+    - The client secret may have expired. Generate a new secret and update the integration.
+    - The Application User may have been disabled in Dataverse. Re-enable it in the Power Platform Admin Center.
+  </Accordion>
 
-### Usage metrics showing zero for all bots
-
-→ Verify the Application User has access to the `conversationtranscript` entity — this is covered by the **System Customizer** role.
-→ Bots must have actual user conversations to generate transcript records. Bots with no usage correctly show zero.
-
-### `401 Unauthorized` on Dataverse API
-
-→ The client secret may have expired. Generate a new secret and update the integration.
-→ The Application User may have been disabled in Dataverse. Re-enable it in the Power Platform Admin Center.
-
-### Duplicate agents appearing
-
-→ If you see more agents than expected, the Dataverse connection may not be working (missing URL, inaccessible, or Application User misconfigured). Without a working Dataverse connection, Agent Posture cannot filter duplicate entries from the Agent Registry.
-→ Verify the Dataverse URL and Application User configuration.
+  <Accordion title="Duplicate agents appearing">
+    - If you see more agents than expected, the Dataverse connection may not be working (missing URL, inaccessible, or Application User misconfigured). Without a working Dataverse connection, Agent Posture cannot filter duplicate entries from the Agent Registry.
+    - Verify the Dataverse URL and Application User configuration.
+  </Accordion>
+</AccordionGroup>
