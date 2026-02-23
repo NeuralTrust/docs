@@ -1,0 +1,257 @@
+---
+title: Azure Integration
+description: "Connect Agent Posture to your Azure environment to discover and monitor Azure AI Foundry agents (v2) and Azure OpenAI Classic assistants (v1). Covers required RBAC roles, telemetry setup, and troubleshooting."
+---
+
+# Azure Integration
+
+Agent Posture supports two types of Azure AI agents under a single integration:
+
+- **Azure AI Foundry Agents (v2)** — agents built with the Azure AI Foundry Agents SDK, hosted in AI Services accounts
+- **Azure OpenAI Classic Assistants (v1)** — assistants built with the Azure OpenAI Assistants API
+
+A single integration discovers both types automatically from your subscription.
+
+---
+
+## What Agent Posture discovers
+
+### Azure AI Foundry agents (v2)
+
+| Data | Source |
+|------|--------|
+| Agent name, description, status | Azure AI Foundry Agents API |
+| Model, instructions, tools | Azure AI Foundry Agents API |
+| Knowledge bases (vector stores) | Azure AI Foundry Agents API |
+| Content filters / RAI policies | Cognitive Services Management API |
+| Guardrails configuration | Derived from RAI policies |
+| Usage metrics (runs, tokens, latency, errors) | Log Analytics (requires telemetry setup) |
+
+### Azure OpenAI Classic assistants (v1)
+
+| Data | Source |
+|------|--------|
+| Assistant name, description, status | Azure OpenAI Assistants API |
+| Model, instructions, tools | Azure OpenAI Assistants API |
+| Vector stores (knowledge bases) | Azure OpenAI Assistants API |
+| Usage metrics (runs, tokens, latency) | Azure Monitor / Threads & Runs API |
+
+<Note>
+Content filters and guardrails are not exposed via the Azure OpenAI Assistants (v1) API. These fields will show as unavailable for Classic assistants.
+</Note>
+
+---
+
+## Required permissions
+
+### Simple setup — one role (recommended)
+
+Assign **Azure AI User** to the service principal at the **subscription level**:
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Azure AI User` | Subscription | Discover Cognitive Services accounts and projects (management plane), list agents, models, datasets, and vector stores (data plane), read RAI policies and content filters |
+
+**Why this role:** Azure AI User includes both `Microsoft.CognitiveServices/*/read` (management plane — enumerate accounts, read RAI policies, read diagnostic settings) and `Microsoft.CognitiveServices/*` (data plane — access agents, models, datasets). Assigning it at subscription level means it applies to all AI Services resources in the subscription automatically.
+
+<Warning>
+**Azure AI Developer** is a different role focused on ML Workspaces. It does **not** include `Microsoft.CognitiveServices/*/read` and cannot discover Cognitive Services accounts. Do not use it for this integration.
+</Warning>
+
+### Granular setup — two roles (least-privilege alternative)
+
+If your security policy requires strictly minimal permissions, you can use two more targeted roles instead:
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Reader` | Subscription | Enumerate Cognitive Services accounts, read account metadata, read RAI policies, read diagnostic settings |
+| `Cognitive Services OpenAI User` | Each AI Services / OpenAI resource | Access the data plane to list agents, models, assistants, vector stores |
+
+<Note>
+With the granular approach, you must assign `Cognitive Services OpenAI User` on **each** AI Services resource individually. Using Azure AI User at subscription level is simpler and equally secure for read-only access.
+</Note>
+
+### Optional — telemetry (usage metrics)
+
+To enable usage metrics (run counts, token consumption, latency, error rates), Agent Posture queries Log Analytics. This requires:
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Log Analytics Reader` | Log Analytics Workspace | Query telemetry data from Diagnostic Logs |
+
+**What you lose without this:** Usage statistics will be unavailable. Agent discovery, security posture assessment, and content filter visibility are not affected.
+
+---
+
+## Prerequisites
+
+Before configuring the integration, ensure you have:
+
+- An Azure subscription containing AI Services or Azure OpenAI resources
+- Permission to create app registrations and assign RBAC roles (User Access Administrator or Owner on the subscription)
+- For telemetry: a Log Analytics workspace with Diagnostic Settings enabled on your Cognitive Services resources (see [Enabling telemetry](#enabling-telemetry))
+
+---
+
+## Step-by-step setup
+
+### Step 1 — Create a service principal
+
+**Via Azure CLI:**
+```bash
+az ad sp create-for-rbac --name "neuraltrust-agent-posture" --skip-assignment
+```
+
+Save the output — you will need `appId` (client ID), `password` (client secret), and `tenant` (tenant ID).
+
+**Via Azure Portal:**
+1. Go to **Microsoft Entra ID** → **App registrations** → **New registration**
+2. Name the app (e.g., `neuraltrust-agent-posture`)
+3. Select **Single tenant**
+4. Click **Register**
+5. Go to **Certificates & secrets** → **New client secret**, set an expiry, and copy the secret value immediately
+
+### Step 2 — Assign the Azure AI User role
+
+**Via Azure CLI (recommended):**
+```bash
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+APP_ID="<your-app-id>"
+
+az role assignment create \
+  --assignee $APP_ID \
+  --role "Azure AI User" \
+  --scope /subscriptions/$SUBSCRIPTION_ID
+```
+
+**Via Azure Portal:**
+1. Go to **Subscriptions** → select your subscription → **Access control (IAM)**
+2. Click **+ Add** → **Add role assignment**
+3. Search for and select **Azure AI User**
+4. Assign it to your service principal
+5. Click **Save**
+
+### Step 3 — (Optional) Assign Log Analytics Reader for telemetry
+
+```bash
+WORKSPACE_ID=$(az monitor log-analytics workspace show \
+  --resource-group <resource-group> \
+  --workspace-name <workspace-name> \
+  --query id -o tsv)
+
+az role assignment create \
+  --assignee $APP_ID \
+  --role "Log Analytics Reader" \
+  --scope $WORKSPACE_ID
+```
+
+### Step 4 — Configure the integration in Agent Posture
+
+Provide the following credentials when creating the Azure integration:
+
+| Field | Where to find it |
+|-------|-----------------|
+| **Tenant ID** | Azure Portal → Microsoft Entra ID → Overview → Directory (tenant) ID |
+| **Client ID** | Azure Portal → App registrations → your app → Application (client) ID |
+| **Client Secret** | Copied in Step 1 |
+| **Subscription ID** | Azure Portal → Subscriptions → your subscription → Subscription ID |
+
+---
+
+## Enabling telemetry
+
+Agent Posture retrieves usage metrics from **Log Analytics** via Azure Diagnostic Settings. To enable this:
+
+### Via Azure Portal
+
+1. Go to your **Cognitive Services** resource → **Monitoring** → **Diagnostic settings**
+2. Click **+ Add diagnostic setting**
+3. Configure:
+   - **Name:** `neuraltrust-diagnostics`
+   - **Logs:** Select `Audit` and `RequestResponse`
+   - **Metrics:** Select `AllMetrics`
+   - **Destination:** Send to **Log Analytics workspace**
+4. Click **Save**
+
+### Via Azure CLI
+
+```bash
+RESOURCE_ID="/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.CognitiveServices/accounts/<account-name>"
+WORKSPACE_ID="/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>"
+
+az monitor diagnostic-settings create \
+  --name "neuraltrust-diagnostics" \
+  --resource $RESOURCE_ID \
+  --workspace $WORKSPACE_ID \
+  --logs '[{"category":"Audit","enabled":true},{"category":"RequestResponse","enabled":true}]' \
+  --metrics '[{"category":"AllMetrics","enabled":true}]'
+```
+
+<Note>
+Metrics may take up to 24 hours to appear in Log Analytics after enabling Diagnostic Settings for the first time.
+</Note>
+
+---
+
+## Feature availability by permission level
+
+| Feature | Azure AI User only | + Log Analytics Reader |
+|---------|-------------------|----------------------|
+| Agent discovery (v2 + v1) | ✅ | ✅ |
+| Model discovery | ✅ | ✅ |
+| Dataset / vector store discovery | ✅ | ✅ |
+| Security posture assessment | ✅ | ✅ |
+| Tools and instructions | ✅ | ✅ |
+| Knowledge bases | ✅ | ✅ |
+| Content filters / RAI policies (v2 only) | ✅ | ✅ |
+| Usage statistics (runs, tokens, latency) | ❌ | ✅ |
+
+---
+
+## Known limitations
+
+| Limitation | Details |
+|------------|---------|
+| No conversation listing | The Azure AI Foundry API does not expose a `conversations.list()` endpoint. Agent Posture collects aggregate metrics but cannot enumerate individual conversations. |
+| No tool call telemetry | Azure telemetry logs all operations as `chat`. Individual tool invocations (code interpreter, file search, function calls) are not tracked as separate events. |
+| Content filters unavailable for v1 | The Azure OpenAI Assistants (v1) API does not expose content filter or RAI policy configuration. These fields show as unavailable for Classic assistants. |
+| Metrics delay | Log Analytics data for new agents may take up to 24 hours to appear. |
+| Conversation ID mismatch | Telemetry `conversation_id` values (UUID format) do not match API conversation IDs (`conv_xxx` format). Agent Posture uses telemetry-level aggregation. |
+
+---
+
+## Security considerations
+
+- The service principal has **read-only** access. Agent Posture cannot modify, delete, or create any Azure resources.
+- `Azure AI User` at subscription level includes `listkeys/action` (the ability to read API keys for Cognitive Services accounts). If your policy prohibits this, use the granular setup (Reader + Cognitive Services OpenAI User), which does not include key listing.
+- Client secrets should be rotated regularly. Update the integration in Agent Posture when you rotate the secret.
+- All credentials are encrypted at rest.
+
+---
+
+## Troubleshooting
+
+### No agents found in my subscription
+
+- Verify the service principal has **Azure AI User** at the subscription level (not at a resource group or resource level only).
+- Confirm your AI agents are deployed in AI Services accounts with `kind=AIServices` or `kind=OpenAI`. If they are in a different resource type, contact support.
+- Check that the `Subscription ID` entered in the integration matches the subscription where your agents are deployed.
+
+### Usage statistics show as zero or unavailable
+
+- Verify that Diagnostic Settings are configured on your Cognitive Services resources and that they send to a Log Analytics workspace.
+- Verify the service principal has **Log Analytics Reader** on the workspace.
+- Metrics take up to 24 hours to appear for newly configured Diagnostic Settings.
+
+### Content filters showing as unavailable for some agents
+
+- Content filter data is only available for **Azure AI Foundry (v2)** agents. Classic (v1) assistants do not expose this via API — this is an Azure limitation, not a configuration issue.
+
+### 403 Forbidden errors during sync
+
+- The service principal may not have the role assigned at the correct scope. Verify the role assignment is at **subscription** level, not resource group or resource level only.
+- Role assignments can take a few minutes to propagate after being created.
+
+### Classic assistants not being discovered
+
+- Classic assistants require the service principal to have data plane access to the Azure OpenAI resource. With `Azure AI User` at subscription level this is covered automatically. With the granular setup, verify that `Cognitive Services OpenAI User` is assigned on the specific OpenAI resource.
