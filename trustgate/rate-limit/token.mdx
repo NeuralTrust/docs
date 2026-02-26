@@ -1,148 +1,195 @@
 ---
-title: By Tokens
+title: "By Tokens"
+description: "Rate limit AI API requests based on actual token consumption using a sliding window counter"
 ---
 
-TrustGate implements a token bucket-based rate limiting system specifically designed for AI model interactions. This system manages both the number of requests and the token usage per API key.
+The Token Rate Limiter plugin controls AI API usage by tracking the actual number of tokens consumed per client within a configurable time window. Unlike request-based rate limiting, this approach accounts for the real cost of each interaction — a short prompt and a 10,000-token response are treated proportionally.
 
-## Overview
+## How It Works
 
-The token rate limiter operates on two dimensions:
-1. **Token Usage**: Controls the total number of tokens consumed
-2. **Request Count**: Limits the number of requests per minute
+The plugin operates across two stages:
+
+1. **Pre-request**: Checks whether the client has already exhausted their token budget for the current window. If the limit is exceeded, the request is rejected with `429 Too Many Requests` before it reaches the upstream.
+2. **Post-response**: After a successful upstream response, extracts the actual token usage (from both streaming and non-streaming responses) and records it against the client's counter.
+
+Token counting is based on the **actual usage reported by the upstream provider** (e.g., OpenAI, Anthropic), not estimates. The plugin uses a provider-aware response decoder to extract `total_tokens` from the response.
 
 ## Configuration
 
 ```json
 {
-  "required_plugins": [
+  "name": "token_rate_limiter",
+  "enabled": true,
+  "stage": "pre_request",
+  "settings": {
+    "identifier_header": "X-API-Key",
+    "window": {
+      "unit": "hour",
+      "max": 100000
+    }
+  }
+}
+```
+
+The plugin must be configured in both `pre_request` and `post_response` stages:
+
+```json
+{
+  "plugin_chain": [
     {
       "name": "token_rate_limiter",
       "enabled": true,
+      "stage": "pre_request",
       "settings": {
-        "tokens_per_request": 1000,    // Default tokens reserved per request
-        "tokens_per_minute": 10000,    // Token replenishment rate
-        "bucket_size": 50000,         // Maximum token capacity
-        "requests_per_minute": 60     // Maximum requests per minute
+        "identifier_header": "X-API-Key",
+        "window": {
+          "unit": "hour",
+          "max": 100000
+        }
+      }
+    },
+    {
+      "name": "token_rate_limiter",
+      "enabled": true,
+      "stage": "post_response",
+      "settings": {
+        "identifier_header": "X-API-Key",
+        "window": {
+          "unit": "hour",
+          "max": 100000
+        }
       }
     }
   ]
 }
 ```
 
-### Configuration Parameters
+## Settings
 
-- **tokens_per_request**: Default number of tokens reserved for each request when actual usage cannot be determined
-- **tokens_per_minute**: Rate at which tokens are replenished (per minute)
-- **bucket_size**: Maximum number of tokens that can be accumulated
-- **requests_per_minute**: Maximum number of requests allowed per minute
+| Parameter | Type | Required | Description | Default |
+|-----------|------|----------|-------------|---------|
+| `identifier_header` | string | No | HTTP header used to identify the client | Falls back to client IP |
+| `window.unit` | string | Yes | Time window unit: `second`, `minute`, `hour`, or `day` | `minute` |
+| `window.max` | integer | Yes | Maximum tokens allowed within the window | — |
 
-## How It Works
+### Client Identification
 
-### Token Bucket Algorithm
+The plugin identifies clients using the following priority:
 
-1. **Pre-Request Phase**:
-- Checks if enough tokens are available in the bucket
-- Reserves tokens for the request
-- Verifies request count limits
-- For streaming requests, deducts tokens immediately
-
-2. **Post-Response Phase**:
-- Calculates actual token usage from the response
-- Updates the bucket with actual consumption
-- Updates request counts
-- Adds rate limit headers to the response
-
-### Token Replenishment
-
-- Tokens are replenished automatically based on the `tokens_per_minute` rate
-- Replenishment occurs when checking the bucket state
-- Maximum tokens cannot exceed the `bucket_size`
-- Request counts reset every minute
+1. **Header value** — if `identifier_header` is set and the header is present in the request
+2. **Client IP** — falls back to the request's source IP
+3. **Global** — if neither is available, a shared `_global` counter is used
 
 ## Response Headers
 
-The plugin adds the following headers to track usage:
+Every response includes rate limit headers:
 
-```
-X-Ratelimit-Limit-Tokens: [maximum tokens]
-X-Ratelimit-Remaining-Tokens: [tokens remaining]
-X-Ratelimit-Reset-Tokens: [seconds until next refill]
-X-Ratelimit-Limit-Requests: [maximum requests per minute]
-X-Ratelimit-Remaining-Requests: [requests remaining]
-X-Ratelimit-Reset-Requests: [seconds until request count reset]
-X-Tokens-Consumed: [tokens used in this request]
-```
+| Header | Example | Description |
+|--------|---------|-------------|
+| `X-Ratelimit-Limit-Tokens` | `100000` | Maximum tokens allowed in the window |
+| `X-Ratelimit-Remaining-Tokens` | `87500` | Tokens remaining in the current window |
+| `X-Ratelimit-Reset-Tokens` | `1800s` | Seconds until the window resets |
+| `X-Tokens-Consumed` | `1250` | Tokens consumed by this specific request (post-response only) |
 
 ## Rate Limit Response
 
-When limits are exceeded, the plugin returns a 429 status code with details:
+When the token limit is exceeded, the plugin returns a `429 Too Many Requests` error:
 
 ```json
 {
-  "error": "Rate limit exceeded. Not enough tokens available. Required: 1000, Current: 500",
-  "retry_after": "30s"
+  "error": "Token rate limit exceeded. Consumed: 100500, Limit: 100000"
 }
 ```
 
+The response includes the rate limit headers so clients can determine when to retry.
+
 ## Streaming Support
 
-The plugin provides special handling for streaming requests:
-- Tokens are reserved and deducted immediately at request time
-- Token usage is tracked throughout the stream
-- Final token consumption is calculated from the accumulated usage
+The plugin handles both streaming and non-streaming upstream responses:
+
+- **Non-streaming**: Decodes the full response body and extracts `usage.total_tokens` from the provider's response format.
+- **Streaming (SSE)**: Scans the stream chunks from the end to find the final chunk containing usage data, which most providers include in the last `data:` event.
 
 ## Implementation Details
 
-### Storage
+### Sliding Window Counter
 
-- Uses Redis for persistent storage
-- Bucket state includes:
-- Current token count
-- Remaining requests
-- Last refill timestamp
-- 24-hour TTL on bucket data
-- Thread-safe operations with mutex locks
+The plugin uses a **fixed window counter** backed by Redis:
+
+- A Redis key stores the cumulative token count for each client+window combination.
+- On the first write within a window, the key is created with a TTL equal to the window duration.
+- The key naturally expires when the window elapses, resetting the counter.
+- All counter operations use an atomic Lua script to prevent race conditions.
 
 ### Key Format
 
 ```
-token_bucket:{plugin_id}:{api_key}
+trl:{plugin_id}:{identifier}
 ```
+
+Where `identifier` is resolved from the header, client IP, or `_global`.
+
+### Provider Support
+
+Token counting works with any provider supported by TrustGate's response adapter layer. The plugin automatically detects the provider format from the request context and uses the appropriate decoder to extract token usage.
 
 ## Best Practices
 
-1. **Token Configuration**
-- Set `tokens_per_request` based on average request size
-- Configure `bucket_size` to handle burst traffic
-- Adjust `tokens_per_minute` based on subscription tiers
+1. **Window Selection**
+   - Use `hour` or `day` for cost-control scenarios
+   - Use `minute` or `second` for burst protection
+   - Match the window to your billing granularity
 
-2. **Request Limits**
-- Set `requests_per_minute` to prevent rapid small requests
-- Consider both token and request limits for complete protection
+2. **Setting Limits**
+   - Start with your upstream provider's rate limits as a ceiling
+   - Set per-client limits based on subscription tiers using `identifier_header`
+   - Leave headroom for bursts — the counter is cumulative, not averaged
 
-3. **Monitoring**
-- Track token consumption patterns using response headers
-- Monitor rate limit responses for capacity planning
-- Implement exponential backoff in clients
+3. **Client Identification**
+   - Use `identifier_header` with API keys or tenant IDs for multi-tenant setups
+   - Rely on IP-based identification only for simple deployments
 
-## Example Usage
+4. **Monitoring**
+   - Track `X-Tokens-Consumed` headers to understand usage patterns
+   - Monitor 429 responses for capacity planning
+   - Implement exponential backoff in clients using `X-Ratelimit-Reset-Tokens`
+
+## Example
+
+### Setting up per-API-key limits
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id} \
+curl -X POST http://localhost:8080/api/v1/gateways/{gateway-id}/rules \
   -H "Content-Type: application/json" \
   -d '{
-    "required_plugins": [
+    "path": "/v1/chat/completions",
+    "plugin_chain": [
       {
         "name": "token_rate_limiter",
         "enabled": true,
+        "stage": "pre_request",
         "settings": {
-          "tokens_per_request": 1000,
-          "tokens_per_minute": 10000,
-          "bucket_size": 50000,
-          "requests_per_minute": 60
+          "identifier_header": "X-API-Key",
+          "window": {
+            "unit": "hour",
+            "max": 50000
+          }
+        }
+      },
+      {
+        "name": "token_rate_limiter",
+        "enabled": true,
+        "stage": "post_response",
+        "settings": {
+          "identifier_header": "X-API-Key",
+          "window": {
+            "unit": "hour",
+            "max": 50000
+          }
         }
       }
     ]
   }'
 ```
 
+This limits each API key to 50,000 tokens per hour. When the limit is reached, subsequent requests receive a `429` response until the window expires.
