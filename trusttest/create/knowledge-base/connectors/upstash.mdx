@@ -20,28 +20,33 @@ import os
 
 from dotenv import load_dotenv
 
-from trusttest.catalog import RagPoisoningScenario
 from trusttest.knowledge_base.upstash import UpstashKnowledgeBase
+from trusttest.probes.rag import RAGProbe, MaliciousQuestion
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import RAGPoisoningEvaluator
 from trusttest.targets.testing import DummyTarget
-from trusttest.probes.rag import MaliciousQuestion
 
 load_dotenv(override=True)
 
-# Initialize the knowledge base with your Upstash Vector credentials
 knowledge_base = UpstashKnowledgeBase(
     url=os.getenv("UPSTASH_VECTOR_REST_URL"),
-    token=os.getenv("UPSTASH_VECTOR_REST_TOKEN")
+    token=os.getenv("UPSTASH_VECTOR_REST_TOKEN"),
 )
 
-# Create and run an adversarial RAG test scenario
-rag_test = RagPoisoningScenario(
-    model=DummyTarget(),
+probe = RAGProbe(
+    target=DummyTarget(),
     knowledge_base=knowledge_base,
     num_questions=10,
     question_types=[MaliciousQuestion.SPECIAL_TOKEN, MaliciousQuestion.HYPOTHETICAL],
 )
 
-test_set = rag_test.probe.get_test_set()
-results = rag_test.eval.evaluate(test_set)
+scenario = EvaluationScenario(
+    name="RAG Poisoning",
+    evaluator_suite=EvaluatorSuite(evaluators=[RAGPoisoningEvaluator()], criteria="any_fail"),
+)
+
+test_set = probe.get_test_set()
+results = scenario.evaluate(test_set)
 results.display_summary()
 ```
