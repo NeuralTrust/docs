@@ -41,44 +41,59 @@ knowledge_base = InMemoryKnowledgeBase(documents=documents)
 
 ## Generate Functional Questions
 
-Now we can generate questions for each topic. In this code we use the catalog to generate a `RagFunctionalScenario`,
-we can create our own `EvaluationScenario` too, but `RagFunctionalScenario` has already the right configuration for the functional evaluation.
+Now we can generate questions for each topic. We use `RAGProbe` together with `EvaluationScenario` and `AnswerRelevanceEvaluator` for functional evaluation.
 
 In this configuration we will generate 2 questions, one for each topic. And we will use the `BenignQuestion.SIMPLE` type,
 which is a simple question that the LLM should be able to answer.
 
 ```python
-from trusttest.catalog import RagFunctionalScenario
+from trusttest.probes.rag import RAGProbe, BenignQuestion
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import AnswerRelevanceEvaluator
 
 knowledge_base = InMemoryKnowledgeBase(documents=documents)
 
-rag_scenario = RagFunctionalScenario(
+probe = RAGProbe(
     target=DummyTarget(),
     knowledge_base=knowledge_base,
     num_questions=2,
-    question_types=[BenignQuestion.SIMPLE]
+    question_types=[BenignQuestion.SIMPLE],
 )
-````
 
-Then we only need to creates the `test_set` and check the results.
+scenario = EvaluationScenario(
+    name="RAG Functional",
+    evaluator_suite=EvaluatorSuite(evaluators=[AnswerRelevanceEvaluator()], criteria="any_fail"),
+)
+```
+
+Then we only need to create the `test_set` and check the results.
 
 ```python
-test_set = rag_test.probe.get_test_set()
-results = rag_test.eval.evaluate(test_set)
+test_set = probe.get_test_set()
+results = scenario.evaluate(test_set)
 results.display()
 ```
 
 ## Generate RAG Poisoning Tests
 
 We can also automatically generate poisoning tests based to attack specific information domains.
-We just need to change the `question_types` to `MaliciousQuestion` and the scenario to `RagPoisoningScenario`.
+We just need to change the `question_types` to `MaliciousQuestion` and use `RAGPoisoningEvaluator`.
 
 ```python
-rag_scenario = RagPoisoningScenario(
+from trusttest.probes.rag import RAGProbe, MaliciousQuestion
+from trusttest.evaluators import RAGPoisoningEvaluator
+
+probe = RAGProbe(
     target=DummyTarget(),
     knowledge_base=knowledge_base,
     num_questions=2,
-    question_types=[MaliciousQuestion.SPECIAL_TOKEN]
+    question_types=[MaliciousQuestion.SPECIAL_TOKEN],
+)
+
+scenario = EvaluationScenario(
+    name="RAG Poisoning",
+    evaluator_suite=EvaluatorSuite(evaluators=[RAGPoisoningEvaluator()], criteria="any_fail"),
 )
 ```
 
@@ -89,10 +104,12 @@ rag_scenario = RagPoisoningScenario(
 ```python Functional tests [expandable]
 from dotenv import load_dotenv
 
-from trusttest.catalog import RagFunctionalScenario
 from trusttest.knowledge_base import Document, InMemoryKnowledgeBase
 from trusttest.targets.testing import DummyTarget
-from trusttest.probes.rag import BenignQuestion
+from trusttest.probes.rag import RAGProbe, BenignQuestion
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import AnswerRelevanceEvaluator
 
 load_dotenv(override=True)
 
@@ -120,25 +137,32 @@ documents = [
 
 knowledge_base = InMemoryKnowledgeBase(documents=documents)
 
-rag_test = RagFunctionalScenario(
+probe = RAGProbe(
     target=DummyTarget(),
     knowledge_base=knowledge_base,
     num_questions=2,
-    question_types=[BenignQuestion.SIMPLE]
+    question_types=[BenignQuestion.SIMPLE],
 )
 
-test_set = rag_test.probe.get_test_set()
-results = rag_test.eval.evaluate(test_set)
+scenario = EvaluationScenario(
+    name="RAG Functional",
+    evaluator_suite=EvaluatorSuite(evaluators=[AnswerRelevanceEvaluator()], criteria="any_fail"),
+)
+
+test_set = probe.get_test_set()
+results = scenario.evaluate(test_set)
 results.display()
 ```
 
 ```python Adversarial tests [expandable]
 from dotenv import load_dotenv
 
-from trusttest.catalog import RagPoisoningScenario
 from trusttest.knowledge_base import Document, InMemoryKnowledgeBase
 from trusttest.targets.testing import DummyTarget
-from trusttest.probes.rag import MaliciousQuestion
+from trusttest.probes.rag import RAGProbe, MaliciousQuestion
+from trusttest.evaluation_scenarios import EvaluationScenario
+from trusttest.evaluator_suite import EvaluatorSuite
+from trusttest.evaluators import RAGPoisoningEvaluator
 
 load_dotenv(override=True)
 
@@ -166,15 +190,20 @@ documents = [
 
 knowledge_base = InMemoryKnowledgeBase(documents=documents)
 
-rag_test = RagPoisoningScenario(
+probe = RAGProbe(
     target=DummyTarget(),
     knowledge_base=knowledge_base,
     num_questions=2,
-    question_types=[MaliciousQuestion.SPECIAL_TOKEN]
+    question_types=[MaliciousQuestion.SPECIAL_TOKEN],
 )
 
-test_set = rag_test.probe.get_test_set()
-results = rag_test.eval.evaluate(test_set)
+scenario = EvaluationScenario(
+    name="RAG Poisoning",
+    evaluator_suite=EvaluatorSuite(evaluators=[RAGPoisoningEvaluator()], criteria="any_fail"),
+)
+
+test_set = probe.get_test_set()
+results = scenario.evaluate(test_set)
 results.display()
 ```
 </CodeGroup>

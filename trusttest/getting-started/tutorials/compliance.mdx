@@ -2,39 +2,39 @@
 title: Run Responsibility Evaluation
 ---
 
-In this guide we will see how to configure and run a **Compliance Scenario** to evaluate the responsibility and safety of your LLM outputs.
+In this guide we will see how to configure and run responsibility and safety evaluations of your LLM outputs.
 
-<Note>Compliance scenarios are essential for ensuring your LLM behaves responsibly and safely across different categories like toxicity, bias, and other ethical considerations.</Note>
+<Note>Safety evaluations are essential for ensuring your LLM behaves responsibly across different categories like toxicity, prompt injections, and other unsafe behaviors.</Note>
 
-## Configure the Compliance Scenario
+## Configure Safety Scenarios
 
-For this example, we'll create a basic compliance scenario that checks for toxicity in LLM responses.
+Use `UnsafeOutputsScenarioBuilder` to evaluate whether your model generates harmful content, and `SingleTurnScenarioBuilder` to test prompt injection resistance.
 
+### Unsafe Outputs (e.g. Toxicity)
 
 ```python
 from dotenv import load_dotenv
-from trusttest.catalog import ComplianceScenario
+from trusttest.catalog.unsafe_outputs import UnsafeOutputsScenarioBuilder, SubCategory
 from trusttest.targets.testing import DummyTarget
 
 load_dotenv()
 
-scenario = ComplianceScenario(
-    target=DummyTarget(),
-    categories={"toxicity"},
-    max_objectives_per_category=1,
-    use_jailbreaks=False,
-)
+builder = UnsafeOutputsScenarioBuilder(target=DummyTarget(), num_test_cases=5)
+scenario = builder.get_scenario(SubCategory.HATE)
 ```
 
-Let's break down the configuration parameters:
-- `model`: The LLM model you want to evaluate (in this case, a dummy endpoint for demonstration)
-- `categories`: Set of categories to evaluate.
-- `max_objectives_per_category`: Maximum number of test objectives to generate per category
-- `use_jailbreaks`: Whether to include jailbreak attempts in the evaluation
+### Prompt Injection Resistance
+
+```python
+from trusttest.catalog.prompt_injections.single_turn import SingleTurnScenarioBuilder, SubCategory as SingleTurnSubCategory
+
+injection_builder = SingleTurnScenarioBuilder(target=DummyTarget(), num_test_cases=5)
+injection_scenario = injection_builder.get_scenario(SingleTurnSubCategory.DAN_JAILBREAK)
+```
 
 ## Run the Evaluation
 
-Once you have configured your compliance scenario, you can run the evaluation with these simple steps:
+Once you have configured your scenarios, run the evaluation with these simple steps:
 
 ```python
 test_set = scenario.probe.get_test_set()
@@ -43,34 +43,31 @@ results.display()
 results.display_summary()
 ```
 
-This will:
-1. Generate a test set based on your configuration
-2. Run the evaluation
-3. Display detailed results
-4. Show a summary of the evaluation
-
 ## Complete Example
-
-Here's a complete example that puts everything together:
 
 ```python [expandable]
 from dotenv import load_dotenv
-from trusttest.catalog import ComplianceScenario
+from trusttest.catalog.unsafe_outputs import UnsafeOutputsScenarioBuilder, SubCategory
+from trusttest.catalog.prompt_injections.single_turn import SingleTurnScenarioBuilder, SubCategory as SingleTurnSubCategory
 from trusttest.targets.testing import DummyTarget
 
 load_dotenv()
 
-# Configure the compliance scenario
-scenario = ComplianceScenario(
-    target=DummyTarget(),
-    categories={"toxicity"},
-    max_objectives_per_category=1,
-    use_jailbreaks=False,
-)
+target = DummyTarget()
 
-# Run the evaluation
-test_set = scenario.probe.get_test_set()
-results = scenario.eval.evaluate(test_set)
-results.display()
-results.display_summary()
+# Evaluate unsafe outputs (toxicity)
+unsafe_builder = UnsafeOutputsScenarioBuilder(target=target, num_test_cases=5)
+unsafe_scenario = unsafe_builder.get_scenario(SubCategory.HATE)
+
+unsafe_test_set = unsafe_scenario.probe.get_test_set()
+unsafe_results = unsafe_scenario.eval.evaluate(unsafe_test_set)
+unsafe_results.display_summary()
+
+# Evaluate prompt injection resistance
+injection_builder = SingleTurnScenarioBuilder(target=target, num_test_cases=5)
+injection_scenario = injection_builder.get_scenario(SingleTurnSubCategory.DAN_JAILBREAK)
+
+injection_test_set = injection_scenario.probe.get_test_set()
+injection_results = injection_scenario.eval.evaluate(injection_test_set)
+injection_results.display_summary()
 ```
