@@ -7,16 +7,24 @@ icon: "/images/integrations/azure.svg"
   <img src="/images/integrations/azure.svg" style={{width:'40px', height:'40px', flexShrink:0}} />
   <div>
     <p style={{margin:0, fontWeight:'600', fontSize:'15px'}}>Microsoft Azure</p>
-    <p style={{margin:0, fontSize:'13px', color:'#6b7280'}}>Azure AI Foundry (v2) · Azure OpenAI Classic (v1)</p>
+    <p style={{margin:0, fontSize:'13px', color:'#6b7280'}}>Azure AI Foundry (v2) · AI Hub (classic Foundry) · Azure OpenAI Classic (v1) · Legacy ML Workspaces</p>
   </div>
 </div>
 
-Agent Posture supports two types of Azure AI agents under a single integration:
+Agent Posture supports all four Azure AI agent infrastructure models under a single integration:
 
-- **Azure AI Foundry Agents (v2)** — agents built with the Azure AI Foundry Agents SDK, hosted in AI Services accounts
-- **Azure OpenAI Classic Assistants (v1)** — assistants built with the Azure OpenAI Assistants API
+- **Azure AI Foundry Agents (v2)** — agents built with the Azure AI Foundry Agents SDK, hosted in AI Services accounts (`kind=AIServices`)
+- **AI Hub projects** — enterprise AI Foundry setups created before late 2024, backed by `Microsoft.MachineLearningServices/workspaces` with `kind=Project`
+- **Azure OpenAI Classic Assistants (v1)** — assistants built with the Azure OpenAI Assistants API (`kind=OpenAI`)
+- **Legacy ML Workspaces** — pre-AI-Foundry Azure ML Studio workspaces (`kind=Default`) that can host Promptflow-based agents
 
-A single integration discovers both types automatically from your subscription.
+A single integration discovers all four types automatically from your subscription.
+
+<Note>
+**How to identify your infrastructure model:** In the Azure Portal, navigate to your AI Foundry project. If the URL shows `ai.azure.com` and the resource is under a `Microsoft.CognitiveServices` account, you are on the **AI Services model (v2)**. If your project lives under a `Microsoft.MachineLearningServices` Hub, you are on the **AI Hub model**.
+
+You can also check from the CLI: `az resource list --resource-type Microsoft.MachineLearningServices/workspaces --query "[].{name:name, kind:kind}"`
+</Note>
 
 ---
 
@@ -33,6 +41,19 @@ A single integration discovers both types automatically from your subscription.
 | Guardrails configuration | Derived from RAI policies |
 | Usage metrics (runs, tokens, latency, errors, tool calls) | Application Insights via Log Analytics (requires telemetry setup — see below) |
 
+### AI Hub projects (ML Workspace-backed)
+
+| Data | Source |
+|------|--------|
+| Agent name, description, status | Azure AI Foundry Agents API (via ML Workspace endpoint) |
+| Model, instructions, tools | Azure AI Foundry Agents API |
+| Knowledge bases (vector stores) | Azure AI Foundry Agents API |
+| Model deployments | Azure AI Projects API |
+
+<Note>
+RAI policies and content filters are not available for AI Hub projects. These fields will show as unavailable for hub-backed agents.
+</Note>
+
 ### Azure OpenAI Classic assistants (v1)
 
 | Data | Source |
@@ -46,11 +67,26 @@ A single integration discovers both types automatically from your subscription.
 Content filters and guardrails are not exposed via the Azure OpenAI Assistants (v1) API. These fields will show as unavailable for Classic assistants.
 </Note>
 
+### Legacy ML Workspaces
+
+| Data | Source |
+|------|--------|
+| Agent name, description, status | Azure AI Foundry Agents API (via ML Workspace endpoint) |
+| Model deployments | Azure AI Projects API |
+
+<Note>
+Legacy ML Workspaces may not expose the full Agents API surface. Agent Posture will discover what is available and skip unsupported endpoints gracefully.
+</Note>
+
 ---
 
 ## Required permissions
 
-### Simple setup — one role (recommended)
+The required roles depend on which infrastructure model your agents use. If you are unsure, assign all applicable roles — unused roles do not cause errors.
+
+### Azure AI Foundry (v2) — AI Services model
+
+#### Simple setup — one role (recommended)
 
 Assign **Azure AI User** to the service principal at the **subscription level**:
 
@@ -60,11 +96,7 @@ Assign **Azure AI User** to the service principal at the **subscription level**:
 
 **Why this role:** Azure AI User includes both `Microsoft.CognitiveServices/*/read` (management plane — enumerate accounts, read RAI policies, read diagnostic settings) and `Microsoft.CognitiveServices/*` (data plane — access agents, models, datasets). Assigning it at subscription level means it applies to all AI Services resources in the subscription automatically.
 
-<Warning>
-**Azure AI Developer** is a different role focused on ML Workspaces. It does **not** include `Microsoft.CognitiveServices/*/read` and cannot discover Cognitive Services accounts. Do not use it for this integration.
-</Warning>
-
-### Granular setup — two roles (least-privilege alternative)
+#### Granular setup — two roles (least-privilege alternative)
 
 If your security policy requires strictly minimal permissions, you can use two more targeted roles instead:
 
@@ -76,6 +108,32 @@ If your security policy requires strictly minimal permissions, you can use two m
 <Note>
 With the granular approach, you must assign `Cognitive Services OpenAI User` on **each** AI Services resource individually. Using Azure AI User at subscription level is simpler and equally secure for read-only access.
 </Note>
+
+### AI Hub projects — ML Workspace-backed model
+
+If your agents were created via an AI Foundry Hub (enterprise setup before late 2024), they live under `Microsoft.MachineLearningServices/workspaces` resources. The roles required are **different** from the AI Services model:
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Reader` | Subscription | Enumerate ML Workspace resources |
+| `Azure AI Developer` | Each AI Hub / Project workspace | Access the Agents API data plane on Hub-backed projects |
+
+<Note>
+`Azure AI Developer` grants access to `Microsoft.MachineLearningServices/workspaces/*/read` and the data plane actions needed to list agents. Assign it at the **Hub** or **Project** workspace scope, or at the subscription level if you have multiple hubs.
+</Note>
+
+<Warning>
+**Azure AI Developer** does **not** include `Microsoft.CognitiveServices/*/read`. If you have a mix of AI Services (v2) and AI Hub projects, you need **both** `Azure AI User` (for AI Services) and `Azure AI Developer` (for AI Hub). `Reader` at subscription level covers resource enumeration for both.
+</Warning>
+
+### Legacy ML Workspaces — pre-AI-Foundry Azure ML Studio
+
+For older workspaces created before AI Foundry existed (Azure ML Studio / kind=Default):
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Reader` | Subscription | Enumerate ML Workspace resources |
+| `Azure Machine Learning Data Scientist` | Each ML Workspace | Access the Agents API data plane on legacy workspaces |
 
 ### Optional — telemetry (usage metrics, v2 only)
 
@@ -95,7 +153,7 @@ For **Azure AI Foundry (v2)** agents, Agent Posture collects usage metrics, toke
 
 Before configuring the integration, ensure you have:
 
-- An Azure subscription containing AI Services or Azure OpenAI resources
+- An Azure subscription containing AI Services, Azure OpenAI, ML Workspace, or AI Hub resources
 - Permission to create app registrations and assign RBAC roles (User Access Administrator or Owner on the subscription)
 - For v2 telemetry: an **Application Insights** resource connected to your AI Foundry project, linked to a Log Analytics workspace (see [Enabling telemetry](#enabling-telemetry))
 
