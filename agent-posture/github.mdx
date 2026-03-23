@@ -1,0 +1,147 @@
+---
+title: GitHub Integration
+icon: "github"
+---
+
+<div style={{display:'flex', alignItems:'center', gap:'14px', padding:'16px 20px', borderRadius:'10px', border:'1px solid #e5e7eb', marginBottom:'28px', background:'#fafafa'}}>
+  <img src="/images/integrations/github.svg" style={{width:'40px', height:'40px', flexShrink:0}} />
+  <div>
+    <p style={{margin:0, fontWeight:'600', fontSize:'15px'}}>GitHub</p>
+    <p style={{margin:0, fontSize:'13px', color:'#6b7280'}}>Agent Configs · MCP Servers · Agent Source Code</p>
+  </div>
+</div>
+
+Agent Posture connects to **GitHub** using a **GitHub App** installation to scan repositories for AI agent configurations, MCP server definitions, and agent source code.
+
+---
+
+## What Agent Posture discovers
+
+### Agent configurations
+
+Instruction and persona files used by AI coding assistants and orchestration frameworks:
+
+- `AGENTS.md`, `CLAUDE.md`, `SKILLS.md`, `.cursorrules`
+- CrewAI YAML configs (`crewai.yaml`, `agents.yaml`)
+- AutoGen and other framework config files
+
+### MCP servers
+
+MCP (Model Context Protocol) server declarations and implementations:
+
+- MCP config files: `mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`
+- Source code files implementing MCP servers via FastMCP, `mcp.server`, etc.
+
+### Agent source code
+
+Source files that implement AI agents using popular SDKs:
+
+- CrewAI, OpenAI Agents SDK, AutoGen, LangChain, LangGraph, LlamaIndex, and others
+
+---
+
+## Authentication model
+
+Agent Posture uses a **GitHub App** — not a personal access token — to access repositories. This provides:
+
+- **Fine-grained repository access**: the App is installed only on selected organizations or repositories
+- **Short-lived tokens**: installation access tokens expire after 1 hour and are auto-refreshed
+- **Read-only by design**: no write permissions are requested or required
+- **Auditable**: all API calls are attributed to the App, visible in your organization's audit log
+
+### Required GitHub App permissions
+
+| Permission | Scope | Required | Purpose |
+|-----------|-------|:--------:|---------|
+| `contents` | Read | **Yes** | Read repository file trees and file contents for scanning |
+| `metadata` | Read | **Yes** | List repositories accessible to the installation (auto-granted) |
+
+<Note>
+Agent Posture only requires `contents:read`. No write permissions (`contents:write`, `pull_requests`, `issues`, etc.) are needed or requested. The App cannot create, modify, or delete any repository content.
+</Note>
+
+---
+
+## Step-by-step setup
+
+<Steps>
+  <Step title="Create a GitHub App">
+    1. Go to your GitHub organization settings: **Settings → Developer settings → GitHub Apps → New GitHub App**
+       - For a personal account: **Settings → Developer settings → GitHub Apps → New GitHub App**
+    2. Fill in the required fields:
+       - **GitHub App name**: `neuraltrust-agent-posture` (or any name)
+       - **Homepage URL**: your organization's URL (e.g. `https://neuraltrust.ai`)
+       - **Webhook**: uncheck **Active** (no webhooks needed)
+    3. Under **Repository permissions**, set:
+       - **Contents**: Read-only
+       - **Metadata**: Read-only (auto-selected)
+    4. Under **Where can this GitHub App be installed?**: select **Only on this account** (for your org) or **Any account** if you manage multiple orgs
+    5. Click **Create GitHub App**
+    6. Note the **App ID** (shown at the top of the app settings page)
+  </Step>
+
+  <Step title="Generate a private key">
+    1. In the GitHub App settings page, scroll to **Private keys**
+    2. Click **Generate a private key** — a `.pem` file will be downloaded
+    3. Keep this file secure — it is used to sign JWT tokens for authentication
+
+    ```bash
+    # The private key file looks like:
+    # -----BEGIN RSA PRIVATE KEY-----
+    # MIIEpAIBAAKCAQEA...
+    # -----END RSA PRIVATE KEY-----
+    ```
+  </Step>
+
+  <Step title="Install the App on your organization or repositories">
+    1. In the GitHub App settings, click **Install App**
+    2. Choose the organization (or user account) to install on
+    3. Select **All repositories** or **Only select repositories** (choose specific repos to scan)
+    4. Click **Install**
+    5. Note the **Installation ID** from the URL: `https://github.com/organizations/{org}/settings/installations/{installation_id}`
+  </Step>
+
+  <Step title="Configure the integration in Agent Posture">
+    Provide the following credentials when creating a GitHub integration:
+
+    | Field | Value |
+    |-------|-------|
+    | **App ID** | The numeric App ID from Step 1 |
+    | **Private Key** | Contents of the `.pem` file from Step 2 |
+    | **Installation ID** | The numeric installation ID from Step 3 |
+
+    Optionally configure:
+
+    | Field | Default | Description |
+    |-------|---------|-------------|
+    | **Scan topics** | `["agent", "mcp"]` | Filter which resource types to scan |
+    | **Discover all** | `true` | When `true`, scan all accessible repos; when `false`, only scan `selected_projects` |
+    | **Selected projects** | `[]` | List of `owner/repo` strings to scan (used when `discover_all=false`) |
+  </Step>
+</Steps>
+
+---
+
+## Incremental scanning
+
+Agent Posture stores the HEAD commit SHA for each scanned repository. On subsequent syncs, repositories whose HEAD SHA has not changed are skipped entirely — this dramatically reduces API calls and scan time for large organizations with many unchanged repositories.
+
+---
+
+## Security considerations
+
+- **Read-only access**: Agent Posture only requests `contents:read`. It cannot modify any repository content.
+- **Scoped installation**: install the App only on repositories you want to scan. You can adjust the installation scope at any time in your GitHub organization settings.
+- **Short-lived tokens**: installation access tokens expire after 60 minutes and are cached in Redis with a 55-minute TTL to avoid redundant token requests.
+- **Private key security**: store the private key securely (e.g. in a secrets manager). Agent Posture encrypts it at rest in its database.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Resolution |
+|---------|-------------|-----------|
+| No repositories discovered | App not installed, or `discover_all=false` with empty `selected_projects` | Verify App installation and repository selection |
+| `401 Unauthorized` | Invalid App ID, private key, or installation ID | Regenerate private key and update credentials |
+| Repository scan skipped | HEAD SHA unchanged since last sync | This is expected incremental behavior — no action needed |
+| `403 Forbidden` on file contents | `contents:read` permission not granted | Re-install the App and ensure Contents permission is set to Read |
