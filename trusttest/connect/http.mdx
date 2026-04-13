@@ -44,56 +44,57 @@ target = HttpTarget(
 
 ## Configuration Options
 
-The `HttpTarget` accepts several configuration options:
+`HttpTarget` is configured from a small set of top-level fields plus nested config objects for the payload, auth, errors, and retries.
 
-### Required Parameters
+### Top-Level Fields
 
-- `url`: The API endpoint URL
-- `payload_config`: Configures how messages are formatted in the request payload
+- `url` (required): The HTTP endpoint that receives the prompt.
+- `payload_config` (required): Describes the request body and transport behavior.
+- `headers` (optional): Static headers sent with every request.
+- `token_config` (optional): Fetches a bearer token before the request.
+- `error_config` (optional): Maps a specific error response into a normal model response.
+- `response_regex` (optional): Applies a regex to the extracted response text.
+- `concatenate_field` (optional): Extracts a nested field from JSON, JSON Lines, or SSE responses using dot notation such as `choices.0.message.content`.
+- `retry_config` (optional): Enables retries with exponential backoff.
 
-### Optional Parameters
+### `PayloadConfig`
 
-- `headers`: HTTP headers to include in the request
-- `token_config`: Configuration for authentication token generation
-- `error_config`: How to handle error responses
-- `response_regex`: Extract specific content from responses
-- `concatenate_field`: Extract nested fields from JSON responses
-- `retry_config`: Configure automatic retries for failed requests
-
-### Payload Configuration
-
-The `PayloadConfig` class configures how messages are formatted in requests:
+`PayloadConfig` controls both the request body and how the HTTP request is sent:
 
 ```python
 PayloadConfig(
     format={
         "messages": [
             {"role": "system", "content": "You are a helpful assistant"},
-            {"role": "user", "content": "{{ message }}"}
-        ]
+            {"role": "user", "content": "{{ test }}"}
+        ],
+        "request_id": "{{ random_id }}"
     },
-    message_regex="{{ message }}",
-    params={"temperature": 0.7}  # URL query parameters
+    message_regex="{{ test }}",
+    date_regex="{{ date }}",
+    random_id_placeholder="{{ random_id }}",
+    params={"temperature": 0.7},
+    timeout=30,
+    rate_limit=0.2,
+    ssl_verify=True,
+    mtls=False,
 )
 ```
 
-- `format`: The structure of your payload, with placeholders for message content
-- `message_regex`: Pattern to replace with the actual message (default: `{{ message }}`)
-- `date_regex`: Pattern to replace with the current date (default: `{{ date }}`)
-- `params`: URL query parameters to include in the request
-- `timeout`: Request timeout in seconds
-- `rate_limit`: Rate limit for the request in requests per second.
-- `proxy`: Proxy to use for the request.
-- `ssl_verify`: Whether to verify the SSL certificate of the request.
+- `format` (required): JSON body template. TrustTest recursively replaces placeholders inside nested dicts and lists.
+- `message_regex`: Placeholder replaced with the prompt text. Default: `{{ test }}`.
+- `date_regex`: Placeholder replaced with the current date in `YYYY-MM-DD` format. Default: `{{ date }}`.
+- `random_id_placeholder`: Placeholder replaced with a UUID in both the payload and headers. Default: `{{ random_id }}`.
+- `params`: Query string parameters added to the request URL.
+- `timeout`: Request timeout in seconds. Default: `10`.
+- `rate_limit`: Minimum seconds between requests. For example, `0.1` means 10 requests per second and `2.0` means one request every 2 seconds.
+- `proxy`: Optional HTTP proxy URL.
+- `ssl_verify`: Whether TLS certificates should be verified. Default: `True`.
+- `mtls`: Enables mutual TLS using the certificates pointed to by `MTLS_CERT_PATH` and `MTLS_KEY_PATH`. Default: `False`.
 
 ### Response Handling
 
-HttpTarget provides several ways to extract the response content:
-
-- `concatenate_field`: Extract a specific field from JSON responses using dot notation
-- `response_regex`: Apply a regex pattern to extract specific content
-
-For example, to extract the message content from a nested JSON response:
+Use `concatenate_field` when the API returns structured data and you want TrustTest to extract a specific nested value:
 
 ```python
 HttpTarget(
@@ -102,9 +103,36 @@ HttpTarget(
 )
 ```
 
-### Error Handling
+Then add `response_regex` if you still need to trim or normalize the extracted text.
 
-Configure how errors are returned as a normal response, this is useful for firewall issues or other issues where you want to return a normal response instead of rising an error.
+### `TokenConfig`
+
+Use `token_config` when the target requires a token request before the main call:
+
+```python
+from trusttest.targets.http import TokenConfig
+
+target = HttpTarget(
+    # ... other config
+    token_config=TokenConfig(
+        url="https://auth.example.com/token",
+        payload={"data": {"client_id": "123", "service": "chat"}},
+        headers={"Content-Type": "application/json"},
+        timeout=10,
+        secret="optional-hmac-secret",
+    )
+)
+```
+
+- `url`: Token endpoint URL.
+- `payload`: Body sent to the token endpoint.
+- `headers`: Headers for the token request.
+- `timeout`: Token request timeout.
+- `secret`: Optional shared secret for HMAC-signed token flows. When set, TrustTest signs the auth payload and reuses any returned cookies across the conversation.
+
+### `ErrorHandelingConfig`
+
+Use `error_config` when an API returns useful text inside a known error response and you want to treat it like a model answer instead of raising:
 
 ```python
 from trusttest.targets.http import ErrorHandelingConfig
@@ -118,9 +146,12 @@ target = HttpTarget(
 )
 ```
 
-### Retry Configuration
+- `status_code`: HTTP status code to intercept.
+- `concatenate_field`: Field extracted from that error body. Default: `errors.0.message`.
 
-Set up automatic retries for failed requests:
+### `RetryConfig`
+
+Set up automatic retries for transient failures:
 
 ```python
 from trusttest.targets.http import RetryConfig
@@ -136,22 +167,10 @@ target = HttpTarget(
 )
 ```
 
-### Authentication with TokenConfig
-
-For APIs requiring token-based authentication with expiration:
-
-```python
-from trusttest.targets.http import TokenConfig
-
-target = HttpTarget(
-    # ... other config
-    token_config=TokenConfig(
-        url="https://auth.example.com/token",
-        payload={"data": {"client_id": "123", "service": "chat"}},
-        headers={"Content-Type": "application/json"}
-    )
-)
-```
+- `max_retries`: Number of retries after the initial failed request.
+- `base_delay`: Starting delay in seconds.
+- `max_delay`: Maximum delay between attempts.
+- `exponential_base`: Backoff multiplier applied after each failed attempt.
 
 
 ## Example Implementation
@@ -214,40 +233,80 @@ results.display()
 
 ## Configure Web UI
 
-Currently, the `HttpTarget` is the only model type that can be used to run tests through the TrustTest web UI. This makes it an essential component for teams looking to set up continuous evaluation of their LLM APIs.
+In the TrustTest web UI, the Target field accepts the same `HttpTarget` config in YAML form. The config is parsed with `HttpTarget.from_dict`, so the field names below should match your Python config one-to-one.
 
-When configuring your model through the web UI, you'll define the same HttpTarget configuration but in YAML format in the Target section. Here's an example of how your configuration should look:
+### Standard HTTP Target
 
 ```yaml
 url: "https://api.example.com/chat"
-headers: {}
+headers:
+  Content-Type: application/json
 response_regex: null
-concatenate_field: null
+concatenate_field: "choices.0.message.content"
 payload_config:
   format:
     messages:
       - role: system
-        content: "**Welcome to Airline Assistant**."
+        content: "You are a helpful assistant."
+      - role: user
+        content: "{{ test }}"
+    request_id: "{{ random_id }}"
+  message_regex: "{{ test }}"
+  date_regex: "{{ date }}"
+  random_id_placeholder: "{{ random_id }}"
+  params: {}
+  timeout: 30
+  rate_limit: 0.2
+  proxy: null
+  ssl_verify: true
+  mtls: false
+token_config:
+  url: "https://auth.example.com/token"
+  payload:
+    data:
+      client_id: "123"
+      service: "chat"
+  headers:
+    Content-Type: application/json
+  timeout: 10
+  secret: null
+error_config:
+  status_code: 400
+  concatenate_field: "errors.0.message"
+retry_config:
+  max_retries: 3
+  base_delay: 1.0
+  max_delay: 10.0
+  exponential_base: 2.0
+```
+
+### Azure OIDC in Web UI
+
+If your target uses Azure OIDC, set `payload_config.auth_type: azure_oidc` and provide the Azure credentials inside `payload_config.azure_oidc_config`. The backend loader converts that UI shape into an `AzureOIDCTarget`.
+
+```yaml
+url: "https://api.example.com/chat"
+headers:
+  Content-Type: application/json
+concatenate_field: "choices.0.message.content"
+payload_config:
+  auth_type: azure_oidc
+  format:
+    messages:
       - role: user
         content: "{{ test }}"
   message_regex: "{{ test }}"
-  params: {}
-  timeout: 60
-  rate_limit: 5
-  proxy: http://localhost:8080
+  timeout: 30
+  rate_limit: 0.2
   ssl_verify: true
-token_config:
-  url: https://auth.token.com/token
-  payload:
-    client_secret: "my secret"
-  headers:
-    Content-Type: application/x-www-form-urlencoded
-retry_config:
-  max_retries: 3
-  base_delay: 1
-  max_delay: 10
-  exponential_base: 2
+  mtls: false
+  azure_oidc_config:
+    tenant_id: "your-tenant-id"
+    client_id: "your-client-id"
+    client_secret: "your-client-secret"
+    scope: "api://your-app-id/.default"
+    auth_flow: "client_credentials"
 ```
 
-This YAML configuration maps directly to the HttpTarget parameters you would use in Python. Once configured, you should be able to run any test directly through the web UI with the same functionality as programmatic tests.
+For Azure password-based auth, change `auth_flow` to `password` or `ropc` and add `username` plus `password` inside `azure_oidc_config`.
 
