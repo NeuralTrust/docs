@@ -1,0 +1,197 @@
+---
+title: Mistral AI Integration
+icon: "/images/integrations/mistralai.svg"
+---
+
+<div style={{display:'flex', alignItems:'center', gap:'14px', padding:'16px 20px', borderRadius:'10px', border:'1px solid #e5e7eb', marginBottom:'28px', background:'#fafafa'}}>
+  <img src="/images/integrations/mistralai.svg" style={{width:'40px', height:'40px', flexShrink:0}} />
+  <div>
+    <p style={{margin:0, fontWeight:'600', fontSize:'15px'}}>Mistral AI</p>
+    <p style={{margin:0, fontSize:'13px', color:'#6b7280'}}>Agents · Models · Document Libraries</p>
+  </div>
+</div>
+
+Agent Posture connects to **Mistral AI** using your API key to discover and monitor agents, models, files, and document libraries in your Mistral workspace.
+
+---
+
+## What Agent Posture discovers
+
+### Agents
+
+| Data | Source |
+|------|--------|
+| Agent name, description, status | Mistral Agents API (beta) |
+| Model, instructions, temperature, top-p | Mistral Agents API (beta) |
+| Tools (code interpreter, web search, image generation, document library, custom functions) | Mistral Agents API (beta) |
+| Knowledge bases (document libraries) | Mistral Agents API + Libraries API (beta) |
+| Version history and deployment aliases | Mistral Agents API (beta) |
+
+### Models
+
+| Data | Source |
+|------|--------|
+| Model name and family | Mistral Models API |
+| Capabilities (chat, function calling, vision, fine-tuning) | Mistral Models API |
+| Lifecycle status (stable, deprecated, legacy) | Mistral Models API |
+| Context window | Mistral Models API |
+
+### Files and document libraries
+
+| Data | Source |
+|------|--------|
+| Filename, size, purpose | Mistral Files API |
+| Document library name, description, document count | Mistral Libraries API (beta) |
+
+### Usage metrics
+
+Agent Posture collects per-agent usage via the Mistral **Conversations API** (beta):
+
+| Metric | Description |
+|--------|-------------|
+| Total runs | Number of agent responses (message outputs) |
+| Total conversations | Number of unique conversation threads |
+| Average latency | Average response time per run |
+| Code interpreter calls | Number of code execution tool invocations |
+| File search calls | Number of document library search invocations |
+| Web search calls | Number of web search tool invocations |
+| Image generation calls | Number of image generation tool invocations |
+| Function calls | Number of custom function tool invocations |
+
+<Note>
+Token usage (input and output token counts) is not currently available via the Mistral API and will not appear in Agent Posture.
+</Note>
+
+---
+
+## Required access
+
+Mistral uses **API key authentication** — no IAM roles or service principals are needed.
+
+### Beta API access
+
+Several Mistral API endpoints used by Agent Posture are in **beta** and require your workspace to have beta access enabled:
+
+| Endpoint | Used for | Beta required |
+|----------|----------|:------------:|
+| `GET /v1/agents` | Agent discovery | <span style={{color:'#dc2626', fontWeight:600}}>Yes</span> |
+| `GET /v1/conversations` | Usage metrics | <span style={{color:'#dc2626', fontWeight:600}}>Yes</span> |
+| `GET /v1/libraries` | Document library discovery | <span style={{color:'#dc2626', fontWeight:600}}>Yes</span> |
+| `GET /v1/models` | Model discovery | No |
+| `GET /v1/files` | File discovery | No |
+
+**If beta API access is not enabled:**
+- Agent discovery will return zero agents
+- Usage metrics will be unavailable
+- Document library discovery will be skipped
+- Models and files will still be discovered
+
+To request beta access, contact [Mistral support](https://mistral.ai/contact).
+
+---
+
+## Step-by-step setup
+
+<Steps>
+  <Step title="Create an API key">
+    1. Log in to [admin.mistral.ai](https://admin.mistral.ai)
+    2. Go to **Organization** → **API Keys**
+    3. Click **Create new key**
+    4. Set a name (e.g., `neuraltrust-agent-posture`) and expiry, then click **Create**
+    5. Copy the key value and store it securely — it is only shown once
+  </Step>
+
+  <Step title="Configure the integration in Agent Posture">
+    Provide the following when creating the Mistral integration:
+
+    | Field | Description |
+    |-------|-------------|
+    | **API Key** | The API key created in Step 1 |
+
+    No additional configuration is required. Agent Posture automatically discovers all agents, models, files, and libraries accessible to the key.
+  </Step>
+</Steps>
+
+---
+
+## Content safety
+
+Mistral does not have built-in content filtering applied automatically at the model level. Instead, content moderation is applied by calling the **Mistral Moderation API** explicitly from your application code before passing input to an agent.
+
+Agent Posture evaluates the guardrails configuration of each Mistral agent. Because Mistral does not expose a structured content-filter config (unlike Azure RAI policies), Agent Posture issues an **advisory warning** for Mistral agents to flag the absence of verifiable, platform-enforced content safety controls. This is not a blocker — it reflects that runtime moderation calls cannot be directly confirmed from agent configuration alone.
+
+<Note>
+The guardrails check for Mistral is a **heuristic signal**, not a deterministic pass/fail. It does not parse agent instructions for a specific sentence or keyword. Enabling `safe_prompt` on the agent is the one verifiable signal that clears the finding.
+</Note>
+
+To reduce or address this advisory finding:
+1. Enable `safe_prompt` on the agent (sets a system-level safety preamble) — this is the most reliable way to clear the finding
+2. Call `POST /v1/moderations` in your application before invoking the agent and handle policy violations there
+
+See [Mistral Moderation API documentation](https://docs.mistral.ai/api/endpoint/classifiers) for implementation details.
+
+---
+
+## Feature availability
+
+| Feature | API key only | + Beta access |
+|---------|:-----------:|:------------:|
+| Model discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| File discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Agent discovery | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Document library discovery | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Usage metrics | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Version history and aliases | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+
+---
+
+## Known limitations
+
+| Limitation | Details |
+|------------|---------|
+| No token usage metrics | The Mistral API does not expose per-agent token consumption. This field will not appear in Agent Posture. |
+| Beta API dependency | Core agent features depend on beta endpoints. If beta access is revoked or unavailable, agent-related features will degrade gracefully but will not function. |
+| Rate limits | Mistral enforces organisation-level rate limits. If syncs are failing with rate limit errors, consider reducing sync frequency. |
+| No tenant-wide audit logs | Mistral does not provide an audit log or activity API for organisation-level agent usage. |
+
+---
+
+## Security considerations
+
+- The API key has access to all resources in your Mistral organisation. Agent Posture uses it in a read-only pattern, but the key itself is not scoped to read-only by the Mistral platform.
+- Rotate the API key regularly and update the integration in Agent Posture when you do.
+- Agent Posture encrypts the API key at rest.
+- If the key is compromised, revoke it immediately in the Mistral Console and create a new one.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No agents discovered">
+    - Verify your workspace has beta API access enabled. Contact Mistral support if not.
+    - Verify the API key is valid and not expired — go to [admin.mistral.ai](https://admin.mistral.ai) and confirm the key is listed.
+    - Verify agents exist in your workspace by checking the Mistral Console.
+  </Accordion>
+
+  <Accordion title="Usage metrics unavailable">
+    - Usage requires beta API access for the Conversations API (`/v1/conversations`).
+    - Agents must have actual conversation activity to show metrics. Newly created agents with no usage will correctly show zero.
+  </Accordion>
+
+  <Accordion title="401 Unauthorized on any endpoint">
+    - The API key is invalid or has expired.
+    - Generate a new key in the Mistral Console and update the integration.
+  </Accordion>
+
+  <Accordion title="Agents showing a guardrails advisory warning">
+    - This is expected for Mistral agents. Because Mistral does not expose a structured content-filter config, Agent Posture issues an advisory warning rather than a hard failure.
+    - Enable `safe_prompt` on the agent to clear the finding — this is the only verifiable platform-level signal Agent Posture can detect.
+    - Alternatively, implement the Mistral Moderation API in your application code; note that Agent Posture cannot verify runtime API calls from agent config alone.
+  </Accordion>
+
+  <Accordion title="Document libraries not appearing">
+    - Beta API access is required for the Libraries API.
+    - Verify at least one document library exists in your workspace.
+  </Accordion>
+</AccordionGroup>
