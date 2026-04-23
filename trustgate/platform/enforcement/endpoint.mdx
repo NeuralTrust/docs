@@ -1,0 +1,210 @@
+---
+title: Endpoint surface
+description: Security enforcement for AI traffic on managed devices — a transparent MITM proxy that desktop apps, IDE plugins, and CLIs route to via a PAC file, with zero software installed on the device.
+---
+
+The **Endpoint** surface is the enforcement path for LLM traffic that **never reaches a central gateway and is not typed into a browser**: desktop apps, IDE plugins, coding assistants, CLI tools, and any process that opens a direct HTTPS connection to an AI provider from a managed device.
+
+Unlike the Gateway (which apps opt into by pointing at its URL), the Endpoint surface operates **transparently**: employees keep using ChatGPT desktop, Cursor, Claude, Copilot, and their CLIs the way they always did — but their AI traffic is silently routed through a TrustGate proxy, inspected by the same detector and policy catalog as every other surface, and allowed, masked, or blocked before it reaches the upstream.
+
+The key design choice: **nothing is installed on the endpoint**. No agent, no daemon, no tray icon, no background service. Everything the device needs is delivered as three configuration profiles pushed by your existing MDM.
+
+## Why an Endpoint surface
+
+As soon as a workstation has an IDE with a built-in assistant, a desktop LLM client, an AI CLI, or a SaaS app that calls an LLM directly, the traffic path looks like:
+
+```
+[ app on the device ] ──▶ [ AI provider over HTTPS ]
+```
+
+There is no gateway to front and no browser tab to instrument. The Endpoint surface is what covers that gap — without forcing users to change tools, configure anything, or accept a resident agent on their machine.
+
+Concretely, the Endpoint surface covers:
+
+- **IDEs and coding assistants** — Cursor, VS Code + Copilot, JetBrains + AI, any editor that calls an LLM.
+- **Desktop AI clients** — ChatGPT desktop, Claude desktop.
+- **CLI tools** — agent CLIs, Python scripts, `curl` against `api.openai.com`, anything that talks HTTPS to a covered provider.
+- **SaaS and productivity apps** that embed an LLM and call the provider directly from the device.
+
+## How it works
+
+The Endpoint surface is built on three standard OS / browser primitives that every MDM already knows how to push. Once they're in place on a device, AI traffic is routed through a TrustGate proxy, decrypted for inspection, policy-evaluated, and forwarded — transparently.
+
+```
+Employee device                         TrustGate proxy
+┌─────────────────────┐                ┌─────────────────────────────┐
+│  Cursor / ChatGPT   │                │  Policy + detector catalog  │
+│  Claude / Copilot   │                │  Decision: allow / mask /   │
+│         │           │  mTLS (org ID) │           block             │
+│         ▼           │ ─────────────▶ │         │                   │
+│  PAC routes AI ───▶ │                │         ▼                   │
+│  traffic to proxy   │                │  Forward to provider        │
+└─────────────────────┘                └─────────────────────────────┘
+```
+
+1. The **PAC file** on the device decides which hostnames go through the proxy (every covered AI provider) and which go direct (everything else).
+2. The device opens a **mutually authenticated TLS connection** to the proxy using the organization's **client certificate**. That certificate is how the proxy knows which organization and which Endpoint integration the traffic belongs to — it replaces API keys entirely.
+3. The proxy inspects the request, generates a **dynamic TLS certificate** for the target domain signed by the organization's CA (installed as a trusted root on the device), and establishes the inspectable TLS tunnel.
+4. The **policy engine** runs the standard detector catalog on the request. Depending on the result the request is forwarded as-is, rewritten (masked), or blocked.
+5. The response is streamed back to the client; non-streaming responses can also be masked or blocked, streaming (SSE) responses are forwarded in real time and analyzed asynchronously for alerting.
+
+The employee sees nothing. They use their AI tools exactly as before.
+
+## Creating an Endpoint integration
+
+The Endpoint surface is provisioned as an **Integration** in the platform. Creating one issues the certificates and the PAC URL your MDM will deploy to the fleet.
+
+1. Go to **Integrations → Add Integration**.
+2. Pick **Endpoint** from the provider catalog.
+3. Fill the form:
+   - **Integration Name** — any label you'll recognise later (for example `eng-macbooks`, `finance-windows`, `contractors-fleet`).
+   - **Tags** (optional) — comma-separated labels usable later for policy scoping.
+4. Save & Close.
+
+Creating the integration automatically generates:
+
+| Artifact | Purpose | Where it ends up |
+| --- | --- | --- |
+| **CA certificate** | Root of trust so devices accept the dynamic certificates the proxy generates during inspection. | Installed on devices as a **trusted root** via MDM. |
+| **Client certificate + key** | The organization's identity when the device connects to the proxy (mutual TLS replaces API keys). | Installed on devices as an **identity certificate** via MDM. |
+| **PAC URL** | Tells the device which hostnames to route through the proxy. | Configured on devices as the **automatic proxy configuration URL** via MDM. |
+
+The private parts of the CA never leave NeuralTrust. The client key is delivered once to the administrator (so it can be pushed through the MDM) and can be rotated from the integration page. Certificates can be rotated without re-creating the integration.
+
+## How to integrate
+
+There is **no endpoint software to install**. Integration is a one-time MDM deployment of the three artifacts generated at integration creation.
+
+### 1. Supported MDMs and platforms
+
+| Platform | Management channel |
+| --- | --- |
+| **macOS** | Jamf, Mosyle, Kandji, Workspace ONE, any MDM that supports Configuration Profiles. |
+| **Windows** | Microsoft Intune, Workspace ONE, any MDM that supports PKCS and Proxy settings. |
+| **Linux** | Centralized management via configuration management (Ansible, Puppet, Chef) or fleet tooling (Fleet, etc.). |
+
+### 2. Deploy three profiles via MDM
+
+The Setup Guide on the integration page generates ready-to-upload artifacts for each platform. The same three profiles apply everywhere; only the MDM-specific packaging changes.
+
+**Profile 1 — CA certificate (trusted root).**
+Install the CA certificate from the integration as a trusted root. This is what lets the device's browser / OS accept the dynamic inspection certificates the proxy presents. Without this, TLS to AI providers would fail.
+
+**Profile 2 — Client certificate (identity).**
+Install the client certificate + private key as a device identity (PKCS #12 / `.p12` bundle). This is what the proxy reads in the TLS handshake to identify which Endpoint integration (and therefore which organization and policy set) the traffic belongs to.
+
+**Profile 3 — PAC URL (proxy auto-config).**
+Configure the OS / browser to use the automatic proxy configuration URL from the integration. The PAC file tells the device: **for covered AI hostnames route through the proxy; for everything else go direct**. It covers the top AI providers out of the box:
+
+- OpenAI (`api.openai.com`, `chatgpt.com`, `chat.openai.com`)
+- Anthropic (`api.anthropic.com`, `claude.ai`)
+- Google (`generativelanguage.googleapis.com`, `gemini.google.com`, `aistudio.google.com`)
+- Cursor (`api2.cursor.sh`, `api.cursor.com`)
+- Microsoft Copilot (`copilot.microsoft.com`, `api.githubcopilot.com`)
+- Mistral (`api.mistral.ai`, `chat.mistral.ai`)
+- DeepSeek (`api.deepseek.com`, `chat.deepseek.com`)
+- Groq (`api.groq.com`)
+- Perplexity (`api.perplexity.ai`)
+
+Any host not in the PAC is routed directly, untouched — there is no general-purpose MITM and no privacy surface outside the covered AI providers.
+
+### 3. What the user sees
+
+Nothing. The three MDM profiles are silent: no login prompt, no pop-up, no tray icon, no browser banner. Employees keep using ChatGPT, Cursor, Claude, or Copilot the way they always did. `Block` decisions surface as a structured error from the AI provider's SDK:
+
+```json
+{
+  "error": {
+    "message": "Request blocked by TrustGate: sensitive data detected",
+    "type": "blocked",
+    "code": 403
+  }
+}
+```
+
+`Mask` decisions are invisible — the upstream receives the rewritten payload and the client sees a normal response.
+
+### 4. Rotation and revocation
+
+- **Client certificate rotation** — regenerate from the integration page and redistribute via MDM. The old cert becomes invalid immediately on the proxy side.
+- **CA rotation** — rare, handled the same way (regenerate, redistribute). The old CA is accepted for a grace period so no traffic breaks during rollout.
+- **Disabling coverage for a device or group** — remove the three MDM profiles; the device returns to direct AI traffic.
+
+### 5. Verify
+
+On an enrolled device, trigger a request from a covered app (for example a chat in an IDE assistant). The event should appear in **Runtime → Logs** with the Endpoint integration, the detected AI application, and the policy decision attached.
+
+## What it sees
+
+The proxy inspects traffic to covered AI endpoints only — it is not a general-purpose MITM. For each intercepted call, it can read:
+
+- **Request URL, method, headers, and body.**
+- **Response headers and body**, including streaming chunks (SSE).
+- The **AI application** the request is headed for (OpenAI, Anthropic, Google, Cursor, Copilot, Mistral, DeepSeek, Groq, Perplexity, …).
+- The **Endpoint integration** the traffic belongs to (resolved from the client certificate).
+
+Per-provider **content extractors** pull the relevant text — prompts, system messages, completions, tool calls — out of each provider's payload shape, so detectors work uniformly across OpenAI-compatible, Anthropic, and Google formats without custom wiring per detector.
+
+Any host not in the PAC's AI catalog is never inspected — the device connects directly to it, untouched by TrustGate.
+
+## How enforcement works
+
+Every policy that selects `Where → Endpoint` translates its action to a concrete behavior on the proxy. One subtlety: streaming responses are delivered to the client as they arrive, so `Block` and `Mask` have different guarantees on the request side vs the response side.
+
+| Stage | `Log` | `Mask` | `Block` |
+| --- | --- | --- | --- |
+| **Request** (always buffered) | Event recorded; request forwarded unchanged. | Request body rewritten before it's forwarded upstream. | Request never leaves the proxy; the client receives a `403` JSON error. |
+| **Non-streaming response** (fully buffered) | Event recorded; response returned unchanged. | Response body rewritten before it reaches the client. | Response replaced with a `403` JSON error. |
+| **Streaming response (SSE)** | Event recorded after the stream completes. | **Cannot mask**: chunks are already flowing to the client; the event is logged with evidence. | **Cannot block**: the stream is already being delivered; the violation raises an alert in the dashboard but does not interrupt the response. |
+
+In practice this means:
+
+- Requests are **always** enforceable in real time — the highest-value control point for data exfiltration.
+- Non-streaming responses are also enforceable in real time.
+- Streaming responses fall back to **alerting**, not blocking. For scenarios where blocking streaming output matters, combine the Endpoint surface with a request-side policy that prevents the triggering prompt from being sent in the first place.
+
+## Policies: default and per-application
+
+The Endpoint surface supports two layers of policy per integration:
+
+- **Default policy** — applies to all AI traffic routed through the integration, regardless of which provider is being called.
+- **Per-application policy** — applies only to traffic headed to a specific AI application (for example `openai`, `anthropic`, `cursor`, `copilot`).
+
+When a request arrives, the policy engine **merges** the default policy with the per-application policy, with the per-application entry taking precedence for any overlapping detector. A request to `api.openai.com` gets `default + openai`; a request to `api2.cursor.sh` with no Cursor-specific policy gets `default` only.
+
+This lets you set organization-wide baselines (for example "mask PII everywhere") while tightening specific providers (for example "also enforce strict injection protection on OpenAI traffic").
+
+## Available filters
+
+When authoring a policy with `Where → Endpoint`, **Add filter** offers:
+
+| Filter | Narrows by |
+| --- | --- |
+| **Endpoints** | Specific Endpoint integrations (for example `eng-macbooks`, `finance-windows`). |
+| **Applications** | The detected AI application (`openai`, `anthropic`, `google`, `cursor`, `copilot`, `mistral`, `deepseek`, `groq`, `perplexity`). |
+| **Tags** | Labels attached to integrations at creation time. |
+
+Filters combine with AND. Omitting every filter applies the policy to **all AI traffic on every Endpoint integration** in the workspace.
+
+## Best for
+
+- **Regulated environments** where AI usage must be governed even when the user is offline from the corporate gateway.
+- **Developer workstations** — IDE plugins and coding assistants that call LLMs directly.
+- **Desktop AI clients** and **CLI tools** that you cannot realistically force through a gateway.
+- **Fleet-wide coverage without installing anything on the device** — MDM-only rollout is the whole point of this surface.
+
+## Layering with other surfaces
+
+Endpoint is the catch-all surface — by the time a request gets here, the other surfaces have already been bypassed. In practice, large deployments combine:
+
+- **Gateway** for owned apps and agents.
+- **Browser** for web AI apps.
+- **Endpoint** for desktop apps, IDE plugins, and CLIs.
+
+Writing the same policy on all three surfaces (for example `Block PII`) gives you hard guarantees on every egress path a prompt can take.
+
+## Related
+
+- [Enforcement surfaces overview](/trustgate/platform/enforcement-surfaces) — how Endpoint compares to Gateway, Browser, and API.
+- [Policies](/trustgate/platform/policies) — authoring `Where / When / Then` for Endpoint.
+- [Deployment modes](/trustgate/platform/deployment-modes) — where the proxy runs (SaaS, hybrid, on-prem) and how that affects data flow.

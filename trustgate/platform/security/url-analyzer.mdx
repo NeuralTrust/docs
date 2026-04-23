@@ -1,0 +1,116 @@
+---
+title: URL analyzer
+description: Fetch and inspect the content behind URLs in prompts and responses — detect indirect prompt injection and PII hidden in linked pages before the model sees them.
+---
+
+Users link out all the time. A RAG agent follows a URL to summarize it, a chat assistant is asked "what does this page say," a tool call pastes a documentation link into context. Each of those links is an **external input** that bypasses any detector which only looks at the prompt text. The **URL analyzer** is one of TrustGate's two [Content Analyzers](#related-detections) — it extracts URLs from the request, fetches them in parallel, and runs the same PII and jailbreak detections TrustGate uses on the prompt, this time against the content that comes back.
+
+## Why it matters
+
+| Concern | Impact |
+| --- | --- |
+| **Indirect prompt injection** | A page the user asks the model to "summarize" can contain hidden instructions that hijack the assistant. |
+| **Data exfiltration** | Linked documents can carry PII or credentials that shouldn't reach the model or downstream tools. |
+| **Third-party risk** | Any page fetched during a request is a new supply-chain surface — the URL analyzer makes that surface inspectable. |
+| **Compliance** | Regulated workloads need an auditable record of what external content the AI actually processed. |
+
+## Where it lives in the picker
+
+The URL analyzer sits under the **Content Security** category in `Create Policy → When`, right next to [Prompt Guard](/trustgate/platform/security/prompt-security), Prompt/Response Moderation, and the [Document analyzer](/trustgate/platform/security/document-analyzer).
+
+Add it to a policy, pick whether you want **PII**, **Jailbreak**, or both signals, and set the outcome in the `Then` step — `Log` to observe, `Block` to reject the request with a `403` when a link is malicious, or `Mask` on the PII side to redact sensitive spans pulled from the fetched content before they reach the model.
+
+## How it works
+
+The analyzer runs at the **pre-request** stage, before the payload reaches the upstream LLM or tool:
+
+1. **Extract** — URLs are detected in the request body (prompt text, tool arguments, structured fields).
+2. **Filter** — URLs are matched against the configured allow / deny domain lists. Blocked domains short-circuit immediately; allow-listed domains proceed; anything outside both lists is handled according to the deployment's default.
+3. **Fetch** — Remaining URLs are fetched in parallel, subject to a configurable timeout and a max response size.
+4. **Detect** — PII and jailbreak detectors run over every fetched body. The first threat triggers **early exit** — remaining fetches are cancelled and the policy engine is notified immediately.
+5. **Decide** — The policy's `Then` step determines the outcome (`Log`, `Block`, `Mask`).
+
+Because the fetch and scan happen **before** the model call, malicious link content never reaches the prompt in an enforce-mode policy.
+
+## Domain filtering
+
+URL filtering is the first line of defence and is configured on the detection itself:
+
+| Mode | Behaviour |
+| --- | --- |
+| **Allow-list** (`allowed_domains` populated) | Only URLs whose host matches the list are fetched and analyzed. Every other domain is skipped. Use this for tight whitelists (internal wikis, approved doc sites). |
+| **Deny-list** (`blocked_domains` populated) | URLs matching the list are rejected outright; everything else is fetched and analyzed. Use this for known-bad domains. |
+| **Combined** | If both lists exist, **deny takes precedence** — a blocked domain is rejected even if it also appears in the allow-list. |
+| **Neither** | All URLs are fetched and analyzed (subject to timeout and size limits). |
+
+Typical deployments combine a narrow allow-list with detection thresholds so you only fetch trusted origins *and* still guard against compromised pages on those origins.
+
+## What is detected
+
+<CardGroup cols={2}>
+  <Card title="Jailbreak in fetched content" icon="shield-alert">
+    Uses the same scoring engine as [Prompt security](/trustgate/platform/security/prompt-security). Sensitivity is picked on a 4-level scale (see below). Catches hidden instructions on pages the model is about to summarize.
+  </Card>
+  <Card title="PII in fetched content" icon="user-round">
+    Email, credit card, IBAN, phone number, SSN, and the broader [entity catalog](/trustgate/platform/security/data-protection) — flagged when they appear in any fetched body.
+  </Card>
+  <Card title="Parallel scanning" icon="layers">
+    Multiple URLs in a single request are fetched concurrently, so an agent handling several links doesn't pay serial latency.
+  </Card>
+  <Card title="Early exit" icon="zap">
+    As soon as one URL trips a detection, outstanding fetches are cancelled and the policy decision is emitted — minimising both latency and exposure.
+  </Card>
+</CardGroup>
+
+## Configuration
+
+The URL Analyzer exposes the following fields in the policy's `When` step:
+
+| Field | Purpose |
+| --- | --- |
+| **Detection Threshold** | Sensitivity level for the jailbreak classifier applied to downloaded content. Uses the shared 4-level scale — see below. |
+| **Timeout** | Maximum time (in seconds) to download each URL. Protects against slow or unresponsive third parties. |
+| **Maximum Content Size** | Upper bound on the response body that gets scanned, in bytes. Default `5242880` (5 MB). Oversize responses are truncated. |
+| **Allowed Domains** | Host-level allow-list. If configured, only URLs from these domains are processed. |
+| **Blocked Domains** | Host-level deny-list. URLs from these domains are rejected automatically — deny always takes precedence over allow. |
+| **PII Entities to Detect** | Which entity types to scan for in downloaded content (Email, Phone, Credit Card, SSN, etc.). |
+
+### Detection Threshold — sensitivity levels
+
+| Level | Label | Behaviour |
+| --- | --- | --- |
+| **L1** | Lenient | Minimal filtering, only the most obvious threats. |
+| **L2** | Balanced | Recommended for most use cases. Default. |
+| **L3** | Enhanced | Higher sensitivity, may flag borderline content. |
+| **L4** | Strict | Maximum protection, strictest filtering. |
+
+Pair these with the policy's **Where** filters (e.g. only Browser applications, only a specific API route) so URL fetching runs only where it's needed.
+
+## Response examples
+
+When a policy's `Then` is `Block`, the gateway returns a structured error describing *why* the request was rejected, so downstream clients (and your audit logs) have a clean signal:
+
+```json
+{
+  "error": "jailbreak detected in url content (score: 0.92, threshold: 0.70)",
+  "status": 403
+}
+```
+
+```json
+{
+  "error": "PII detected in url content: [email, credit_card]",
+  "status": 403
+}
+```
+
+With `Then: Log`, the same detection details are emitted to observability without blocking the request.
+
+## Related detections
+
+The URL analyzer is one of two **Content Analyzers** in TrustGate — both share the same configuration pattern (mode + PII + jailbreak) but look at different input channels:
+
+- **URL analyzer** (this page) — fetches and inspects the content behind links that appear in the request.
+- **[Document analyzer](/trustgate/platform/security/document-analyzer)** — parses files uploaded as attachments and runs the same detections over their extracted content.
+
+In a RAG or agentic workflow, enable both so nothing slips in through either channel.

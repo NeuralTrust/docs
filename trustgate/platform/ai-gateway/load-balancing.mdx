@@ -1,0 +1,75 @@
+---
+title: Load balancing
+description: Strategies the AI Gateway uses to distribute traffic across upstreams — for resilience, cost control, and routing requests by meaning.
+---
+
+A **route** can forward to one or more upstreams. Load balancing decides **which upstream** receives the next request and **how the pool reacts** when things go wrong — upstreams get slow, a provider has an incident, quota runs out, or a new model needs a careful rollout.
+
+Because the gateway understands LLM payloads, balancing can happen on more than just HTTP headers: it can split by **tokens**, by **cost**, or even by the **meaning** of the prompt.
+
+## Strategies
+
+<CardGroup cols={2}>
+  <Card title="Round-robin" icon="rotate-ccw">
+    Requests go to each upstream in turn. Simple, even distribution — the right default when every upstream is interchangeable.
+  </Card>
+  <Card title="Weighted round-robin" icon="sliders-horizontal">
+    Traffic is distributed by weight (for example, 70 / 30). Use it for canaries, cost-aware splits, or gradually migrating between providers.
+  </Card>
+  <Card title="Least connections" icon="activity">
+    Picks the upstream with the fewest in-flight requests. Best when upstreams have very different latencies (a cloud model vs. a local one).
+  </Card>
+  <Card title="Random" icon="shuffle">
+    Pure random pick — cheap and acceptable for homogeneous pools. No state between requests.
+  </Card>
+  <Card title="Semantic" icon="brain">
+    Routes by the **meaning** of the prompt — send code-heavy requests to one model, chat to another, retrieval to a third. Ideal for multi-model stacks.
+  </Card>
+</CardGroup>
+
+### When to pick which
+
+| Strategy | Pick it when… | Watch out for |
+| --- | --- | --- |
+| **Round-robin** | Upstreams are identical (same model, same region). | One slow upstream drags the whole pool. |
+| **Weighted** | You're rolling out a new provider or optimizing cost. | Weights need to be re-tuned whenever provider price or capacity changes. |
+| **Least connections** | Upstream latencies are very uneven. | Requires accurate in-flight tracking, which costs a bit of state. |
+| **Random** | Stateless, homogeneous pools; very high RPS. | Can hotspot briefly under burst traffic. |
+| **Semantic** | You have specialized models (code, chat, reasoning) and want to route by task. | Small classification cost per request; plan your model catalog carefully. |
+
+## Resilience controls
+
+Load balancing is only half the job — the other half is how the pool behaves when something breaks.
+
+| Control | Behaviour |
+| --- | --- |
+| **Health checks** | The gateway probes each upstream on a schedule and pulls unhealthy ones out of rotation. Recovered upstreams are re-added automatically. |
+| **Retries** | Failed requests can be retried on a sibling upstream, with a configurable cap to avoid amplification (one failure shouldn't become ten). |
+| **Failover** | When the primary pool is degraded, traffic shifts to a secondary pool automatically — useful for provider outages or model-specific incidents. |
+| **Circuit breaking** | After repeated errors, the gateway opens the circuit to protect both the upstream and the client, failing fast instead of queueing requests. |
+| **Timeout budgets** | Per-upstream and per-route timeouts prevent a slow provider from dragging the whole request chain. |
+
+These controls are configured on the route, so the same upstream can have aggressive retries on one route and none on another.
+
+## Multi-provider deployments
+
+The AI Gateway is the natural place to run **multiple providers in parallel** — not for redundancy alone, but as a first-class product decision. Common shapes:
+
+- **Cost-aware split** — send cheap bulk traffic to a low-cost provider and premium traffic to a top-tier model. A weighted route plus a per-tenant override is enough.
+- **Latency-aware routing** — keep a local / low-latency model for interactive flows and a larger model for background jobs. Least-connections or a body-field match on `stream = true` does the work.
+- **Quality routing** — semantic load balancing picks the model best suited for each prompt class: code → code-tuned model, chat → chat-tuned model, retrieval → embedding + reasoning model.
+- **Data residency** — EU tenants land on EU upstreams, US on US upstreams. Header match plus two weighted pools.
+- **Provider failover** — primary = OpenAI, secondary = Anthropic (or a self-hosted model). When the primary circuit opens, traffic shifts without a client change.
+- **Gradual provider migration** — start at 95 / 5, measure quality + latency on the 5, scale up over days or weeks, without any client rollout.
+
+Because transformations live on the route ([Routes & forwarding](/trustgate/platform/ai-gateway/routes)), clients see a single normalized API no matter which provider actually answers the request. Swapping upstreams is a configuration change, not a code migration.
+
+## Token- and cost-aware awareness
+
+Load balancing integrates with [Traffic control](/trustgate/platform/ai-gateway/traffic-control) so that balancing is not just about count of requests:
+
+- **Token caps** per upstream prevent a single hot pool from consuming the provider quota.
+- **Cost ceilings** per route keep a weighted split from accidentally becoming expensive when one side's pricing changes.
+- **Anomaly signals** (sudden spikes in token spend or error rates) can shift weights automatically via a policy.
+
+The resulting behaviour: the pool stays healthy, spend stays predictable, and you can keep adding providers without re-architecting anything.

@@ -1,0 +1,108 @@
+---
+title: AWS Bedrock Agents
+description: Apply Runtime security to AWS Bedrock Agents by calling the TrustGate Actions API before and after every InvokeAgent call.
+---
+
+## What this covers
+
+Agents hosted on [AWS Bedrock Agents](https://aws.amazon.com/bedrock/agents/). Because Bedrock Agents are fully managed by AWS — orchestration, the foundation-model call, knowledge-base retrieval, and action-group routing all run server-side inside Bedrock — there is no way to put TrustGate on the wire in front of the agent's internal steps, and there is no bring-your-own-model option for the agent's foundation model.
+
+The validated integration pattern is to wrap your application's calls to `InvokeAgent` with two [Actions API](/trustgate/actions-api/overview) calls: one on the user input before you call Bedrock, and one on the agent's final response before you return it to the user.
+
+- **Surface**: [Actions API](/trustgate/actions-api/overview).
+- **Who is this for**: applications calling `bedrock-agent-runtime:InvokeAgent` (boto3, AWS SDKs for any language).
+
+## Architecture
+
+```
+user ──► your app ──► TrustGate Actions API (prompt check)
+                           │
+                           ├─ block / mask / allow
+                           ▼
+                     AWS Bedrock InvokeAgent
+                           │
+                           ▼
+                     TrustGate Actions API (response check)
+                           │
+                           ▼
+                     return to user
+```
+
+TrustGate is not on the AWS wire. Your app keeps calling `bedrock-agent-runtime.<region>.amazonaws.com` directly with SigV4; TrustGate inspection happens through two side calls.
+
+## Prerequisites
+
+1. Two **policies** in TrustGate's Actions API — one configured with the detectors you want to run on **user input**, and one configured with the detectors you want to run on the **agent's final response**. A single policy can be reused for both if the detectors are symmetric. See [Create policy](/trustgate/actions-api/overview#3-api-keys-management-admin) for the request shape.
+2. A TrustGate **execution API key** allowed to call both policies.
+3. Standard AWS credentials and IAM permissions to call `bedrock-agent-runtime:InvokeAgent` on the target agent alias.
+
+## Wire it up
+
+The example below shows the two side calls wrapping a single `InvokeAgent` invocation. The pattern is identical regardless of streaming mode — `streamFinalResponse` is discussed under [Limitations](#limitations).
+
+```python
+import boto3
+import requests
+
+TRUSTGATE_HOST = "https://<your-trustgate-host>"
+TRUSTGATE_KEY = "<trustgate-execution-api-key>"
+PROMPT_POLICY_ID = "<policy-id-for-input-checks>"
+RESPONSE_POLICY_ID = "<policy-id-for-output-checks>"
+
+bedrock = boto3.client("bedrock-agent-runtime", region_name="us-east-1")
+
+
+def actions_check(policy_id: str, text: str, user_id: str) -> dict:
+    resp = requests.post(
+        f"{TRUSTGATE_HOST}/v1/actions",
+        headers={"Authorization": f"Bearer {TRUSTGATE_KEY}"},
+        json={
+            "policy_id": policy_id,
+            "payload": {"input_text": text, "user_id": user_id},
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def ask_agent(user_id: str, prompt: str, agent_id: str, alias_id: str, session_id: str) -> str:
+    pre = actions_check(PROMPT_POLICY_ID, prompt, user_id)
+    if pre.get("status") != 200:
+        raise RuntimeError(f"Input blocked by TrustGate: {pre}")
+    sanitized_prompt = pre["payload"].get("result", prompt)
+
+    response = bedrock.invoke_agent(
+        agentId=agent_id,
+        agentAliasId=alias_id,
+        sessionId=session_id,
+        inputText=sanitized_prompt,
+    )
+    completion = "".join(
+        event["chunk"]["bytes"].decode()
+        for event in response.get("completion", [])
+        if "chunk" in event
+    )
+
+    post = actions_check(RESPONSE_POLICY_ID, completion, user_id)
+    if post.get("status") != 200:
+        raise RuntimeError(f"Output blocked by TrustGate: {post}")
+
+    return post["payload"].get("result", completion)
+```
+
+Return the decision from either Actions API call to your application layer and act on it — for masking, replace the text; for blocking, surface an error or a generic refusal; for allow, pass through.
+
+## Verify
+
+1. Run your app with a prompt that a detector on your input policy should flag (for example, one containing PII if PII detection is configured).
+2. Confirm the first `POST /v1/actions` call returns a decision that matches what you configured (block / mask / allow).
+3. Run a prompt that should produce a flaggable response; confirm the second `POST /v1/actions` call catches it.
+4. Review the Actions API telemetry / metrics you enabled on each policy to confirm executions are logging correctly.
+
+## Policies to turn on first
+
+- **Prompt security** — jailbreak and prompt injection on user input.
+- **Data protection & masking** — PII and secret detection on both sides; useful if the agent has retrieval over internal data.
+- **Content moderation** — on the agent's final response.
+- **Keyword / topic block** — on input, to keep requests in scope.

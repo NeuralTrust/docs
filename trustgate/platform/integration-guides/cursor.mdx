@@ -1,0 +1,75 @@
+---
+title: Cursor, Copilot & AI IDEs
+description: Protect Cursor, GitHub Copilot, Windsurf, and other AI IDEs on managed developer machines using the Endpoint and Browser enforcement surfaces.
+---
+
+## What this covers
+
+AI-assisted IDEs and coding assistants where the LLM provider and orchestration are hosted by the vendor — you can't intercept the call server-side. Enforcement happens on the developer's managed device.
+
+This includes:
+
+- [Cursor](https://cursor.com), [Windsurf](https://codeium.com/windsurf), [GitHub Copilot](https://github.com/features/copilot), [Sourcegraph Cody](https://sourcegraph.com/cody), [JetBrains AI Assistant](https://www.jetbrains.com/ai/), and similar native IDEs or IDE plugins.
+- Web-based AI IDEs and chat apps used for coding (Cursor web, Copilot chat in the browser, claude.ai, chatgpt.com, gemini.google.com) — only the public, approved chat apps, not internal tools.
+
+- **Surfaces**: [Endpoint](/trustgate/platform/enforcement/endpoint) for native IDE traffic, [Browser](/trustgate/platform/enforcement/browser) for web UIs.
+
+## Architecture
+
+```
+developer's managed device
+    │
+    ├── native IDE / CLI ──► PAC ──► TrustGate Endpoint (MITM) ──► LLM provider
+    └── Chromium browser ──► Browser extension ──► LLM provider web app
+```
+
+The developer does not install TrustGate software. Both integrations are pushed by MDM.
+
+## Prerequisites
+
+- An **Endpoint integration** — provides the PAC file URL, the client certificate+key, and the TrustGate CA certificate used for dynamic TLS.
+- A **Browser integration** — provides the MDM-distributable extension package for Chromium-based browsers.
+- An MDM tool (Jamf, Intune, Kandji, Workspace ONE, or similar) with enrollment on developer machines.
+- Chromium-based browsers only for the Browser surface (Chrome, Edge, Brave, Arc, Opera). Firefox and Safari are **not** supported.
+
+## Wire it up
+
+### Endpoint — native IDE traffic
+
+1. Create an **Endpoint integration** in the console. Download the PAC URL, the per-org client certificate + key, and the TrustGate CA certificate.
+2. Using your MDM, push to managed developer machines:
+   - The **TrustGate CA certificate** into the system trust store (so dynamic TLS certificates are trusted by native apps).
+   - The **client certificate + key** into the system keychain (used for mTLS to identify your org).
+   - A **proxy configuration** that uses the PAC URL so the OS-level HTTPS traffic for the targeted IDEs is routed through the TrustGate Endpoint MITM.
+3. In TrustGate, configure the Endpoint policies to match the LLM endpoints those IDEs call (for example, `api.openai.com`, `api.anthropic.com`, `api.githubcopilot.com`, `api.cursor.sh`). Anything outside the scope defined on the integration is not intercepted.
+
+Developers do not sign in, install software, or change settings.
+
+### Browser — web AI apps
+
+1. Create a **Browser integration**. Download the MDM extension package.
+2. Push the extension to Chromium browsers via MDM force-install policies (for Chrome and Edge, use their enterprise policy for `ExtensionInstallForcelist`).
+3. Configure which AI chat apps the extension activates on (for example, `chatgpt.com`, `claude.ai`, `gemini.google.com`, `cursor.com`, `github.com/copilot`).
+
+The extension is bound to your tenant via the managed extension configuration — developers do not authenticate.
+
+## Verify
+
+1. On a test managed machine, open Cursor or use GitHub Copilot in an IDE. Send a prompt.
+2. Open **Runtime → Explorer** and filter by the Endpoint integration. The prompt and response should appear.
+3. Separately, open `chatgpt.com` in Chrome on the same machine and send a prompt. It should appear filtered by the Browser integration.
+
+## Policies to turn on first
+
+- **Source-code IP leakage** — pattern and semantic detectors for proprietary identifiers, internal project names, and secret tokens.
+- **Data protection & masking** — PII and credentials embedded in code or pasted prompts.
+- **Prompt security** — jailbreak attempts originating from pasted content (indirect prompt injection).
+- **Keyword block** — list of project codenames or customer identifiers that must not leave the device.
+
+## Limitations
+
+- **Streaming on Endpoint**: many AI IDE providers use streaming responses. `Mask` and `Block` actions apply to the final consolidated payload; the detector decision is enforced once the stream completes.
+- **Certificate pinning**: some native vendors pin their API certificates and will reject the TrustGate dynamic TLS certificate. Consult the vendor's enterprise documentation; a few IDEs offer an MDM-managed CA override.
+- **Browser scope**: only Chromium-based browsers are supported. Firefox and Safari are not covered.
+- **Unmanaged devices**: BYOD laptops without MDM are out of scope for both surfaces. Restrict access from unmanaged devices via SSO / conditional access upstream.
+- **Internal chat apps**: these surfaces protect your developers when they use the approved public LLM tools. Homegrown internal chat apps should be covered with the [Gateway](/trustgate/platform/enforcement/gateway) or [API](/trustgate/platform/enforcement/api) surfaces, not Browser or Endpoint.
