@@ -1,0 +1,134 @@
+---
+title: LLM SDKs
+description: Route OpenAI, Anthropic, Google, Azure OpenAI, and Bedrock SDK calls through a TrustGate Gateway with a single base-URL change.
+---
+
+## What this covers
+
+Any application or service that calls an LLM provider directly through an official SDK. Because you control the call, the Gateway sits in between as an HTTPS proxy and applies policies on both the request and the response.
+
+- **Surface**: [Gateway](/trustgate/platform/enforcement/gateway)
+- **Who is this for**: backends and scripts using `openai`, `anthropic`, `@google/generative-ai`, Azure OpenAI, the Bedrock Runtime SDK, or the [Vercel AI SDK](https://sdk.vercel.ai).
+
+## Architecture
+
+```
+your app ──► TrustGate Gateway ──► LLM provider (OpenAI, Anthropic, Google, Azure, Bedrock)
+                │
+                └── applies route matching, policies, detectors, observability
+```
+
+The Gateway speaks the provider's native wire format, so your SDK doesn't need any provider-specific changes beyond the base URL and API key.
+
+## Prerequisites
+
+1. A **Gateway integration** in the TrustGate console. See [Gateway surface — Create a Gateway integration](/trustgate/platform/enforcement/gateway).
+2. At least one **Route** on that Gateway pointing at the LLM provider you want to protect.
+3. A **Gateway API key** issued by that Gateway integration.
+
+Your Gateway base URL will look like `https://<gateway>.neuraltrust.ai`.
+
+## Wire it up
+
+Point the SDK's `base_url` / `baseURL` at your Gateway and use the Gateway API key as the SDK's API key. The provider's native API key stays configured on the Route, not on the client.
+
+### OpenAI (Python)
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<gateway>.neuraltrust.ai/v1",
+    api_key="<trustgate-api-key>",
+)
+
+resp = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+### OpenAI (TypeScript)
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "https://<gateway>.neuraltrust.ai/v1",
+  apiKey: "<trustgate-api-key>",
+});
+```
+
+### Anthropic (Python)
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="https://<gateway>.neuraltrust.ai",
+    api_key="<trustgate-api-key>",
+)
+```
+
+### Azure OpenAI
+
+Use an Azure OpenAI route on the Gateway and point the Azure SDK at it:
+
+```python
+from openai import AzureOpenAI
+
+client = AzureOpenAI(
+    azure_endpoint="https://<gateway>.neuraltrust.ai",
+    api_key="<trustgate-api-key>",
+    api_version="2024-10-21",
+)
+```
+
+### AWS Bedrock Runtime
+
+For direct model invocation (not Bedrock Agents), use a Bedrock route and swap the endpoint:
+
+```python
+import boto3
+
+bedrock = boto3.client(
+    "bedrock-runtime",
+    endpoint_url="https://<gateway>.neuraltrust.ai",
+    aws_access_key_id="<trustgate-api-key>",
+    aws_secret_access_key="unused",
+    region_name="us-east-1",
+)
+```
+
+### Vercel AI SDK
+
+```ts
+import { createOpenAI } from "@ai-sdk/openai";
+
+const openai = createOpenAI({
+  baseURL: "https://<gateway>.neuraltrust.ai/v1",
+  apiKey: "<trustgate-api-key>",
+});
+```
+
+## Verify
+
+1. Send a test request from your app.
+2. Open **Runtime → Explorer** in the console.
+3. You should see the request and response, the route that matched, and any detectors that fired.
+
+## Policies to turn on first
+
+Start with these on every route, then tune based on what you see in Explorer:
+
+- **Prompt security** — jailbreaks and prompt injection on the input.
+- **Data protection & masking** — PII and secret detection on both sides.
+- **Content moderation** — toxicity and keyword filters on outputs.
+- **Rate limits** — token and request-per-minute limits per consumer.
+
+## Limitations
+
+- **Streaming**: requests using `stream=true` are inspected as a full response once the stream completes. `Mask` and `Block` actions take effect on the final consolidated payload, not per chunk.
+- **Provider-specific payloads**: each SDK targets its provider's native shape. Make sure the Route type matches the SDK (OpenAI-compatible, Anthropic, Bedrock, Azure OpenAI, etc.).
+- **Conversation context**: each call is inspected independently. To link turns in multi-turn conversations, send a stable `conversation_id` header so Explorer can thread them.
+- **Native tool calling**: tool-call arguments and outputs are inspected at the LLM boundary. Deeper inspection of downstream tool execution requires separately wrapping those tools with a [Gateway](/trustgate/platform/enforcement/gateway) or [API](/trustgate/platform/enforcement/api) integration.

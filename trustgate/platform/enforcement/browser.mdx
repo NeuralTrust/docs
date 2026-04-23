@@ -1,0 +1,130 @@
+---
+title: Browser surface
+description: Security enforcement at the browser — what the TrustGate browser extension sees on web-based LLMs, how it enforces Log / Mask / Block, and how to roll it out as an integration.
+---
+
+The **Browser** surface is the enforcement path for **web-based LLM usage**: employees typing into public AI chat apps like ChatGPT, Claude, Gemini, Copilot, or Mistral Le Chat in a browser tab. A signed TrustGate browser extension runs on the user's browser, sees the input before it is submitted, and applies the same policy catalog as every other surface.
+
+This is the surface that handles **shadow AI** — traffic that never reaches a gateway because it was never routed anywhere you control.
+
+## Why a browser surface
+
+Most AI usage inside an enterprise happens outside the apps your team built:
+
+- An employee pastes a customer record into ChatGPT to summarise it.
+- A PM uploads a roadmap slide deck to Gemini for rewording.
+- A support agent drops a full email thread into Claude to draft a reply.
+
+None of that traffic goes through your gateway. There is no server-side hook, no proxy, and no upstream integration you can policy-scope. The only point at which the prompt, the pasted text, or the uploaded file is still available in plaintext is **inside the browser, before submit**. That is where the Browser surface enforces.
+
+## Creating a Browser integration
+
+The Browsers surface is provisioned as an **Integration** in the platform.
+
+1. Go to **Integrations → Add Integration**.
+2. Pick **Browsers** from the provider catalog.
+3. Give the integration an **Integration Name** (for example `sales-fleet`, `contractors`).
+4. Optionally attach **Tags** that will later be usable to scope policies (for example `sales, external`).
+5. Save & Close.
+
+Once the integration exists you deploy the TrustGate browser extension to the population it covers by pushing it through your enterprise browser management (Chrome Enterprise, Edge for Business, or any MDM that supports browser extension policies). The extension reports to the control plane as soon as a user opens the browser.
+
+The integration appears as a target under **Inventory → Browsers** and becomes selectable in `Where → Applications` when you author a policy.
+
+## How to integrate
+
+There is **no code change** to make on any application — the Browser surface is installed once on the user's browser and covers every supported AI web app from that moment on.
+
+### 1. Deploy the extension
+
+The TrustGate browser extension is **Chromium-based** — it runs on Chrome, Edge, Brave, Arc, and any other Chromium-derived browser. It is distributed through enterprise browser management: force-install it through Google Admin Console, Microsoft Intune, or any MDM that supports `ExtensionInstallForcelist`. The extension appears on every managed browser at next sync and cannot be disabled by the user.
+
+Firefox and Safari are **not supported** today.
+
+Detailed policy snippets for each management channel are in the **Setup Guide** button on the Browsers integration page.
+
+### 2. What the user sees
+
+Once installed, the extension is quiet by default:
+
+- A small **status badge** in the toolbar shows it is connected.
+- On `Mask`, an inline notice tells the user the input was modified and why.
+- On `Block`, the submit action is cancelled and a dismissable banner explains the reason and the policy.
+
+All three behaviors are controlled centrally — the user cannot downgrade `Block` to `Log` from the browser.
+
+### 3. Provider catalog & updates
+
+The list of covered AI applications (ChatGPT, Claude, Gemini, Copilot, Mistral Le Chat, …) is maintained centrally and pushed to the extension together with policy updates. A newly supported app is covered automatically on the next policy sync — no re-install.
+
+### 4. Verify
+
+Open any covered AI app, try to submit a prompt that your policies target, and confirm the expected behavior in **Runtime → Logs**: the event should appear with the application and decision attached.
+
+## What it sees
+
+The extension inspects what the user is about to send to a supported web AI application:
+
+- **Typed prompts** in the chat input box.
+- **Pasted content** — plaintext, rich text, or structured data.
+- **File uploads** attached to the chat (documents, images, spreadsheets).
+- **Selected context** from page-level integrations (for example right-click "Ask ChatGPT").
+
+The extension does **not** exfiltrate the content to a third party — detections run locally in the extension, and only the **decision and event metadata** are sent to the control plane. When the policy catalog requires server-side detectors (for example large model classifiers), the extension calls the TrustGate API over a signed channel with just the fragment that needs to be evaluated.
+
+Supported web AI applications evolve; the list is maintained centrally and updated alongside the extension.
+
+## How enforcement works
+
+Every policy that selects `Where → Browser` translates its action to a concrete browser behavior:
+
+| Action | In the browser |
+| --- | --- |
+| `Log` | User experience is unchanged; a decision event is recorded against the user, device, and application. |
+| `Mask` | The input field, pasted buffer, or uploaded file is **rewritten in place** before the user submits — for example PII redacted, secrets stripped, confidential identifiers replaced with placeholders. The user sees a notice explaining that the content was modified. |
+| `Block` | The submit action is cancelled. The user is shown the reason (for example "Sending source code to external LLMs is not allowed") and the event is logged. |
+
+Because enforcement happens **before submit**, `Block` is a hard stop — the sensitive content never leaves the machine.
+
+## Available filters
+
+When authoring a policy with `Where → Browser`, **Add filter** offers:
+
+| Filter | Narrows by |
+| --- | --- |
+| **Applications** | The specific web AI application the policy applies to (for example `ChatGPT`, `Claude`, `Gemini`, `Copilot`). |
+
+Leaving the filter empty applies the policy to **every supported AI application** the extension covers — the usual choice for shadow-AI policies like `Block PII everywhere`.
+
+## Identity and audit
+
+Every browser event is stamped with:
+
+- The **user identity** from SSO (email, group membership).
+- The **device identity** the extension is installed on.
+- The **application** the prompt was headed for.
+- The **evidence snippet** that matched the policy (masked when the policy is `Mask` or `Block`).
+
+All of this lands in the same log stream as Gateway, API, and Endpoint events, so a single query can answer "who tried to send a credit card number to an LLM today, regardless of how".
+
+## Best for
+
+- **Shadow AI and copy-paste exfiltration** — the biggest leak channel in most enterprises.
+- Populations you cannot force behind a gateway: sales, finance, support, execs, contractors.
+- Organizations already using a managed browser where rolling out extensions is straightforward.
+
+## Layering with other surfaces
+
+The Browser surface pairs naturally with the Gateway and Endpoint surfaces. A typical deployment uses:
+
+- **Gateway** for owned apps and agents (hard `Block`).
+- **Browser** for anything a user types into a web AI app (hard `Block` at the tab).
+- **Endpoint** for desktop apps, IDE plugins, and CLIs that bypass both.
+
+Writing the same policy on all three surfaces (for example `Block PII`) gives you coverage across every way a prompt can leave your perimeter.
+
+## Related
+
+- [Enforcement surfaces overview](/trustgate/platform/enforcement-surfaces) — how Browser compares to Gateway, API, and Endpoint.
+- [Policies](/trustgate/platform/policies) — authoring `Where / When / Then` for Browser.
+- [Security capabilities](/trustgate/platform/security-capabilities) — detectors shared with every other surface.

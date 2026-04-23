@@ -1,0 +1,134 @@
+---
+title: LangChain & LangGraph
+description: Point LangChain and LangGraph model clients at a TrustGate Gateway to secure every LLM hop in your chain or graph.
+---
+
+## What this covers
+
+LangChain applications and LangGraph workflows that call LLM providers through `ChatOpenAI`, `ChatAnthropic`, `ChatGoogleGenerativeAI`, `AzureChatOpenAI`, or `ChatBedrock`. TrustGate inspects each LLM hop independently — not the LangChain orchestration itself — so policies apply to every model call the chain or graph makes.
+
+- **Surface**: [Gateway](/trustgate/platform/enforcement/gateway)
+- **Who is this for**: Python (`langchain`, `langgraph`) and TypeScript (`@langchain/core`, `@langchain/langgraph`) stacks.
+
+## Architecture
+
+```
+LangChain / LangGraph app ──► model client ──► TrustGate Gateway ──► LLM provider
+                                                        │
+                                                        └── one inspection per LLM hop
+```
+
+Every node or chain step that calls `llm.invoke(...)` becomes a discrete request in the Gateway, with its own route match and detector decisions.
+
+## Prerequisites
+
+1. A **Gateway integration** with Routes for every provider your chain touches (OpenAI, Anthropic, etc.).
+2. A **Gateway API key** with permission to call those routes.
+
+## Wire it up
+
+Swap `base_url` / `baseURL` and `api_key` / `apiKey` on each model client. No other changes to prompts, tools, or graph structure.
+
+### LangChain (Python)
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
+
+gateway = "https://<gateway>.neuraltrust.ai"
+key = "<trustgate-api-key>"
+
+openai_llm = ChatOpenAI(
+    model="gpt-4o",
+    base_url=f"{gateway}/v1",
+    api_key=key,
+)
+
+anthropic_llm = ChatAnthropic(
+    model="claude-3-5-sonnet-latest",
+    base_url=gateway,
+    api_key=key,
+)
+```
+
+Use them anywhere you use a regular LangChain LLM:
+
+```python
+from langchain_core.prompts import ChatPromptTemplate
+
+prompt = ChatPromptTemplate.from_messages([("user", "{q}")])
+chain = prompt | openai_llm
+chain.invoke({"q": "Summarize the contract below..."})
+```
+
+### LangChain (TypeScript)
+
+```ts
+import { ChatOpenAI } from "@langchain/openai";
+
+const llm = new ChatOpenAI({
+  model: "gpt-4o",
+  configuration: {
+    baseURL: "https://<gateway>.neuraltrust.ai/v1",
+    apiKey: "<trustgate-api-key>",
+  },
+});
+```
+
+### LangGraph
+
+LangGraph nodes use the same LangChain model clients. Configure them once and pass them into your graph as usual:
+
+```python
+from langgraph.graph import StateGraph
+from typing_extensions import TypedDict
+
+class State(TypedDict):
+    input: str
+    output: str
+
+def think(state: State) -> State:
+    reply = openai_llm.invoke(state["input"])
+    return {"output": reply.content, **state}
+
+graph = StateGraph(State)
+graph.add_node("think", think)
+graph.set_entry_point("think")
+graph.set_finish_point("think")
+app = graph.compile()
+```
+
+### Tools and agents
+
+For tool-calling agents (`create_react_agent`, `AgentExecutor`, LangGraph prebuilt agents), the LLM hop is protected by the Gateway. To also protect **tool execution** — for example, a tool that calls an internal HTTP API — wrap that tool's endpoint with a separate [Gateway](/trustgate/platform/enforcement/gateway) route or an [API](/trustgate/platform/enforcement/api) integration.
+
+## Verify
+
+1. Run a chain or graph that makes at least one LLM call.
+2. Open **Runtime → Explorer**.
+3. You should see one entry per LLM hop. Chains with multiple steps produce multiple entries.
+
+To group hops into a single conversation in Explorer, forward a stable `conversation_id`:
+
+```python
+openai_llm = ChatOpenAI(
+    model="gpt-4o",
+    base_url=f"{gateway}/v1",
+    api_key=key,
+    default_headers={"x-conversation-id": conversation_id},
+)
+```
+
+## Policies to turn on first
+
+- **Prompt security** — jailbreak and prompt injection on user input and retrieved documents (critical for RAG chains).
+- **Data protection & masking** — PII and secrets on both sides.
+- **Tool-guard** (when using agents) — validate tool arguments before they reach the LLM's action plan.
+- **Context security / RAG poisoning** — on chains that retrieve untrusted content.
+
+## Limitations
+
+- **Per-hop inspection**: detectors run on each LLM call independently. Multi-turn context is inferred from the messages you pass in; use a conversation header to correlate.
+- **Streaming**: streamed responses are inspected once the stream completes; `Mask` and `Block` apply to the final consolidated payload.
+- **Tool execution**: LangChain tool calls that hit external APIs are not automatically covered. Wrap those endpoints with their own Gateway or API integration if they handle sensitive data.
+- **Custom runnables**: anything that bypasses the standard chat models (direct `httpx` calls, custom providers) will not be inspected unless it also uses the Gateway base URL.

@@ -1,0 +1,96 @@
+---
+title: Traffic control
+description: Rate limits, token and size caps, bot detection, and anomaly detection at the AI Gateway surface — the controls that keep upstream providers and your own infrastructure healthy.
+---
+
+Traffic control is everything the **NeuralTrust AI Gateway** does to keep itself, the client, and the upstream providers healthy under real-world load and attack patterns. It covers four dimensions: **rate**, **size**, **origin**, and **shape**.
+
+Each control enforces natively on the gateway (block, throttle, truncate) **and** emits structured signals. When the [Runtime Security](/trustgate/platform/enforcement/gateway) layer is attached, those signals become first-class conditions in `Where / When / Then` policies — so a bot signal can raise rate-limit strictness, a token spike can force a model downgrade, and an oversized prompt can be truncated before it reaches the upstream.
+
+## Rate limiting
+
+<CardGroup cols={2}>
+  <Card title="Per IP" icon="network">
+    Throttle requests from each client IP — the baseline abuse and scraping defence.
+  </Card>
+  <Card title="Per user / API key" icon="user-round">
+    Enforce quotas per authenticated identity so a single tenant cannot starve others.
+  </Card>
+  <Card title="Token-based" icon="coins">
+    Limit by **prompt + completion tokens**, not just requests — the right unit for LLM cost and capacity. A 500-token budget is very different from 500 requests of 10 tokens each.
+  </Card>
+  <Card title="Fingerprint-based" icon="fingerprint">
+    Cluster requests by a derived fingerprint to detect and throttle abusers that rotate IPs or API keys.
+  </Card>
+  <Card title="Global" icon="globe">
+    Protect an upstream from total traffic regardless of origin — useful during provider incidents or quota emergencies.
+  </Card>
+</CardGroup>
+
+Every limiter exposes a signal (`rate.exceeded`, `rate.approaching`, `tokens.used`) that can be used in policies — e.g. *"when the user approaches their hourly token cap, warn them and downgrade to a cheaper model"*.
+
+## Size limits
+
+Size limiting caps the shape of requests and responses, preventing resource exhaustion and a common class of abuse where huge payloads are used to bypass quotas.
+
+| Control | Protects against |
+| --- | --- |
+| **Request body size** | DoS via large prompts or oversized tool-call arguments. |
+| **Attachment size** | Oversized document or image uploads that blow up the doc analyzer pipeline. |
+| **Response stream size** | Runaway generations that exhaust bandwidth or client buffers. |
+| **Context window guard** | Prompts that exceed the target model's context window — fail fast instead of letting the provider return an error. |
+
+Limits can be global, per-route, or per-tenant — and the gateway can either reject the request or truncate / chunk it before forwarding.
+
+## Bot detection
+
+Bot detection identifies automated clients — scrapers, credential stuffers, content farms, keyword miners — using behavioural heuristics and fingerprints. A single request is rarely enough; detection works across a short rolling window of behaviour.
+
+Signals the detector looks at:
+
+- Request cadence and bursts (humans have jitter, bots don't).
+- Header consistency (user-agent, accept-language, TLS fingerprint).
+- Path and parameter patterns (enumerating `id=1..N` is a giveaway).
+- Missing or cheap client behaviours (no cookies, no JS, no retries on transient errors).
+- IP and ASN reputation.
+
+Once a client is classified as bot-like, a policy can decide the outcome: **block**, **challenge**, **rate-limit harder**, or **route to a cheaper upstream** — whichever matches the workload. Bot detection integrates with the same policy engine as the other security features, so the decision is scoped through the standard `Where / When / Then`.
+
+## Anomaly detection
+
+Anomaly detection learns a baseline of normal traffic and flags deviations that a static rate-limit would miss. It is the "did something change?" signal.
+
+Dimensions monitored:
+
+- **Request rate and shape** — sudden surge, unusual path mix, change in method distribution.
+- **Token spend** — unexpected spike in prompt or completion tokens per minute.
+- **Tool-call patterns** — an agent suddenly calling write tools after hours of read-only traffic.
+- **Error bursts** — 4xx / 5xx rates climbing on a specific upstream.
+- **Content distribution shifts** — a surge of similar-looking prompts (red-team probing) or suddenly different-looking ones (a new abuse script).
+
+Detected anomalies emit signals (`anomaly.rate`, `anomaly.tokens`, `anomaly.tool_pattern`, `anomaly.error_burst`) that policies can act on. Typical reactions: throttle the tenant, shift traffic to a cheaper upstream, open an incident, or require a human approval step.
+
+## Where these controls live
+
+| Control | Typical scope | Attaches to |
+| --- | --- | --- |
+| Rate limits | Per route, per upstream, per identity, or global | Route or application |
+| Size limits | Per route | Route |
+| Token caps | Per identity, per upstream, or global | Route or application |
+| Bot detection | Per gateway, refined per route | Gateway-wide with per-route overrides |
+| Anomaly detection | Per gateway, with per-route thresholds | Gateway-wide with per-route overrides |
+
+## Signals available to policies
+
+Every traffic-control module produces first-class signals that can appear in a policy's `When`:
+
+| Signal | Produced by | Example policy |
+| --- | --- | --- |
+| `rate.exceeded` / `rate.approaching` | Rate limiter | Warn and downgrade model at 80% of the hourly token budget. |
+| `size.exceeded` | Size limiter | Block prompts above the context window before the upstream returns an error. |
+| `bot.score`, `bot.classified` | Bot detector | Require a CAPTCHA / challenge for browser traffic with `bot.score > 0.8`. |
+| `anomaly.tokens`, `anomaly.rate`, `anomaly.tool_pattern` | Anomaly detector | Shift the tenant to a cheaper upstream and alert SecOps when token spend spikes 5× baseline. |
+
+## Observability
+
+Everything traffic control produces is captured alongside the usual request traces — rate-limit counters, token counters, bot scores, anomaly deltas — and streams into the observability pipeline. See [Observability](/trustgate/platform/observability) for how to explore, alert, and integrate these signals with your SIEM and dashboards.

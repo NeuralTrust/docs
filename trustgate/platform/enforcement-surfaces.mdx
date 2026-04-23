@@ -1,0 +1,79 @@
+---
+title: Surfaces
+description: The four places where TrustGate can enforce a policy — Gateway, Browser, API, and Endpoint. How they differ, how to combine them, and which one to start with.
+---
+
+Runtime security cannot live in a single place. The same employee who calls your production LLM through a proxy also pastes prompts into ChatGPT in a browser tab, and their laptop runs a desktop app that calls an LLM directly. TrustGate enforces on **four distinct surfaces** so one policy library covers every path.
+
+When you create a policy, the first thing you pick is the **Where → surface**. That choice determines:
+
+- **What traffic is visible** to the policy.
+- **Where enforcement physically happens** — inside a gateway proxy, a browser extension, an API engine, or a transparent MITM proxy devices route to via a PAC file.
+- **Which filters** are available to narrow the scope further.
+- **How `Log`, `Mask`, and `Block` translate** into a concrete action on the wire.
+
+All four surfaces are provisioned as **Integrations** in the platform (Integrations → Add Integration). Gateway and API integrations additionally let you pick a **Deployment Type** — Serverless or Dedicated — and issue their own per-engine API keys.
+
+<CardGroup cols={2}>
+  <Card title="Gateway" icon="database" href="/trustgate/platform/enforcement/gateway">
+    LLM traffic through a TrustGate gateway. Routes decide whether it acts as an embedded AI Gateway or a pure security layer on top of a third-party gateway or backend.
+  </Card>
+  <Card title="Browser" icon="globe" href="/trustgate/platform/enforcement/browser">
+    A signed browser extension that enforces on web-based LLMs (ChatGPT, Claude, Gemini, Copilot, Mistral Le Chat). The surface for shadow AI and copy-paste exfiltration.
+  </Card>
+  <Card title="API" icon="code-xml" href="/trustgate/platform/enforcement/api">
+    An API engine (Serverless or Dedicated) your backends call directly. For workloads that can't be placed behind a proxy but can afford one extra HTTP round trip.
+  </Card>
+  <Card title="Endpoint" icon="git-branch" href="/trustgate/platform/enforcement/endpoint">
+    A transparent MITM proxy that managed devices route AI traffic to via an MDM-pushed PAC file. Zero software on the device; covers desktop apps, IDE plugins, and CLIs.
+  </Card>
+</CardGroup>
+
+## At a glance
+
+| Surface | Traffic it sees | Runs in | Integration? | Filters |
+| --- | --- | --- | --- | --- |
+| **[Gateway](/trustgate/platform/enforcement/gateway)** | LLM traffic sent through a TrustGate gateway | Gateway engine (Serverless or Dedicated); routes point at LLMs, third-party gateways, or custom backends | **Gateway** (per-engine API keys) | Gateways · Routes · Tags · Use Cases |
+| **[Browser](/trustgate/platform/enforcement/browser)** | Prompts typed or pasted into web-based LLMs | TrustGate browser extension on the user's browser | **Browsers** | Applications |
+| **[API](/trustgate/platform/enforcement/api)** | Whatever the caller sends to the Actions API | API engine (Serverless or Dedicated) exposing the Actions API | **API** (per-engine API keys) | Engines · Tags · Use Cases |
+| **[Endpoint](/trustgate/platform/enforcement/endpoint)** | AI traffic from managed devices (IDEs, desktop apps, CLIs) to covered AI providers | A transparent MITM proxy the device reaches via an MDM-pushed PAC file (no software on the device) | **Endpoint** | Endpoints · Applications · Tags |
+
+## Surfaces and actions
+
+All four surfaces share the **same detector catalog** and the **same policy language**. Only the enforcement mechanics of `Log`, `Mask`, and `Block` differ — which is why the per-surface pages spell out each verb explicitly.
+
+| Action | Gateway | Browser | API | Endpoint |
+| --- | --- | --- | --- | --- |
+| `Log` | Event recorded; traffic unchanged. | Event recorded; UX unchanged. | Decision + evidence returned; caller proceeds. | Event recorded; traffic unchanged. |
+| `Mask` | Payload rewritten before upstream and on response. | Input field / paste / upload rewritten **in place** before submit. | Rewritten payload returned to the caller to use instead of the original. | Request body (and non-streaming response bodies) rewritten by the proxy before they reach the upstream or the client. |
+| `Block` | Upstream never called; client receives an error. | Submit cancelled in the browser; content never leaves the machine. | Decision = `block` returned; caller is expected to abort. | Request blocked with a `403` JSON error; non-streaming responses replaced. Streaming responses can only be alerted (already delivered to the client). |
+
+`Log`, `Mask`, and `Block` on the Gateway and Browser surfaces are hard guarantees. On the Endpoint surface they are hard guarantees on **requests and non-streaming responses**; **streaming responses** can only be alerted. On the API surface enforcement is a contract the caller must honor.
+
+## Layering surfaces
+
+Surfaces are **not mutually exclusive**. A mature deployment layers them so the same detection (for example PII) is blocked wherever a prompt can leave the perimeter:
+
+- **Gateway** for owned apps and agents — hard guarantee on your own traffic.
+- **Browser** for shadow AI in web chat apps.
+- **Endpoint** for desktop apps, IDE plugins, and CLIs.
+- **API** for backend jobs that can't be proxied, or as a second-line check on another surface.
+
+Because every surface shares the same detectors and policy language, writing `Block PII` on all four is cheap and consistent. The control plane aggregates decisions from every surface into a single log stream.
+
+## Decision guide
+
+Use this table to pick a starting point; then add overlapping surfaces as your threat model grows.
+
+| Your concern | Start with |
+| --- | --- |
+| Apps you built calling LLMs through an AI gateway (NeuralTrust or a third-party one) | [**Gateway**](/trustgate/platform/enforcement/gateway) |
+| Employees pasting data into ChatGPT / Claude / Gemini | [**Browser**](/trustgate/platform/enforcement/browser) |
+| Backend jobs that can't be proxied | [**API**](/trustgate/platform/enforcement/api) |
+| Desktop apps, IDE plugins, CLI tools talking to AI | [**Endpoint**](/trustgate/platform/enforcement/endpoint) |
+
+## Related
+
+- [Policies](/trustgate/platform/policies) — the `Where / When / Then` model that runs on every surface.
+- [Security capabilities](/trustgate/platform/security-capabilities) — the shared detector catalog.
+- [Architecture](/trustgate/platform/architecture) — how the four surfaces share a single control plane.

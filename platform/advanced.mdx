@@ -1,0 +1,115 @@
+---
+title: Advanced
+description: Provision a hybrid data plane in your own AWS, GCP, or Azure account — or connect one you already run — directly from Team Settings.
+---
+
+# Advanced
+
+The **Advanced** panel is how you bind a **hybrid data plane** to the team. A data plane is the stack that actually handles traffic — TrustGate Gateways, API engines, Browser workers, Endpoint proxy, and the policy engine that runs on them. In a **hybrid** deployment, that stack lives **inside your own cloud account** while NeuralTrust's control plane (the console, policy authoring, audit, analytics) remains on NeuralTrust's side.
+
+Open it from **Team settings → Advanced**. The section is titled **Data Plane Configuration** and exposes one of four flows:
+
+- **AWS** — provision a new data plane into an AWS account.
+- **GCP** — provision into a GCP project.
+- **Azure** — provision into an Azure subscription.
+- **Connect to existing** — link to a data plane you or NeuralTrust has already deployed.
+
+<Note>
+If your plan is **SaaS** (NeuralTrust-hosted), you don't need this panel. Your team already has a data plane attached and this view can be ignored. Advanced is for **hybrid** and **self-managed** deployments where the data plane runs in your infrastructure.
+</Note>
+
+See [Deployment modes](/trustgate/platform/deployment-modes) for the full matrix of SaaS / Hybrid / Self-hosted and how to pick one.
+
+## Provision a new data plane
+
+The three cloud tabs (AWS / GCP / Azure) share the same flow: collect a small set of inputs, hand off to a provisioning API that installs the data-plane chart into your account, and poll for status until it's ready.
+
+### Common fields
+
+| Field | What it is |
+| --- | --- |
+| **Data plane version** | The chart version to deploy. The dropdown pins the currently stable release (for example `1.6.2 (latest stable)`) and lets you pick historical versions for pinned environments. |
+| **Region** | The cloud region to deploy into (for example `us-east-1`, `europe-west1`, `westeurope`). Pick the region closest to your users to minimize policy-evaluation latency. |
+| **JWT Secret** *(optional)* | Secret used to sign internal tokens exchanged between the control plane and the data plane. Leave empty and the provisioning API generates one; use **Generate Random Secret** to produce a fresh 256-bit value. Save it if you plan to rotate or connect additional data planes later. |
+
+### AWS
+
+Required, in addition to the common fields:
+
+- **Role ARN** — an IAM role in your AWS account that the NeuralTrust provisioning API can assume to create the data-plane resources. The role trust policy must allow NeuralTrust's provisioning principal; the **Policy and steps to complete in your cloud** accordion at the bottom of the panel shows the exact trust policy and the IAM permissions the role needs.
+
+**Flow**
+
+1. In AWS, create the IAM role with the trust policy and attached permissions listed in the accordion.
+2. Back in Team Settings → Advanced, select **AWS**, pick the version and region, paste the **Role ARN**, and optionally provide a JWT secret.
+3. Click **Deploy**.
+4. The job runs asynchronously. The panel polls every 15 seconds; you can also click **Refresh status** for an immediate check.
+5. When the status is **SUCCEEDED**, the data plane is linked to the team automatically.
+
+### GCP
+
+GCP uses a service account instead of a role. Required fields additionally include the **Project ID** and a **Service Account** email with the necessary roles. The policy accordion shows the exact role bindings to create before running the provisioning job.
+
+### Azure
+
+Azure uses a **Subscription ID** plus a **Managed Identity** (or a service principal) that NeuralTrust's provisioning API can authenticate as. The policy accordion lists the required role assignments on the subscription.
+
+### During provisioning
+
+- The panel shows a live status (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`) with a progress message for the current step.
+- Status updates automatically every **15 seconds**; **Refresh status** forces an immediate poll.
+- A job typically completes in a few minutes. Region cold-starts or first-time container pulls can push it longer.
+- If it fails, the message surfaces what went wrong (usually an IAM / role permission issue) — fix it, then re-run **Deploy**.
+
+### After SUCCEEDED
+
+- The team is **linked** to the new data plane.
+- Provisioned Gateway / API / Browser / Endpoint integrations start using this data plane.
+- Traffic logs and audit events flow back to the NeuralTrust control plane through the pipeline the chart sets up.
+
+## Connect to an existing data plane
+
+Use the **Connect to existing** tab when the data plane has already been installed — for example by your platform team via Terraform or Helm, or by NeuralTrust Professional Services, or by a prior provisioning run in another team.
+
+You'll provide:
+
+- The **data-plane endpoint** (hostname the control plane should reach).
+- An **enrollment token** generated by the data plane's bootstrap job.
+- Optionally a **JWT secret** if you want to rotate the one the data plane was installed with.
+
+Clicking **Connect** links the data plane without creating any new infrastructure in your cloud.
+
+## Upgrading the data plane
+
+The dropdown exposes versions beyond the current default. To upgrade:
+
+1. Open **Team settings → Advanced**.
+2. Select the target version from **Data plane version**.
+3. Re-run **Deploy** against the same role / service account / managed identity.
+
+The provisioning API performs a rolling upgrade of the chart. Traffic keeps flowing through the old pods while new ones come up; there is no enforced downtime, but you should still plan upgrades for low-traffic windows.
+
+## Unlinking a data plane
+
+Unlinking disassociates the data plane from the team at the control-plane level. It does **not** tear down infrastructure in your cloud — that remains your responsibility and is done from your cloud console / IaC.
+
+1. Open **Team settings → Advanced**.
+2. On the connected data plane, click **Unlink**.
+3. (Optional) De-provision the cloud resources separately once you've confirmed no traffic is still targeting them.
+
+After unlinking, the team has no data plane and traffic-handling products become unavailable until you link another one.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| Deploy stuck in `QUEUED` | Provisioning API queue back-pressure or region capacity. | Wait; if > 10 min, contact support. |
+| Deploy fails with IAM error | Role / service account / managed identity lacks a required permission. | Apply the exact policy from the **Policy and steps** accordion, then re-run. |
+| Status stays `RUNNING` for > 30 min | Cloud-side resource (load balancer, cert, DNS) taking long to come up. | Check the relevant cloud console for the data-plane namespace / resource group and confirm progress. |
+| `SUCCEEDED` but traffic isn't flowing | DNS / networking not yet configured for the data plane's public endpoint. | Follow the DNS steps printed at the end of the provisioning job. |
+
+## Related
+
+- [Deployment modes](/trustgate/platform/deployment-modes) — SaaS vs Hybrid vs Self-hosted and how they compare.
+- [Architecture](/trustgate/platform/architecture) — where the data plane fits relative to the control plane.
+- [General](/platform/general) — deleting the team unlinks any data plane but does not tear it down in your cloud.

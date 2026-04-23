@@ -1,0 +1,90 @@
+---
+title: Document analyzer
+description: Inspect uploaded files before they reach the model — extract content via OCR and parsing, then run PII and jailbreak detections over the full document.
+---
+
+Documents are a blind spot for most AI security tooling. Content is buried inside PDFs, images, spreadsheets, and scans, so detectors that only look at the prompt text miss what matters. The **Document analyzer** is one of TrustGate's two [Content Analyzers](#related-detections) — it parses uploaded files, runs OCR where needed, and then executes the same PII and jailbreak detections that protect the prompt, this time against the extracted document content.
+
+## Why it matters
+
+| Concern | Impact |
+| --- | --- |
+| **Indirect prompt injection** | A benign-looking PDF can carry hidden instructions ("ignore previous rules…") that hijack the model once the file is summarized or embedded. |
+| **PII exposure** | Scanned contracts, IDs, and forms carry personal data that text-only detectors never see. |
+| **Structured leakage** | Tables and forms encode account numbers, amounts, and identifiers that need the same protection as prose. |
+| **Payload smuggling** | Malicious actors hide instructions or secrets in metadata, embedded scripts, or steganographic content. |
+
+## Where it lives in the picker
+
+The Document analyzer sits under the **Content Security** category in `Create Policy → When`, alongside prompt- and response-level detections (Prompt Guard, Prompt Moderation, Response Moderation, Toxicity Protection, URL Analyzer).
+
+Add the detection to a policy, pick whether you want **PII**, **Jailbreak**, or both signals, and set the outcome in the `Then` step — `Log` to observe, `Block` to reject the request with a `403`, or `Mask` on the PII side to redact sensitive spans before the model sees them.
+
+## How it works
+
+The analyzer runs at the **pre-request** stage, before the payload reaches the upstream LLM or tool:
+
+1. **Parse** — native text is pulled from PDFs, Office files, markdown, HTML, and archives.
+2. **OCR** — images and scanned documents are run through OCR to produce searchable text. Languages are configurable per deployment.
+3. **Normalize** — tables, forms, and metadata are converted into a structured representation so detections can reason about fields as well as free text.
+4. **Detect** — PII and jailbreak detectors run against both the extracted text and the structured view. Results feed back into the policy engine's `When` evaluation.
+
+Because extraction happens before any model call, the analyzer can block, mask, or log *before* the file's content ever enters a prompt — which is the whole point of putting it here rather than downstream.
+
+## Supported inputs
+
+| Input | Treatment |
+| --- | --- |
+| **PDF, DOCX, XLSX, PPTX, Markdown, HTML** | Native text + structured extraction (tables, headings, metadata). |
+| **PNG, JPEG, TIFF, scanned PDFs** | OCR to text, with language-specific tokenization. |
+| **Archives (zip, tar, etc.)** | Recursively unpacked; each inner file goes through the same pipeline. |
+
+A **max file size** cap (50 MB by default) protects the gateway from resource exhaustion. Files above the cap short-circuit with a policy decision before any work is done.
+
+## What is detected
+
+<CardGroup cols={2}>
+  <Card title="PII" icon="user-round">
+    Email, credit card, IBAN, phone number, SSN, passport number, national IDs — detected across text, tables, and OCR'd regions. Same entity catalog as [Data protection & masking](/trustgate/platform/security/data-protection).
+  </Card>
+  <Card title="Jailbreak" icon="shield-alert">
+    Hidden prompt-injection payloads embedded in document body, metadata, alt text, or visual steganography. Uses the same scoring engine as [Prompt security](/trustgate/platform/security/prompt-security); sensitivity is picked on a 4-level scale (see below).
+  </Card>
+  <Card title="Structured signals" icon="table">
+    Detections run against extracted tables and form fields, not just free text — so numbers, codes, and identifiers are caught even when they never appear as prose.
+  </Card>
+  <Card title="Embedded content" icon="link">
+    Links and references inside documents are surfaced; pair with the [URL Analyzer](/trustgate/platform/security/url-analyzer) to follow and inspect them.
+  </Card>
+</CardGroup>
+
+## Configuration
+
+The Document Analyzer exposes the following fields in the policy's `When` step:
+
+| Field | Purpose |
+| --- | --- |
+| **Detection Threshold** | Sensitivity level for the jailbreak classifier applied to extracted content. Uses the shared 4-level scale — see below. |
+| **Max File Size** | Upper bound on the uploaded file, in bytes. Default `52428800` (50 MB). Oversized uploads are rejected before parsing. |
+| **OCR Languages** | List of ISO language codes OCR should try (e.g. `en`, `es`, `fr`). Disable OCR entirely for text-only deployments to cut latency. |
+| **PII Entities to Detect** | Which entity types to scan for (Email, Phone, Credit Card, IBAN, SSN, Passport, etc.). |
+
+### Detection Threshold — sensitivity levels
+
+| Level | Label | Behaviour |
+| --- | --- | --- |
+| **L1** | Lenient | Minimal filtering, only the most obvious threats. |
+| **L2** | Balanced | Recommended for most use cases. Default. |
+| **L3** | Enhanced | Higher sensitivity, may flag borderline content. |
+| **L4** | Strict | Maximum protection, strictest filtering. |
+
+Pair these with the policy's **Where** filters (application, endpoint, etc.) so the analyzer only runs on the routes where file uploads are expected.
+
+## Related detections
+
+The Document analyzer is one of two **Content Analyzers** in TrustGate — both share the same configuration pattern (mode + PII + jailbreak) but look at different input channels:
+
+- **Document analyzer** (this page) — inspects files that arrive as uploads or attachments.
+- **[URL Analyzer](/trustgate/platform/security/url-analyzer)** — fetches the content behind URLs referenced in the prompt and runs the same detections over what it downloads.
+
+In a RAG or document-processing workflow, enable both so nothing slips in through either channel.

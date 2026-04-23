@@ -1,0 +1,89 @@
+---
+title: Content moderation
+description: Keep prompts and responses on-topic and on-policy. Pick from a built-in Topics catalog in the policy `When` picker and apply to Input or Output.
+---
+
+Content moderation controls **what your application is allowed to say and be asked about** — financial / legal / medical advice, political or religious content, competitor mentions, internal-policy leakage, and more — on either side of the LLM call.
+
+Moderation is not a separate screen: it's a detection you pick inside a policy's `When` condition, just like Prompt Guard.
+
+## Apply to prompts or responses
+
+The same detections run on either direction of the traffic — you control this with the condition's **Field**:
+
+| Field | Moderates | Typical use |
+| --- | --- | --- |
+| **Input** | What the user sends to the model. | Stop off-policy questions before they hit the LLM. |
+| **Output** | What the model generates. | Prevent the LLM from saying something the product, brand, or regulator forbids. |
+
+You can run both in the same policy, or split into two policies so each side tunes independently.
+
+## Topics — the built-in catalog
+
+In `Create Policy → When`, open the detection picker and pick the **Topics** category. It ships with the following out-of-the-box topics:
+
+| Topic | Catches |
+| --- | --- |
+| **Financial Advice** | Recommendations on investments, trades, tax strategy, etc. |
+| **Legal Advice** | Advice on contracts, litigation, legal interpretation. |
+| **Medical Advice** | Diagnoses, treatment suggestions, dosage guidance. |
+| **Political Content** | Political opinions, parties, elections, activism. |
+| **Religious Content** | Religious beliefs, practices, comparative religion discussions. |
+| **Internal Policies** | Leakage of internal guidelines, SOPs, or playbooks. |
+| **Confidential Projects** | Codenames, unannounced initiatives, sensitive programs. |
+
+Pick the subset relevant to the route. A fintech assistant might enable `Financial Advice` + `Legal Advice`; a healthcare assistant might enable `Medical Advice`; an internal copilot might enable `Internal Policies` + `Confidential Projects`.
+
+### How a topic condition looks
+
+Once selected, the condition row reads like any other `When` condition:
+
+```text
+Input  ·  triggers  ·  Topics: Financial Advice, Legal Advice
+```
+
+Add more rows via `+ Add Condition` — per the [policy model](/trustgate/platform/policies), rows always combine with **AND**, so for OR semantics use multiple policies.
+
+## Keyword & Regex — deterministic rules
+
+Alongside the classifier-driven **Topics** catalog, you can attach deterministic lists:
+
+| List | Use for |
+| --- | --- |
+| **Blocked Keywords** | Exact or substring matches — brand names, competitors, policy vocabulary. |
+| **Regex Patterns** | Structured matches — SKUs, internal IDs, complex compliance patterns. |
+
+Use Keyword & Regex when you need **auditable, literal** rules that supplement the classifier's intent-based matches.
+
+## Sensitivity
+
+Topic and keyword detections expose a 5-level sensitivity scale:
+
+| Level | Profile | Good for |
+| --- | --- | --- |
+| **L1 — Lenient** | Minimal filtering, only the most obvious violations. | Internal or already-hardened traffic. |
+| **L2 — Light** | Low sensitivity, catches clear cases. | Low-risk customer apps. |
+| **L3 — Balanced** | **Recommended default** — clear threats with low false-positives (~85% threshold). | Typical production routes. |
+| **L4 — Enhanced** | Higher sensitivity, flags borderline content. | Regulated or high-risk workloads. |
+| **L5 — Strict** | Maximum protection, strictest filtering. | Kids / health / finance / government. |
+
+Start at **L3 — Balanced** with a `Log` policy, review the hits on real traffic, then raise the level and/or promote the action to `Block` once the false-positive rate is acceptable.
+
+## Using moderation in a policy
+
+Standard `Where / When / Then` flow:
+
+- **Where** — typically the `Gateway` surface, optionally filtered by `Routes` or `Applications`.
+- **When** —
+  - `Input` · `triggers` · **Topics: …** (for the prompt side), and/or
+  - `Output` · `triggers` · **Topics: …** (for the generation side).
+- **Then** — `Log` while tuning, `Block` once the policy is ready for enforcement.
+
+A single policy can mix Topics with Keyword/Regex rows and other Content Security detections — they all AND together.
+
+## Common policies
+
+- **Keep a fintech assistant off financial advice** — `Output · triggers · Topics: Financial Advice, Legal Advice` → `Block`.
+- **Block medical advice on a general-purpose chatbot** — `Output · triggers · Topics: Medical Advice` → `Block`.
+- **Protect internal policy leakage on external routes** — `Output · triggers · Topics: Internal Policies, Confidential Projects` → `Block`.
+- **Log political and religious content for review** — `Input + Output · triggers · Topics: Political Content, Religious Content` → `Log`.

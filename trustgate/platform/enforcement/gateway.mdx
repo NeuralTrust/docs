@@ -1,0 +1,167 @@
+---
+title: Gateway surface
+description: Security enforcement for LLM traffic flowing through a TrustGate Gateway — how to create the integration, author routes, and what Log / Mask / Block do on the wire.
+---
+
+The **Gateway** surface is the enforcement path for traffic your own apps and agents send to LLMs. Applications point at a gateway URL owned by TrustGate, and every LLM request (and its response) is inspected by the Runtime Security layer before it reaches the model.
+
+Depending on where its routes point, the same gateway integration can act in two shapes:
+
+| Shape | When it applies | What the gateway does |
+| --- | --- | --- |
+| **Embedded AI Gateway** | Routes point **directly at an LLM provider** (OpenAI, Anthropic, Azure OpenAI, Bedrock, Vertex, …) or a self-hosted model (vLLM, Ollama, TGI, …) | Acts as the AI gateway itself — routing, load balancing, traffic control — **plus** all security. One hop, both jobs. See [AI Gateway overview](/trustgate/platform/ai-gateway/overview). |
+| **Pure security layer** | Routes point at a **third-party AI gateway** or a **custom client backend** | The downstream component keeps doing its own routing; this gateway only adds detections, masking, and policy decisions on top. |
+
+Detectors, policies, and the request lifecycle are identical in both shapes. The only difference is what sits on the other side of the upstream.
+
+## Creating a Gateway
+
+A Gateway is provisioned as an **Integration** in the platform.
+
+1. Go to **Integrations → Add Integration**.
+2. Pick **Gateway** from the provider catalog.
+3. Fill the form:
+   - **Integration Name** — any label you'll recognise later (for example `prod-eu`, `staging-gateway`).
+   - **Deployment Type** — choose one:
+     - **Serverless** — an instantly-ready gateway for learning and development.
+     - **Dedicated** — a scalable production gateway with effortless deployment.
+   - **Tags** (optional) — comma-separated labels such as `production, us-east, secure`. Tags become selectable filters when you author a policy.
+4. Save & Close.
+
+The saved Gateway appears in the **Gateway → Overview** sidebar with these columns:
+
+| Column | Meaning |
+| --- | --- |
+| **Gateway** | The integration name and the provider it was created from. |
+| **Status** | `active` or `paused` — a paused gateway stops serving traffic but keeps its config and routes. |
+| **Endpoint** | The base URL your applications send traffic to (for example `https://gateway.neuraltrust.ai/v1`). |
+| **Tags** | The tags set at creation time. |
+| **Requests** | Rolling traffic volume (for example `2.4M` in the selected window). |
+
+You can create several Gateway integrations — for example one per region, per environment, or per tenant. Each appears independently under `Where → Gateways` when writing a policy.
+
+## Routes
+
+A Gateway on its own does nothing until it has **Routes**. A route decides which incoming request is handled by which upstream integration and which plugin chain runs along the way.
+
+### Routes list
+
+Open **Gateway → Routes** to see every route configured across your Gateway integrations:
+
+| Column | Meaning |
+| --- | --- |
+| **Route** | The route name and the path it matches (for example `chat-completion` → `/v1/chat/completions`). |
+| **Use Case** | The optional business label attached to the route (for example `Customer Support Bot`, `Data Analysis`). |
+| **Tags** | Free-form labels useful for filtering and policy scope. |
+| **Integration** | The upstream integration this route forwards to — the AI provider, third-party gateway, or custom backend. |
+| **Status** | `active` or `paused`. |
+| **Rate Limit** | The route-level rate limit (for example `1000/min`). |
+| **24h Requests** | Rolling traffic for the last 24 hours. |
+
+The list is filterable by **Gateway**, **Status**, **Use Case**, and **Tags**, and can be flipped between `List` and `By Use Case` views.
+
+### Create Route
+
+Click **+ Create Route** (top right) to open the Create Route dialog:
+
+| Field | Required | What it controls |
+| --- | --- | --- |
+| **Route Name** | Yes | Human-readable identifier (for example `chat-completion`). |
+| **Path** | Yes | The URL path the route matches on the gateway (for example `/v1/chat/completions`, `/v1/embeddings`). Supports exact paths and path prefixes. |
+| **Use Case** | No | Optional business grouping — lets you write policies that target a whole workflow (`Customer Support Bot`) without naming individual routes. |
+| **Integration** | Yes | The AI provider this route connects to. Options include **LLM providers**, **self-hosted models**, **third-party AI gateways**, and **custom backends** you registered as integrations. |
+| **Rate Limit** | No | Route-level quota (for example `1000/min`). Enforced by the gateway itself; exceeding it also emits a signal for Runtime Security. |
+| **Tags** | No | Comma-separated labels (for example `chat, external, api`). |
+| **Enable Route** | Yes (default on) | Toggle between `active` and `paused` at creation time. |
+
+Once created, the route starts matching traffic immediately (unless paused). You can also manage shared **Use Cases** from the same screen — they are reusable across routes and referenced in policy scoping.
+
+### How the Integration field decides the shape
+
+The `Integration` value on a route is what collapses or separates the AI-gateway and security-layer roles:
+
+- **LLM provider or self-hosted model** → Gateway is an **embedded AI Gateway** (it owns routing + security).
+- **Third-party AI gateway** or **custom backend** → Gateway is a **pure security layer**; the downstream component still owns routing.
+
+You can mix shapes inside the same Gateway integration: some routes can embed directly, others can front a third-party gateway.
+
+## How to integrate a client
+
+With the Gateway created and its routes configured, any application that used to call the upstream directly can now call the gateway instead. Integration is a **base-URL swap plus an API key** — no SDK to adopt.
+
+A "client" here is anything that makes HTTP requests: a frontend (browser or mobile app), a backend service, an agent, a script or CLI, or code using a provider SDK. Whatever it is, integrating means only one thing:
+
+- Replace the URL it currently calls with the **gateway endpoint** (from **Gateway → Overview**).
+- Replace the auth credential with a **TrustGate API key** generated on the Gateway integration's **API Keys** tab. Keys are scoped to the engine that issued them — a key from one Gateway integration is not accepted by another.
+- Leave everything else unchanged — paths, method, headers, body, streaming.
+
+```bash
+# Before — calling the upstream directly
+BASE_URL=https://api.openai.com/v1     # or your backend, or a 3rd-party gateway
+API_KEY=upstream-key
+
+# After — calling TrustGate
+BASE_URL=https://gateway.neuraltrust.ai/v1
+API_KEY=nt-gateway-key
+```
+
+The client does not need to know what sits behind the gateway. Whether the route forwards to an LLM provider, a self-hosted model, a third-party AI gateway, or a custom backend is a server-side decision — the gateway mirrors the upstream's paths and contract, so any existing client keeps working.
+
+The swap is drop-in for:
+
+- **Provider SDKs** (OpenAI, Anthropic, Mistral, Cohere, Groq, Together, Fireworks, …) via their `base_url` setting.
+- **Frameworks** (LangChain, LlamaIndex, Vercel AI SDK, Haystack, DSPy, …) via their custom-endpoint option.
+- **Frontend fetches / mobile apps** by swapping the configured API hostname.
+- **Raw HTTP / curl** by changing the URL.
+
+Streaming, function / tool calling, vision, embeddings, moderation, and proprietary payloads all pass through untouched (after policy evaluation). For the specifics — custom paths, body transforms, header rewriting, non-REST transports — see [Routes & forwarding](/trustgate/platform/ai-gateway/routes).
+
+Once the client is pointed at the gateway, every call shows up in **Runtime → Logs** with its route, decision, and evidence. At this point the gateway is fully in the path: policies that select `Where → Gateway` start enforcing on the next request.
+
+## What it sees
+
+Every LLM request and response handled by the Gateway:
+
+- Provider calls (OpenAI, Anthropic, Bedrock, Azure OpenAI, Vertex, …).
+- Model routing, embeddings, moderation, rerank.
+- Streaming and non-streaming completions.
+- **Tool-call payloads inside LLM messages** — the `tools[]` definitions and `tool_calls` arguments. This is how TrustGate governs MCP and tool usage: by inspecting those fields inside LLM traffic, not by routing to the MCP server itself.
+
+Full request / response interception means policies can inspect prompts, generations, document contents, tool names, and tool arguments, and react before the upstream is called or before the response reaches the client.
+
+## How enforcement works
+
+Every policy that selects `Where → Gateway` translates its action to concrete on-the-wire behavior:
+
+| Action | On the wire |
+| --- | --- |
+| `Log` | Decision is recorded; the request and response go through unchanged. |
+| `Mask` | Payload is rewritten before the upstream call (for example PII redacted in the prompt). Masks also apply on the return path — sensitive fields in the response are redacted before the client sees them. |
+| `Block` | Upstream is **never called**; the client receives an error response with a policy-scoped reason code. |
+
+Because the surface is fully inline, `Block` is a hard guarantee rather than a best-effort.
+
+## Available filters
+
+When authoring a policy with `Where → Gateway`, click **Add filter** to narrow the scope:
+
+| Filter | Narrows by |
+| --- | --- |
+| **Gateways** | Specific Gateway integrations (for example `prod-eu`, `prod-us`). |
+| **Routes** | Specific routes on a gateway (for example `/v1/chat/completions`). |
+| **Tags** | Any tag attached to a gateway or a route. |
+| **Use Cases** | The business-level groupings defined under **Manage Use Cases** on the Routes page. |
+
+Filters combine with AND. Omitting every filter applies the policy to **all traffic on every Gateway integration** in the workspace.
+
+## Best for
+
+- Apps and agents your team built, calling LLMs through a controlled gateway endpoint.
+- Any scenario where you want `Block` to be a real stop signal (as opposed to advisory).
+- Central governance for tool calls and MCP usage — since the tool payload rides on the LLM request, the Gateway surface sees and can enforce on it.
+
+## Related
+
+- [AI Gateway overview](/trustgate/platform/ai-gateway/overview) — what an embedded AI Gateway gives you (load balancing, traffic control, routing primitives).
+- [Routes & forwarding](/trustgate/platform/ai-gateway/routes) — deeper view of path matching, request transforms, and the route model.
+- [Policies](/trustgate/platform/policies) — the full `Where / When / Then` authoring model.
