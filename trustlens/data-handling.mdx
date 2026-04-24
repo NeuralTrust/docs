@@ -1,0 +1,103 @@
+---
+title: Data handling
+description: What TrustLens collects, what it never collects, where it stores data, and how to revoke access.
+---
+
+TrustLens is built around the principle that **discovery should not create new risk**. This page documents exactly what data leaves your environment, what stays inside it, and the controls available to you.
+
+## What is collected
+
+For every connected integration, TrustLens collects **resource metadata and aggregated telemetry** only:
+
+| Category | Examples |
+|---|---|
+| Resource identity | Agent / model / dataset / repo / device IDs, names, descriptions |
+| Configuration | Tools, instructions, knowledge bases, guardrail policies, access controls, MCP server declarations |
+| Aggregated telemetry | Run counts, conversation counts, average latency, error counts, tool-call counts per category |
+| Source provenance | Which integration produced each record, when it was last synced |
+| Endpoint inventory | Per-device list of installed AI software, signed and reported by the Discovery script |
+
+## What is never collected
+
+These categories are **explicitly excluded** by every connector:
+
+- Prompt or message content sent to any model
+- Model responses or completions
+- The contents of any tool call (input or output)
+- API keys, OAuth tokens, or secret values referenced by configurations (variable names are kept, values are dropped client-side)
+- File contents from source repositories that are not on the agent-config / MCP allowlist
+- Browser history, cookies, session tokens, or any user activity content from managed devices
+- Personally identifiable information about end-users of the agents
+
+## Where data is stored
+
+| Data | Storage | Encryption |
+|---|---|---|
+| Inventory and findings | NeuralTrust control plane database | AES-256 at rest, TLS 1.2+ in transit |
+| Integration credentials (service principal secrets, API keys, GitHub App private keys, Discovery Tokens) | Dedicated secrets store with envelope encryption | Customer-managed keys available on Enterprise |
+| Aggregated telemetry | Time-series store, retention configurable per integration | Same as above |
+| Audit logs | Audit log store, forwardable to your SIEM | Same as above |
+
+The default control-plane region matches your tenant's region (US, EU). For hybrid deployments where the data plane runs in your own cloud account, see [Architecture & deployment](/neuraltrust/deployment/overview).
+
+## Retention
+
+| Data class | Default retention | Configurable |
+|---|---|---|
+| Current inventory snapshot | Indefinite (current state) | Cleared when the integration is deleted |
+| Historical inventory diffs | 90 days | 30 / 90 / 180 / 365 days |
+| Aggregated telemetry | 90 days | 30 / 90 / 180 / 365 days |
+| Audit logs | 365 days | Per [Audit & Compliance](/platform/audit-logs) policy |
+
+When an integration is deleted, all inventory and telemetry tied to it is scheduled for deletion within 24 hours and purged within 30 days.
+
+## Network egress
+
+| Source | Destination | Port | Purpose |
+|---|---|---|---|
+| NeuralTrust control plane | Azure ARM, Microsoft Graph, Power Platform | 443 | Read your Azure / M365 metadata |
+| NeuralTrust control plane | GCP API endpoints | 443 | Read your Vertex AI metadata |
+| NeuralTrust control plane | `api.mistral.ai` | 443 | Read your Mistral resources |
+| NeuralTrust control plane | `api.github.com` | 443 | Read your GitHub repositories |
+| Your managed devices | `posture.neuraltrust.ai` | 443 | Endpoint Discovery script reports |
+
+Add `posture.neuraltrust.ai` to the egress allowlist applied to your managed device fleet. Inbound from NeuralTrust to your environment is never required — all sync flows are NeuralTrust-initiated outbound.
+
+## Read-only credentials
+
+Every integration is documented with the **minimum** read-only roles or scopes required:
+
+- **Azure** — `Reader` + `Azure AI User` at subscription scope (granular alternatives documented per integration)
+- **GCP Vertex AI** — `roles/aiplatform.viewer` and a fixed list of read-only viewer roles
+- **Mistral** — workspace API key (no roles in Mistral)
+- **M365 Copilot** — Application User with `System Customizer` role + `AgentInstance.Read.All` Graph permission
+- **GitHub** — GitHub App with `contents:read` and `metadata:read`
+- **Endpoint Discovery** — per-integration Discovery Token, scoped to write only into that integration's inventory
+
+If a connector is granted broader permissions than required, no additional data is collected — the connector calls the same read-only endpoints regardless.
+
+## Revoking access
+
+Revocation is fully under your control and works at the upstream provider:
+
+| Integration | Revoke by |
+|---|---|
+| Azure | Delete the service principal, or remove its role assignment |
+| GCP Vertex AI | Delete the service account JSON key, or remove IAM role bindings |
+| Mistral AI | Revoke the API key in `admin.mistral.ai` |
+| M365 Copilot | Disable the Application User in Power Platform Admin Center, or revoke the app registration |
+| GitHub | Uninstall the GitHub App from the organization |
+| Endpoint Discovery | Remove the script from your MDM, or rotate the Discovery Token in the TrustLens console |
+
+After revocation, the next sync will fail and the integration will be marked **Disconnected**. Inventory data already collected is retained per the retention policy above and can be deleted immediately by deleting the integration.
+
+## Compliance posture
+
+TrustLens inherits the NeuralTrust platform's compliance program:
+
+- SOC 2 Type II
+- ISO 27001
+- GDPR — no personal data is collected from end-users of your agents
+- HIPAA-ready when deployed in the hybrid data plane configuration
+
+See [Security overview](/neuraltrust/security/overview) and [Data privacy](/neuraltrust/data-privacy/overview) for the full program details.

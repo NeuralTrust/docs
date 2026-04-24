@@ -27,44 +27,121 @@ The developer does not install TrustGate software. Both integrations are pushed 
 
 ## Prerequisites
 
-- An **Endpoint integration** — provides the PAC file URL, the client certificate+key, and the TrustGate CA certificate used for dynamic TLS.
-- A **Browser integration** — provides the MDM-distributable extension package for Chromium-based browsers.
-- An MDM tool (Jamf, Intune, Kandji, Workspace ONE, or similar) with enrollment on developer machines.
-- Chromium-based browsers only for the Browser surface (Chrome, Edge, Brave, Arc, Opera). Firefox and Safari are **not** supported.
+- An MDM tool with enrollment on developer machines — Jamf, Intune, Kandji, Workspace ONE, or similar.
+- Chromium-based browsers for the Browser surface (Chrome, Edge, Brave, Arc, Opera). Firefox and Safari are **not** supported.
+- Approval from IT / Security to push a root CA, a client certificate, and a managed browser extension to developer machines.
 
-## Wire it up
+## Step-by-step setup
 
-### Endpoint — native IDE traffic
+Unlike Gateway or API surfaces, the Endpoint and Browser surfaces don't have "upstream" Integrations — each of these Integrations is self-contained: it **generates the artifacts** (PAC file, certificates, extension package) that MDM pushes to devices. Both are configured under **Integrations → Add Integration**.
 
-1. Create an **Endpoint integration** in the console. Download the PAC URL, the per-org client certificate + key, and the TrustGate CA certificate.
-2. Using your MDM, push to managed developer machines:
-   - The **TrustGate CA certificate** into the system trust store (so dynamic TLS certificates are trusted by native apps).
-   - The **client certificate + key** into the system keychain (used for mTLS to identify your org).
-   - A **proxy configuration** that uses the PAC URL so the OS-level HTTPS traffic for the targeted IDEs is routed through the TrustGate Endpoint MITM.
-3. In TrustGate, configure the Endpoint policies to match the LLM endpoints those IDEs call (for example, `api.openai.com`, `api.anthropic.com`, `api.githubcopilot.com`, `api.cursor.sh`). Anything outside the scope defined on the integration is not intercepted.
+<Steps>
+  <Step title="Create an Endpoint Integration">
+    **Integrations → Add Integration → Endpoint**. Set:
 
-Developers do not sign in, install software, or change settings.
+    - **Scope (allow-list of hostnames)** — the LLM endpoints native IDEs call: `api.openai.com`, `api.anthropic.com`, `api.githubcopilot.com`, `api.cursor.sh`, and any vendor-specific host your developers use. Hosts outside the scope are not intercepted — they bypass TrustGate entirely.
+    - **Applications** (optional) — label sub-scopes like `Cursor`, `Copilot`, `Windsurf` so you can filter policies and Explorer by app.
+    - **Tags** (optional) — e.g. `engineering, developers`.
 
-### Browser — web AI apps
+    After saving, the integration exposes **three artifacts** in the console:
 
-1. Create a **Browser integration**. Download the MDM extension package.
-2. Push the extension to Chromium browsers via MDM force-install policies (for Chrome and Edge, use their enterprise policy for `ExtensionInstallForcelist`).
-3. Configure which AI chat apps the extension activates on (for example, `chatgpt.com`, `claude.ai`, `gemini.google.com`, `cursor.com`, `github.com/copilot`).
+    - `pac.url` — proxy auto-config URL.
+    - `client.crt` + `client.key` — per-org client certificate and private key (mTLS to identify your tenant to the Endpoint MITM).
+    - `trustgate-ca.crt` — CA certificate used for dynamic TLS.
+  </Step>
 
-The extension is bound to your tenant via the managed extension configuration — developers do not authenticate.
+  <Step title="Push Endpoint artifacts via MDM">
+    In your MDM (Jamf, Intune, Kandji, Workspace ONE), create a configuration profile targeting your developer device group that:
 
-## Verify
+    1. Installs **`trustgate-ca.crt`** into the **system trust store** (so native IDEs accept the dynamic TLS certificate).
+    2. Installs **`client.crt` + `client.key`** into the **system keychain**, scoped so only macOS/Windows can use it for mTLS.
+    3. Sets an **OS-level proxy configuration** that references the **PAC URL** from Step 1, so HTTPS traffic to the hosts in scope is routed through the TrustGate Endpoint MITM.
 
-1. On a test managed machine, open Cursor or use GitHub Copilot in an IDE. Send a prompt.
-2. Open **Runtime → Explorer** and filter by the Endpoint integration. The prompt and response should appear.
-3. Separately, open `chatgpt.com` in Chrome on the same machine and send a prompt. It should appear filtered by the Browser integration.
+    Developers do not sign in, install software, or change settings.
+  </Step>
 
-## Policies to turn on first
+  <Step title="Create a Browser Integration">
+    **Integrations → Add Integration → Browser**. Set:
 
-- **Source-code IP leakage** — pattern and semantic detectors for proprietary identifiers, internal project names, and secret tokens.
-- **Data protection & masking** — PII and credentials embedded in code or pasted prompts.
-- **Prompt security** — jailbreak attempts originating from pasted content (indirect prompt injection).
-- **Keyword block** — list of project codenames or customer identifiers that must not leave the device.
+    - **Applications** — which web AI apps the extension activates on: `chatgpt.com`, `claude.ai`, `gemini.google.com`, `cursor.com`, `github.com/copilot`, etc.
+    - **Tags** (optional) — e.g. `engineering`.
+
+    After saving, download the **MDM-distributable extension package** (Chrome `.crx` + policy manifest, Edge equivalent).
+  </Step>
+
+  <Step title="Push the Browser extension via MDM">
+    Use Chromium's `ExtensionInstallForcelist` enterprise policy (or Edge's equivalent) to **force-install** the extension on managed browsers. The extension is bound to your tenant via the managed extension configuration — developers do not authenticate and cannot disable it.
+  </Step>
+
+  <Step title="Author the mirror policies">
+    See [Policies to apply](#policies-to-apply) below. Author the **same intent on both surfaces** so a developer sees consistent enforcement whether they use Cursor natively or paste into ChatGPT in a browser.
+  </Step>
+
+  <Step title="Verify on a test managed device">
+    On a managed laptop:
+
+    1. Open Cursor (or any IDE with Copilot) and send a prompt. Confirm it appears in **Runtime → Explorer**, filtered by the Endpoint integration.
+    2. Open `chatgpt.com` in Chrome and send a prompt. Confirm it appears, filtered by the Browser integration.
+    3. Trigger a `Block` policy (e.g. paste a fake AWS access key) in both surfaces. Confirm both the native IDE and the browser app reject the send.
+  </Step>
+</Steps>
+
+## Policies to apply
+
+This guide uses **two** surfaces — Endpoint for native IDE traffic and Browser for web AI apps — and each has its own filter catalog and action semantics. Read the [Policies & Enforcement](/trustgate/platform/policies) page for the `Where` / `When` / `Then` model; on Browser and Endpoint, `Block` prevents the prompt or paste from ever leaving the device, and `Mask` redacts fragments inline before they reach the wire.
+
+Author mirror policies on both surfaces so a developer sees the same rules whether they use Cursor natively or ChatGPT in a browser.
+
+### Block credentials leaving the device
+
+- **Where (Endpoint)** — `Endpoint` + filter `Endpoints = <your-endpoint>` · `Applications = Cursor, Copilot, Windsurf`
+- **Where (Browser)** — `Browser` + filter `Applications = ChatGPT, Claude, Gemini, Cursor Web, Copilot Web`
+- **When** — `Input` · `Triggers` · `API Key / Secret`
+- **Then** — `Block`
+
+Highest-signal policy for developer devices — a single leaked secret is a security incident.
+
+### Block PII in prompts and file uploads
+
+- **Where (Browser)** — `Browser` + filter `Applications = ChatGPT, Claude, Gemini, Cursor Web, Copilot Web`
+- **When** — `Input` · `Triggers` · `Email Address, Phone Number, Social Security Number, Credit Card, PII in Files`
+- **Then** — `Block`
+
+Mirror the same rule on the Endpoint surface against the native IDEs.
+
+### Keyword block on project codenames and customer identifiers
+
+- **Where** — `Endpoint` + filter `Endpoints = <your-endpoint>` and `Browser` + filter `Applications = <web-apps>`
+- **When** — `Input` · `Triggers` · `Keyword Match = <your-codename-list>`
+- **Then** — `Block`
+
+Prevents developers from pasting internal project codenames, customer names, or acquisition targets into any AI tool.
+
+### Mask file uploads with PII
+
+- **Where** — `Browser` + filter `Applications = ChatGPT, Claude, Gemini`
+- **When** — `Input` · `Triggers` · `PII in Files`
+- **Then** — `Mask`
+
+Applies only on Browser since that's the surface where file uploads happen. Mask redacts the PII fragments and lets the upload continue.
+
+### Block indirect prompt injection from pasted content
+
+- **Where** — `Endpoint` + filter `Endpoints = <your-endpoint>` · `Applications = Cursor, Copilot, Windsurf`
+- **When** — `Input` · `Triggers` · `Prompt Injection`
+- **Then** — `Block`
+
+Defends against payloads embedded in documents a developer pastes into the IDE (e.g., the "ignore prior instructions" class of attack riding on an issue title or pasted log).
+
+### Log everything while you tune
+
+- **Where** — `Endpoint` + filter `Endpoints = <your-endpoint>` *and* `Browser` + filter `Applications = <all>`
+- **When** — empty
+- **Then** — `Log`
+
+Baseline visibility before you enforce. Because precedence is `block ▶ mask ▶ log`, this `Log` rule composes safely with the `Block` / `Mask` policies above — it never weakens them.
+
+Promote each policy from `Log` to `Block` / `Mask` once you've confirmed the false-positive rate on real developer traffic in **Runtime → Logs**.
 
 ## Limitations
 
