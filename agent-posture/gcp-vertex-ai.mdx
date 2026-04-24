@@ -56,7 +56,7 @@ To ensure tool calls appear in the correct category in Agent Posture dashboards,
 
 ## Required GCP APIs
 
-Enable all five APIs in your GCP project before creating the integration:
+Enable all six APIs in your GCP project before creating the integration:
 
 | API | Purpose |
 |-----|---------|
@@ -65,6 +65,7 @@ Enable all five APIs in your GCP project before creating the integration:
 | `monitoring.googleapis.com` | Read usage metrics (requests, latency, CPU, memory) |
 | `cloudtrace.googleapis.com` | Read invocation traces for tool call extraction |
 | `logging.googleapis.com` | Read structured logs for telemetry, conversations, and security events |
+| `modelarmor.googleapis.com` | Read Model Armor templates and floor settings for guardrails discovery |
 
 **Enable all at once:**
 ```bash
@@ -74,6 +75,7 @@ gcloud services enable \
   monitoring.googleapis.com \
   cloudtrace.googleapis.com \
   logging.googleapis.com \
+  modelarmor.googleapis.com \
   --project=YOUR_PROJECT_ID
 ```
 
@@ -92,7 +94,7 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
 
 ## Required IAM roles
 
-The service account provided to Agent Posture needs all five roles:
+The service account provided to Agent Posture needs all seven roles:
 
 | Role | Purpose | What you lose without it |
 |------|---------|--------------------------|
@@ -101,14 +103,34 @@ The service account provided to Agent Posture needs all five roles:
 | `roles/monitoring.viewer` | Read Cloud Monitoring metrics | Usage metrics (request count, latency, CPU, memory) will be unavailable |
 | `roles/cloudtrace.user` | Read Cloud Trace data for tool call extraction | Tool call breakdown from OpenTelemetry-instrumented agents will be unavailable |
 | `roles/logging.viewer` | Read Cloud Logging for conversations, tool calls from custom agents, and security events | Conversations and security events will be unavailable; tool call extraction from non-instrumented agents will also be unavailable |
+| `roles/modelarmor.viewer` | Read Model Armor templates | Guardrail template policies will not appear on agents |
+| `projects/YOUR_PROJECT/roles/modelArmorFloorReader` *(custom)* | Read the project-level floor setting | Floor setting enforcement status will not appear |
 
 <Note>
-All five roles are read-only. Agent Posture cannot create, modify, or delete any GCP resources.
+All roles are read-only. Agent Posture cannot create, modify, or delete any GCP resources.
+</Note>
+
+<Note>
+**Why a custom role for the floor setting?** GCP's predefined `roles/modelarmor.viewer` and `roles/modelarmor.admin` do not include `modelarmor.floorSettings.get`. That permission is only in `roles/editor`. Create a minimal custom role to grant it in a least-privilege way:
+
+```bash
+# Create the custom role (requires project Owner)
+gcloud iam roles create modelArmorFloorReader \
+  --project=YOUR_PROJECT_ID \
+  --title="Model Armor Floor Setting Reader" \
+  --description="Read the project-level Model Armor floor setting" \
+  --permissions="modelarmor.floorSettings.get,modelarmor.floorSettings.computeEffectiveFloorSetting"
+
+# Bind it to your service account
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+  --member="serviceAccount:YOUR_SA_EMAIL" \
+  --role="projects/YOUR_PROJECT_ID/roles/modelArmorFloorReader"
+```
 </Note>
 
 ### Custom role (strict least-privilege)
 
-If your policy requires a custom role instead of predefined roles, the minimum individual permissions needed are:
+If your policy requires a single custom role instead of predefined roles, the minimum individual permissions needed are:
 
 ```
 aiplatform.reasoningEngines.list
@@ -123,6 +145,12 @@ monitoring.timeSeries.list
 cloudtrace.traces.list
 cloudtrace.traces.get
 logging.logEntries.list
+modelarmor.locations.list
+modelarmor.locations.get
+modelarmor.templates.list
+modelarmor.templates.get
+modelarmor.floorSettings.get
+modelarmor.floorSettings.computeEffectiveFloorSetting
 ```
 
 ---
@@ -277,9 +305,135 @@ Non-instrumented agents will show `total_runs > 0` (from Cloud Monitoring) but a
 
 ---
 
+---
+
+## Model Armor guardrails discovery
+
+Agent Posture integrates with **Google Cloud Model Armor** to discover and surface your project's AI content safety posture alongside each Vertex AI agent.
+
+Model Armor operates at the **project level** — policies (templates) and the floor setting apply to all agents in the project rather than being configured per agent. Agent Posture discovers this data and associates it with every agent in the integration so you can assess your safety coverage in one place.
+
+### What is discovered
+
+Agent Posture reads two categories of Model Armor data:
+
+#### Templates
+
+Model Armor templates are named policy definitions that apply RAI (Responsible AI) content filters. Each template includes:
+
+| Field | Description |
+|-------|-------------|
+| `name` | Full resource name: `projects/{project}/locations/{location}/templates/{id}` |
+| `filterConfig.raiSettings.raiFilters` | List of active RAI filter rules |
+| Each filter's `filterType` | Content category being filtered (see table below) |
+| Each filter's `confidenceLevel` | Detection sensitivity threshold |
+
+**`filterType` values:**
+
+| Value | Content category |
+|-------|-----------------|
+| `SEXUALLY_EXPLICIT` | Sexually explicit content |
+| `HATE_SPEECH` | Hate speech |
+| `HARASSMENT` | Harassment and bullying |
+| `DANGEROUS_CONTENT` | Dangerous activities |
+| `VIOLENT` | Violent content |
+
+**`confidenceLevel` values (from least to most strict):**
+
+| Value | Meaning |
+|-------|---------|
+| `LOW_AND_ABOVE` | Block low, medium, and high confidence matches |
+| `MEDIUM_AND_ABOVE` | Block medium and high confidence matches |
+| `HIGH_AND_ABOVE` | Block only high confidence matches |
+
+#### Floor setting
+
+The floor setting is a single project-level object that defines the minimum content safety policy enforced across all Model Armor usage in the project, regardless of what individual templates specify:
+
+| Field | Description |
+|-------|-------------|
+| `name` | `projects/{project}/locations/{location}/floorSetting` |
+| `enableFloorSettingEnforcement` | `true` if the floor policy is actively enforced |
+
+When `enableFloorSettingEnforcement` is `true`, Model Armor applies the floor policy as a baseline even if a weaker template is attached to a call. Agent Posture surfaces this as a project-wide safety control.
+
+### Guardrails object shape
+
+All Model Armor data is stored on each agent's `guardrails` field with the following structure:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `provider` | `"gcp_model_armor"` | Identifies the guardrails source |
+| `scope` | `"project"` | Policies apply at the project level, not per agent |
+| `policy_count` | `integer` | Number of distinct templates discovered |
+| `policies` | `array` | Deduplicated Model Armor template objects |
+| `floor_setting` | `object` \| `null` | The project floor setting, or `null` if not accessible |
+| `locations` | `array of strings` | GCP regions where Model Armor data was successfully read |
+
+**Example `guardrails` object for a GCP agent:**
+
+```json
+{
+  "provider": "gcp_model_armor",
+  "scope": "project",
+  "policy_count": 2,
+  "policies": [
+    {
+      "name": "projects/my-project/locations/europe-west1/templates/strict-rai",
+      "filterConfig": {
+        "raiSettings": {
+          "raiFilters": [
+            {
+              "filterType": "SEXUALLY_EXPLICIT",
+              "confidenceLevel": "LOW_AND_ABOVE"
+            },
+            {
+              "filterType": "HATE_SPEECH",
+              "confidenceLevel": "MEDIUM_AND_ABOVE"
+            },
+            {
+              "filterType": "DANGEROUS_CONTENT",
+              "confidenceLevel": "LOW_AND_ABOVE"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "projects/my-project/locations/europe-west1/templates/moderate-rai",
+      "filterConfig": {
+        "raiSettings": {
+          "raiFilters": [
+            {
+              "filterType": "SEXUALLY_EXPLICIT",
+              "confidenceLevel": "HIGH_AND_ABOVE"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "floor_setting": {
+    "name": "projects/my-project/locations/europe-west1/floorSetting",
+    "enableFloorSettingEnforcement": true
+  },
+  "locations": ["europe-west1"]
+}
+```
+
+### Partial access behavior
+
+Agent Posture reads templates and the floor setting **independently**. If your service account has `roles/modelarmor.viewer` but not the floor setting custom role, templates will still appear — the floor setting will show as `null`. Similarly, if templates are inaccessible but the floor setting is readable, the floor setting is surfaced on its own. A completely missing guardrails field means neither source was accessible.
+
+### Agents without Model Armor
+
+If your GCP project has no Model Armor templates configured, or the service account does not have the required roles, the `guardrails` field will be `null` for all agents in the integration. Agent Posture surfaces this as a **missing guardrails** finding.
+
+---
+
 ## Feature availability by permission level
 
-| Feature | Minimum (`aiplatform.viewer` only) | Full (all 5 roles) |
+| Feature | Minimum (`aiplatform.viewer` only) | Full (all roles) |
 |---------|:----------------------------------:|:-----------------:|
 | Agent discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
 | Model discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
@@ -290,6 +444,8 @@ Non-instrumented agents will show `total_runs > 0` (from Cloud Monitoring) but a
 | Tool call breakdown | <span style={{color:'#dc2626'}}>No</span> — needs `cloudtrace.user` + `logging.viewer` | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
 | Conversation discovery | <span style={{color:'#dc2626'}}>No</span> — needs `logging.viewer` | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
 | Security event detection | <span style={{color:'#dc2626'}}>No</span> — needs `logging.viewer` | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Model Armor templates (guardrails) | <span style={{color:'#dc2626'}}>No</span> — needs `modelarmor.viewer` | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Model Armor floor setting (guardrails) | <span style={{color:'#dc2626'}}>No</span> — needs custom `modelArmorFloorReader` role | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
 
 ---
 
@@ -348,5 +504,16 @@ Non-instrumented agents will show `total_runs > 0` (from Cloud Monitoring) but a
 
   <Accordion title="All agents show the same tools and instructions">
     Multiple agents are likely sharing the same GCS pickle file. Each agent needs its own unique pickle file to show distinct configurations.
+  </Accordion>
+
+  <Accordion title="Guardrails showing as null or missing for all agents">
+    - Enable the `modelarmor.googleapis.com` API: `gcloud services enable modelarmor.googleapis.com --project=YOUR_PROJECT_ID`
+    - Grant `roles/modelarmor.viewer` to the service account: `gcloud projects add-iam-policy-binding YOUR_PROJECT_ID --member="serviceAccount:YOUR_SA_EMAIL" --role="roles/modelarmor.viewer"`
+    - Verify at least one Model Armor template exists in the GCP Console under **Model Armor** in the regions you have configured.
+    - IAM changes can take 1–2 minutes to propagate. Trigger a resync from the integration settings page after granting permissions.
+  </Accordion>
+
+  <Accordion title="Guardrail templates appear but floor setting shows as null">
+    The floor setting requires `modelarmor.floorSettings.get`, which is not included in `roles/modelarmor.viewer`. Create and bind the `modelArmorFloorReader` custom role using the commands in the **Required IAM roles** section above.
   </Accordion>
 </AccordionGroup>

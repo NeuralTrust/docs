@@ -114,21 +114,83 @@ To request beta access, contact [Mistral support](https://mistral.ai/contact).
 
 ---
 
-## Content safety
+## Guardrails discovery
 
-Mistral does not have built-in content filtering applied automatically at the model level. Instead, content moderation is applied by calling the **Mistral Moderation API** explicitly from your application code before passing input to an agent.
+Agent Posture discovers the native **guardrails policies** configured on each Mistral agent via the Mistral Agents API. When an agent has guardrails attached, the full policy object is stored and surfaced in the UI.
 
-Agent Posture evaluates the guardrails configuration of each Mistral agent. Because Mistral does not expose a structured content-filter config (unlike Azure RAI policies), Agent Posture issues an **advisory warning** for Mistral agents to flag the absence of verifiable, platform-enforced content safety controls. This is not a blocker — it reflects that runtime moderation calls cannot be directly confirmed from agent configuration alone.
+### What is discovered
 
-<Note>
-The guardrails check for Mistral is a **heuristic signal**, not a deterministic pass/fail. It does not parse agent instructions for a specific sentence or keyword. Enabling `safe_prompt` on the agent is the one verifiable signal that clears the finding.
-</Note>
+Mistral guardrails are stored per-agent under the `guardrails` object with the following shape:
 
-To reduce or address this advisory finding:
-1. Enable `safe_prompt` on the agent (sets a system-level safety preamble) — this is the most reliable way to clear the finding
-2. Call `POST /v1/moderations` in your application before invoking the agent and handle policy violations there
+| Field | Type | Description |
+|-------|------|-------------|
+| `provider` | `"mistral"` | Identifies the guardrails source |
+| `scope` | `"agent"` | Policies are attached directly to this agent |
+| `policy_count` | `integer` | Number of guardrail policies on the agent |
+| `policies` | `array` | Raw Mistral policy objects — see below |
 
-See [Mistral Moderation API documentation](https://docs.mistral.ai/api/endpoint/classifiers) for implementation details.
+Each entry in `policies` is the raw guardrails object returned by the Mistral Agents API. Fields vary by policy type but the `moderation_llm_v2` (v2) format includes:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `block_on_error` | `boolean` | Whether to block when the moderation call itself errors |
+| `moderation_llm_v2` | `string` | Moderation model used (e.g. `"mistral-moderation-2411"`) |
+| `action` | `"block"` \| `"flag"` | What happens when a category threshold is exceeded |
+| `ignore_other_categories` | `boolean` | Whether categories not listed in thresholds are ignored |
+| `custom_category_thresholds` | `object` | Per-category sensitivity scores (0.0–1.0, lower = more strict) |
+| `jailbreaking` | `object` | `{"enabled": true/false}` |
+| `pii` | `object` | `{"enabled": true/false}` |
+
+**Category keys in `custom_category_thresholds` (v2 taxonomy):**
+
+| Key | Description |
+|-----|-------------|
+| `sexual` | Sexual content |
+| `hate_and_discrimination` | Hate speech and discrimination |
+| `violence_and_threats` | Violence and threats |
+| `dangerous` | Dangerous activities |
+| `criminal` | Criminal content |
+| `selfharm` | Self-harm content |
+| `health` | Medical / health misinformation |
+| `financial` | Financial misinformation |
+| `jailbreaking` | Prompt injection / jailbreak attempts |
+| `pii` | Personally identifiable information |
+
+**Example `guardrails` object for a Mistral agent:**
+
+```json
+{
+  "provider": "mistral",
+  "scope": "agent",
+  "policy_count": 1,
+  "policies": [
+    {
+      "block_on_error": true,
+      "moderation_llm_v2": "mistral-moderation-2411",
+      "action": "block",
+      "ignore_other_categories": false,
+      "custom_category_thresholds": {
+        "sexual": 0.1,
+        "hate_and_discrimination": 0.1,
+        "violence_and_threats": 0.1,
+        "dangerous": 0.1,
+        "criminal": 0.1,
+        "selfharm": 0.1,
+        "health": 0.5,
+        "financial": 0.5,
+        "jailbreaking": 0.1,
+        "pii": 0.2
+      },
+      "jailbreaking": {"enabled": true},
+      "pii": {"enabled": true}
+    }
+  ]
+}
+```
+
+### Agents without guardrails
+
+If an agent has no guardrails configured in the Mistral API, the `guardrails` field will be `null`. Agent Posture surfaces this as a **missing guardrails** finding so you can identify agents running without content safety policies.
 
 ---
 
@@ -184,10 +246,10 @@ See [Mistral Moderation API documentation](https://docs.mistral.ai/api/endpoint/
     - Generate a new key in the Mistral Console and update the integration.
   </Accordion>
 
-  <Accordion title="Agents showing a guardrails advisory warning">
-    - This is expected for Mistral agents. Because Mistral does not expose a structured content-filter config, Agent Posture issues an advisory warning rather than a hard failure.
-    - Enable `safe_prompt` on the agent to clear the finding — this is the only verifiable platform-level signal Agent Posture can detect.
-    - Alternatively, implement the Mistral Moderation API in your application code; note that Agent Posture cannot verify runtime API calls from agent config alone.
+  <Accordion title="Agents showing null or missing guardrails">
+    - The agent was created in Mistral without any guardrails policy attached. Agent Posture reads and surfaces whatever is configured in the Mistral API — if none, `guardrails` is `null`.
+    - To add guardrails, update the agent in the Mistral Console or via `PATCH /v1/agents/{agent_id}` to attach a `moderation_llm_v2` policy.
+    - After adding guardrails, trigger a manual sync from the Agent Posture integration settings page to pick up the new configuration immediately.
   </Accordion>
 
   <Accordion title="Document libraries not appearing">
