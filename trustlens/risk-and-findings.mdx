@@ -1,135 +1,199 @@
 ---
 title: Risk & findings
-description: How TrustLens scores posture, the catalog of finding types it produces, and the workflow for triaging and resolving them.
+description: How TrustLens scores posture — the security controls evaluated per resource type, their weights, and how individual control results roll up to a 0–100 score and a risk level.
 ---
 
-Every resource in the [Inventory](/trustlens/inventory) is continuously assessed against the security controls relevant to its type. The output is a per-resource **posture score** and a list of typed **findings** that explain what is wrong and how to fix it.
+Every resource in the [Inventory](/trustlens/inventory) is evaluated against a fixed set of **security controls** chosen for its type. Each control returns one of four statuses; results are combined into a weighted **0–100 posture score** and bucketed into a risk level.
+
+## Control statuses
+
+Every control emits one of four values:
+
+| Status | Meaning | Weight contribution |
+|---|---|---|
+| **PASS** | Control is satisfied | 0% |
+| **WARNING** | Partial or degraded satisfaction (e.g. instructions present but very short) | 50% |
+| **FAIL** | Control is violated | 100% |
+| **UNKNOWN** | Required data is not available — usually a permissions gap in the integration | 30% |
+
+Alongside the score, every resource reports a **data completeness** metric — the ratio of assessed (non-UNKNOWN) controls to total controls. A resource with many UNKNOWN results should be investigated at the integration level before trusting the score.
 
 ## Risk levels
 
-Each finding is categorized into one of five severity levels:
+The 0–100 score is bucketed by exact thresholds:
 
-| Level | Meaning |
+| Level | Score range | Response |
+|---|---|---|
+| **Critical** | `>= 75` | Act immediately — material exposure exists |
+| **High** | `50–74` | Address within the current sprint |
+| **Medium** | `25–49` | Hardening opportunity |
+| **Low** | `0–24` | Hygiene |
+
+## Control category weights
+
+Controls belong to a category; each category carries a base weight that feeds the score. Cloud resources (agents, models, datasets) and endpoint resources (IDEs, extensions, CLIs, MCP servers on devices) use different weight tables because their risk topologies differ.
+
+| Category | Cloud weight | Endpoint weight |
+|---|---:|---:|
+| Supply chain | 30 | **40** |
+| Excessive agency | 25 | 25 |
+| Prompt injection | 20 | 5 |
+| Sensitive data | 15 | 10 |
+| Guardrails | 15 | 10 |
+| Content safety | 15 | 5 |
+| Data privacy | 15 | 10 |
+| Output handling | 10 | 5 |
+| Model security | 10 | 10 |
+
+Endpoint scoring shifts weight toward supply-chain (known CVEs in installed AI tools) and away from prompt-injection / content-safety, which apply less to a managed IDE than to a production agent.
+
+## Controls by resource type
+
+Every control carries an `id`, human-readable `name`, a category, a weight, a list of mapped compliance frameworks, a description of *why the risk exists*, and remediation steps. Below is the full catalog.
+
+### Agents
+
+Applies to Azure AI Foundry agents, Mistral agents, GCP Vertex AI Reasoning Engines, and M365 Copilot / Copilot Studio agents.
+
+| ID | Name | Category | Weight |
+|---|---|---|---:|
+| `computer_use` | Computer Use Capability | Excessive agency | 2.5 |
+| `agent_model_version` | Agent Model Version | Supply chain | 2.0 |
+| `jailbreak_detection` | Jailbreak Detection Enabled (Azure) | Prompt injection | 2.0 |
+| `function_tools_scope` | Function Tools Scope | Excessive agency | 2.0 |
+| `critical_function_patterns` | Critical Function Patterns | Excessive agency | 2.0 |
+| `browser_automation` | Browser Automation Capability | Excessive agency | 2.0 |
+| `code_interpreter` | Code Interpreter Risk | Excessive agency | 1.8 |
+| `combined_excessive_agency` | Combined Excessive Agency | Excessive agency | 1.8 |
+| `content_filter_enabled` | Content Filtering Enabled (Azure) | Content safety | 1.5 |
+| `document_library_exposure` | Document Library Exposure | Sensitive data | 1.5 |
+| `deep_research` | Autonomous Deep Research | Excessive agency | 1.5 |
+| `guardrails_configured` | Guardrails Configured | Guardrails | 1.2 |
+| `file_search_access` | File Search Data Access | Sensitive data | 1.2 |
+| `mcp_tools` | MCP Server Connections | Excessive agency | 1.2 |
+| `instructions_present` | System Instructions Defined | Guardrails | 1.0 |
+| `agent_version_tracked` | Agent Version Tracked | Supply chain | 1.0 |
+| `version_history_stability` | Version History Stability (Mistral) | Supply chain | 1.0 |
+| `deployment_aliases_configured` | Deployment Aliases Configured (Mistral) | Supply chain | 1.0 |
+| `classic_retirement` | Classic Assistants API Retirement (Azure) | Supply chain | 1.0 |
+| `content_thresholds` | Content Filter Thresholds (Azure) | Content safety | 1.0 |
+| `protected_material` | Protected Material Detection (Azure) | Sensitive data | 1.0 |
+| `memory_enabled` | Conversation Memory (Azure) | Data privacy | 1.0 |
+| `response_format` | Response Format Constraints (Azure) | Output handling | 1.0 |
+| `sampling_parameters` | Sampling Parameters | Guardrails | 1.0 |
+| `connected_agents` | Connected Agent Chain | Excessive agency | 1.0 |
+| `external_data_access` | External Data Access | Excessive agency | 1.0 |
+| `knowledge_base_connected` | Knowledge Base Connectivity | Sensitive data | 1.0 |
+| `fabric_access` | Microsoft Fabric Access | Sensitive data | 1.0 |
+| `sharepoint_access` | SharePoint Access | Sensitive data | 1.0 |
+| `openapi_access` | OpenAPI Tool Access | Excessive agency | 1.0 |
+| `copilot_authentication` | Copilot Authentication (M365) | Guardrails | 1.0 |
+| `copilot_access_control` | Copilot Access Control (M365) | Guardrails | 1.0 |
+| `copilot_data_exposure` | Copilot Data Source Exposure (M365) | Sensitive data | 1.0 |
+| `copilot_teams_publishing` | Copilot Teams Publishing (M365) | Supply chain | 1.0 |
+| `copilot_solution_managed` | Copilot Solution Managed (M365) | Supply chain | 1.0 |
+| `copilot_owner_assigned` | Copilot Owner Assigned (M365) | Supply chain | 1.0 |
+
+### Models
+
+Applies to foundation models in Azure Cognitive Services, Azure ML Workspaces, GCP Vertex AI Model Registry, and Mistral.
+
+| ID | Name | Category | Weight |
+|---|---|---|---:|
+| `model_safety_guardrails` | Model Safety Guardrails | Guardrails | **3.0** |
+| `model_lifecycle` | Model Lifecycle Status | Supply chain | 2.5 |
+| `model_provider_trust` | Model Provider Trust | Supply chain | 2.5 |
+| `model_capabilities_risk` | Model Capabilities Risk | Model security | 2.5 |
+| `model_content_filter` | Model Content Filter (Azure) | Content safety | 2.5 |
+| `model_version_tracked` | Model Version Tracked | Supply chain | 2.0 |
+
+### Datasets
+
+Applies to vector stores, document libraries, and training datasets.
+
+| ID | Name | Category | Weight |
+|---|---|---|---:|
+| `pii_indicators` | PII Indicators | Data privacy | 2.5 |
+| `dataset_compliance` | Compliance Requirements | Data privacy | 2.0 |
+| `dataset_encryption` | Data Encryption | Data privacy | 1.5 |
+| `data_location` | Data Storage Location | Data privacy | 1.2 |
+
+### MCP servers
+
+Applies to MCP server declarations discovered in source repos (`github`) and on managed devices (Endpoint Discovery).
+
+| ID | Name | Category | Weight |
+|---|---|---|---:|
+| `mcp_no_hardcoded_secrets` | No Hardcoded Secrets in MCP Config | Sensitive data | **5.0** |
+| `mcp_no_tool_poisoning` | No Tool Poisoning in MCP Description | Prompt injection | **4.0** |
+| `mcp_no_auto_approve_wildcard` | No Wildcard `autoApprove` | Excessive agency | **4.0** |
+| `mcp_supply_chain` | MCP Server Supply Chain Safety | Supply chain | 3.5 |
+| `mcp_uses_https` | Remote MCP Server Uses HTTPS | Data privacy | 2.0 |
+
+MCP servers discovered on endpoints also inherit the endpoint-tool controls below.
+
+### Endpoint tools (IDEs, extensions, CLIs, browsers)
+
+Applies to AI-assisted IDEs, browser extensions, agent CLIs, browsers, and AI runtimes installed on managed devices (reported by the Endpoint Discovery script).
+
+| ID | Name | Category | Weight |
+|---|---|---|---:|
+| `endpoint_known_vulnerabilities` | No Known Vulnerabilities | Supply chain | **5.0** |
+| `endpoint_shadow_ai` | No Shadow AI Tools | Sensitive data | **5.0** |
+| `endpoint_tool_approval` | Tool Policy Compliance | Supply chain | 4.0 |
+| `endpoint_vulnerability_severity` | Vulnerability Severity Acceptable | Supply chain | 3.5 |
+| `endpoint_detection_freshness` | Detection Data Freshness | Guardrails | 2.0 |
+
+### Shadow AI (SaaS)
+
+Applies to AI SaaS usage observed by the [TrustGate Runtime browser extension](/trustgate/platform/enforcement/browser).
+
+| ID | Name | Category | Weight |
+|---|---|---|---:|
+| `shadow_ai_unsanctioned_usage` | No Unsanctioned AI Usage | Excessive agency | **6.0** |
+| `shadow_ai_app_approval` | Application Policy Approval | Supply chain | **5.0** |
+| `shadow_ai_data_handling_risk` | Data Handling Risk | Data privacy | 4.0 |
+| `shadow_ai_provider_trust` | AI Provider Trust | Supply chain | 3.0 |
+| `shadow_ai_detection_intensity` | Detection Frequency | Guardrails | 3.0 |
+
+## Compliance framework mapping
+
+Every control carries its mapped framework references so a failing control can be traced back to the obligation it supports. The frameworks that appear across the catalog:
+
+- **AI frameworks** — NIST AI RMF, EU AI Act, ISO/IEC 42001, OWASP LLM Top 10 (2025), OWASP MCP Top 10
+- **General security** — SOC 2 (CC6.7, CC8.1), NIST SP 800-53 (CM-7, RA-5, SI-4, AU-6, SC-28), CIS Controls 2.1 / 7.1
+- **Privacy** — GDPR (Art. 5, Art. 32), CCPA, HIPAA, PCI-DSS, SOX
+- **Vulnerability** — CVSSv3, CWE-74, CWE-306, CWE-319, CWE-494, CWE-798
+- **OWASP Web** — A06:2021
+
+## What a finding contains
+
+When a control fails or warns, the resulting **finding** carries:
+
+| Field | Purpose |
 |---|---|
-| **Critical** | Direct, exploitable exposure (e.g. an unauthenticated agent reachable from the public internet). Investigate immediately. |
-| **High** | Significant security gap (e.g. agent with no guardrails, MCP server with shell tools, RAI policy disabled). Address within the current sprint. |
-| **Medium** | Hardening opportunity (e.g. weak access control scope, missing system instructions). Address during routine maintenance. |
-| **Low** | Hygiene issue (e.g. agent uses a deprecated model). Track but rarely urgent. |
-| **Not assessed** | A connected integration cannot read enough metadata to score this resource. Usually a permissions gap — see the integration's troubleshooting section. |
+| `name` | Human-readable control name (e.g. *"Code Interpreter Risk"*) |
+| `status` | PASS / FAIL / WARNING / UNKNOWN |
+| `frameworks` | Mapped compliance frameworks |
+| `description` / `finding` | What was detected |
+| `why_risk` | Plain-language explanation of the underlying threat |
+| `severity_rationale` | Why this specific status was assigned (includes status-specific variants for WARNING and UNKNOWN) |
+| `remediation` | Numbered steps to resolve — status-specific for WARNING and UNKNOWN |
 
-The Overview page surfaces counts at each level (Critical · High · Medium · Low) and a 7-day **Posture Risk Trend** chart so regressions are visible immediately.
+Findings are sorted **FAIL → WARNING → UNKNOWN → PASS** on each resource page so actionable items surface first.
 
-## How posture risk is computed
+## UNKNOWN findings and integration health
 
-Posture risk for a resource is the **maximum severity** of any open finding on that resource. A single Critical finding makes the resource Critical; the rest of its findings are still listed but do not raise the level above Critical.
+UNKNOWN indicates missing data, not missing risk. Every UNKNOWN control ships a generic severity rationale and remediation:
 
-For an integration, the rollup is the count of resources at each severity, weighted by type:
+> *"This control could not be evaluated because the required configuration data was not available from the provider API. The actual risk is indeterminate until the data becomes accessible."*
+>
+> *"Verify that the integration has the required API permissions to retrieve the configuration data this control needs. Re-sync the resource after fixing permissions — the control will be re-evaluated automatically."*
 
-- An unprotected production agent counts more than an unprotected sandbox agent
-- A repo with a leaked API key in an agent config counts more than a repo with a deprecated CrewAI YAML
-- An endpoint host running an unsanctioned agent CLI counts more than an endpoint with an outdated browser extension
+Controls may override this with a provider-specific message (for example, the Mistral `version_history_stability` control points users at the specific API endpoint and permissions that would unblock evaluation).
 
-Weights are tunable per organization in **Settings → Detection rules**.
-
-## Finding catalog
-
-### Authentication and access
-
-| Finding | Severity | Where | Detected when |
-|---|---|---|---|
-| Unauthenticated agent | Critical | Agents | `authenticationmode = None` (M365), public Vertex endpoint, or public Azure deployment |
-| Unrestricted access policy | High | Agents | Access scope is `Any` or `*` instead of a specific group |
-| Service principal with write permissions | High | Integrations | Connected credential exceeds read-only baseline |
-| Stale credential | Medium | Integrations | Service principal secret or API key past 90 days old |
-
-### Guardrails
-
-| Finding | Severity | Where | Detected when |
-|---|---|---|---|
-| Missing guardrails | High | Agents (Mistral, GCP, M365) | `guardrails` is `null` and the platform supports them |
-| Weak guardrail thresholds | Medium | Agents (Mistral, GCP) | Category sensitivity above `MEDIUM_AND_ABOVE` (GCP) or above `0.5` (Mistral) |
-| Floor setting not enforced | High | Agents (GCP Model Armor) | Project floor setting `enableFloorSettingEnforcement = false` |
-| RAI policy unavailable | Low | Agents (Azure v1, AI Hub) | Platform does not expose policy via API — informational |
-
-### Tool and data exposure
-
-| Finding | Severity | Where | Detected when |
-|---|---|---|---|
-| High-risk tool | High | Agents, MCP Servers | Tool name matches dangerous pattern (e.g. `exec`, `delete_user`, `transfer_funds`) |
-| Code interpreter on internet-facing agent | High | Agents | Code interpreter tool + unrestricted access scope |
-| MCP server with shell access | High | MCP Servers | stdio transport invoking a shell binary or `npx` with arbitrary script |
-| Unrestricted knowledge base | Medium | Agents | Knowledge base scope spans more than the agent's access scope |
-| Excessive tool count | Medium | Agents | Agent attaches more than 20 tools — increases prompt-injection blast radius |
-
-### Configuration drift
-
-| Finding | Severity | Where | Detected when |
-|---|---|---|---|
-| Missing system instructions | Medium | Agents | Agent has no system prompt — behavior is fully model-default |
-| Tool added since last sync | Medium | Agents | New tool appeared without an associated change-management record |
-| Model swapped | Medium | Agents | Bound model changed between syncs |
-| Config file modified | Low | Agent configs | `AGENTS.md` / `.cursorrules` / `mcp.json` changed since last sync |
-
-### Endpoint hygiene
-
-| Finding | Severity | Where | Detected when |
-|---|---|---|---|
-| Unsanctioned agent CLI | High | Endpoint Hosts | CLI not on the allowlist installed on a managed device |
-| AI extension in unmanaged browser | Medium | Extensions | AI extension installed in a browser the org does not manage |
-| MCP server pointing at public stdio | High | MCP Servers | Locally-declared MCP server uses `npx`/`pip` to fetch unpinned remote code |
-| Outdated AI IDE | Low | IDEs | Installed version is more than 90 days behind the latest stable |
-
-### Source code
-
-| Finding | Severity | Where | Detected when |
-|---|---|---|---|
-| Secret referenced in agent config | High | Agent configs (GitHub) | `AGENTS.md` or framework YAML references a non-env-var secret literal |
-| MCP server fetched at runtime | High | MCP Servers (GitHub) | Repo declares an MCP server using `npx` or `uvx` against a non-pinned version |
-| Agent code uses unpinned model | Low | Agent code (GitHub) | LangChain/CrewAI/etc. instantiated with a non-pinned model alias |
-
-## Insights
-
-The right rail of the Overview page surfaces aggregated **Insights** — actionable summaries built on top of the raw findings. Each insight is one sentence, one severity badge, and one **Investigate** action that filters the inventory to the matching resources.
-
-| Insight | Built from |
-|---|---|
-| *N high-risk resources* | Count of resources at High or Critical |
-| *N medium-risk resources* | Count of resources at Medium |
-| *N low-risk resources* | Count of resources at Low |
-| *N resources pending assessment* | Count of resources currently `Not assessed` (run a sync) |
-
-Insights are recomputed on every sync.
-
-## Triage workflow
-
-<Steps>
-  <Step title="Investigate">
-    Click an Insight or open a resource directly. Each resource page lists every open finding with severity, evidence (the exact field that triggered it), and the integration sync that detected it.
-  </Step>
-
-  <Step title="Resolve at the source">
-    TrustLens is read-only. Remediation always happens in the upstream system:
-
-    - Add or strengthen a guardrail policy in Mistral / Foundry / Model Armor
-    - Restrict an agent's access policy in Copilot Studio
-    - Pin an MCP server's version in `mcp.json`
-    - Remove a high-risk tool from a Vertex Reasoning Engine
-    - Uninstall an unsanctioned CLI via your MDM
-
-    The next sync confirms the fix.
-  </Step>
-
-  <Step title="Suppress (optional)">
-    For findings you have explicitly accepted as risk (e.g. a sandbox agent intentionally running unauthenticated), use **Suppress with note** on the finding. Suppressed findings still appear in audit exports but no longer raise the resource's posture level.
-  </Step>
-
-  <Step title="Forward to SIEM">
-    Open Critical and High findings can be forwarded to your SIEM via the Audit & Compliance integration — see [SIEM integration](/platform/siem-integration). The forwarded payload includes the resource ID, finding type, severity, evidence, and the upstream resource link.
-  </Step>
-</Steps>
-
-## How findings interact with TrustGate Runtime
+## Pair with Runtime
 
 TrustLens identifies *what* needs protection. [TrustGate Runtime](/trustgate/platform/index) enforces *how* it is protected at runtime.
 
-A common pattern: a TrustLens **High** finding ("agent has no guardrails") becomes the trigger to put that agent behind a Gateway with a [prompt-security policy](/trustgate/platform/security/prompt-security) attached. Once the Gateway is in front, the finding can be marked resolved with a link back to the runtime policy.
+A common pattern: a TrustLens **FAIL** on `guardrails_configured` becomes the trigger to put that agent behind a Gateway with a [prompt-security policy](/trustgate/platform/security/prompt-security) attached. Once the Gateway is in front, the control will pass on the next sync with a reference back to the runtime policy.
