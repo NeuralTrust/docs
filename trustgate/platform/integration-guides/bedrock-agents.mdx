@@ -1,64 +1,331 @@
 ---
 title: AWS Bedrock Agents
-description: Apply Runtime security to AWS Bedrock Agents by calling the TrustGate Actions API before and after every InvokeAgent call.
+description: Protect Bedrock-based agents with a TrustGate Gateway via the Strands Agents SDK, or with the API enforcement surface for managed Bedrock Agents.
 ---
 
 ## What this covers
 
-Agents hosted on [AWS Bedrock Agents](https://aws.amazon.com/bedrock/agents/). Because Bedrock Agents are fully managed by AWS — orchestration, the foundation-model call, knowledge-base retrieval, and action-group routing all run server-side inside Bedrock — there is no way to put TrustGate on the wire in front of the agent's internal steps, and there is no bring-your-own-model option for the agent's foundation model.
+Agents running on Amazon Bedrock. There are two supported integrations, depending on how you build the agent:
 
-The validated integration pattern is to wrap your application's calls to `InvokeAgent` with two [Actions API](/trustgate/actions-api/overview) calls: one on the user input before you call Bedrock, and one on the agent's final response before you return it to the user.
+- **Option 1 — Strands Agents SDK + [Gateway](/trustgate/platform/enforcement/gateway)**: the agentic loop runs in your code, so every model call can flow through a Gateway for full on-the-wire inspection.
+- **Option 2 — Managed Bedrock Agents + [API surface](/trustgate/platform/enforcement/api)**: the agentic loop runs inside AWS, so you call a TrustGate API engine before and after `InvokeAgent` to inspect the user prompt and the agent's final response.
 
-- **Surface**: [Actions API](/trustgate/actions-api/overview).
-- **Who is this for**: applications calling `bedrock-agent-runtime:InvokeAgent` (boto3, AWS SDKs for any language).
+Pick Option 1 for new builds and for workloads where you want policies on every planner step, tool-call reasoning step, and model hop. Pick Option 2 when you are committed to the managed Bedrock Agents service and need policy enforcement on the ingress prompt and final response.
 
-## Architecture
+## Option 1 — Strands Agents SDK + Gateway
+
+[Strands Agents](https://aws.amazon.com/blogs/opensource/introducing-strands-agents-an-open-source-ai-agents-sdk/) is AWS's open-source, model-driven agent SDK. Because the agentic loop runs in your code, every model invocation is a standard SDK call that you can route through a Gateway — same shape as the [LLM SDKs](/trustgate/platform/integration-guides/openai-sdk) and [LangChain](/trustgate/platform/integration-guides/langchain) patterns.
+
+- **Surface**: [Gateway](/trustgate/platform/enforcement/gateway)
+- **Who is this for**: Python applications building Bedrock agents with the `strands-agents` SDK, deployed either locally, on EC2/ECS/EKS/Lambda, or via [BedrockAgentCore](https://aws.amazon.com/bedrock/agentcore/).
+- **What TrustGate inspects**: every iteration of the agent loop — the messages sent to the model (user prompt, prior tool results, full history), the model's response on each hop (reasoning and any tool-call requests), and the final answer. One Explorer entry per model hop. Tool execution itself runs locally in your process; TrustGate sees what the model asks each tool to do and what the tool returns (via the next hop's messages), but not the tool's internal behavior.
+
+### Architecture
 
 ```
-user ──► your app ──► TrustGate Actions API (prompt check)
+your Strands agent ──► OpenAIModel ──► TrustGate Gateway ──► AWS Bedrock
+        │                                      │             (Claude, Nova,
+        ├─ tools (@tool / MCP)                 │              Llama, Mistral…)
+        │                                      │
+        └─ optionally wrapped in a             └── inspects every model hop:
+           BedrockAgentCoreApp                     user prompt, tool-call
+           (/invocations HTTP entrypoint)          requests, tool results,
+                                                   final answer
+```
+
+The Gateway speaks the OpenAI wire format to the client and translates to Bedrock on the upstream side — **no SigV4 on the client**, no AWS credentials on the agent process. AWS auth lives on the **Bedrock provider Integration** (IAM role, access key, or workload identity) and is shared across every Route that references it.
+
+### Step-by-step setup
+
+AWS credentials live on a **Bedrock provider Integration** — your agent process never sees them, never runs SigV4, never needs `boto3` for the model call. The Gateway Route picks the Bedrock Integration from a dropdown and the Gateway translates OpenAI↔Bedrock on the wire.
+
+<Steps>
+  <Step title="Install Strands">
+    ```bash
+    pip install strands-agents strands-agents-tools python-dotenv
+    ```
+
+    Add `bedrock-agentcore` if you plan to deploy with the AWS runtime.
+  </Step>
+
+  <Step title="Register AWS Bedrock as an Integration">
+    **Integrations → Add Integration → AWS Bedrock**. Fill in:
+
+    - **AWS credentials** — pick one: IAM role ARN (with trust to the TrustGate data plane), a programmatic access-key pair, or a workload identity federation.
+    - **Region** — e.g. `us-east-1`, `eu-west-1`.
+    - **Allowed models** — the Bedrock model IDs (or inference profile ARNs) you want to expose. Examples: `anthropic.claude-sonnet-4-20250514-v1:0`, `amazon.nova-pro-v1:0`, `us.anthropic.claude-...` (cross-region inference profile).
+
+    The IAM principal needs `bedrock:InvokeModel` (and `bedrock:InvokeModelWithResponseStream` for streaming) on the models above. Cross-account Bedrock? Point the Integration at a role you can assume in the Bedrock-owning account — don't plumb dual credentials through the agent.
+  </Step>
+
+  <Step title="Create a Gateway Integration">
+    **Integrations → Add Integration → Gateway**. Pick Serverless (dev) or Dedicated (prod), name it (e.g. `bedrock-agents-prod`), save, and copy the Endpoint from **Gateway → Overview**.
+
+    A default Route for the Bedrock Integration from Step 2 is created automatically — it exposes `/v1/chat/completions` (the OpenAI path Strands' `OpenAIModel` targets) and the Gateway handles OpenAI↔Bedrock translation on the wire. One Route fronts every Bedrock model you allowed on the Integration — the model ID is selected per request via `GATEWAY_MODEL_ID`. Optionally add a Use Case (e.g. `customer-support-agent`) or per-route rate limits under **Gateway → Routes**.
+  </Step>
+
+  <Step title="Issue a Gateway API key">
+    On the Gateway Integration's **API Keys** tab, create a key. This is `TG_API_KEY` in the code below.
+  </Step>
+
+  <Step title="Wire up Strands' OpenAIModel">
+    Use the snippet below. Set `GATEWAY_BASE_URL`, `TG_API_KEY`, and `GATEWAY_MODEL_ID` in a `.env`. No AWS credentials on the agent — the Gateway signs SigV4 upstream using the Bedrock Integration.
+  </Step>
+
+  <Step title="Verify in Runtime → Explorer">
+    Run the agent. Expect one Explorer entry per model hop (plan → tool → reflect → answer), tagged with the Route and any detector decisions. Trigger a prompt-injection lure to confirm policies fire.
+  </Step>
+</Steps>
+
+### Client code
+
+```python
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+from strands import Agent
+from strands.models.openai import OpenAIModel
+
+load_dotenv(Path(__file__).parent / ".env", override=True)
+
+GATEWAY_BASE_URL = os.getenv("GATEWAY_BASE_URL", "https://<gateway>.neuraltrust.ai/v1")
+TG_API_KEY = os.getenv("TG_API_KEY", "")
+GATEWAY_MODEL_ID = os.getenv(
+    "GATEWAY_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0"
+)
+
+model = OpenAIModel(
+    client_args={
+        "base_url": GATEWAY_BASE_URL,
+        "api_key": TG_API_KEY or "not-used",
+        "default_headers": {"X-TG-API-Key": TG_API_KEY} if TG_API_KEY else {},
+    },
+    model_id=GATEWAY_MODEL_ID,
+)
+
+agent = Agent(
+    model=model,
+    system_prompt="You are a customer support agent for an electronics store.",
+    tools=[],
+)
+
+agent("What is the status of order ORD-1001?")
+```
+
+A few Bedrock-specific details worth calling out:
+
+- `model_id` is the **Bedrock model ID** the upstream expects, not an OpenAI model name. Examples: `anthropic.claude-sonnet-4-20250514-v1:0`, `amazon.nova-pro-v1:0`, `meta.llama3-1-70b-instruct-v1:0`.
+- The Gateway accepts the TrustGate key on either `Authorization: Bearer` (via OpenAI SDK's `api_key`) or the custom `X-TG-API-Key` header. Passing both keeps one config working across Gateway auth modes.
+- Cross-region inference profiles (`us.anthropic.claude-...`) work — just configure the Route's upstream to allow invocation of the profile ARN.
+
+#### With tools
+
+Wiring in tools is unchanged from standard Strands — tools run locally in your process:
+
+```python
+from tools import check_inventory, get_current_time, initiate_return, lookup_order
+
+agent = Agent(
+    model=model,
+    system_prompt=(
+        "You are a customer support agent for an electronics store. "
+        "Look up orders, check inventory, and initiate returns when asked."
+    ),
+    tools=[lookup_order, check_inventory, initiate_return, get_current_time],
+)
+
+agent("What is the status of order ORD-1001?")
+```
+
+Every model hop (plan → tool select → reflect → answer) is a distinct Gateway request and produces a distinct Explorer entry. To inspect what the tools themselves do over HTTP, front each tool's upstream with its own Gateway route or [API engine](/trustgate/platform/enforcement/api).
+
+#### Deploy on AWS with BedrockAgentCore
+
+For production on AWS, wrap the agent in a [BedrockAgentCore](https://aws.amazon.com/bedrock/agentcore/) app. The Gateway integration is unchanged — only the outer HTTP entrypoint changes:
+
+```python
+from bedrock_agentcore import BedrockAgentCoreApp
+
+app = BedrockAgentCoreApp()
+
+
+@app.entrypoint
+def invoke(payload):
+    prompt = payload.get("prompt", "Hello! How can I help you today?")
+    result = agent(prompt)
+    return {"result": result.message}
+
+
+if __name__ == "__main__":
+    app.run()
+```
+
+Call it:
+
+```bash
+curl -X POST http://localhost:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is the status of order ORD-1001?"}'
+```
+
+Full flow: `client → BedrockAgentCore entrypoint → Strands Agent → OpenAIModel → TrustGate Gateway → Bedrock`. Optionally, put a TrustGate [API engine](/trustgate/platform/enforcement/api) in front of the BedrockAgentCore HTTP endpoint itself if you also need to inspect requests coming *into* the agent.
+
+See the [Strands Agents guide](/trustgate/platform/integration-guides/strands-agents) for multi-provider upstreams, MCP tools, conversation correlation, and multi-agent (`workflow`, `graph`, `swarm`) patterns.
+
+### Correlate hops into one conversation
+
+Thread all hops of a logical session together in Explorer by passing a stable `x-conversation-id`:
+
+```python
+model = OpenAIModel(
+    client_args={
+        "base_url": GATEWAY_BASE_URL,
+        "api_key": TG_API_KEY,
+        "default_headers": {
+            "X-TG-API-Key": TG_API_KEY,
+            "x-conversation-id": conversation_id,
+        },
+    },
+    model_id=GATEWAY_MODEL_ID,
+)
+```
+
+### Policies to apply (Option 1)
+
+Gateway policies fire on every iteration of the Strands loop. Author them against the `Gateways = <your-gateway>` filter, or narrow to `Routes = <bedrock-route>` if the same Gateway serves other upstreams. Start in `Log`, review hits in **Runtime → Logs**, promote to `Mask` / `Block`. See [Policies & Enforcement](/trustgate/platform/policies) for the full `Where` / `When` / `Then` model and precedence.
+
+#### Block prompt injection and jailbreaks on every hop
+
+- **Where** — `Gateway` + filter `Gateways = <your-gateway>`
+- **When** — `Input` · `Triggers` · `Prompt Injection, Jailbreak`
+- **Then** — `Block`
+
+Because tool results come back as messages on the next hop, this policy also catches **indirect injection** — e.g., a malicious substring returned by a search tool or knowledge-base lookup.
+
+#### Mask PII on both sides of the hop
+
+- **Where** — `Gateway` + filter `Gateways = <your-gateway>`
+- **When** — `Input or Output` · `Triggers` · `Email Address, Phone Number, Credit Card, Social Security Number`
+- **Then** — `Mask`
+
+Strands agents commonly ground on AWS data (DynamoDB, knowledge bases, S3). Masking on `Output` prevents grounded PII from leaking back to the user or into the next hop's context.
+
+#### Block credential leakage
+
+- **Where** — `Gateway` + filter `Gateways = <your-gateway>`
+- **When** — `Input or Output` · `Triggers` · `API Key / Secret`
+- **Then** — `Block`
+
+#### Guard tool-call arguments
+
+- **Where** — `Gateway` + filter `Gateways = <your-gateway>`
+- **When** — `Tool Call` · `Triggers` · `Suspicious Arguments, Prompt Injection`
+- **Then** — `Block`
+
+Especially important with the pre-built `http_request` tool, where the model can synthesize arbitrary URLs and payloads. The tool call is inspected **before** your code dispatches it.
+
+#### Moderate the final response
+
+- **Where** — `Gateway` + filter `Routes = <customer-facing-bedrock-route>`
+- **When** — `Output` · `Triggers` · `Toxicity, Harmful Content`
+- **Then** — `Block`
+
+See the [Strands Agents guide — Policies to apply](/trustgate/platform/integration-guides/strands-agents#policies-to-apply) for additional patterns and the `Log`-first lifecycle.
+
+### Limitations
+
+- **Per-hop inspection, not loop-wide** — TrustGate inspects each model call independently. Correlate them with a `x-conversation-id` header if you want one logical session in Explorer.
+- **Streaming** — Strands streams Bedrock responses by default. Enable the streaming profile on the Gateway route so chunks are inspected in order; `Mask` and `Block` decisions apply when the stream completes.
+- **Bedrock-specific features** — Bedrock Guardrails, Bedrock Agents (the managed service), and Knowledge Bases are **not** covered by Option 1 because they run server-side. If you need the managed agent runtime, use [Option 2](#option-2--managed-bedrock-agents--api-surface). Guardrails can be layered on the Bedrock side in addition to TrustGate policies.
+- **Tool execution is local** — only tools that make HTTP calls can be protected by adding their own Gateway/API route. Pure Python tools (`@tool` functions with no outbound calls) are invisible to TrustGate by design.
+- **Cross-account Bedrock** — if Bedrock runs in a different AWS account than the Gateway's upstream credentials can assume, configure the Gateway upstream to assume a role in the Bedrock account; do not plumb dual credentials through the agent.
+
+## Option 2 — Managed Bedrock Agents + API surface
+
+[Managed Bedrock Agents](https://aws.amazon.com/bedrock/agents/) runs orchestration, the foundation-model call, knowledge-base retrieval, and action-group routing entirely server-side inside AWS. You cannot put a proxy on the internal steps, so enforcement happens on the **ingress prompt** and the **final response** through a TrustGate [API engine](/trustgate/platform/enforcement/api).
+
+- **Surface**: [API](/trustgate/platform/enforcement/api)
+- **Who is this for**: applications calling `bedrock-agent-runtime:InvokeAgent` (boto3, AWS SDKs for any language) on the managed Bedrock Agents service.
+- **What TrustGate inspects**: the prompt you send to `InvokeAgent` and the agent's final response — the internal agent steps are opaque.
+
+### Architecture
+
+```
+user ──► your app ──► TrustGate API engine (stage: "request")
                            │
-                           ├─ block / mask / allow
+                           ├─ allow / mask / block
                            ▼
                      AWS Bedrock InvokeAgent
                            │
                            ▼
-                     TrustGate Actions API (response check)
+                     TrustGate API engine (stage: "response")
                            │
                            ▼
                      return to user
 ```
 
-TrustGate is not on the AWS wire. Your app keeps calling `bedrock-agent-runtime.<region>.amazonaws.com` directly with SigV4; TrustGate inspection happens through two side calls.
+Your app keeps calling `bedrock-agent-runtime.<region>.amazonaws.com` directly with SigV4; TrustGate inspection happens through two side calls to the API engine.
 
-## Prerequisites
+### Step-by-step setup
 
-1. Two **policies** in TrustGate's Actions API — one configured with the detectors you want to run on **user input**, and one configured with the detectors you want to run on the **agent's final response**. A single policy can be reused for both if the detectors are symmetric. See [Create policy](/trustgate/actions-api/overview#3-api-keys-management-admin) for the request shape.
-2. A TrustGate **execution API key** allowed to call both policies.
-3. Standard AWS credentials and IAM permissions to call `bedrock-agent-runtime:InvokeAgent` on the target agent alias.
+Unlike the Gateway, the API surface is a **contract**: your app calls `POST /v1/actions/execute` before and after `InvokeAgent`, then honors the decision. There's no upstream to register — the API engine inspects the payload you send it.
 
-## Wire it up
+<Steps>
+  <Step title="Create an API Integration (API engine)">
+    **Integrations → Add Integration → API**. Pick the engine type:
 
-The example below shows the two side calls wrapping a single `InvokeAgent` invocation. The pattern is identical regardless of streaming mode — `streamFinalResponse` is discussed under [Limitations](#limitations).
+    - **Serverless** — instantly-ready, good for dev and low volume.
+    - **Dedicated** — horizontally-scalable, VPC-isolated, for production.
+
+    Name it (e.g. `bedrock-agents-inspector`), add Tags for policy scope (e.g. `production, customer-support`), and save.
+  </Step>
+
+  <Step title="Attach policies to the engine">
+    Open **Runtime → Policies → Create Policy** and scope with `Where = API` + filter `Engines = <your-engine>`. Author separate policies for the `request` and `response` stages — the engine runs them based on the `stage` field you send on each call. See [Policies to apply (Option 2)](#policies-to-apply-option-2) below for concrete starters.
+  </Step>
+
+  <Step title="Issue an engine API key">
+    On the API Integration's **API Keys** tab, create a key. This is `ENGINE_API_KEY` in the code below.
+  </Step>
+
+  <Step title="Confirm AWS credentials and IAM">
+    Your app needs standard AWS credentials with `bedrock-agent-runtime:InvokeAgent` on the target agent alias. Unlike Option 1, AWS auth stays on the client because `InvokeAgent` is called directly — TrustGate only sees the payload you send it.
+  </Step>
+
+  <Step title="Wrap InvokeAgent with two engine calls">
+    Insert one `POST /v1/actions/execute` with `stage: "request"` before `InvokeAgent`, and a second with `stage: "response"` on the completion. Honor the `decision` field on each — see the snippet below.
+  </Step>
+
+  <Step title="Verify in Runtime → Logs">
+    Run a prompt that a detector on your engine's policies should flag. Confirm both the `request`-stage and `response`-stage events appear in **Runtime → Logs**, tagged with the `application`, `use_case`, and `user` you sent.
+  </Step>
+</Steps>
+
+### Client code
+
+The example below wraps a single `InvokeAgent` invocation with two calls to the API engine — one with `stage: "request"` for the prompt, one with `stage: "response"` for the final output.
 
 ```python
 import boto3
 import requests
 
-TRUSTGATE_HOST = "https://<your-trustgate-host>"
-TRUSTGATE_KEY = "<trustgate-execution-api-key>"
-PROMPT_POLICY_ID = "<policy-id-for-input-checks>"
-RESPONSE_POLICY_ID = "<policy-id-for-output-checks>"
+ENGINE_URL = "https://engine.neuraltrust.ai"
+ENGINE_API_KEY = "<engine-api-key>"
 
 bedrock = boto3.client("bedrock-agent-runtime", region_name="us-east-1")
 
 
-def actions_check(policy_id: str, text: str, user_id: str) -> dict:
+def inspect(stage: str, messages: list, user: str) -> dict:
     resp = requests.post(
-        f"{TRUSTGATE_HOST}/v1/actions",
-        headers={"Authorization": f"Bearer {TRUSTGATE_KEY}"},
+        f"{ENGINE_URL}/v1/actions/execute",
+        headers={"Authorization": f"Bearer {ENGINE_API_KEY}"},
         json={
-            "policy_id": policy_id,
-            "payload": {"input_text": text, "user_id": user_id},
+            "application": "bedrock-agents-app",
+            "use_case": "customer-support",
+            "user": user,
+            "stage": stage,
+            "payload": {"messages": messages},
         },
         timeout=10,
     )
@@ -66,17 +333,21 @@ def actions_check(policy_id: str, text: str, user_id: str) -> dict:
     return resp.json()
 
 
-def ask_agent(user_id: str, prompt: str, agent_id: str, alias_id: str, session_id: str) -> str:
-    pre = actions_check(PROMPT_POLICY_ID, prompt, user_id)
-    if pre.get("status") != 200:
-        raise RuntimeError(f"Input blocked by TrustGate: {pre}")
-    sanitized_prompt = pre["payload"].get("result", prompt)
+def ask_agent(user: str, prompt: str, agent_id: str, alias_id: str, session_id: str) -> str:
+    pre = inspect("request", [{"role": "user", "content": prompt}], user)
+    if pre["decision"] == "block":
+        raise RuntimeError(f"Input blocked by TrustGate: {pre['reason']}")
+    effective_prompt = (
+        pre["payload"]["messages"][0]["content"]
+        if pre["decision"] == "mask"
+        else prompt
+    )
 
     response = bedrock.invoke_agent(
         agentId=agent_id,
         agentAliasId=alias_id,
         sessionId=session_id,
-        inputText=sanitized_prompt,
+        inputText=effective_prompt,
     )
     completion = "".join(
         event["chunk"]["bytes"].decode()
@@ -84,25 +355,64 @@ def ask_agent(user_id: str, prompt: str, agent_id: str, alias_id: str, session_i
         if "chunk" in event
     )
 
-    post = actions_check(RESPONSE_POLICY_ID, completion, user_id)
-    if post.get("status") != 200:
-        raise RuntimeError(f"Output blocked by TrustGate: {post}")
-
-    return post["payload"].get("result", completion)
+    post = inspect("response", [{"role": "assistant", "content": completion}], user)
+    if post["decision"] == "block":
+        raise RuntimeError(f"Output blocked by TrustGate: {post['reason']}")
+    return (
+        post["payload"]["messages"][0]["content"]
+        if post["decision"] == "mask"
+        else completion
+    )
 ```
 
-Return the decision from either Actions API call to your application layer and act on it — for masking, replace the text; for blocking, surface an error or a generic refusal; for allow, pass through.
+Act on the `decision` field per the API-surface contract: `allow` / `log` → pass through, `mask` → use the returned payload, `block` → stop and surface the reason.
 
-## Verify
+### Policies to apply (Option 2)
 
-1. Run your app with a prompt that a detector on your input policy should flag (for example, one containing PII if PII detection is configured).
-2. Confirm the first `POST /v1/actions` call returns a decision that matches what you configured (block / mask / allow).
-3. Run a prompt that should produce a flaggable response; confirm the second `POST /v1/actions` call catches it.
-4. Review the Actions API telemetry / metrics you enabled on each policy to confirm executions are logging correctly.
+API-engine policies use the same `Where` / `When` / `Then` model as the Gateway ([Policies & Enforcement](/trustgate/platform/policies)), but the **Where** is the API engine and the detectable fields are tied to the two stages you invoke — `request` and `response`. Scope with the `Engines` filter (or by `application` / `use_case` tags you send on the call) so one engine can serve multiple apps with different rules.
 
-## Policies to turn on first
+### Block prompt injection on the ingress prompt
 
-- **Prompt security** — jailbreak and prompt injection on user input.
-- **Data protection & masking** — PII and secret detection on both sides; useful if the agent has retrieval over internal data.
-- **Content moderation** — on the agent's final response.
-- **Keyword / topic block** — on input, to keep requests in scope.
+- **Where** — `API` + filter `Engines = <your-engine>` · `Use Cases = customer-support`
+- **When** — `Input` (stage `request`) · `Triggers` · `Prompt Injection, Jailbreak`
+- **Then** — `Block`
+
+Your app treats `decision: "block"` from the request-stage call as a stop.
+
+### Mask PII on both stages
+
+- **Where** — `API` + filter `Engines = <your-engine>`
+- **When** — `Input or Output` · `Triggers` · `Email Address, Phone Number, Credit Card, Social Security Number`
+- **Then** — `Mask`
+
+When `decision: "mask"` comes back, use the returned `payload.messages` instead of the original content — both for the prompt you hand to `InvokeAgent` and for the response you return to the user.
+
+### Block credential leakage in the agent's final response
+
+- **Where** — `API` + filter `Engines = <your-engine>`
+- **When** — `Output` (stage `response`) · `Triggers` · `API Key / Secret`
+- **Then** — `Block`
+
+Guards against the Bedrock agent echoing secrets it retrieved from a knowledge base.
+
+### Moderate the final response
+
+- **Where** — `API` + filter `Engines = <your-engine>` · `Use Cases = customer-support`
+- **When** — `Output` · `Triggers` · `Toxicity, Harmful Content`
+- **Then** — `Block`
+
+### Keyword / topic block on input
+
+- **Where** — `API` + filter `Engines = <your-engine>`
+- **When** — `Input` · `Triggers` · `Keyword Match = <your-list>`
+- **Then** — `Block`
+
+Use this to keep requests in scope (for example, block off-topic requests on a domain-specific agent).
+
+Because the API surface is a contract — your code chooses whether to honor the decision — keep policies in `Log` mode until the integration is proven to respect `block` and `mask` outcomes correctly, then promote.
+
+### Limitations
+
+- **Agent internals are opaque** — tool invocations, knowledge-base retrievals, and planner steps run inside Bedrock. The API engine only sees what you send to `InvokeAgent` and what comes back as the final response. If you need enforcement on every planner step and tool call, use [Option 1](#option-1-strands-agents-sdk-gateway).
+- **Streaming final response** — when `streamFinalResponse` is enabled, accumulate the chunks before calling the response-stage check so the detector runs on the full payload.
+- **Enforcement is a contract** — the API surface returns a decision, but TrustGate can't physically stop code that ignores it. Decisions are logged for audit. For inline enforcement, use Option 1.

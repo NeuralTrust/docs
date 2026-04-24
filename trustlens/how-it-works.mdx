@@ -1,0 +1,124 @@
+---
+title: How it works
+description: The five stages of the TrustLens lifecycle — connect, discover, assess, monitor, and alert — and how data flows from your environment into a single AI inventory.
+---
+
+TrustLens runs the same five-stage loop against every connected environment. Each stage uses **read-only credentials** scoped to the integration and produces structured records that feed into the unified inventory.
+
+## The lifecycle
+
+<Steps>
+  <Step title="Connect">
+    You register an Integration once per environment using the credentials each provider expects:
+
+    - **Cloud platforms** (Azure, GCP) — service principal or service account with read-only RBAC roles
+    - **SaaS providers** (Mistral) — read-only API key
+    - **Microsoft 365** — Azure AD service principal + Dataverse Application User
+    - **Source code** (GitHub) — GitHub App installation with `contents:read` only
+    - **Managed endpoints** (Intune, Kandji) — signed Device Discovery script with a per-integration write-only token
+
+    Credentials are encrypted at rest. No integration ever needs write access to your environment.
+  </Step>
+
+  <Step title="Discover">
+    The connector enumerates every AI-related resource the credential can see:
+
+    - Agents, models, datasets, vector stores, document libraries
+    - Tools, instructions, knowledge bases bound to each agent
+    - Guardrail policies (RAI filters, Model Armor templates, Mistral moderation policies)
+    - Source files implementing agents and MCP servers
+    - Installed AI software, browser extensions, and MCP configs on managed devices
+
+    Discovery is non-destructive — the connector lists and reads, never writes. Each discovered item becomes a typed entry in the inventory (`Agent`, `Model`, `MCPServer`, `EndpointHost`, etc.).
+  </Step>
+
+  <Step title="Assess">
+    Each discovered resource is scored against the security controls relevant to its type:
+
+    - **Authentication** — is the resource reachable without auth? Anonymous? Restricted to a group?
+    - **Guardrails** — are content filters or moderation policies attached?
+    - **Tool exposure** — what tools can the agent invoke? Are any high-risk (script execution, identity management)?
+    - **Instructions** — does the agent have a system prompt that constrains behavior?
+    - **Data sources** — what knowledge bases or files can it read?
+    - **Configuration drift** — has any of the above changed since the last sync?
+
+    Each finding is tagged with severity (Critical / High / Medium / Low) and aggregated into a per-resource posture score. See [Risk & findings](/trustlens/risk-and-findings) for the full taxonomy.
+  </Step>
+
+  <Step title="Monitor">
+    Where the upstream platform exposes telemetry, the connector pulls usage signals to track adoption and flag anomalies:
+
+    | Source | Signals |
+    |---|---|
+    | Application Insights (Azure v2) | Runs, tokens, latency, errors, tool-call breakdown |
+    | Azure Monitor (Azure AI Hub) | `AgentRuns`, `AgentTokens`, `AgentThreads`, `AgentToolCalls` |
+    | Cloud Monitoring + Cloud Trace (GCP) | Request count, latency, CPU/memory, tool-call spans |
+    | Mistral Conversations API | Per-agent runs, conversations, tool-call counts |
+    | Dataverse transcripts (M365) | Per-bot conversation count |
+    | Endpoint Discovery script | Inventory delta per device per run |
+
+    No prompt or response content ever leaves your environment. Telemetry is metadata only.
+  </Step>
+
+  <Step title="Alert">
+    Findings are surfaced three ways:
+
+    - **Dashboards** — Posture Risk Trend, Risk Distribution, Attack Surface by Type
+    - **Insights panel** — actionable summaries (e.g. *"6 high-risk resources — Investigate"*)
+    - **Notifications** — high-severity findings can be forwarded to the SIEMs configured under [Audit & Compliance](/platform/siem-integration) (Splunk, Elastic, IBM QRadar, Microsoft Sentinel, Datadog)
+
+    Resync runs on a configurable schedule (default daily) so the inventory always reflects the current state of your environment.
+  </Step>
+</Steps>
+
+---
+
+## Data flow
+
+```
+┌──────────────────────┐    read-only     ┌─────────────────────────┐
+│  Your environments   │ ───────────────▶ │  TrustLens │
+│  (Azure, GCP, M365,  │                  │  control plane          │
+│   Mistral, GitHub,   │                  │                         │
+│   managed devices)   │ ◀─────────────── │  - Inventory            │
+└──────────────────────┘   no writes      │  - Posture scoring      │
+                                          │  - Findings             │
+                                          │  - Telemetry aggregates │
+                                          └───────────┬─────────────┘
+                                                      │
+                                                      │ optional forward
+                                                      ▼
+                                          ┌─────────────────────────┐
+                                          │  SIEM / ticketing       │
+                                          │  (Splunk, Sentinel, …)  │
+                                          └─────────────────────────┘
+```
+
+- **Inbound from your environment**: structured metadata only (resource names, configs, telemetry counters).
+- **Outbound to your environment**: nothing. There is no return channel that mutates your resources.
+- **Outbound from the platform**: SIEM forwarding for high-severity findings, if configured.
+
+## Sync cadence
+
+| Integration | Default cadence | Tunable |
+|---|---|---|
+| Azure | Every 6 hours | Yes |
+| GCP Vertex AI | Every 6 hours | Yes |
+| Mistral AI | Every 6 hours | Yes |
+| M365 Copilot | Every 12 hours | Yes |
+| GitHub | On-demand + every 24 hours | Incremental: skipped when HEAD SHA unchanged |
+| Endpoint Discovery (MDM) | Driven by MDM script schedule (typical: daily) | Yes — change the MDM script frequency |
+
+You can trigger a manual resync from each integration's settings page at any time.
+
+## Read-only by construction
+
+Every integration in TrustLens is built around the principle that **no credential should be able to change anything in your environment**:
+
+- Cloud roles are scoped to `*.viewer` / `*.read` equivalents
+- Mistral and Microsoft Graph API permissions are read-only application permissions
+- The GitHub App requests `contents:read` and `metadata:read` — nothing else
+- The Endpoint Discovery script enumerates the local filesystem and exits; the per-integration token can only write to that integration's inventory
+- All credentials are encrypted at rest and never echoed back through the API
+
+If a sync fails because of insufficient permission, the integration fails closed (no data) rather than gracefully skipping the affected resource silently — see each integration's troubleshooting section for the specific symptoms.

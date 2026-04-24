@@ -1,0 +1,267 @@
+---
+title: Endpoint Discovery (MDM)
+description: Deploy a read-only Device Discovery script via Microsoft Intune or Kandji to inventory AI tools — IDEs, browsers, extensions, agent CLIs, MCP servers, and agent configs — across macOS and Windows endpoints.
+---
+
+The **Endpoint Discovery** integration deploys a small, signed, read-only script to your managed devices via your MDM. The script enumerates AI-related software and configuration on each endpoint, reports back to TrustLens, and exits — no daemon, no persistent process, no data exfiltration.
+
+This is the only integration in TrustLens that needs to run code on a device. It is purpose-built to be safe to deploy through any MDM that can run shell or PowerShell scripts on macOS and Windows.
+
+<Note>
+Endpoint Discovery is **not** an enforcement surface — it does not block, modify, or proxy any traffic. For runtime enforcement on endpoint devices, see the [Endpoint enforcement surface](/trustgate/platform/enforcement/endpoint) under TrustGate Runtime.
+</Note>
+
+---
+
+## What the script discovers
+
+The Device Discovery script enumerates the local filesystem and installed-application registry to build a per-device inventory. Each item is reported with the application name, version, install path, and any AI-relevant configuration (e.g. the contents of a parsed MCP config file).
+
+| Inventory category | Examples |
+|---|---|
+| **AI-assisted IDEs** | Cursor, Windsurf, JetBrains AI Assistant, VS Code with Copilot / Continue / Cline / Cody, Zed |
+| **Agent CLIs** | Claude Code, OpenAI Codex CLI, GitHub Copilot CLI, Aider, Goose, Open Interpreter |
+| **Browsers connecting to AI** | Chrome, Edge, Brave, Arc, Vivaldi, Firefox, Safari (presence + version) |
+| **AI browser extensions** | ChatGPT, Claude, Gemini, Copilot, Perplexity, Monica, Merlin, Sider, MaxAI, ChatHub |
+| **MCP servers** | Local declarations from `mcp.json`, `.cursor/mcp.json`, `~/.codex/config.toml`, `~/.config/claude/*.json`, etc. — both stdio and HTTP/SSE servers |
+| **Agent configuration files** | `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `SKILLS.md`, CrewAI / AutoGen YAML configs, hooks |
+| **Endpoint host metadata** | Hostname, OS, OS version, hardware UUID, last-seen timestamp, MDM-supplied device ID and user assignment |
+
+For each MCP server discovered, the script reports the server name, command/URL, and declared tool names — never the contents of any tool call or any secret values referenced in the config.
+
+### What the script does **not** do
+
+- It does not read user files outside the well-known AI configuration paths.
+- It does not capture browser history, cookies, or any session content.
+- It does not capture the contents of prompts, messages, or model responses.
+- It does not transmit secrets, API keys, or environment variables — when an MCP config references an env var, the variable name is reported and the value is dropped client-side.
+- It does not install, modify, or remove any software on the device.
+- It does not run as a daemon or scheduled task on the device. Re-discovery happens on the MDM's schedule.
+
+---
+
+## How the script reports back
+
+Each run produces a single signed JSON payload that is sent to a TrustLens ingestion endpoint over HTTPS. Authentication is a per-integration **Discovery Token** that you generate when configuring the integration. The token is scoped to write only to the inventory of that integration and cannot be used to read or modify any other resource.
+
+| Property | Value |
+|---|---|
+| Egress destination | `https://posture.neuraltrust.ai/v1/devices/report` |
+| Egress port | 443 (HTTPS) |
+| Auth header | `X-Discovery-Token: <token>` |
+| Payload | Signed JSON, ~5–50 KB per device |
+| Frequency | Driven by the MDM script schedule (typical: daily) |
+
+Add `posture.neuraltrust.ai` to any egress allowlist that applies to your managed devices.
+
+---
+
+## Supported MDMs
+
+| MDM | macOS | Windows | Script type |
+|---|:---:|:---:|---|
+| **Microsoft Intune** | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | Shell script (macOS) · PowerShell script (Windows) |
+| **Kandji** | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | Custom Script (Library Item) |
+
+Other MDMs that can run signed shell or PowerShell scripts on a schedule (e.g. Jamf, Workspace ONE, Mosyle) are not pre-packaged today but can deploy the same script. Contact support for a packaged Library Item.
+
+---
+
+## Prerequisites
+
+Before deploying, make sure you have:
+
+- An MDM administrator account with permission to upload and assign device scripts in Intune or Library Items in Kandji
+- A target device group containing the macOS and Windows endpoints you want to inventory
+- Network egress from the device fleet to `https://posture.neuraltrust.ai` on TCP 443
+- For Windows: PowerShell 5.1 or later (default on Windows 10/11)
+- For macOS: macOS 12 (Monterey) or later
+
+---
+
+## Step-by-step setup
+
+<Steps>
+  <Step title="Create the Endpoint Discovery integration in TrustLens">
+    1. In the TrustLens console, go to **Integrations** → **Add integration**
+    2. Pick your MDM under **MDM**: **Microsoft Intune** or **Kandji**
+    3. Give the integration a name (e.g. `Corp macOS fleet`)
+    4. Click **Generate Discovery Token** and copy the value — it is shown once
+    5. Download the script bundle for your MDM and platform combination
+  </Step>
+
+  <Step title="Configure the Discovery Token on the script">
+    Open `discover.sh` (macOS) or `discover.ps1` (Windows) and set the `DISCOVERY_TOKEN` variable at the top of the file to the value you copied:
+
+    <Tabs>
+      <Tab title="macOS — discover.sh">
+        ```bash
+        DISCOVERY_TOKEN="dt_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        REPORT_URL="https://posture.neuraltrust.ai/v1/devices/report"
+        ```
+      </Tab>
+      <Tab title="Windows — discover.ps1">
+        ```powershell
+        $DiscoveryToken = "dt_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        $ReportUrl      = "https://posture.neuraltrust.ai/v1/devices/report"
+        ```
+      </Tab>
+    </Tabs>
+
+    <Tip>
+    To avoid embedding the token in the script, you can instead deliver it via an MDM-managed environment variable or a configuration profile and read it from the script at runtime. See the **Token delivery options** section below.
+    </Tip>
+  </Step>
+
+  <Step title="Deploy the script via your MDM">
+    <Tabs>
+      <Tab title="Microsoft Intune — macOS">
+        1. Go to [Intune admin center](https://intune.microsoft.com) → **Devices** → **macOS** → **Shell scripts** → **+ Add**
+        2. **Basics**: name it `NeuralTrust Device Discovery (macOS)`
+        3. **Script settings**:
+           - Upload `discover.sh`
+           - **Run script as signed-in user**: **No** (run as root)
+           - **Hide script notifications on devices**: **Yes**
+           - **Script frequency**: **Every 1 day**
+           - **Max number of times to retry if script fails**: **3**
+        4. **Assignments**: assign to your target macOS device group
+        5. **Review + add**
+
+        <Note>
+        Intune runs macOS shell scripts via the Microsoft Intune Management Extension. The script needs root to enumerate per-user installs across all profiles on shared devices.
+        </Note>
+      </Tab>
+      <Tab title="Microsoft Intune — Windows">
+        1. Go to [Intune admin center](https://intune.microsoft.com) → **Devices** → **Windows** → **PowerShell scripts** → **+ Add**
+        2. **Basics**: name it `NeuralTrust Device Discovery (Windows)`
+        3. **Script settings**:
+           - Upload `discover.ps1`
+           - **Run this script using the logged on credentials**: **No** (run as SYSTEM)
+           - **Enforce script signature check**: **Yes** (the script ships signed)
+           - **Run script in 64-bit PowerShell host**: **Yes**
+        4. **Assignments**: assign to your target Windows device group
+        5. **Review + add**
+
+        Intune PowerShell scripts run **once per device** by default. To re-discover periodically, wrap the script in a Win32 app with a scheduled detection rule, or use **Proactive Remediations** with a daily schedule.
+      </Tab>
+      <Tab title="Kandji — macOS">
+        1. Go to [Kandji](https://web.kandji.io) → **Library** → **Add Library Item** → **Custom Script**
+        2. **General**:
+           - Name: `NeuralTrust Device Discovery`
+           - Execution frequency: **Every Day**
+           - Restart: **No**
+        3. **Audit Script**: paste `discover.sh`
+        4. **Remediation Script**: leave empty
+        5. **Assignment**: assign to your macOS Blueprint covering the target devices
+        6. **Save**
+
+        <Note>
+        Kandji runs Custom Scripts as root on macOS. The Audit Script field is the right place because Discovery is read-only and reports state — there is nothing to remediate.
+        </Note>
+      </Tab>
+      <Tab title="Kandji — Windows">
+        1. Go to [Kandji](https://web.kandji.io) → **Library** → **Add Library Item** → **Custom Script** (Windows)
+        2. **General**:
+           - Name: `NeuralTrust Device Discovery`
+           - Execution frequency: **Every Day**
+        3. **Script**: paste `discover.ps1`
+        4. **Run as**: **System**
+        5. **Assignment**: assign to your Windows Blueprint covering the target devices
+        6. **Save**
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Verify ingestion in TrustLens">
+    1. Wait for the next MDM script execution window — for daily-scheduled scripts in Intune, this is typically within 8 hours; in Kandji it is within an hour
+    2. In the TrustLens console, open the integration you created in Step 1
+    3. The **Last sync** timestamp should update and the **Endpoint Host** count should increment as devices report in
+    4. Open **Inventory → Endpoint Hosts** to see per-device discovery results
+
+    If a device hasn't reported after 24 hours, check the MDM's script execution log on that device — see [Troubleshooting](#troubleshooting) below.
+  </Step>
+</Steps>
+
+---
+
+## Token delivery options
+
+Embedding the Discovery Token directly in the script is the simplest setup, but you have alternatives if your security policy requires the token to live outside the script body:
+
+| Option | macOS | Windows | Notes |
+|---|---|---|---|
+| In-script constant | Edit `discover.sh` | Edit `discover.ps1` | Simplest. The token grants write-only access to one integration's inventory and cannot exfiltrate data. |
+| Configuration profile (key/value) | Read from a managed `~/Library/Managed Preferences/ai.neuraltrust.discover.plist` | Read from a managed registry key under `HKLM:\SOFTWARE\NeuralTrust\Discovery` | The script reads the token at runtime. Token never appears in the script body. |
+| Secret variable in MDM | Intune Custom Attributes; Kandji Self Service variables | Intune Custom Attributes; Kandji Self Service variables | Cleaner audit trail per environment. |
+
+---
+
+## Re-discovery cadence and bandwidth
+
+| Setting | Typical value | Notes |
+|---|---|---|
+| Default schedule | Once every 24 hours | Tune to your environment — hourly is usually overkill |
+| Payload size per device | 5–50 KB | Scales with the number of MCP servers, extensions, and configs |
+| Bandwidth per 1,000 devices per day | ~10–50 MB total | Well below any practical egress limit |
+| Wall-clock script duration | 5–20 seconds per device | Mostly filesystem walks; no model calls |
+
+---
+
+## Security considerations
+
+- The script is **signed** by NeuralTrust. Verify the signature before deploying — Intune can enforce this automatically; on macOS you can verify with `codesign -dv discover.sh.signed` or check the SHA-256 against the published value in the integration page.
+- The Discovery Token is scoped to **write to one integration's inventory** only. It cannot read existing inventory, modify other integrations, or access the rest of the platform.
+- Rotate Discovery Tokens when team members with MDM admin access leave — the integration page has a **Rotate token** action that invalidates the old value immediately.
+- The script never writes to disk outside `/tmp` (macOS) or `%TEMP%` (Windows), and cleans up after itself on exit.
+- All credentials and ingested device payloads are encrypted at rest.
+- The script source is available for review on request — contact your account team.
+
+---
+
+## Known limitations
+
+| Limitation | Details |
+|---|---|
+| MDM coverage | Only Intune and Kandji ship as packaged Library Items today. Other MDMs can run the same script — contact support for a wrapper. |
+| Per-user vs. per-device installs | On Windows, per-user installs (e.g. user-scoped Cursor) are only seen when the script runs in the user context. Running as SYSTEM enumerates all user profiles on the device but cannot read protected user keychains. |
+| Browser extension state | The script detects which AI extensions are installed but does not detect whether they are currently enabled or signed in. |
+| MCP runtime activity | Discovery reports declared MCP servers from config files. To observe what tools an MCP server is actually invoked with, use the [MCP tool security](/trustgate/platform/mcp-tool-security) features of TrustGate Runtime. |
+| Air-gapped devices | Devices that cannot reach `posture.neuraltrust.ai` will not appear in the inventory. There is no offline upload path today. |
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No devices reporting after 24 hours">
+    - Check the MDM's script execution log on a sample device:
+      - Intune (macOS): `/Library/Logs/Microsoft/Intune/IntuneMDMDaemon.log`
+      - Intune (Windows): `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\IntuneManagementExtension.log`
+      - Kandji: `Kandji.app` → **Activity** tab on the device
+    - Confirm the device can reach `https://posture.neuraltrust.ai/v1/devices/report` with `curl -I` (macOS) or `Invoke-WebRequest` (Windows)
+    - Confirm the Discovery Token in the script matches the one shown on the integration page (or has not been rotated since deploy)
+  </Accordion>
+
+  <Accordion title="Device shows up but inventory is empty">
+    - The script may be running but failing to enumerate due to permissions. On macOS, ensure the script is set to run as root (Intune: **Run script as signed-in user = No**; Kandji: default for Custom Scripts).
+    - On Windows, running as the logged-in user instead of SYSTEM will miss installs in other user profiles. Switch to SYSTEM or schedule a per-user run for shared devices.
+    - Some endpoint protection products block unsigned PowerShell. Enable **Enforce script signature check** in Intune and confirm the signed `discover.ps1.signed` is the file you uploaded.
+  </Accordion>
+
+  <Accordion title="MCP servers from a tool I use are not appearing">
+    - The script reads from a known list of MCP config locations. If your IDE or agent CLI uses a non-standard path, file an issue with your account team and we will add the path to the next script release.
+    - Verify the config file exists on the device by running `cat ~/.cursor/mcp.json` (or the equivalent path) — if it is missing, no servers are declared.
+  </Accordion>
+
+  <Accordion title="401 Unauthorized in script logs">
+    - The Discovery Token is invalid or has been rotated. Generate a new token on the integration page and re-deploy the script with the new value.
+  </Accordion>
+
+  <Accordion title="Duplicate hosts appearing for the same device">
+    - The script uses the device's hardware UUID (macOS `IOPlatformUUID` / Windows `MachineGuid`) as the stable host identifier. If a device was re-imaged, the new identity is intentionally a new entry. Archive the old host entry from the inventory page.
+  </Accordion>
+
+  <Accordion title="Script runs but Intune marks it as failed">
+    - Intune treats any non-zero exit code as failure. The Discovery script exits 0 on success and 2 on a non-fatal warning (e.g. one of many config files unreadable). Check the script log under `/Library/Logs/NeuralTrust/discover.log` (macOS) or `C:\ProgramData\NeuralTrust\Discovery\discover.log` (Windows) to see the warning detail.
+  </Accordion>
+</AccordionGroup>

@@ -1,0 +1,135 @@
+---
+title: Risk & findings
+description: How TrustLens scores posture, the catalog of finding types it produces, and the workflow for triaging and resolving them.
+---
+
+Every resource in the [Inventory](/trustlens/inventory) is continuously assessed against the security controls relevant to its type. The output is a per-resource **posture score** and a list of typed **findings** that explain what is wrong and how to fix it.
+
+## Risk levels
+
+Each finding is categorized into one of five severity levels:
+
+| Level | Meaning |
+|---|---|
+| **Critical** | Direct, exploitable exposure (e.g. an unauthenticated agent reachable from the public internet). Investigate immediately. |
+| **High** | Significant security gap (e.g. agent with no guardrails, MCP server with shell tools, RAI policy disabled). Address within the current sprint. |
+| **Medium** | Hardening opportunity (e.g. weak access control scope, missing system instructions). Address during routine maintenance. |
+| **Low** | Hygiene issue (e.g. agent uses a deprecated model). Track but rarely urgent. |
+| **Not assessed** | A connected integration cannot read enough metadata to score this resource. Usually a permissions gap — see the integration's troubleshooting section. |
+
+The Overview page surfaces counts at each level (Critical · High · Medium · Low) and a 7-day **Posture Risk Trend** chart so regressions are visible immediately.
+
+## How posture risk is computed
+
+Posture risk for a resource is the **maximum severity** of any open finding on that resource. A single Critical finding makes the resource Critical; the rest of its findings are still listed but do not raise the level above Critical.
+
+For an integration, the rollup is the count of resources at each severity, weighted by type:
+
+- An unprotected production agent counts more than an unprotected sandbox agent
+- A repo with a leaked API key in an agent config counts more than a repo with a deprecated CrewAI YAML
+- An endpoint host running an unsanctioned agent CLI counts more than an endpoint with an outdated browser extension
+
+Weights are tunable per organization in **Settings → Detection rules**.
+
+## Finding catalog
+
+### Authentication and access
+
+| Finding | Severity | Where | Detected when |
+|---|---|---|---|
+| Unauthenticated agent | Critical | Agents | `authenticationmode = None` (M365), public Vertex endpoint, or public Azure deployment |
+| Unrestricted access policy | High | Agents | Access scope is `Any` or `*` instead of a specific group |
+| Service principal with write permissions | High | Integrations | Connected credential exceeds read-only baseline |
+| Stale credential | Medium | Integrations | Service principal secret or API key past 90 days old |
+
+### Guardrails
+
+| Finding | Severity | Where | Detected when |
+|---|---|---|---|
+| Missing guardrails | High | Agents (Mistral, GCP, M365) | `guardrails` is `null` and the platform supports them |
+| Weak guardrail thresholds | Medium | Agents (Mistral, GCP) | Category sensitivity above `MEDIUM_AND_ABOVE` (GCP) or above `0.5` (Mistral) |
+| Floor setting not enforced | High | Agents (GCP Model Armor) | Project floor setting `enableFloorSettingEnforcement = false` |
+| RAI policy unavailable | Low | Agents (Azure v1, AI Hub) | Platform does not expose policy via API — informational |
+
+### Tool and data exposure
+
+| Finding | Severity | Where | Detected when |
+|---|---|---|---|
+| High-risk tool | High | Agents, MCP Servers | Tool name matches dangerous pattern (e.g. `exec`, `delete_user`, `transfer_funds`) |
+| Code interpreter on internet-facing agent | High | Agents | Code interpreter tool + unrestricted access scope |
+| MCP server with shell access | High | MCP Servers | stdio transport invoking a shell binary or `npx` with arbitrary script |
+| Unrestricted knowledge base | Medium | Agents | Knowledge base scope spans more than the agent's access scope |
+| Excessive tool count | Medium | Agents | Agent attaches more than 20 tools — increases prompt-injection blast radius |
+
+### Configuration drift
+
+| Finding | Severity | Where | Detected when |
+|---|---|---|---|
+| Missing system instructions | Medium | Agents | Agent has no system prompt — behavior is fully model-default |
+| Tool added since last sync | Medium | Agents | New tool appeared without an associated change-management record |
+| Model swapped | Medium | Agents | Bound model changed between syncs |
+| Config file modified | Low | Agent configs | `AGENTS.md` / `.cursorrules` / `mcp.json` changed since last sync |
+
+### Endpoint hygiene
+
+| Finding | Severity | Where | Detected when |
+|---|---|---|---|
+| Unsanctioned agent CLI | High | Endpoint Hosts | CLI not on the allowlist installed on a managed device |
+| AI extension in unmanaged browser | Medium | Extensions | AI extension installed in a browser the org does not manage |
+| MCP server pointing at public stdio | High | MCP Servers | Locally-declared MCP server uses `npx`/`pip` to fetch unpinned remote code |
+| Outdated AI IDE | Low | IDEs | Installed version is more than 90 days behind the latest stable |
+
+### Source code
+
+| Finding | Severity | Where | Detected when |
+|---|---|---|---|
+| Secret referenced in agent config | High | Agent configs (GitHub) | `AGENTS.md` or framework YAML references a non-env-var secret literal |
+| MCP server fetched at runtime | High | MCP Servers (GitHub) | Repo declares an MCP server using `npx` or `uvx` against a non-pinned version |
+| Agent code uses unpinned model | Low | Agent code (GitHub) | LangChain/CrewAI/etc. instantiated with a non-pinned model alias |
+
+## Insights
+
+The right rail of the Overview page surfaces aggregated **Insights** — actionable summaries built on top of the raw findings. Each insight is one sentence, one severity badge, and one **Investigate** action that filters the inventory to the matching resources.
+
+| Insight | Built from |
+|---|---|
+| *N high-risk resources* | Count of resources at High or Critical |
+| *N medium-risk resources* | Count of resources at Medium |
+| *N low-risk resources* | Count of resources at Low |
+| *N resources pending assessment* | Count of resources currently `Not assessed` (run a sync) |
+
+Insights are recomputed on every sync.
+
+## Triage workflow
+
+<Steps>
+  <Step title="Investigate">
+    Click an Insight or open a resource directly. Each resource page lists every open finding with severity, evidence (the exact field that triggered it), and the integration sync that detected it.
+  </Step>
+
+  <Step title="Resolve at the source">
+    TrustLens is read-only. Remediation always happens in the upstream system:
+
+    - Add or strengthen a guardrail policy in Mistral / Foundry / Model Armor
+    - Restrict an agent's access policy in Copilot Studio
+    - Pin an MCP server's version in `mcp.json`
+    - Remove a high-risk tool from a Vertex Reasoning Engine
+    - Uninstall an unsanctioned CLI via your MDM
+
+    The next sync confirms the fix.
+  </Step>
+
+  <Step title="Suppress (optional)">
+    For findings you have explicitly accepted as risk (e.g. a sandbox agent intentionally running unauthenticated), use **Suppress with note** on the finding. Suppressed findings still appear in audit exports but no longer raise the resource's posture level.
+  </Step>
+
+  <Step title="Forward to SIEM">
+    Open Critical and High findings can be forwarded to your SIEM via the Audit & Compliance integration — see [SIEM integration](/platform/siem-integration). The forwarded payload includes the resource ID, finding type, severity, evidence, and the upstream resource link.
+  </Step>
+</Steps>
+
+## How findings interact with TrustGate Runtime
+
+TrustLens identifies *what* needs protection. [TrustGate Runtime](/trustgate/platform/index) enforces *how* it is protected at runtime.
+
+A common pattern: a TrustLens **High** finding ("agent has no guardrails") becomes the trigger to put that agent behind a Gateway with a [prompt-security policy](/trustgate/platform/security/prompt-security) attached. Once the Gateway is in front, the finding can be marked resolved with a link back to the runtime policy.

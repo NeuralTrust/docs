@@ -1,0 +1,508 @@
+---
+title: Azure
+description: Azure AI Foundry (v2), AI Hub (classic Foundry), Azure OpenAI Classic (v1), and legacy ML Workspaces — all under one integration.
+---
+
+TrustLens supports all four Azure AI agent infrastructure models under a single integration:
+
+- **Azure AI Foundry Agents (v2)** — agents built with the Azure AI Foundry Agents SDK, hosted in AI Services accounts (`kind=AIServices`)
+- **AI Hub projects** — enterprise AI Foundry setups created before late 2024, backed by `Microsoft.MachineLearningServices/workspaces` with `kind=Project`
+- **Azure OpenAI Classic Assistants (v1)** — assistants built with the Azure OpenAI Assistants API (`kind=OpenAI`)
+- **Legacy ML Workspaces** — pre-AI-Foundry Azure ML Studio workspaces (`kind=Default`) that can host Promptflow-based agents
+
+A single integration discovers all four types automatically from your subscription.
+
+<Note>
+**How to identify your infrastructure model:** In the Azure Portal, navigate to your AI Foundry project. If the URL shows `ai.azure.com` and the resource is under a `Microsoft.CognitiveServices` account, you are on the **AI Services model (v2)**. If your project lives under a `Microsoft.MachineLearningServices` Hub, you are on the **AI Hub model**.
+
+You can also check from the CLI: `az resource list --resource-type Microsoft.MachineLearningServices/workspaces --query "[].{name:name, kind:kind}"`
+</Note>
+
+---
+
+## What TrustLens discovers
+
+### Azure AI Foundry agents (v2)
+
+| Data | Source |
+|------|--------|
+| Agent name, description, status | Azure AI Foundry Agents API |
+| Model, instructions, tools | Azure AI Foundry Agents API |
+| Knowledge bases (vector stores) | Azure AI Foundry Agents API |
+| Content filters / RAI policies | Cognitive Services Management API |
+| Guardrails configuration | Derived from RAI policies |
+| Usage metrics (runs, tokens, latency, errors, tool calls) | Application Insights via Log Analytics (requires telemetry setup — see below) |
+
+### AI Hub projects (ML Workspace-backed)
+
+| Data | Source |
+|------|--------|
+| Agent name, description, status | Azure AI Foundry Agents API (via ML Workspace endpoint) |
+| Model, instructions, tools | Azure AI Foundry Agents API |
+| Knowledge bases (vector stores) | Azure AI Foundry Agents API |
+| Model deployments | Azure AI Projects API |
+
+<Note>
+RAI policies and content filters are not available for AI Hub projects. These fields will show as unavailable for hub-backed agents.
+</Note>
+
+### Azure OpenAI Classic assistants (v1)
+
+| Data | Source |
+|------|--------|
+| Assistant name, description, status | Azure OpenAI Assistants API |
+| Model, instructions, tools | Azure OpenAI Assistants API |
+| Vector stores (knowledge bases) | Azure OpenAI Assistants API |
+| Usage metrics (runs, conversations, tool call counts) | Assistants API — Threads & Run Steps (no Log Analytics required) |
+
+<Note>
+Content filters and guardrails are not exposed via the Azure OpenAI Assistants (v1) API. These fields will show as unavailable for Classic assistants.
+</Note>
+
+### Legacy ML Workspaces
+
+| Data | Source |
+|------|--------|
+| Agent name, description, status | Azure AI Foundry Agents API (via ML Workspace endpoint) |
+| Model deployments | Azure AI Projects API |
+
+<Note>
+Legacy ML Workspaces may not expose the full Agents API surface. TrustLens will discover what is available and skip unsupported endpoints gracefully.
+</Note>
+
+---
+
+## Required permissions
+
+The required roles depend on which infrastructure model your agents use. If you are unsure, assign all applicable roles — unused roles do not cause errors.
+
+### Azure AI Foundry (v2) — AI Services model
+
+#### Simple setup — one role (recommended)
+
+Assign **Azure AI User** to the service principal at the **subscription level**:
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Azure AI User` | Subscription | Discover Cognitive Services accounts and projects (management plane), list agents, models, datasets, and vector stores (data plane), read RAI policies and content filters |
+
+**Why this role:** Azure AI User includes both `Microsoft.CognitiveServices/*/read` (management plane — enumerate accounts, read RAI policies, read diagnostic settings) and `Microsoft.CognitiveServices/*` (data plane — access agents, models, datasets). Assigning it at subscription level means it applies to all AI Services resources in the subscription automatically.
+
+#### Granular setup — two roles (least-privilege alternative)
+
+If your security policy requires strictly minimal permissions, you can use two more targeted roles instead:
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Reader` | Subscription | Enumerate Cognitive Services accounts, read account metadata, read RAI policies, read diagnostic settings |
+| `Cognitive Services OpenAI User` | Each AI Services / OpenAI resource | Access the data plane to list agents, models, assistants, vector stores |
+
+<Note>
+With the granular approach, you must assign `Cognitive Services OpenAI User` on **each** AI Services resource individually. Using Azure AI User at subscription level is simpler and equally secure for read-only access.
+</Note>
+
+### AI Hub projects — ML Workspace-backed model
+
+If your agents were created via an AI Foundry Hub (enterprise setup before late 2024), they live under `Microsoft.MachineLearningServices/workspaces` resources. The roles required are **different** from the AI Services model:
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Reader` | Subscription | Enumerate ML Workspace resources |
+| `Azure AI Developer` | Each AI Hub / Project workspace | Access the Agents API data plane on Hub-backed projects |
+
+<Note>
+`Azure AI Developer` grants access to `Microsoft.MachineLearningServices/workspaces/*/read` and the data plane actions needed to list agents. Assign it at the **Hub** or **Project** workspace scope, or at the subscription level if you have multiple hubs.
+</Note>
+
+<Warning>
+**Azure AI Developer** does **not** include `Microsoft.CognitiveServices/*/read`. If you have a mix of AI Services (v2) and AI Hub projects, you need **both** `Azure AI User` (for AI Services) and `Azure AI Developer` (for AI Hub). `Reader` at subscription level covers resource enumeration for both.
+</Warning>
+
+### Legacy ML Workspaces — pre-AI-Foundry Azure ML Studio
+
+For older workspaces created before AI Foundry existed (Azure ML Studio / kind=Default):
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Reader` | Subscription | Enumerate ML Workspace resources |
+| `Azure Machine Learning Data Scientist` | Each ML Workspace | Access the Agents API data plane on legacy workspaces |
+
+### All infrastructure types — single subscription setup (recommended)
+
+If you have a mix of infrastructure models, or simply want a zero-friction setup that covers everything without tracking which roles apply to which resources, assign all roles at **subscription level**. Azure RBAC cascades automatically to all child resources.
+
+#### Core roles (always required)
+
+| Role | Scope | Covers |
+|------|-------|--------|
+| `Reader` | Subscription | Control-plane enumeration of all resource types: Cognitive Services accounts, ML Workspaces, App Insights components, diagnostic settings, resource groups |
+| `Azure AI User` | Subscription | Data plane for AI Services (v2) and Azure OpenAI Classic (v1): list agents, models, vector stores, RAI policies |
+
+#### Conditional roles (add only what applies to you)
+
+| Role | Scope | Required for |
+|------|-------|-------------|
+| `Azure AI Developer` | Subscription | Data plane for AI Hub / ML Workspace-backed projects (pre-late-2024 Foundry Hubs) |
+| `Azure Machine Learning Data Scientist` | Subscription | Data plane for legacy ML Workspaces (`kind=Default`, pre-AI-Foundry Azure ML Studio) |
+| `Log Analytics Reader` | Subscription | v2 usage telemetry via App Insights / Log Analytics |
+| `Monitoring Reader` | Subscription | Hub-backed agent metrics via Azure Monitor (`AgentRuns`, `AgentTokens`, etc.) |
+
+<Note>
+`Reader` and `Azure AI User` are always required. Neither can replace the other: `Reader` handles broad ARM control-plane enumeration (ML Workspaces, App Insights, etc.) while `Azure AI User` adds the Cognitive Services data plane. `Azure AI User` does not include `Microsoft.MachineLearningServices` or `Microsoft.Insights` read permissions.
+</Note>
+
+#### One-command setup
+
+```bash
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+APP_ID="<your-app-id>"
+SCOPE="/subscriptions/$SUBSCRIPTION_ID"
+
+# Always required
+az role assignment create --assignee $APP_ID --role "Reader"         --scope $SCOPE
+az role assignment create --assignee $APP_ID --role "Azure AI User"  --scope $SCOPE
+
+# Add if you have AI Hub / ML Workspace-backed projects
+az role assignment create --assignee $APP_ID --role "Azure AI Developer" --scope $SCOPE
+
+# Add if you have legacy ML Workspaces (kind=Default)
+az role assignment create --assignee $APP_ID --role "Azure Machine Learning Data Scientist" --scope $SCOPE
+
+# Add for usage telemetry (v2 App Insights + Hub metrics)
+az role assignment create --assignee $APP_ID --role "Log Analytics Reader" --scope $SCOPE
+az role assignment create --assignee $APP_ID --role "Monitoring Reader"    --scope $SCOPE
+```
+
+---
+
+### Optional — telemetry (usage metrics)
+
+TrustLens collects two distinct types of telemetry depending on your infrastructure model:
+
+- **AI Foundry v2 (AI Services):** Usage metrics, token counts, latency, error rates, and tool call breakdowns are collected from **Application Insights** via a linked Log Analytics workspace.
+- **AI Hub (ML Workspace-backed):** Agent-level metrics (`AgentRuns`, `AgentTokens`, `AgentThreads`, `AgentToolCalls`, `AgentMessages`) are collected from **Azure Monitor Metrics** on the Hub resource.
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| `Log Analytics Reader` | Log Analytics Workspace (or Subscription) | Query Application Insights traces (`AppDependencies` table) for v2 usage metrics, token counts, latency, and tool call breakdowns |
+| `Monitoring Reader` | AI Foundry Hub resource (or Subscription) | Query Azure Monitor Metrics (`AgentRuns`, `AgentTokens`, `AgentThreads`, etc.) for Hub-backed agent telemetry |
+
+<Note>
+Both roles can be assigned at subscription level to cascade automatically to all workspaces and resources in the subscription, eliminating the need for per-resource assignments.
+</Note>
+
+**What you lose without these:** Usage statistics and tool call metrics will be unavailable for the corresponding infrastructure type. v1 Classic usage is collected directly via the Assistants API and does **not** require either role.
+
+**What you gain:** Per-agent usage metrics, conversation-level telemetry signals (used for aggregation, not enumeration), per-tool call breakdown by type (code interpreter, file search, custom functions), token consumption, latency, and Hub-level run and thread counts.
+
+---
+
+## Prerequisites
+
+Before configuring the integration, ensure you have:
+
+- An Azure subscription containing AI Services, Azure OpenAI, ML Workspace, or AI Hub resources
+- Permission to create app registrations and assign RBAC roles (User Access Administrator or Owner on the subscription)
+- For v2 telemetry: an **Application Insights** resource connected to your AI Foundry project, linked to a Log Analytics workspace (see [Enabling telemetry](#enabling-telemetry))
+
+---
+
+## Step-by-step setup
+
+<Steps>
+  <Step title="Create a service principal">
+    <Tabs>
+      <Tab title="Azure CLI">
+        ```bash
+        az ad sp create-for-rbac --name "neuraltrust-trustlens" --skip-assignment
+        ```
+        Save the output — you will need `appId` (client ID), `password` (client secret), and `tenant` (tenant ID).
+      </Tab>
+      <Tab title="Azure Portal">
+        1. Go to **Microsoft Entra ID** → **App registrations** → **New registration**
+        2. Name the app (e.g., `neuraltrust-trustlens`)
+        3. Select **Single tenant**
+        4. Click **Register**
+        5. Go to **Certificates & secrets** → **New client secret**, set an expiry, and copy the secret value immediately
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Assign the Azure AI User role">
+    <Tabs>
+      <Tab title="Azure CLI">
+        ```bash
+        SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+        APP_ID="<your-app-id>"
+
+        az role assignment create \
+          --assignee $APP_ID \
+          --role "Azure AI User" \
+          --scope /subscriptions/$SUBSCRIPTION_ID
+        ```
+      </Tab>
+      <Tab title="Azure Portal">
+        1. Go to **Subscriptions** → select your subscription → **Access control (IAM)**
+        2. Click **+ Add** → **Add role assignment**
+        3. Search for and select **Azure AI User**
+        4. Assign it to your service principal
+        5. Click **Save**
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="(Optional) Assign telemetry roles">
+    Skip this step if you do not need usage metrics. Two roles cover different telemetry sources:
+
+    - **Log Analytics Reader** — required for v2 (AI Services) usage metrics via Application Insights
+    - **Monitoring Reader** — required for Hub-backed agent metrics via Azure Monitor
+
+    <Tabs>
+      <Tab title="Azure CLI — subscription scope (simplest)">
+        Assigning at subscription level cascades to all workspaces and Hub resources automatically:
+
+        ```bash
+        SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+        az role assignment create \
+          --assignee $APP_ID \
+          --role "Log Analytics Reader" \
+          --scope /subscriptions/$SUBSCRIPTION_ID
+
+        az role assignment create \
+          --assignee $APP_ID \
+          --role "Monitoring Reader" \
+          --scope /subscriptions/$SUBSCRIPTION_ID
+        ```
+      </Tab>
+      <Tab title="Azure CLI — resource scope (least privilege)">
+        Assign `Log Analytics Reader` on the specific Log Analytics workspace linked to Application Insights:
+
+        ```bash
+        WORKSPACE_ID=$(az monitor log-analytics workspace show \
+          --resource-group <resource-group> \
+          --workspace-name <workspace-name> \
+          --query id -o tsv)
+
+        az role assignment create \
+          --assignee $APP_ID \
+          --role "Log Analytics Reader" \
+          --scope $WORKSPACE_ID
+        ```
+
+        Assign `Monitoring Reader` on the specific AI Foundry Hub resource:
+
+        ```bash
+        HUB_ID=$(az resource show \
+          --resource-group <resource-group> \
+          --resource-type Microsoft.MachineLearningServices/workspaces \
+          --name <hub-name> \
+          --query id -o tsv)
+
+        az role assignment create \
+          --assignee $APP_ID \
+          --role "Monitoring Reader" \
+          --scope $HUB_ID
+        ```
+      </Tab>
+      <Tab title="Azure Portal">
+        **For Log Analytics Reader:**
+        1. Go to the **Log Analytics workspace** → **Access control (IAM)**
+        2. Click **+ Add role assignment** → select **Log Analytics Reader**
+        3. Assign to your service principal → click **Save**
+
+        **For Monitoring Reader:**
+        1. Go to the **AI Foundry Hub** resource → **Access control (IAM)**
+        2. Click **+ Add role assignment** → select **Monitoring Reader**
+        3. Assign to your service principal → click **Save**
+
+        Alternatively, assign both roles at **subscription level** (Subscriptions → Access control (IAM)) to cover all resources automatically.
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Configure the integration in TrustLens">
+    Provide the following credentials when creating the Azure integration:
+
+    | Field | Where to find it |
+    |-------|-----------------|
+    | **Tenant ID** | Azure Portal → Microsoft Entra ID → Overview → Directory (tenant) ID |
+    | **Client ID** | Azure Portal → App registrations → your app → Application (client) ID |
+    | **Client Secret** | Copied in Step 1 |
+    | **Subscription ID** | Azure Portal → Subscriptions → your subscription → Subscription ID |
+  </Step>
+</Steps>
+
+---
+
+## Enabling telemetry
+
+TrustLens retrieves v2 usage metrics from **Application Insights** via a linked Log Analytics workspace. Azure AI Foundry automatically writes server-side OpenTelemetry traces (`gen_ai.*` semantic conventions) to the `AppDependencies` table when a Foundry project is connected to Application Insights. TrustLens queries this table to produce per-agent usage, token counts, latency, and tool call breakdowns.
+
+<Note>
+**Classic (v1) assistants do not require this setup.** Usage for v1 assistants is collected directly from the Assistants API (Threads and Run Steps) and is always available once the core RBAC role is in place.
+</Note>
+
+<Steps>
+  <Step title="Connect Application Insights to your AI Foundry project">
+    <Tabs>
+      <Tab title="AI Foundry Portal">
+        1. Open [Azure AI Foundry](https://ai.azure.com) and navigate to your project
+        2. Go to **Settings** → **Tracing**
+        3. Select or create an **Application Insights** resource
+        4. Save — Azure will begin writing traces automatically; no SDK instrumentation is required
+      </Tab>
+      <Tab title="Azure CLI">
+        ```bash
+        az ml workspace update \
+          --name <foundry-project-name> \
+          --resource-group <resource-group> \
+          --application-insights /subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/microsoft.insights/components/<appinsights-name>
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Grant Log Analytics Reader on the linked workspace">
+    Application Insights stores trace data in a linked Log Analytics workspace. Find the workspace and grant access:
+
+    <Tabs>
+      <Tab title="Azure CLI">
+        ```bash
+        WORKSPACE_ID=$(az monitor log-analytics workspace show \
+          --resource-group <resource-group> \
+          --workspace-name <workspace-name> \
+          --query id -o tsv)
+
+        az role assignment create \
+          --assignee $APP_ID \
+          --role "Log Analytics Reader" \
+          --scope $WORKSPACE_ID
+        ```
+      </Tab>
+      <Tab title="Azure Portal">
+        1. Go to the **Log Analytics workspace** → **Access control (IAM)**
+        2. Click **+ Add role assignment** → select **Log Analytics Reader**
+        3. Assign to your service principal → click **Save**
+
+        The workspace is found in the Application Insights resource under **Settings** → **Linked workspace**.
+      </Tab>
+    </Tabs>
+
+    <Note>
+    Traces may take a few minutes to appear after the first agent invocations.
+    </Note>
+  </Step>
+</Steps>
+
+### Telemetry source summary
+
+| Data type | Infrastructure | Source | Requires |
+|-----------|---------------|--------|----------|
+| Usage metrics (runs, tokens, latency, errors) | AI Foundry v2 (AI Services) | Application Insights — `AppDependencies` | App Insights connected to Foundry project + `Log Analytics Reader` |
+| Tool call breakdown (code interpreter, file search, functions) | AI Foundry v2 (AI Services) | Application Insights — `AppDependencies` | Same as above |
+| Agent metrics (runs, tokens, threads, messages, tool calls) | AI Hub (ML Workspace-backed) | Azure Monitor Metrics | `Monitoring Reader` on Hub resource (or subscription) |
+| Usage metrics (runs, conversations, tool call counts) | Azure OpenAI Classic (v1) | Assistants API — Threads & Run Steps | Core RBAC role only — no Log Analytics or Monitor roles needed |
+
+---
+
+## Feature availability by permission level
+
+### Azure AI Foundry (v2) — AI Services model
+
+| Feature | Azure AI User only | + Log Analytics Reader |
+|---------|:-----------------:|:---------------------:|
+| Agent discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Model and dataset discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Security posture assessment | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tools, instructions, knowledge bases | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Content filters / RAI policies | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Usage metrics (runs, tokens, latency, errors) | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tool call breakdown (code interpreter, file search, functions) | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Conversation-level telemetry (aggregation signals) | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+
+### AI Hub — ML Workspace-backed model
+
+| Feature | Reader + Azure AI Developer | + Monitoring Reader |
+|---------|:---------------------------:|:-------------------:|
+| Agent discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Model deployments | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tools, instructions, knowledge bases | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Content filters / RAI policies | <span style={{color:'#6b7280'}}>No — not available for Hub-backed agents</span> | <span style={{color:'#6b7280'}}>No — not available for Hub-backed agents</span> |
+| Agent run and thread counts | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Token consumption (input / output) | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tool call counts | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Message counts | <span style={{color:'#dc2626'}}>No</span> | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+
+### Azure OpenAI Classic (v1)
+
+| Feature | Azure AI User only |
+|---------|:-----------------:|
+| Assistant discovery | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Tools, instructions, vector stores | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Usage metrics (runs, conversations, tool call counts) | <span style={{color:'#16a34a', fontWeight:600}}>Yes</span> |
+| Content filters / RAI policies | <span style={{color:'#6b7280'}}>No — Azure API limitation</span> |
+
+---
+
+## Known limitations
+
+| Limitation | Details |
+|------------|---------|
+| No conversation enumeration for v2 | The Azure AI Foundry API does not expose a `conversations.list()` endpoint. App Insights provides conversation-level telemetry signals (conversation ID, message count, latency per conversation) used for aggregation — not a list of conversations you can browse. |
+| Tool call telemetry requires App Insights (v2) | Tool call breakdown (code interpreter, file search, function calls) requires Application Insights connected to the Foundry project. Foundry automatically emits `gen_ai.tool.name` spans — no client instrumentation needed. |
+| Content filters unavailable for v1 | The Azure OpenAI Assistants (v1) API does not expose content filter or RAI policy configuration. These fields show as unavailable for Classic assistants. |
+| App Insights trace delay | Traces may take a few minutes to appear in Log Analytics after initial agent invocations. |
+| Conversation ID mismatch (v2) | Application Insights `conversation_id` values (UUID format) do not match Foundry API conversation IDs (`conv_xxx` format). TrustLens uses telemetry-level aggregation. |
+
+---
+
+## Security considerations
+
+- The service principal has **read-only** access. TrustLens cannot modify, delete, or create any Azure resources.
+- `Azure AI User` at subscription level includes `listkeys/action` (the ability to read API keys for Cognitive Services accounts). If your policy prohibits this, use the granular setup (Reader + Cognitive Services OpenAI User), which does not include key listing.
+- Client secrets should be rotated regularly. Update the integration in TrustLens when you rotate the secret.
+- All credentials are encrypted at rest.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No agents found in my subscription">
+    - Verify the service principal has **Azure AI User** at the subscription level (not at a resource group or resource level only).
+    - Confirm your AI agents are deployed in AI Services accounts with `kind=AIServices` or `kind=OpenAI`. If they are in a different resource type, contact support.
+    - Check that the **Subscription ID** entered in the integration matches the subscription where your agents are deployed.
+  </Accordion>
+
+  <Accordion title="Usage statistics show as zero or unavailable (v2)">
+    - Verify that **Application Insights is connected** to your AI Foundry project (Foundry Portal → Settings → Tracing).
+    - Verify the service principal has **Log Analytics Reader** on the Log Analytics workspace linked to Application Insights (found under App Insights → Settings → Linked workspace).
+    - Traces appear within minutes of the first agent invocation. If no invocations have occurred, usage metrics will correctly show zero.
+  </Accordion>
+
+  <Accordion title="Usage statistics show as zero or unavailable (AI Hub / ML Workspace-backed)">
+    - Hub agent metrics are collected from **Azure Monitor Metrics**, not Application Insights.
+    - Verify the service principal has **Monitoring Reader** on the AI Foundry Hub resource (or at subscription level).
+    - If no agent runs have occurred, metrics will correctly show zero.
+  </Accordion>
+
+  <Accordion title="Usage statistics show as zero or unavailable (v1 Classic)">
+    - Classic usage is collected via the Assistants API (Threads and Run Steps) — no Log Analytics configuration is needed.
+    - Verify the service principal has data plane access (`Azure AI User` or `Cognitive Services OpenAI User`) on the Azure OpenAI resource.
+    - If no threads or runs exist for an assistant, usage will correctly show zero.
+  </Accordion>
+
+  <Accordion title="Content filters showing as unavailable for some agents">
+    Content filter data is only available for **Azure AI Foundry (v2)** agents. Classic (v1) assistants do not expose this via API — this is an Azure limitation, not a configuration issue.
+  </Accordion>
+
+  <Accordion title="403 Forbidden errors during sync">
+    - The service principal may not have the role assigned at the correct scope. Verify the role assignment is at **subscription** level, not resource group or resource level only.
+    - Role assignments can take a few minutes to propagate after being created.
+  </Accordion>
+
+  <Accordion title="Classic assistants not being discovered">
+    Classic assistants require the service principal to have data plane access to the Azure OpenAI resource. With `Azure AI User` at subscription level this is covered automatically. With the granular setup, verify that `Cognitive Services OpenAI User` is assigned on the specific OpenAI resource.
+  </Accordion>
+</AccordionGroup>

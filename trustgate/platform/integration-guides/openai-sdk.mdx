@@ -20,17 +20,46 @@ your app ──► TrustGate Gateway ──► LLM provider (OpenAI, Anthropic, 
 
 The Gateway speaks the provider's native wire format, so your SDK doesn't need any provider-specific changes beyond the base URL and API key.
 
-## Prerequisites
+## Step-by-step setup
 
-1. A **Gateway integration** in the TrustGate console. See [Gateway surface — Create a Gateway integration](/trustgate/platform/enforcement/gateway).
-2. At least one **Route** on that Gateway pointing at the LLM provider you want to protect.
-3. A **Gateway API key** issued by that Gateway integration.
+Setup happens entirely in the **Integrations** area of the console. The provider's native credentials (OpenAI API key, Azure OpenAI endpoint + key, AWS credentials, etc.) live on a **provider Integration** — never on your client and never on a Route. The Route just picks that Integration from a dropdown.
 
-Your Gateway base URL will look like `https://<gateway>.neuraltrust.ai`.
+<Steps>
+  <Step title="Register the LLM provider as an Integration">
+    Open **Integrations → Add Integration**, pick your provider from the catalog (OpenAI, Anthropic, Azure OpenAI, Google, Bedrock, Mistral, Cohere, …), and enter the provider's credentials:
 
-## Wire it up
+    - **OpenAI / Anthropic / Mistral / Cohere / Google / Groq / Together** — provider API key.
+    - **Azure OpenAI** — resource endpoint, API key, and default API version.
+    - **AWS Bedrock** — IAM role ARN, access key pair, or workload identity. The region and the models you want to expose.
+    - **Self-hosted model** — the internal base URL and any auth header.
 
-Point the SDK's `base_url` / `baseURL` at your Gateway and use the Gateway API key as the SDK's API key. The provider's native API key stays configured on the Route, not on the client.
+    Give the Integration a short name (for example `openai-prod`, `bedrock-eu-west-1`). Repeat for every provider you want to front.
+  </Step>
+
+  <Step title="Create a Gateway Integration">
+    Still in **Integrations → Add Integration**, pick **Gateway**. Choose **Serverless** (instant, good for dev) or **Dedicated** (production), give it a name (`prod-eu`, `staging`), and optionally add Tags.
+
+    After saving, open **Gateway → Overview** and copy the **Endpoint** — it looks like `https://<gateway>.neuraltrust.ai/v1`. This is the only URL your client needs.
+
+    Default Routes for every provider Integration you registered in Step 1 are created automatically on this Gateway. You can inspect them under **Gateway → Routes**, add Use Cases or Tags for policy scoping, or set per-route rate limits — but no manual Route creation is needed to start serving traffic.
+  </Step>
+
+  <Step title="Issue a Gateway API key">
+    Open the Gateway Integration's **API Keys** tab and create a key. This is the credential your client will use — the provider's native key stays on the Integration and is never seen by the client.
+  </Step>
+
+  <Step title="Swap base URL and API key in your client">
+    Point the SDK at `https://<gateway>.neuraltrust.ai/v1` and use the TrustGate key. No other changes — paths, method, headers, body, and streaming are unchanged. See the language-specific snippets below.
+  </Step>
+
+  <Step title="Verify in Runtime → Explorer">
+    Send one request from your app and confirm it appears in **Runtime → Explorer** with the matching Route, any detector decisions, and token usage.
+  </Step>
+</Steps>
+
+## Client code
+
+The client never sees the provider's API key. The only change is the base URL and the API key you pass to the SDK.
 
 ### OpenAI (Python)
 
@@ -84,21 +113,25 @@ client = AzureOpenAI(
 )
 ```
 
-### AWS Bedrock Runtime
+### AWS Bedrock (via OpenAI-compatible route)
 
-For direct model invocation (not Bedrock Agents), use a Bedrock route and swap the endpoint:
+For direct model invocation on Bedrock (not the managed Bedrock Agents service), the Gateway speaks OpenAI to the client and translates to Bedrock upstream — so you can use the standard OpenAI SDK with a Bedrock model ID. No boto3, no SigV4 on the client.
 
 ```python
-import boto3
+from openai import OpenAI
 
-bedrock = boto3.client(
-    "bedrock-runtime",
-    endpoint_url="https://<gateway>.neuraltrust.ai",
-    aws_access_key_id="<trustgate-api-key>",
-    aws_secret_access_key="unused",
-    region_name="us-east-1",
+client = OpenAI(
+    base_url="https://<gateway>.neuraltrust.ai/v1",
+    api_key="<trustgate-api-key>",
+)
+
+resp = client.chat.completions.create(
+    model="anthropic.claude-sonnet-4-20250514-v1:0",
+    messages=[{"role": "user", "content": "Hello"}],
 )
 ```
+
+AWS credentials live on the Bedrock Integration you registered in Step 1. For agents using the Strands SDK on top of this pattern, see [AWS Bedrock Agents](/trustgate/platform/integration-guides/bedrock-agents).
 
 ### Vercel AI SDK
 
@@ -111,20 +144,43 @@ const openai = createOpenAI({
 });
 ```
 
-## Verify
+## Policies to apply
 
-1. Send a test request from your app.
-2. Open **Runtime → Explorer** in the console.
-3. You should see the request and response, the route that matched, and any detectors that fired.
+Policies on this integration use the Gateway surface and follow the standard `Where` / `When` / `Then` model — see [Policies & Enforcement](/trustgate/platform/policies) for the authoring flow and precedence rules. For a direct-SDK integration, scope policies with the `Gateways` or `Routes` filters so rules apply to the specific provider route (OpenAI, Anthropic, Bedrock, Azure OpenAI, etc.).
 
-## Policies to turn on first
+Start with these five patterns, each authored in `Log` mode first and promoted to `Mask` / `Block` once you've reviewed hits in **Runtime → Logs**.
 
-Start with these on every route, then tune based on what you see in Explorer:
+### Block prompt injection and jailbreaks on user input
 
-- **Prompt security** — jailbreaks and prompt injection on the input.
-- **Data protection & masking** — PII and secret detection on both sides.
-- **Content moderation** — toxicity and keyword filters on outputs.
-- **Rate limits** — token and request-per-minute limits per consumer.
+- **Where** — `Gateway` + filter `Gateways = <your-gateway>`
+- **When** — `Input` · `Triggers` · `Prompt Injection, Jailbreak`
+- **Then** — `Block`
+
+### Mask PII on both sides of the hop
+
+- **Where** — `Gateway` + filter `Gateways = <your-gateway>`
+- **When** — `Input or Output` · `Triggers` · `Email Address, Phone Number, Credit Card, Social Security Number`
+- **Then** — `Mask`
+
+### Block secret / credential leakage
+
+- **Where** — `Gateway` + filter `Gateways = <your-gateway>`
+- **When** — `Input or Output` · `Triggers` · `API Key / Secret`
+- **Then** — `Block`
+
+### Moderate toxic or harmful outputs
+
+- **Where** — `Gateway` + filter `Routes = <customer-facing-routes>`
+- **When** — `Output` · `Triggers` · `Toxicity, Harmful Content`
+- **Then** — `Block`
+
+### Enforce per-consumer token and request limits
+
+- **Where** — `Gateway` + filter `Gateways = <your-gateway>`
+- **When** — `API Key` · `Exceeds` · `<rate-limit-threshold>`
+- **Then** — `Block`
+
+For tool-calling flows (`tools=[...]` on the SDK), layer on a **tool-call guard** policy that matches on the `Tool Call` field to validate arguments the model emits before downstream systems act on them.
 
 ## Limitations
 
