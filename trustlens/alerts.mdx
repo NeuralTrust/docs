@@ -1,0 +1,189 @@
+---
+title: Alerts
+description: Rule-based alerts that notify your team when an AI resource crosses a risk threshold — so posture regressions never sit unnoticed.
+---
+
+TrustLens continuously evaluates every resource in the [Inventory](/trustlens/inventory) against the [security controls](/trustlens/risk-and-findings) and assigns each a risk level. **Alerts** turn that signal into push notifications: as soon as a resource lands at or above a threshold you care about, an alert is created.
+
+Alerts complement the dashboard view. Instead of relying on someone opening TrustLens to spot a regression, the platform tells you when a regression happens — and on which scope.
+
+## How alerts work
+
+1. **Rules** define what to watch and at what threshold.
+2. On every resource sync, TrustLens re-evaluates the controls and recomputes the risk level.
+3. If the new risk level meets or exceeds a rule's threshold and the resource matches the rule's scope, an alert is generated.
+4. The alert remains active until the underlying findings drop below the threshold or the rule is muted.
+
+Each alert is tied to the originating resource and findings, so you can drill down from the alert to the exact controls that pushed the risk level up.
+
+## Rule fields
+
+A rule has the following fields:
+
+| Field | Required | Purpose |
+|---|---|---|
+| **Rule name** | Yes | A descriptive label that identifies the rule in lists and notifications (e.g. *"Production agents — Critical risk"*). |
+| **Rule active** | Yes | Toggle. Inactive rules stop generating new alerts but preserve their configuration and history. Use it to silence a rule during planned maintenance instead of deleting and recreating. |
+| **Risk threshold** | Yes | The minimum [risk level](/trustlens/risk-and-findings#risk-levels) that triggers the rule — `Low`, `Medium`, `High`, or `Critical`. Alerts fire when a matched resource lands **at or above** this level. |
+| **Provider / Integration** | Yes | The scope of providers the rule covers — *All integrations* or a specific provider (Azure AI Foundry, GCP Vertex AI, Mistral, M365 Copilot, GitHub, Endpoint MDM). |
+| **Asset type** | Yes | The scope of resource types the rule covers — *All assets* or one of `Agent`, `Model`, `Dataset`, `MCP server`, `Endpoint tool`, `SaaS` (shadow AI). |
+
+A rule with *All integrations* + *All assets* + *High* threshold acts as a tenant-wide safety net. Narrower rules let you give different teams different escalation paths — for example, *"Endpoint MDM + Endpoint tool + Critical"* can route directly to the IT team that owns device policy.
+
+## Threshold semantics
+
+Thresholds are **inclusive and cumulative**: a rule set to `High` fires for resources at `High` *and* `Critical`. This way a single rule can cover everything above a chosen severity floor without needing duplicate rules for each level.
+
+| Rule threshold | Fires on resources at risk level |
+|---|---|
+| `Critical` | Critical |
+| `High` | High, Critical |
+| `Medium` | Medium, High, Critical |
+| `Low` | Low, Medium, High, Critical |
+
+## Scope examples
+
+| Goal | Provider / Integration | Asset type | Threshold |
+|---|---|---|---|
+| Catch any new Critical exposure anywhere | All integrations | All assets | Critical |
+| Watch only production Azure agents | Azure AI Foundry | Agent | High |
+| Track shadow-AI risk introduced by browser usage | All integrations | SaaS | Medium |
+| Hardware vulnerability sweep on managed devices | Endpoint MDM | Endpoint tool | High |
+| Source-repo MCP supply-chain regressions | GitHub | MCP server | High |
+
+## Alert lifecycle
+
+| State | Meaning |
+|---|---|
+| **Open** | The matched resource is still at or above the rule's threshold. |
+| **Resolved** | The resource has dropped below the threshold (e.g. the failing controls were remediated and the risk score recomputed). Resolution is automatic on the next sync. |
+| **Muted** | A user has temporarily silenced the alert without remediating it — the alert is hidden from active views but recorded in history. |
+
+Alerts also keep a full **history**: who acknowledged them, when they resolved, and which findings drove them. The history is the audit trail you point compliance reviewers at when they ask “how do you detect AI posture regressions?”.
+
+## Choosing thresholds
+
+A practical default is to start with **two rules** per tenant:
+
+1. *"All integrations / All assets / Critical"* — owned by the security team, paged in real time.
+2. *"All integrations / All assets / High"* — owned by the platform team, reviewed during the daily standup.
+
+Then add narrow rules for sensitive scopes — for example, an agent that handles regulated data probably warrants its own *Medium* rule on its provider.
+
+Avoid creating a *Low* rule covering everything. Hygiene-level findings are better handled in the dashboard backlog than as paging alerts.
+
+## Operational use cases
+
+The patterns below are the alerts most enterprises configure first. Each one targets a real exposure and ships with a SOC playbook so the on-call analyst knows what to do as soon as the alert fires.
+
+Posture alerts differ from runtime alerts in one important way: the SOC's first job is rarely to *block traffic* — it is to **validate, route, and govern**. A TrustLens alert points at a configuration weakness; the fix usually lives with the resource owner, not the SOC itself.
+
+### 1. New Critical agent appears in production
+
+**Signal.** A rule scoped to *Agent + Critical* fires because a newly synced agent landed at risk score `≥ 75`.
+
+**Likely cause.** A team deployed an agent without a content-filter policy, with broad tool scope, or with code-interpreter enabled — and the change hasn't been through review.
+
+**SOC playbook.**
+
+1. **Validate.** Open the agent in TrustLens and read the failing controls in [Risk & findings](/trustlens/risk-and-findings). Confirm at least one FAIL is genuine — not just a permissions issue producing UNKNOWNs.
+2. **Identify the owner.** Use the agent's owner / created_by metadata. For Copilot agents, the [`copilot_owner_assigned`](/trustlens/risk-and-findings) control lists the responsible party.
+3. **Contain (if user-facing).** If the agent is public or org-wide and a *Critical* control is failing (no guardrails, no auth, computer-use enabled), put the agent behind [TrustGate Runtime](/trustgate/platform/index) with a hardening policy until the underlying findings are resolved.
+4. **Hand off.** File a remediation ticket against the owner with the failing controls, the suggested remediation, and a deadline aligned with your Critical SLA.
+
+### 2. Hardcoded secret detected in MCP configuration
+
+**Signal.** The [`mcp_no_hardcoded_secrets`](/trustlens/risk-and-findings) control fails — an API key, GitHub PAT, AWS access key, or similar literal credential was found in a discovered `mcp.json`.
+
+**Likely cause.** A developer pasted a token into their MCP server config; the file was synced to a managed device or pushed to a source repo.
+
+**SOC playbook.**
+
+1. **Validate.** Open the finding and confirm the matched pattern. The detection regex is high-precision (matches concrete token formats), so true-positive rate is high.
+2. **Treat as a potentially leaked credential.** Even if the file lives on a single device, IDE settings sync, diagnostics uploads, and source-control commits all expose the same data.
+3. **Contain.** Rotate the credential at its issuer (GitHub, AWS, OpenAI, Slack, …) immediately. Block any concurrent sessions if the issuer supports it.
+4. **Remediate.** Notify the device owner to migrate the value to a secret reference (`${SECRET_NAME}`). Add the configuration file to `.gitignore`. Scan source-control history with a secrets scanner if a repo source is involved.
+5. **Document.** Log a security incident regardless of confirmed misuse — the credential is to be considered exposed from the moment it was written in plaintext.
+
+### 3. Critical CVE on a developer endpoint tool
+
+**Signal.** [`endpoint_known_vulnerabilities`](/trustlens/risk-and-findings) fails on an installed AI tool (IDE, extension, CLI, runtime). The OSV summary returns at least one *Critical* CVE or three or more *High* CVEs.
+
+**Likely cause.** A widely-used package the developer hasn't updated, a transitive dependency with a recent advisory, or a stale install on a long-running developer machine.
+
+**SOC playbook.**
+
+1. **Validate.** Confirm the affected version against the vendor advisory. Some OSV entries are noisy on older minor versions.
+2. **Scope the blast radius.** Pull the list of devices in the [Inventory](/trustlens/inventory) running the same tool and version. A single device is a hygiene issue; a fleet-wide hit is a vulnerability-management gap.
+3. **Contain.** For *Critical* CVEs (CVSS ≥ 9.0), push a forced update via the MDM (Kandji or Intune) within hours, or quarantine the device if the patch isn't ready.
+4. **Hand off.** File a ticket against IT to standardise the affected tool's version in the MDM baseline. Confirm endpoint posture returns to PASS on the next sync.
+
+### 4. Unsanctioned shadow-AI tool with high usage
+
+**Signal.** [`shadow_ai_unsanctioned_usage`](/trustlens/risk-and-findings) FAIL combined with [`shadow_ai_detection_intensity`](/trustlens/risk-and-findings) WARNING/FAIL — i.e. an unapproved AI SaaS is being used heavily.
+
+**Likely cause.** A team adopted a tool (often a coding assistant or a writing tool) without going through the approval process. Detection volume tells you it's not a one-off.
+
+**SOC playbook.**
+
+1. **Validate.** Pivot to the SaaS resource in TrustLens. Confirm the provider, category (coding assistant carries elevated risk), and detection count.
+2. **Engage the user.** Reach out to the affected employees or the owning team. Assume good intent — most shadow-AI is productivity-driven.
+3. **Decide.** Either fast-track the tool through the approval process and add it to the AI tools catalogue, or block it via MDM and provide an approved alternative.
+4. **Configure enforcement.** Once approved, register the SaaS in the policy. If blocked, configure the [TrustGate Runtime browser extension](/trustgate/platform/enforcement/browser) to enforce the block on managed browsers.
+
+### 5. Deprecated model still running in production
+
+**Signal.** [`model_lifecycle`](/trustlens/risk-and-findings) FAIL or [`agent_model_version`](/trustlens/risk-and-findings) FAIL on a production agent or deployment.
+
+**Likely cause.** The provider deprecated a model the team has been pinning; nobody migrated; the deprecation window is closing.
+
+**SOC playbook.**
+
+1. **Validate.** Confirm the deprecation date from the provider's lifecycle page. The control will tell you the model name and the deployment using it.
+2. **Quantify exposure.** Pull all agents and deployments referencing the same model from the Inventory. A single dev agent is a low-priority hygiene fix; production agents are a continuity risk.
+3. **Hand off.** Open a migration task against the agent owner. Provide the recommended replacement model from the provider's catalog.
+4. **Track.** Set a follow-up date aligned with the deprecation deadline. Re-check the alert after the migration is deployed — it should auto-resolve on the next sync.
+
+### 6. Unmanaged Copilot agent with broad data access
+
+**Signal.** Combination of [`copilot_solution_managed`](/trustlens/risk-and-findings) FAIL and [`copilot_data_exposure`](/trustlens/risk-and-findings) FAIL or [`copilot_access_control`](/trustlens/risk-and-findings) FAIL on the same agent.
+
+**Likely cause.** A maker built a Copilot Studio agent connected to SharePoint or Fabric, deployed it to the entire tenant, and skipped the managed-solution / ALM workflow.
+
+**SOC playbook.**
+
+1. **Validate.** Confirm the agent's connected data sources and access scope from the TrustLens resource page.
+2. **Contain.** Restrict the agent's audience in Copilot Studio to a specific Microsoft 365 group while the rest of the review proceeds. This is the smallest reversible change that meaningfully reduces blast radius.
+3. **Engage the maker.** Walk them through exporting the agent as a managed solution and connecting it to the ALM pipeline. Provide the standard data-classification questionnaire for the connected sources.
+4. **Track to closure.** Keep the alert open until the managed-solution control PASSes and the data-exposure control returns to a sanctioned scope.
+
+### 7. PII or compliance signal on a newly registered dataset
+
+**Signal.** [`pii_indicators`](/trustlens/risk-and-findings) or [`dataset_compliance`](/trustlens/risk-and-findings) FAIL on a dataset that was just connected to an agent or a model deployment.
+
+**Likely cause.** A team connected a vector store containing PII or regulated data without applying classification labels or completing the privacy review.
+
+**SOC playbook.**
+
+1. **Validate.** Sample the dataset's metadata and a small slice of its content. Substring-based PII detection has false positives — confirm the data really contains personal data before treating it as a privacy incident.
+2. **Engage the data-protection officer (DPO).** Any confirmed PII or regulated data dataset connected to an AI pipeline triggers a DPIA obligation under GDPR Article 35.
+3. **Contain.** Disconnect the dataset from any user-facing agent until the review is complete. Apply Microsoft Purview sensitivity labels (or the equivalent in your platform) for ongoing classification.
+4. **Hand off.** File a remediation ticket against the data owner: minimisation, pseudonymisation, retention limits, and access controls. The control auto-resolves once the dataset carries a compliance tag (`gdpr-compliant`, `hipaa-certified`).
+
+## How posture alerts and runtime alerts work together
+
+The same incident often surfaces in both products at different stages:
+
+| Stage | Where it shows up | Example |
+|---|---|---|
+| 1. Configuration weakness introduced | TrustLens alert (this page) | New agent ships with `function_tools_scope` failing. |
+| 2. Adversary exploits the weakness | Runtime alert | Jailbreak-driven tool-call surge on the same agent. |
+| 3. Posture closes the loop | TrustLens alert auto-resolves | Owner attaches a tool-permission policy; control returns to PASS. |
+
+A SOC running both tracks closes incidents faster: the runtime alert tells them *what is happening right now*, the posture alert tells them *which configuration gap made it possible*, and the resolution is the same patch.
+
+## Pair with Runtime
+
+TrustLens alerts trigger on **posture** changes — what a resource looks like at rest. [TrustGate Runtime alerts](/trustgate/platform/alerts) trigger on **traffic** anomalies — what a resource does in flight.
+
+A typical workflow: a TrustLens *Critical* alert on `function_tools_scope` for a production agent prompts the team to attach a [tool-permission policy](/trustgate/platform/tools/tool-permission) at the runtime layer. The runtime alert then watches for unexpected tool-call patterns once the policy is in place.

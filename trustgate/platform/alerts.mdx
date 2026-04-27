@@ -1,0 +1,159 @@
+---
+title: Alerts
+description: Metric and change alerts on runtime traffic — fire when latency, message volume, jailbreak attempts, or other live signals cross a threshold.
+---
+
+Runtime alerts watch the live behaviour of every application proxied by TrustGate and notify your team when something deviates from expected. They sit on top of the same telemetry that powers [Logs, Traces, and Dashboards](/trustgate/platform/observability) and reuse the same metric definitions, so an alert always points back to the events that triggered it.
+
+## Alert types
+
+Two alert types are supported. Pick the one that matches what you know about the metric.
+
+<CardGroup cols={2}>
+  <Card title="Metric" icon="gauge">
+    Compare a metric value to a static threshold. Use this when you already know what range is acceptable — e.g. "latency must stay under 500 ms".
+  </Card>
+  <Card title="Change" icon="trending-up">
+    Compare the current value to a previous window. Use this when the absolute number is harder to predict, but a sudden swing is meaningful — e.g. "5× the usual jailbreak rate in the last hour".
+  </Card>
+</CardGroup>
+
+## Metric alerts
+
+A Metric alert evaluates a runtime metric over a configurable window using an aggregation function and compares the result to a fixed threshold.
+
+On each evaluation, TrustGate computes the **average, minimum, maximum, or sum** of the selected metric over the window and checks whether it is above or below the configured value. If the condition is met, the alert moves to a triggered state and a notification is sent.
+
+### Fields
+
+| Field | Required | Purpose |
+|---|---|---|
+| **Name** | Yes | Identifies the alert in lists, notifications, and incident timelines. |
+| **Priority** | Yes | The severity tag attached to every notification (e.g. `P1 Critical`, `P2 High`). Used to route to the right on-call rotation. |
+| **Metric** | Yes | The runtime metric being watched. Built-in options include **Messages** (request volume), **Latency (ms)** (per-request latency), and **Jailbreak attempt** (count of jailbreak detections). |
+| **Evaluate** | Yes | The aggregation function applied over the evaluation window — `average`, `minimum`, `maximum`, or `sum`. |
+| **Condition** | Yes | The comparison operator — *above* or *below* the threshold. |
+| **Alert threshold** | Yes | The value that puts the alert in the triggered state. |
+| **Warning threshold** | Optional | A softer value reached before the alert threshold. Used to surface degradation early without paging. |
+| **Notification users** | Yes | Members that receive the email notification when the alert fires or recovers. |
+
+### Built-in metrics
+
+| Metric | What it measures | Typical use |
+|---|---|---|
+| `Messages` | Number of requests handled per route or globally over the window. | Detect traffic spikes, drops, or unexpected silence. |
+| `Latency (ms)` | Per-request latency, including upstream and plugin time. | Catch performance regressions and upstream slowness. |
+| `Jailbreak attempt` | Count of requests flagged by the [jailbreak detector](/trustgate/content-security/jailbreaks/overview). | Detect adversarial campaigns or new jailbreak classes hitting an app. |
+
+The list of available metrics grows with the detectors you enable. Any plugin that emits a counter or histogram becomes selectable in this dropdown.
+
+### States
+
+| State | Meaning |
+|---|---|
+| **OK** | Latest aggregation is within the threshold. |
+| **Warning** | Latest aggregation is past the warning threshold but not yet past the alert threshold. |
+| **Triggered** | Alert threshold is met or exceeded. The notification is sent and the alert remains in this state until the metric recovers. |
+| **Muted** | A user has silenced the alert without resolving it. Records continue to be written to history. |
+
+### Threshold examples
+
+| Goal | Metric | Evaluate | Condition | Alert threshold | Warning threshold |
+|---|---|---|---|---|---|
+| Catch a jailbreak campaign | Jailbreak attempt | sum | above | 50 / 5 min | 20 / 5 min |
+| Page on latency regression | Latency (ms) | average | above | 800 | 500 |
+| Detect a traffic outage | Messages | sum | below | 10 / 5 min | 50 / 5 min |
+| Detect a tool-call surge | Messages | maximum | above | 1000 / min | 600 / min |
+
+## Change alerts
+
+Change alerts compare the current window to a previous baseline rather than a fixed value. Use them when the absolute number is variable but a sudden swing is the actual signal — for example, when the jailbreak rate doubles relative to the previous day, even if the absolute count is below a static page-worthy threshold.
+
+The fields are the same as Metric alerts, except the threshold is expressed as a **delta** (absolute change) or **percentage** (relative change) over the prior window.
+
+## Notifications
+
+Each alert has a list of **members that will receive an email notification**. Notifications are sent on:
+
+- the transition from `OK` → `Warning` or `Triggered`
+- the transition back to `OK` (recovery)
+- changes to the alert configuration (audit trail)
+
+For higher-fidelity routing — Slack, PagerDuty, Opsgenie, ticketing systems — TrustGate forwards alert events through the [SIEM and downstream pipelines](/trustgate/platform/observability#siem-and-downstream-pipelines) you've already configured.
+
+## Alert list and history
+
+The Alerts view shows every active and historical alert with:
+
+- **Status** — `OK`, `Warning`, `Triggered`, `Muted`.
+- **Priority** — the severity tag used for routing.
+- **Muted** — whether notifications are paused.
+- **Name** — the configured alert name.
+- **Metric** — the metric and unit being evaluated.
+
+Clicking an alert opens the detail view: the underlying metric chart with the threshold overlaid, the fired evaluations, and direct links into [Logs](/trustgate/platform/observability) for the matching events.
+
+## Operational use cases
+
+The patterns below are the alerts most enterprises configure on day one. Each one captures a real production failure mode and a concrete SOC playbook so the on-call analyst knows what to do as soon as the page lands.
+
+### 1. Jailbreak campaign
+
+**Signal.** `Jailbreak attempt` (sum, 5–15 min window) above a baseline that you would not see in normal traffic. A small steady trickle is expected; a sudden multi-fold spike or a sustained elevation is the campaign signature.
+
+**Likely cause.** Adversarial users probing the model, an automated red-team script hitting a public endpoint, or a new jailbreak class your detectors are now picking up.
+
+**SOC playbook.**
+
+1. **Triage.** Open the alert in TrustGate and pivot to [Logs](/trustgate/platform/observability) filtered by the same route and the `jailbreak` detector. Inspect the top jailbreak prompts.
+2. **Identify the source.** Group by API key, identity, or IP. A single source means abuse — block at the [IP whitelist](/trustgate/application-security/ip-whitelist) or revoke the key. Many sources spread thinly suggests a public attack and a rate-limit tightening is in order.
+3. **Contain.** Increase the [jailbreak detector](/trustgate/content-security/jailbreaks/overview) sensitivity for the affected route, or temporarily switch the policy from `log` to `block`.
+4. **Hand off.** If a new jailbreak class is in play, file a sample to the detection team so the model can be updated. Keep the alert open until the rate returns to baseline for at least one full window.
+
+### 2. Sensitive-data egress spike
+
+**Signal.** A sudden rise in [data-protection](/trustgate/platform/security/data-protection) detections — PII, secrets, internal tokens — on requests or responses.
+
+**Likely cause.** A new app onboarded with the wrong data classification; an agent retrieving documents it shouldn't; an upstream model regressing and echoing user input verbatim.
+
+**SOC playbook.**
+
+1. **Triage.** Filter Logs by detection category (PII, secret, credential). Inspect the top apps and routes.
+2. **Verify it's not a false positive.** Sample 5–10 events end-to-end. If the matches are spurious, raise the entity threshold rather than blocking.
+3. **Contain.** Switch the route's data-protection policy from `mask` to `block` while you investigate. Notify the data-protection officer if PHI / regulated data is involved.
+4. **Remediate.** Engage the application owner to apply input sanitisation upstream and confirm the agent's connected data sources are scoped correctly.
+
+### 3. Latency or availability degradation
+
+**Signal.** `Latency (ms)` (average or p95) above an SLO threshold, or `Messages` (sum) below an expected floor — i.e. the route went silent.
+
+**Likely cause.** Upstream model slowness, plugin overhead in a new policy, or a deployment that broke routing.
+
+**SOC playbook.**
+
+1. **Triage.** Open the route in [Traces](/trustgate/platform/observability) and look at the latency breakdown — TrustGate plugins vs. upstream model time. The breakdown tells you whether the cause is gateway-side or provider-side.
+2. **If upstream-side**, fail traffic over to the secondary provider via [load balancing](/trustgate/platform/ai-gateway/load-balancing). Notify the provider via their status page.
+3. **If gateway-side**, check the most recently deployed plugin or policy change. Roll back if the regression aligns with the deployment.
+4. **Communicate.** Page the application owner for any route in `Triggered` for more than the SLO breach window.
+
+### 4. Tool-call anomaly (excessive agency in flight)
+
+**Signal.** A spike in tool-call volume or a previously unseen tool name appearing on a route — typically watched as a `Messages` alert filtered by the [tool-guard](/trustgate/platform/tools/tool-guard) detector, or a Change alert on tool-name distribution.
+
+**Likely cause.** Prompt injection successfully driving an agent to call a tool it normally doesn't, or an application change that introduced a new tool without policy review.
+
+**SOC playbook.**
+
+1. **Triage.** Pivot to Logs filtered by the tool name. Inspect the prompts that triggered the calls — look for injection patterns ("ignore previous instructions", retrieved web content, etc.).
+2. **Contain.** Tighten the route's [tool-permission](/trustgate/platform/tools/tool-permission) policy to the minimum required tool list. If the new tool is unsanctioned, block it outright.
+3. **Investigate the root cause.** Check the [Agent-SPM finding](/trustlens/risk-and-findings) on `function_tools_scope` for the agent. The runtime symptom often correlates with a posture finding the team hasn't yet remediated.
+4. **Hand off.** Notify the agent owner to apply human-in-the-loop approval for high-impact tools.
+
+## Pair with Agent-SPM
+
+Runtime alerts watch **traffic**. [Agent-SPM (TrustLens) alerts](/trustlens/alerts) watch **posture** — the configuration and exposure surface of an AI resource at rest. Use both:
+
+- **TrustLens alert** fires when a Critical posture issue is introduced (e.g. a new agent ships without guardrails). Action: harden the agent and route it through TrustGate.
+- **Runtime alert** fires when traffic on that agent does something unusual (e.g. a jailbreak spike on an exposed route). Action: investigate the policy hits and tighten enforcement.
+
+Together they cover the “what could go wrong” and the “what is going wrong right now” halves of operating AI in production.
