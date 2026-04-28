@@ -1,342 +1,297 @@
 ---
-title: GCP Deployment
+title: GCP (GKE)
+description: Provision a Google Kubernetes Engine cluster and install the NeuralTrust Platform Helm chart with GCP-native ingress, storage, and certificates.
 ---
 
-# Deploy NeuralTrust on Google Cloud Platform
+NeuralTrust Platform runs on Google Kubernetes Engine using GCP-native primitives — GCE Ingress with managed certificates, Persistent Disk storage, and Cloud DNS. GCP is the default platform target — the chart's defaults assume GCP unless you override `global.platform`.
 
-NeuralTrust provides **global deployment** across all Google Cloud regions while ensuring your data never leaves your GCP project. We handle all infrastructure complexity while maintaining the highest security standards for enterprise AI monitoring, providing a fully managed service that combines the benefits of cloud-scale infrastructure with complete data sovereignty.
+For the cross-platform install workflow, start with [Install on Kubernetes](./kubernetes).
 
-Our GCP deployment model ensures that your sensitive AI monitoring data remains within your GCP environment at all times, while benefiting from NeuralTrust's expertise in infrastructure management, security hardening, and operational excellence. This approach provides the optimal balance of control, security, and convenience for enterprise AI monitoring deployments.
-
-## Architecture Overview
+## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph NT[NeuralTrust Control Plane]
-        Portal[Control Plane] 
-        subgraph Products[Products]
-            TrustTest[TrustTest]
-            TrustScan[TrustScan]
-            AISPM[AISPM]
-        end
+    subgraph NT[NeuralTrust SaaS Control Plane optional]
+        Portal[Control Plane]
     end
-    subgraph Customer[Your GCP Project]
-        subgraph DataPlane[Data Plane]
-            TG[TrustGate<br/>AI Gateway]
-            Workers[Data Plane<br/>Workers]
-            DB[(Analytics<br/>Database)]
-            DataPlaneApi[Data Plane API]
+
+    subgraph GCP[Your GCP Project]
+        subgraph GKE[Google Kubernetes Engine]
+            TG[TrustGate]
+            CP[Control Plane]
+            DP[Data Plane API + Workers]
+            FW[Firewall optional]
+            CH[(ClickHouse)]
+            KAF[(Kafka)]
+            PG[(PostgreSQL)]
         end
-        
-        subgraph Storage[GCP Services]
-            GCS[Cloud Storage]
-            KMS[Cloud KMS]
-        end
+        LB[GCE Load Balancer]
+        MC[Managed Certificate]
+        GCS[(Cloud Storage)]
     end
-    
-    AI[Your AI Apps] --> TG
-    TG --> Workers
-    Workers --> DB
-    DataPlaneApi --> DB
-    DB --> GCS
-    GCS --> KMS
-    
-    Portal -.-> DataPlaneApi
-    Portal -.-> Products
-    
-    style Customer fill:#f0f7ff
+
+    Apps[Your AI apps] --> LB --> TG
+    TG --> DP
+    DP --> CH
+    DP --> KAF
+    CP --> PG
+    LB -. cert .- MC
+
+    Portal -. optional hybrid .- CP
+
+    style GCP fill:#e8f0fe
     style NT fill:#e8f5e8
-    style DataPlane fill:#f5f5f5
-    style Storage fill:#f5f5f5
 ```
 
-**Key Architecture Benefits:**
-- **🔒 Data Sovereignty**: All your data stays in your GCP project
-- **⚡ Automated Setup**: VPC, GKE, Storage, KMS automatically created
-- **🛡️ Zero Trust**: TrustGate validates all AI traffic before processing
+All workloads run inside your GCP project and VPC. Data never leaves your environment.
 
-## Global Deployment Capabilities
+## Cluster prerequisites
 
-### Universal Google Cloud Region Support
+| Resource | Recommended starting point |
+|---|---|
+| GKE version | 1.28 or newer |
+| Cluster mode | Standard or Autopilot (Standard recommended for GPU workloads) |
+| Worker machine type | `e2-standard-4` or `n2-standard-4` (4 vCPU / 16 GiB) |
+| Min nodes | 3 across at least 2 zones (regional cluster) |
+| Storage | `pd-balanced` or `pd-ssd` storage class |
+| Ingress | GCE Ingress (default) with Managed Certificates, or NGINX |
+| DNS | Cloud DNS (or any DNS provider) for the platform base domain |
 
-NeuralTrust supports deployment in **ALL commercial Google Cloud regions worldwide** with no exceptions, providing global coverage that enables organizations to deploy AI monitoring infrastructure close to their users and data sources while meeting data residency requirements.
+For GPU Firewall workers, add a GPU node pool (`nvidia-l4` or `nvidia-t4`) with the GKE GPU device plugin. See [Firewall deployment › GPU](./firewall#enable-the-firewall).
 
-| Region Group | Regions | Description |
-|--------------|---------|-------------|
-| **Americas** | **US**: us-central1 (Iowa), us-east1 (S. Carolina), us-east4 (N. Virginia), us-west1 (Oregon), us-west2 (Los Angeles), us-west3 (Salt Lake City), us-west4 (Las Vegas)<br/>**Canada**: northamerica-northeast1 (Montreal), northamerica-northeast2 (Toronto)<br/>**South America**: southamerica-east1 (São Paulo), southamerica-west1 (Santiago) | Complete coverage across North and South America |
-| **Europe** | **EU West**: europe-west1 (Belgium), europe-west2 (London), europe-west3 (Frankfurt), europe-west4 (Netherlands), europe-west6 (Zurich), europe-west8 (Milan), europe-west9 (Paris)<br/>**EU Central**: europe-central2 (Warsaw)<br/>**EU North**: europe-north1 (Finland) | Full European coverage for GDPR compliance |
-| **Asia Pacific** | **AP Southeast**: asia-southeast1 (Singapore), asia-southeast2 (Jakarta)<br/>**AP Northeast**: asia-northeast1 (Tokyo), asia-northeast2 (Osaka), asia-northeast3 (Seoul)<br/>**AP South**: asia-south1 (Mumbai), asia-south2 (Delhi)<br/>**Australia**: australia-southeast1 (Sydney), australia-southeast2 (Melbourne) | Comprehensive Asia-Pacific regional support |
-
-### Regional Capabilities and Features
-
-**Global Google Cloud Region Support:**
-NeuralTrust supports deployment across all current Google Cloud commercial regions with automatic availability for new regions as they launch.
-
-**Data Residency and Compliance:**
-- **Regional Data Processing**: Choose your preferred region for primary data processing while maintaining data locality within specified geographic boundaries
-- **Multi-Regional Storage**: Optional encrypted multi-regional replication for disaster recovery scenarios
-
-**Unified Management:**
-All regional deployments are managed through a single NeuralTrust console interface, providing centralized administration across multiple Google Cloud regions while maintaining regional data sovereignty.
-
-## VPC and Infrastructure Creation
-
-NeuralTrust automatically creates all required Google Cloud infrastructure during the deployment process, including VPC, subnets, security groups, and networking components.
-
-### Automated Infrastructure Deployment
-
-**What NeuralTrust Creates:**
-- **VPC Network**: `/20` CIDR block (4,094 usable IPs) in your chosen region
-- **Subnets**: Multi-zone public and private subnets for high availability
-- **Networking**: Global Load Balancer, Cloud NAT, Route Tables, Firewall Rules
-- **GKE Cluster**: Google Kubernetes Engine cluster with auto-scaling node pools
-- **Load Balancers**: Global Load Balancer for TrustGate endpoints
-- **Storage**: Cloud Storage buckets for backups and data rotation
-- **Security**: Customer-managed Cloud KMS keys for encryption
-
-**Network Architecture Created:**
-```
-Auto-Created VPC Network (10.0.0.0/20)
-├── Public Subnets (for Load Balancer & Cloud NAT)
-│   ├── us-central1-a: 10.0.1.0/24 (254 IPs)
-│   └── us-central1-b: 10.0.2.0/24 (254 IPs)
-└── Private Subnets (for GKE and Data Plane Components)
-    ├── us-central1-a: 10.0.4.0/22 (1,022 IPs)
-    └── us-central1-b: 10.0.8.0/22 (1,022 IPs)
-```
-
-**Security Configuration:**
-- **Outbound**: HTTPS (443) to internet, internal communication within firewall rules
-- **Inbound**: Only TrustGate API endpoints, no direct external access to private components
-
-### Infrastructure Benefits
-
-- **Zero Manual Setup**: No VPC or networking configuration required
-- **Best Practices**: Enterprise-grade security and networking patterns
-- **High Availability**: Multi-zone deployment for resilience
-- **Scalability**: Auto-scaling capabilities for varying workloads
-
-> **Note**: All infrastructure is created in your GCP project using your credentials, ensuring complete data sovereignty.
-
-## Storage and Data Management
-
-### Enterprise Storage Configuration
-
-**Cloud Storage Data Management**
-- **Daily Database Backups**: Automated daily backups of analytics database stored in Cloud Storage
-- **Data Rotation**: Raw data rotated from analytics database to Cloud Storage after 6 months
-- **Encrypted Storage**: All backups and rotated data encrypted with customer-managed keys
-- **Lifecycle Management**: Automated archival and retention policies for both backups and rotated data
-
-**Advanced Storage Security**
-- **Bucket Policies**: Restrictive policies preventing unauthorized access
-- **Versioning**: Complete version history
-- **Object Lock**: Immutable storage for compliance requirements
-
-### Data Lifecycle Management
-
-**Data Retention and Rotation**
-- **Analytics Database**: Real-time data stored for 6 months for active querying and analysis
-- **Cloud Storage Rotation**: After 6 months, data automatically rotated from analytics database to Cloud Storage
-- **Long-term Storage**: Cloud Storage provides cost-effective long-term retention with encryption
-- **Compliance Retention**: Configurable retention periods to meet regulatory requirements
-
-**Backup and Recovery**
-- **Daily Database Backups**: Automated daily backups to Cloud Storage with encryption
-- **Recovery Options**: Restore from any daily backup within retention period
-- **Storage Backup Protection**: Versioning and object lock for all backup data
-- **Automated Testing**: Monthly disaster recovery validation
-- **RTO/RPO Guarantees**: 4-hour recovery time
-
-## Data Plane Installation Guide
-
-### Prerequisites
-
-Before beginning the Data Plane installation, ensure you have the following:
-
-**GCP Project Setup:**
-- Google Cloud project with billing enabled
-- gcloud CLI configured with appropriate credentials
-
-**NeuralTrust Account:**
-- Active NeuralTrust enterprise account
-- Access to NeuralTrust Admin Portal
-- Control Plane access credentials
-
-### Step 1: Service Account Configuration
-
-**1.1 Create Service Account**
+### Required cluster setup
 
 ```bash
-# Set project variables
-PROJECT_ID="your-project-id"
-SERVICE_ACCOUNT_NAME="neuraltrust-dataplane-user"
+# Create a regional GKE Standard cluster
+gcloud container clusters create neuraltrust \
+  --region <REGION> \
+  --num-nodes 1 \
+  --machine-type e2-standard-4 \
+  --release-channel regular
 
-# Create service account
-gcloud iam service-accounts create $SERVICE_ACCOUNT_NAME \
-    --display-name "NeuralTrust Data Plane User" \
-    --description "Service account for NeuralTrust Data Plane deployment" \
-    --project $PROJECT_ID
+# Get credentials
+gcloud container clusters get-credentials neuraltrust --region <REGION>
 ```
 
-**1.2 Assign Required Roles**
+GCE Ingress and Persistent Disk CSI driver are enabled by default on GKE.
 
-```bash
-# Core infrastructure roles
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member "serviceAccount:$SERVICE_ACCOUNT_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
-    --role "roles/compute.admin"
+## Install the Helm chart on GKE
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member "serviceAccount:$SERVICE_ACCOUNT_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
-    --role "roles/container.admin"
+<Steps>
+  <Step title="Configure kubectl for the GKE cluster">
+    ```bash
+    gcloud container clusters get-credentials neuraltrust --region <REGION>
+    kubectl get nodes
+    ```
+  </Step>
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member "serviceAccount:$SERVICE_ACCOUNT_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
-    --role "roles/storage.admin"
+  <Step title="Create the namespace and image pull secret">
+    ```bash
+    kubectl create namespace neuraltrust
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member "serviceAccount:$SERVICE_ACCOUNT_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
-    --role "roles/cloudkms.admin"
+    kubectl create secret docker-registry gcr-secret \
+      --docker-server=europe-west1-docker.pkg.dev \
+      --docker-username=_json_key \
+      --docker-password="$(cat path/to/gcr-keys.json)" \
+      --docker-email=admin@neuraltrust.ai \
+      -n neuraltrust
+    ```
+  </Step>
 
-# Monitoring and security roles
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member "serviceAccount:$SERVICE_ACCOUNT_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
-    --role "roles/monitoring.admin"
+  <Step title="Install with the GCP platform selector (default)">
+    ```bash
+    helm upgrade --install neuraltrust-platform \
+      oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+      --version <VERSION> \
+      --namespace neuraltrust \
+      --set global.platform=gcp \
+      --set global.domain=platform.example.com \
+      --set global.storageClass=pd-balanced
+    ```
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member "serviceAccount:$SERVICE_ACCOUNT_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
-    --role "roles/logging.admin"
+    `global.platform=gcp` is the chart default and can be omitted if you want.
+  </Step>
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member "serviceAccount:$SERVICE_ACCOUNT_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
-    --role "roles/secretmanager.admin"
+  <Step title="Point DNS at the load balancer">
+    ```bash
+    kubectl get ingress -n neuraltrust -o wide
+    ```
+
+    Get the GCE load balancer IP from each Ingress and create A records in Cloud DNS for every platform host (`app.<domain>`, `data-plane-api.<domain>`, etc.).
+  </Step>
+</Steps>
+
+## GCP-specific configuration
+
+### Managed certificates
+
+GCP Managed Certificates issue and renew certs automatically against domains validated through Cloud DNS:
+
+```yaml
+trustgate:
+  ingress:
+    enabled: true
+    annotations:
+      kubernetes.io/ingress.class: "gce"
+      networking.gke.io/managed-certificates: "trustgate-cert"
+      networking.gke.io/v1beta1.FrontendConfig: "trustgate-fc"
 ```
 
-**1.3 Create Service Account Key**
+Create the `ManagedCertificate` and `FrontendConfig` separately:
 
-```bash
-# Create and download service account key
-gcloud iam service-accounts keys create neuraltrust-key.json \
-    --iam-account $SERVICE_ACCOUNT_NAME@$PROJECT_ID.iam.gserviceaccount.com
-```
-
-Save the **service account key file** securely. You'll provide this credential in the NeuralTrust Admin Portal.
-
-### Step 2: Customer-Managed KMS Keys
-
-**2.1 Create KMS Keyring and Key**
-
-```bash
-# Set region and keyring variables
-REGION="us-central1"
-KEYRING_NAME="neuraltrust-dataplane-keyring"
-KEY_NAME="neuraltrust-dataplane-key"
-
-# Create KMS keyring
-gcloud kms keyrings create $KEYRING_NAME \
-    --location $REGION \
-    --project $PROJECT_ID
-
-# Create encryption key
-gcloud kms keys create $KEY_NAME \
-    --keyring $KEYRING_NAME \
-    --location $REGION \
-    --purpose encryption \
-    --project $PROJECT_ID
-```
-
-### Step 3: Deploy Data Plane via Admin Portal
-
-**3.1 Access NeuralTrust Admin Portal**
-
-1. Log into your NeuralTrust account at [https://portal.neuraltrust.ai](https://portal.neuraltrust.ai)
-2. Navigate to **Data Plane** → **Deployments**
-3. Click **"New Data Plane Deployment"**
-
-**3.2 Configure Deployment Settings**
-
-In the Admin Portal, provide the following information:
-
-**GCP Configuration:**
-- **Project ID**: Your Google Cloud project ID
-- **Service Account Key**: Upload the JSON key file created in Step 1
-- **GCP Region**: Your chosen deployment region (e.g., `us-central1`)
-
-**Data Plane Settings:**
-- **Environment Name**: `production` (or your preferred name)
-- **Instance Type**: `e2-standard-4` (recommended for production)
-- **Min/Max Nodes**: Configure auto-scaling parameters
-- **Data Retention**: 90 days (configurable)
-
-**3.3 Initiate Deployment**
-
-1. Review all configuration settings
-2. Click **"Deploy Data Plane"**
-3. Monitor deployment progress in real-time through the portal
-4. Deployment typically takes 15-20 minutes
-
-### Step 4: Verify Deployment
-
-**4.1 Check Deployment Status**
-
-Monitor the deployment through the Admin Portal:
-- **Infrastructure Status**: All components show "Healthy"
-- **TrustGate Services**: Both Admin and Gateway services running
-- **Data Processing**: Workers and queue operational
-- **Database**: Connection established and healthy
-
-**4.2 Test Connectivity**
-
-The portal provides built-in connectivity tests:
-1. **Control Plane Connection**: Verify secure connection to NeuralTrust
-2. **Internal Communication**: Test Data Plane component connectivity
-3. **External Access**: Validate TrustGate endpoint accessibility
-
-### Verification Checklist
-
-**✅ Pre-Deployment Verification**
-- [ ] Service account created with correct permissions
-- [ ] KMS keyring and encryption keys configured
-- [ ] Admin Portal access confirmed
-
-**✅ Deployment Verification**
-- [ ] All Data Plane components deployed successfully
-- [ ] TrustGate services healthy and accessible
-- [ ] Connection to Control Plane established
-- [ ] Monitoring and logging active
-
-**✅ Application Integration**
-- [ ] AI applications configured to use TrustGate
-- [ ] End-to-end data flow tested
-- [ ] Security policies validated
-- [ ] Performance monitoring enabled
-
-### Troubleshooting
-
-**Common Issues and Solutions:**
-
-**Deployment Failures:**
-- Check service account permissions in GCP console
-- Verify project quota limits
-- Ensure KMS key accessibility
-
-**Connectivity Issues:**
-- Validate VPC firewall rules
-- Check Global Load Balancer configuration
-- Verify DNS resolution
-
-**Permission Errors:**
-- Review IAM role assignments
-- Confirm service account key validity
-- Check KMS key permissions
-
-### Support
-
-For deployment assistance:
-- **Technical Support**: support@neuraltrust.ai
-- **Documentation**: https://docs.neuraltrust.ai/dataplane/gcp
-
+```yaml
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: trustgate-cert
+  namespace: neuraltrust
+spec:
+  domains:
+    - trustgate.platform.example.com
 ---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: trustgate-fc
+  namespace: neuraltrust
+spec:
+  redirectToHttps:
+    enabled: true
+```
 
-> **🔒 Security Guarantee**: Your data never leaves your GCP environment. NeuralTrust provides enterprise-grade AI monitoring with military-grade security, complete data sovereignty, and global deployment capabilities across all Google Cloud regions. 
+### Storage class
+
+```yaml
+global:
+  storageClass: "pd-balanced"   # cost / perf default
+  # storageClass: "pd-ssd"      # SSD for high-throughput ClickHouse
+```
+
+Per-component override:
+
+```yaml
+clickhouse:
+  persistence:
+    storageClass: "pd-ssd"
+    size: 200Gi
+```
+
+### Internal-only ingress
+
+For VPC-internal endpoints (Internal HTTP(S) Load Balancer):
+
+```yaml
+trustgate:
+  ingress:
+    annotations:
+      kubernetes.io/ingress.class: "gce-internal"
+```
+
+### Network Endpoint Groups (NEG) and Private Service Connect
+
+For container-native load balancing or PSC-published endpoints:
+
+```yaml
+trustgate:
+  service:
+    annotations:
+      cloud.google.com/neg: '{"ingress": true}'
+```
+
+PSC-specific configuration is environment-dependent — work with your Google Cloud architect to plan the producer/consumer side.
+
+### GPU node pool for Firewall workers
+
+```bash
+gcloud container node-pools create gpu-pool \
+  --cluster neuraltrust --region <REGION> \
+  --machine-type g2-standard-4 \
+  --accelerator type=nvidia-l4,count=1,gpu-driver-version=latest \
+  --num-nodes 1 \
+  --node-taints nvidia.com/gpu=true:NoSchedule
+```
+
+```yaml
+neuraltrust-firewall:
+  firewall:
+    enabled: true
+    workerDefaults:
+      image:
+        repository: "europe-west1-docker.pkg.dev/.../firewall-gpu"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+      nodeSelector:
+        cloud.google.com/gke-accelerator: "nvidia-l4"
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      hostIPC: true
+```
+
+Full reference: [Firewall deployment](./firewall).
+
+## Region availability
+
+NeuralTrust runs in any GCP region with GKE support. Choose the region closest to your application traffic and target LLM endpoints, or one that meets your data-residency obligations. The chart and images are region-agnostic.
+
+For Assured Workloads or specific sovereign-cloud requirements, contact [support@neuraltrust.ai](mailto:support@neuraltrust.ai).
+
+## Backup and data lifecycle
+
+For production, configure backups against the persistent stores rather than relying on Persistent Disk snapshots alone:
+
+- **PostgreSQL**: Use Cloud SQL for PostgreSQL externally with built-in automated backups, and set `neuraltrust-control-plane.infrastructure.postgresql.deploy: false`.
+- **ClickHouse**: Use ClickHouse `BACKUP` to Cloud Storage, or ClickHouse Cloud externally with `infrastructure.clickhouse.deploy: false`.
+- **Kafka**: For higher availability, use Confluent Cloud and set `infrastructure.kafka.deploy: false`.
+
+Pointing the chart at managed GCP data services is documented in [Configuration scenarios › External infrastructure only](./configuration#external-infrastructure-only).
+
+## Verification
+
+```bash
+kubectl get pods -n neuraltrust
+kubectl get ingress -n neuraltrust -o wide
+kubectl get managedcertificate -n neuraltrust   # if using Managed Certificates
+
+curl https://data-plane-api.platform.example.com/health
+curl https://control-plane-api.platform.example.com/health
+```
+
+## Troubleshooting
+
+### Ingress doesn't get an IP
+
+```bash
+kubectl describe ingress -n neuraltrust <ingress-name>
+```
+
+Common causes: missing BackendConfig, NEG annotation mismatch, or quota exhausted on the project's regional load balancer pool.
+
+### Managed certificate stuck `Provisioning`
+
+```bash
+kubectl describe managedcertificate -n neuraltrust trustgate-cert
+```
+
+Provisioning requires DNS to already point at the load balancer. Confirm the A record resolves before adding the cert annotation.
+
+### PVCs stuck in `Pending`
+
+```bash
+kubectl describe pvc -n neuraltrust <pvc-name>
+```
+
+Verify the storage class exists and the cluster has quota for the requested disk type.
+
+### `ImagePullBackOff`
+
+Recreate `gcr-secret` with the JSON key from NeuralTrust. See [Install on Kubernetes › Common issues](./kubernetes#common-issues).
+
+## Related guides
+
+- [Install on Kubernetes](./kubernetes) — full install workflow
+- [Configuration scenarios](./configuration) — values files for common topologies
+- [Secrets management](./secrets) — auto-generation and external secret stores
+- [Firewall deployment](./firewall) — GPU workers on GKE
