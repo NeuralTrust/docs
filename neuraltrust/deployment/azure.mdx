@@ -1,376 +1,278 @@
 ---
-title: Azure Deployment
+title: Azure (AKS)
+description: Provision an Azure Kubernetes Service cluster and install the NeuralTrust Platform Helm chart with Azure-native ingress, storage, and certificates.
 ---
 
-# Deploy NeuralTrust on Microsoft Azure
+NeuralTrust Platform runs on Azure Kubernetes Service using Azure-native primitives — Application Gateway Ingress Controller (AGIC) or NGINX for ingress, Azure Disk / Azure Files for persistent storage, Key Vault for certificates, and Azure Monitor for observability. This page covers Azure-specific prerequisites; the install workflow itself is the same as any other Kubernetes cluster.
 
-NeuralTrust provides **global deployment** across all Azure regions while ensuring your data never leaves your Azure subscription. We handle all infrastructure complexity while maintaining the highest security standards for enterprise AI monitoring, providing a fully managed service that combines the benefits of cloud-scale infrastructure with complete data sovereignty.
+For the cross-platform install workflow, start with [Install on Kubernetes](./kubernetes).
 
-Our Azure deployment model ensures that your sensitive AI monitoring data remains within your Azure environment at all times, while benefiting from NeuralTrust's expertise in infrastructure management, security hardening, and operational excellence. This approach provides the optimal balance of control, security, and convenience for enterprise AI monitoring deployments.
-
-## Architecture Overview
+## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph NT[NeuralTrust Control Plane]
-        Portal[Control Plane] 
-        subgraph Products[Products]
-            TrustTest[TrustTest]
-            TrustScan[TrustScan]
-            AISPM[AISPM]
-        end
+    subgraph NT[NeuralTrust SaaS Control Plane optional]
+        Portal[Control Plane]
     end
-    subgraph Customer[Your Azure Subscription]
-        subgraph DataPlane[Data Plane]
-            TG[TrustGate<br/>AI Gateway]
-            Workers[Data Plane<br/>Workers]
-            DB[(Analytics<br/>Database)]
-            DataPlaneApi[Data Plane API]
+
+    subgraph AZ[Your Azure Subscription]
+        subgraph AKS[Azure Kubernetes Service]
+            TG[TrustGate]
+            CP[Control Plane]
+            DP[Data Plane API + Workers]
+            FW[Firewall optional]
+            CH[(ClickHouse)]
+            KAF[(Kafka)]
+            PG[(PostgreSQL)]
         end
-        
-        subgraph Storage[Azure Services]
-            Blob[Blob Storage]
-            Vault[Key Vault]
-        end
+        AGW[Application Gateway]
+        KV[Key Vault]
+        ADLS[(Azure Storage)]
     end
-    
-    AI[Your AI Apps] --> TG
-    TG --> Workers
-    Workers --> DB
-    DataPlaneApi --> DB
-    DB --> Blob
-    Blob --> Vault
-    
-    Portal -.-> DataPlaneApi
-    Portal -.-> Products
-    
-    style Customer fill:#e3f2fd
+
+    Apps[Your AI apps] --> AGW --> TG
+    TG --> DP
+    DP --> CH
+    DP --> KAF
+    CP --> PG
+    AGW -. cert .- KV
+
+    Portal -. optional hybrid .- CP
+
+    style AZ fill:#e3f2fd
     style NT fill:#e8f5e8
-    style DataPlane fill:#f5f5f5
-    style Storage fill:#f5f5f5
 ```
 
-**Key Architecture Benefits:**
-- **🔒 Data Sovereignty**: All your data stays in your Azure subscription
-- **⚡ Automated Setup**: VNet, AKS, storage automatically created
-- **🛡️ Zero Trust**: TrustGate validates all AI traffic before processing
+All workloads run inside your Azure subscription and VNet. Data never leaves your environment.
 
-## Global Deployment Capabilities
+## Cluster prerequisites
 
-### Universal Azure Region Support
+| Resource | Recommended starting point |
+|---|---|
+| AKS version | 1.28 or newer |
+| Worker node SKU | `Standard_D4s_v5` or `Standard_D4ds_v5` (4 vCPU / 16 GiB) |
+| Min nodes | 3 across at least 2 availability zones |
+| VNet | Dedicated VNet with at least one subnet for AKS, one for Application Gateway (if using AGIC) |
+| Storage | Azure Disk CSI driver (default in AKS); `managed-csi-premium` for production |
+| Ingress | AGIC, NGINX, or any Kubernetes-conformant ingress controller |
+| DNS | Azure DNS (or any DNS provider) for the platform base domain |
+| Certificates | Key Vault certificate referenced by AGIC, or pre-existing TLS secrets |
 
-NeuralTrust supports deployment in **ALL commercial Azure regions worldwide** with no exceptions, providing global coverage that enables organizations to deploy AI monitoring infrastructure close to their users and data sources while meeting data residency requirements.
+For GPU Firewall workers, add an `Standard_NC*` or `Standard_ND*` node pool with the NVIDIA device plugin. See [Firewall deployment › GPU](./firewall#enable-the-firewall).
 
-| Region Group | Regions | Description |
-|--------------|---------|-------------|
-| **Americas** | **US**: East US, East US 2, West US, West US 2, West US 3, Central US, North Central US, South Central US<br/>**Canada**: Canada Central, Canada East<br/>**Brazil**: Brazil South, Brazil Southeast | Complete coverage across North and South America |
-| **Europe** | **EU West**: West Europe, North Europe, UK South, UK West<br/>**EU Central**: Germany West Central, Switzerland North<br/>**EU Nordic**: Norway East, Sweden Central<br/>**EU South**: France Central, Italy North | Full European coverage for GDPR compliance |
-| **Asia Pacific** | **AP Southeast**: Southeast Asia, East Asia, Australia East, Australia Southeast<br/>**AP Northeast**: Japan East, Japan West, Korea Central<br/>**AP South**: Central India, South India, Jio India West | Comprehensive Asia-Pacific regional support |
-| **Middle East & Africa** | **Middle East**: UAE North, Qatar Central<br/>**Africa**: South Africa North | Strategic coverage for emerging markets |
-
-### Regional Capabilities and Features
-
-**Global Azure Region Support:**
-NeuralTrust supports deployment across all current Azure commercial regions with automatic availability for new regions as they launch. Government cloud deployments include enhanced compliance features for regulatory requirements.
-
-**Data Residency and Compliance:**
-- **Regional Data Processing**: Choose your preferred region for primary data processing while maintaining data locality within specified geographic boundaries
-- **Cross-Region Replication**: Optional encrypted cross-region replication for disaster recovery scenarios
-
-**Unified Management:**
-All regional deployments are managed through a single NeuralTrust console interface, providing centralized administration across multiple Azure regions while maintaining regional data sovereignty.
-
-## Virtual Network and Infrastructure Creation
-
-NeuralTrust automatically creates all required Azure infrastructure during the deployment process, including Virtual Network, subnets, security groups, and networking components.
-
-### Automated Infrastructure Deployment
-
-**What NeuralTrust Creates:**
-- **Virtual Network**: `/20` CIDR block (4,094 usable IPs) in your chosen region
-- **Subnets**: Multi-zone public and private subnets for high availability
-- **Networking**: Application Gateway, NAT Gateway, Route Tables, Network Security Groups
-- **AKS Cluster**: Azure Kubernetes Service cluster with auto-scaling node pools
-- **Load Balancers**: Application Gateway for TrustGate endpoints
-- **Storage**: Blob Storage containers for backups and data rotation
-- **Security**: Customer-managed Key Vault keys for encryption
-
-**Network Architecture Created:**
-```
-Auto-Created Virtual Network (10.0.0.0/20)
-├── Public Subnets (for Application Gateway & NAT Gateway)
-│   ├── East US-1: 10.0.1.0/24 (254 IPs)
-│   └── East US-2: 10.0.2.0/24 (254 IPs)
-└── Private Subnets (for AKS and Data Plane Components)
-    ├── East US-1: 10.0.4.0/22 (1,022 IPs)
-    └── East US-2: 10.0.8.0/22 (1,022 IPs)
-```
-
-**Security Configuration:**
-- **Outbound**: HTTPS (443) to internet, internal communication within security groups
-- **Inbound**: Only TrustGate API endpoints, no direct external access to private components
-
-### Infrastructure Benefits
-
-- **Zero Manual Setup**: No Virtual Network or networking configuration required
-- **Best Practices**: Enterprise-grade security and networking patterns
-- **High Availability**: Multi-zone deployment for resilience
-- **Scalability**: Auto-scaling capabilities for varying workloads
-
-> **Note**: All infrastructure is created in your Azure subscription using your credentials, ensuring complete data sovereignty.
-
-## Storage and Data Management
-
-### Enterprise Storage Configuration
-
-**Blob Storage Data Management**
-- **Daily Database Backups**: Automated daily backups of analytics database stored in Blob Storage
-- **Data Rotation**: Raw data rotated from analytics database to Blob Storage after 6 months
-- **Encrypted Storage**: All backups and rotated data encrypted with customer-managed keys
-- **Lifecycle Management**: Automated archival and retention policies for both backups and rotated data
-
-**Advanced Storage Security**
-- **Storage Policies**: Restrictive policies preventing unauthorized access
-- **Versioning**: Complete version history
-- **Immutable Storage**: Immutable storage for compliance requirements
-
-### Data Lifecycle Management
-
-**Data Retention and Rotation**
-- **Analytics Database**: Real-time data stored for 6 months for active querying and analysis
-- **Blob Storage Rotation**: After 6 months, data automatically rotated from analytics database to Blob Storage
-- **Long-term Storage**: Blob Storage provides cost-effective long-term retention with encryption
-- **Compliance Retention**: Configurable retention periods to meet regulatory requirements
-
-**Backup and Recovery**
-- **Daily Database Backups**: Automated daily backups to Blob Storage with encryption
-- **Recovery Options**: Restore from any daily backup within retention period
-- **Storage Backup Protection**: Versioning and immutable storage for all backup data
-- **Automated Testing**: Monthly disaster recovery validation
-- **RTO/RPO Guarantees**: 4-hour recovery time
-
-## Data Plane Installation Guide
-
-### Prerequisites
-
-Before beginning the Data Plane installation, ensure you have the following:
-
-**Azure Subscription Setup:**
-- Azure subscription with administrative access
-- Azure CLI configured with appropriate credentials
-
-**NeuralTrust Account:**
-- Active NeuralTrust enterprise account
-- Access to NeuralTrust Admin Portal
-- Control Plane access credentials
-
-### Step 1: Service Principal Configuration
-
-**1.1 Create Service Principal**
+### Required cluster add-ons
 
 ```bash
-# Create service principal for NeuralTrust Data Plane
-az ad sp create-for-rbac \
-    --name "NeuralTrustDataPlaneUser" \
-    --role "Contributor" \
-    --scopes "/subscriptions/YOUR-SUBSCRIPTION-ID"
+# Application Gateway Ingress Controller (option A — managed AGIC)
+az aks enable-addons -n <AKS_NAME> -g <RG> -a ingress-appgw \
+  --appgw-name <AGW_NAME> --appgw-subnet-cidr "10.0.1.0/24"
+
+# Or NGINX Ingress (option B)
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm install ingress-nginx ingress-nginx/ingress-nginx \
+  -n ingress-nginx --create-namespace
 ```
 
-**1.2 Create Custom Role with Restricted Permissions**
+The Azure Disk CSI driver is enabled by default on AKS.
+
+## Install the Helm chart on AKS
+
+<Steps>
+  <Step title="Configure kubectl for the AKS cluster">
+    ```bash
+    az aks get-credentials --resource-group <RG> --name <AKS_NAME>
+    kubectl get nodes
+    ```
+  </Step>
+
+  <Step title="Create the namespace and image pull secret">
+    ```bash
+    kubectl create namespace neuraltrust
+
+    kubectl create secret docker-registry gcr-secret \
+      --docker-server=europe-west1-docker.pkg.dev \
+      --docker-username=_json_key \
+      --docker-password="$(cat path/to/gcr-keys.json)" \
+      --docker-email=admin@neuraltrust.ai \
+      -n neuraltrust
+    ```
+  </Step>
+
+  <Step title="Install with the Azure platform selector">
+    ```bash
+    helm upgrade --install neuraltrust-platform \
+      oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+      --version <VERSION> \
+      --namespace neuraltrust \
+      --set global.platform=azure \
+      --set global.domain=platform.example.com \
+      --set global.storageClass=managed-csi-premium
+    ```
+  </Step>
+
+  <Step title="Point DNS at the ingress">
+    ```bash
+    kubectl get ingress -n neuraltrust -o wide
+    ```
+
+    For AGIC, look up the Application Gateway's public IP / FQDN. For NGINX, get the LoadBalancer Service's external IP. Create A or CNAME records in Azure DNS for each platform host.
+  </Step>
+</Steps>
+
+## Azure-specific configuration
+
+### AGIC annotations
+
+```yaml
+trustgate:
+  ingress:
+    enabled: true
+    className: "azure-application-gateway"
+    annotations:
+      kubernetes.io/ingress.class: azure/application-gateway
+      appgw.ingress.kubernetes.io/ssl-redirect: "true"
+      appgw.ingress.kubernetes.io/appgw-ssl-certificate: "<KEY_VAULT_CERT_NAME>"
+
+neuraltrust-control-plane:
+  controlPlane:
+    components:
+      api:
+        ingress:
+          enabled: true
+          className: "azure-application-gateway"
+          annotations:
+            kubernetes.io/ingress.class: azure/application-gateway
+            appgw.ingress.kubernetes.io/ssl-redirect: "true"
+            appgw.ingress.kubernetes.io/appgw-ssl-certificate: "<KEY_VAULT_CERT_NAME>"
+```
+
+The Key Vault certificate must be uploaded to Application Gateway via AGIC's [`appgw-ssl-certificate`](https://azure.github.io/application-gateway-kubernetes-ingress/annotations/) workflow.
+
+### NGINX ingress
+
+```yaml
+trustgate:
+  ingress:
+    enabled: true
+    className: "nginx"
+    annotations:
+      cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+```
+
+Pair with [cert-manager](https://cert-manager.io/) for automatic Let's Encrypt issuance.
+
+### Storage class
+
+```yaml
+global:
+  storageClass: "managed-csi-premium"   # SSD-backed, recommended for production
+  # storageClass: "managed-csi"          # cheaper, standard SSD
+  # storageClass: "azurefile-csi"        # only for ReadWriteMany scenarios
+```
+
+Per-component override for ClickHouse on `Premium_LRS`:
+
+```yaml
+clickhouse:
+  persistence:
+    storageClass: "managed-csi-premium"
+    size: 200Gi
+```
+
+### Internal-only ingress
+
+For private AKS clusters and VNet-internal endpoints, use AGIC with a private Application Gateway, or NGINX with an internal load balancer:
+
+```yaml
+trustgate:
+  ingress:
+    annotations:
+      service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+```
+
+### GPU node pool for Firewall workers
 
 ```bash
-# Create custom role definition
-cat > neuraltrust-dataplane-role.json << EOF
-{
-  "Name": "NeuralTrust Data Plane Role",
-  "Description": "Custom role for NeuralTrust Data Plane deployment with AKS and related resources",
-  "Actions": [
-    "Microsoft.Resources/subscriptions/resourceGroups/read",
-    "Microsoft.Resources/subscriptions/resourceGroups/write",
-    "Microsoft.Resources/subscriptions/resourceGroups/delete",
-    "Microsoft.ContainerService/managedClusters/read",
-    "Microsoft.ContainerService/managedClusters/write",
-    "Microsoft.ContainerService/managedClusters/delete",
-    "Microsoft.ContainerService/managedClusters/listClusterUserCredential/action",
-    "Microsoft.ContainerService/managedClusters/agentPools/read",
-    "Microsoft.ContainerService/managedClusters/agentPools/write",
-    "Microsoft.ContainerService/managedClusters/agentPools/delete",
-    "Microsoft.Network/virtualNetworks/read",
-    "Microsoft.Network/virtualNetworks/write",
-    "Microsoft.Network/virtualNetworks/delete",
-    "Microsoft.Network/virtualNetworks/subnets/read",
-    "Microsoft.Network/virtualNetworks/subnets/write",
-    "Microsoft.Network/virtualNetworks/subnets/delete",
-    "Microsoft.Network/virtualNetworks/subnets/join/action",
-    "Microsoft.Network/networkSecurityGroups/read",
-    "Microsoft.Network/networkSecurityGroups/write",
-    "Microsoft.Network/networkSecurityGroups/delete",
-    "Microsoft.Network/routeTables/read",
-    "Microsoft.Network/routeTables/write",
-    "Microsoft.Network/routeTables/delete",
-    "Microsoft.Network/applicationGateways/read",
-    "Microsoft.Network/applicationGateways/write",
-    "Microsoft.Network/applicationGateways/delete",
-    "Microsoft.Network/natGateways/read",
-    "Microsoft.Network/natGateways/write",
-    "Microsoft.Network/natGateways/delete",
-    "Microsoft.Compute/availabilitySets/read",
-    "Microsoft.Compute/availabilitySets/write",
-    "Microsoft.Compute/availabilitySets/delete",
-    "Microsoft.Compute/virtualMachines/read",
-    "Microsoft.Compute/virtualMachines/write",
-    "Microsoft.Compute/virtualMachines/delete",
-    "Microsoft.Storage/storageAccounts/read",
-    "Microsoft.Storage/storageAccounts/write",
-    "Microsoft.Storage/storageAccounts/delete",
-    "Microsoft.KeyVault/vaults/read",
-    "Microsoft.KeyVault/vaults/write",
-    "Microsoft.KeyVault/vaults/delete",
-    "Microsoft.ManagedIdentity/userAssignedIdentities/read",
-    "Microsoft.ManagedIdentity/userAssignedIdentities/write",
-    "Microsoft.ManagedIdentity/userAssignedIdentities/delete",
-    "Microsoft.Authorization/roleAssignments/read",
-    "Microsoft.Authorization/roleAssignments/write",
-    "Microsoft.Authorization/roleAssignments/delete",
-    "Microsoft.Insights/components/read",
-    "Microsoft.Insights/components/write",
-    "Microsoft.OperationalInsights/workspaces/read",
-    "Microsoft.OperationalInsights/workspaces/write"
-  ],
-  "NotActions": [],
-  "AssignableScopes": [
-    "/subscriptions/YOUR-SUBSCRIPTION-ID"
-  ]
-}
-EOF
-
-# Create the custom role
-az role definition create --role-definition neuraltrust-dataplane-role.json
-
-# Assign custom role to service principal
-az role assignment create \
-    --assignee "YOUR-SERVICE-PRINCIPAL-ID" \
-    --role "NeuralTrust Data Plane Role" \
-    --scope "/subscriptions/YOUR-SUBSCRIPTION-ID"
+az aks nodepool add -g <RG> --cluster-name <AKS_NAME> \
+  --name gpupool --node-vm-size Standard_NC8as_T4_v3 --node-count 1 \
+  --node-taints "nvidia.com/gpu=true:NoSchedule"
 ```
 
-Save the **Application ID**, **Tenant ID**, and **Client Secret** securely. You'll provide these credentials in the NeuralTrust Admin Portal.
+```yaml
+neuraltrust-firewall:
+  firewall:
+    enabled: true
+    workerDefaults:
+      image:
+        repository: "europe-west1-docker.pkg.dev/.../firewall-gpu"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+      nodeSelector:
+        agentpool: "gpupool"
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      hostIPC: true
+```
 
-### Step 2: Customer-Managed Key Vault Keys
+Full reference: [Firewall deployment](./firewall).
 
-**2.1 Create Key Vault and Encryption Key**
+## Region availability
+
+NeuralTrust runs in any Azure commercial region with AKS support. Choose the region closest to your application traffic and target LLM endpoints, or one that meets your data-residency obligations (e.g. GDPR for European customers). The chart and images are region-agnostic.
+
+For Azure Government clouds or specific sovereign regions, contact [support@neuraltrust.ai](mailto:support@neuraltrust.ai).
+
+## Backup and data lifecycle
+
+For production, configure backups against the persistent stores rather than relying on managed disk snapshots alone:
+
+- **PostgreSQL**: Use Azure Database for PostgreSQL Flexible Server externally and disable `neuraltrust-control-plane.infrastructure.postgresql.deploy`. Built-in PITR backups apply.
+- **ClickHouse**: Use ClickHouse `BACKUP` to Azure Blob Storage, or run ClickHouse Cloud externally and set `infrastructure.clickhouse.deploy: false`.
+- **Kafka**: For higher availability, use Confluent Cloud or Azure Event Hubs (Kafka surface) and set `infrastructure.kafka.deploy: false`.
+
+Pointing the chart at managed Azure data services is documented in [Configuration scenarios › External infrastructure only](./configuration#external-infrastructure-only).
+
+## Verification
 
 ```bash
-# Create resource group for keys
-az group create --name neuraltrust-keys-rg --location "East US"
+kubectl get pods -n neuraltrust
+kubectl get ingress -n neuraltrust -o wide
 
-# Create Key Vault
-az keyvault create \
-    --name neuraltrust-dataplane-kv \
-    --resource-group neuraltrust-keys-rg \
-    --location "East US" \
-    --enable-disk-encryption
-
-# Create encryption key
-az keyvault key create \
-    --vault-name neuraltrust-dataplane-kv \
-    --name neuraltrust-dataplane-key \
-    --protection software
+curl https://data-plane-api.platform.example.com/health
+curl https://control-plane-api.platform.example.com/health
 ```
 
-### Step 3: Deploy Data Plane via Admin Portal
+## Troubleshooting
 
-**3.1 Access NeuralTrust Admin Portal**
+### Ingress doesn't acquire an IP / FQDN
 
-1. Log into your NeuralTrust account at [https://portal.neuraltrust.ai](https://portal.neuraltrust.ai)
-2. Navigate to **Data Plane** → **Deployments**
-3. Click **"New Data Plane Deployment"**
+```bash
+kubectl describe ingress -n neuraltrust <ingress-name>
+# AGIC logs (managed add-on)
+az aks show -g <RG> -n <AKS_NAME> --query "addonProfiles.ingressApplicationGateway"
+```
 
-**3.2 Configure Deployment Settings**
+Common causes: AGIC not enabled, Application Gateway subnet wrongly sized, or NSG blocking the AKS-AGW path.
 
-In the Admin Portal, provide the following information:
+### PVCs stuck in `Pending`
 
-**Azure Configuration:**
-- **Subscription ID**: Your Azure subscription ID
-- **Application ID**: From the service principal created in Step 1
-- **Client Secret**: From the service principal created in Step 1
-- **Tenant ID**: Your Azure Active Directory tenant ID
-- **Azure Region**: Your chosen deployment region (e.g., `East US`)
+```bash
+kubectl describe pvc -n neuraltrust <pvc-name>
+```
 
-**Data Plane Settings:**
-- **Environment Name**: `production` (or your preferred name)
-- **Instance Type**: `Standard_D4s_v3` (recommended for production)
-- **Min/Max Nodes**: Configure auto-scaling parameters
-- **Data Retention**: 90 days (configurable)
+Verify the configured storage class exists (`kubectl get storageclass`) and your subscription has quota for the SKU it references.
 
-**3.3 Initiate Deployment**
+### `ImagePullBackOff`
 
-1. Review all configuration settings
-2. Click **"Deploy Data Plane"**
-3. Monitor deployment progress in real-time through the portal
-4. Deployment typically takes 15-20 minutes
+Recreate `gcr-secret` with the JSON key from NeuralTrust. See [Install on Kubernetes › Common issues](./kubernetes#common-issues).
 
-### Step 4: Verify Deployment
+## Related guides
 
-**4.1 Check Deployment Status**
-
-Monitor the deployment through the Admin Portal:
-- **Infrastructure Status**: All components show "Healthy"
-- **TrustGate Services**: Both Admin and Gateway services running
-- **Data Processing**: Workers and queue operational
-- **Database**: Connection established and healthy
-
-**4.2 Test Connectivity**
-
-The portal provides built-in connectivity tests:
-1. **Control Plane Connection**: Verify secure connection to NeuralTrust
-2. **Internal Communication**: Test Data Plane component connectivity
-3. **External Access**: Validate TrustGate endpoint accessibility
-
-### Verification Checklist
-
-**✅ Pre-Deployment Verification**
-- [ ] Service principal created with correct permissions
-- [ ] Key Vault and encryption keys configured
-- [ ] Admin Portal access confirmed
-
-**✅ Deployment Verification**
-- [ ] All Data Plane components deployed successfully
-- [ ] TrustGate services healthy and accessible
-- [ ] Connection to Control Plane established
-- [ ] Monitoring and logging active
-
-**✅ Application Integration**
-- [ ] AI applications configured to use TrustGate
-- [ ] End-to-end data flow tested
-- [ ] Security policies validated
-- [ ] Performance monitoring enabled
-
-### Troubleshooting
-
-**Common Issues and Solutions:**
-
-**Deployment Failures:**
-- Check service principal permissions in Azure portal
-- Verify subscription quota limits
-- Ensure Key Vault accessibility
-
-**Connectivity Issues:**
-- Validate Network Security Group rules
-- Check Application Gateway configuration
-- Verify DNS resolution
-
-**Permission Errors:**
-- Review custom role assignments
-- Confirm service principal trust relationship
-- Check Key Vault access policies
-
-### Support
-
-For deployment assistance:
-- **Technical Support**: support@neuraltrust.ai
-- **Documentation**: https://docs.neuraltrust.ai/dataplane/azure
-
----
-
-> **🔒 Security Guarantee**: Your data never leaves your Azure environment. NeuralTrust provides enterprise-grade AI monitoring with military-grade security, complete data sovereignty, and global deployment capabilities across all Azure regions. 
+- [Install on Kubernetes](./kubernetes) — full install workflow
+- [Configuration scenarios](./configuration) — values files for common topologies
+- [Secrets management](./secrets) — auto-generation and external secret stores
+- [Firewall deployment](./firewall) — GPU workers on AKS
