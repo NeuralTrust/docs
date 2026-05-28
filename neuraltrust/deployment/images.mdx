@@ -1,0 +1,211 @@
+---
+title: Image catalog
+description: Complete inventory of container images the NeuralTrust Platform Helm chart deploys, grouped by subchart and by deployment model. Use this when mirroring images, planning air-gapped installs, or sizing image-pull bandwidth.
+---
+
+All NeuralTrust images live in the private Google Artifact Registry  
+`europe-west1-docker.pkg.dev/neuraltrust-app-prod/nt-docker/<name>`.
+
+To mirror or rebrand the registry, set `global.imageRegistry` once and the chart will rewrite all subchart image paths automatically (the helper strips the default GCP prefix before prepending yours).
+
+All private images are pulled with `gcr-secret` (`docker-registry` type). The Kubernetes Secret name is configurable per subchart via `imagePullSecrets`.
+
+<Note>
+Versions below reflect the current `values.yaml` defaults in the chart. They change with every chart release — always cross-check against the `values.yaml` of the chart version you're installing.
+</Note>
+
+## Per-subchart inventory
+
+### `clickhouse`
+
+| Image | Default tag | Purpose | Default replicas | Storage |
+|---|---|---|---|---|
+| `…/clickhouse-server` | `26.3` | ClickHouse DB (StatefulSet) | 1 | 50 GiB PVC |
+| `…/clickhouse-server` | `26.3` | Backup CronJob (when `clickhouse.backup.enabled: true`) | CronJob | — |
+
+### `kafka`
+
+| Image | Default tag | Purpose | Default replicas | Storage |
+|---|---|---|---|---|
+| `…/kafka` | `4.3.0` | Kafka broker (StatefulSet) | 1 | 10 GiB PVC |
+
+### `neuraltrust-data-plane`
+
+| Image | Default tag | Purpose | Default replicas |
+|---|---|---|---|
+| `…/data-plane-api` | `v1.24.11` | Data Plane API | 2 |
+| `…/clickhouse-server` | `26.3` | Init container `clickhouse-migrations` on API | — |
+| `…/workers` | `v1.6.12` | Data Plane worker | 1 |
+| `…/kafka-connect` | `v0.3.1` | Kafka Connect Deployment | 1 |
+| `…/kafka-connect` | `v0.3.1` | Init container `fix-connect-topics` on Kafka Connect | — |
+| `…/data-plane-api` | `v1.24.11` | Ephemeral Kubernetes Job pods spawned by API for evals (`k8sJobs.enabled: true`, up to `maxConcurrentJobs: 10`) | — |
+
+### `neuraltrust-control-plane` *(only when `controlPlane.enabled: true`)*
+
+| Image | Default tag | Purpose | Default replicas |
+|---|---|---|---|
+| `…/control-plane-api` | `v1.18.3` | Control Plane API | 2 |
+| `…/app` | `v1.65.9` | Control Plane UI (Next.js) | 2 |
+| `…/app` | `v1.65.9` | Init container `init-db` (Prisma migrations) on UI | — |
+| `…/scheduler` | `v1.9.7` | Scheduler | 1 |
+| `…/postgres` | `17-alpine` | Init container `wait-for-postgresql` on API + scheduler | — |
+| `…/postgres` | `17-alpine` | In-cluster PostgreSQL *(when `infrastructure.postgresql.deploy: true`)* | 1 |
+
+### `trustgate`
+
+| Image | Default tag | Purpose | Default replicas |
+|---|---|---|---|
+| `…/trustgate-ee` | `v1.27.5` | TrustGate admin (`trustgate-control-plane`) | 2 |
+| `…/trustgate-ee` | `v1.27.5` | TrustGate gateway (`trustgate-data-plane`) | 2 |
+| `…/trustgate-ee` | `v1.27.5` | TrustGate actions (`trustgate-actions`) | 2 |
+| `…/postgres` | `17-alpine` | Init Job `trustgate-postgresql-init` (creates DB + user) | Job |
+| `…/redis-stack-server` | `7.2.0-v20` | Redis cache | 1 |
+
+### `neuraltrust-firewall` *(default: enabled)*
+
+| Image | Default tag | Purpose | Default replicas |
+|---|---|---|---|
+| `…/firewall-cpu` | `v2.9.6` | Gateway (CPU router) | 2 |
+| `…/firewall-cpu` | `v2.9.6` | Worker — `toxicity` | 1 |
+| `…/firewall-cpu` | `v2.9.6` | Worker — `toolguard` | 1 |
+| `…/firewall-cpu` | `v2.9.6` | Worker — `prompt-jailbreak` | 1 |
+| `…/firewall-cpu` | `v2.9.6` | Worker — `prompt-moderation` | 1 |
+| `…/firewall-cpu` | `v2.9.6` | Worker — `response-jailbreak` | 1 |
+| `…/firewall-gpu` | `v2.9.6` | GPU-accelerated workers *(override `workerDefaults.image`)* | configurable |
+
+### Optional add-on subcharts *(off by default)*
+
+| Subchart | Image(s) | Default tag | Toggle |
+|---|---|---|---|
+| `neuraltrust-siem-connectors` | `siem-connectors` | `v0.2.2` | `neuraltrust-siem-connectors.siemConnectors.enabled` |
+| `neuraltrust-watchdog` | `neuraltrust-watchdog` | Chart `appVersion` | `neuraltrust-watchdog.enabled` |
+| Umbrella OpenTelemetry Collector | `otel/opentelemetry-collector-contrib` | `0.110.0` | `global.observability.enabled` |
+
+## What's deployed in each model
+
+The two main deployment models are documented in [Deployment models](./deployment-models). The image footprint for each:
+
+<Tabs>
+  <Tab title="Hybrid (default install)">
+    Chart default. Control Plane runs on NeuralTrust SaaS — no CP images in your cluster.
+
+    | Subchart | Deployed? | Notes |
+    |---|---|---|
+    | `neuraltrust-data-plane` | ✅ | API ×2 + worker ×1 + Kafka Connect ×1 |
+    | `trustgate` | ✅ *(typical)* | admin ×2, gateway ×2, actions ×2, Redis ×1 |
+    | `neuraltrust-firewall` | ✅ *(default on)* | gateway ×2 + 5 CPU workers; GPU optional |
+    | `clickhouse` | ✅ *(or external)* | StatefulSet ×1 |
+    | `kafka` | ✅ *(or external)* | StatefulSet ×1 |
+    | `neuraltrust-control-plane` PostgreSQL | ✅ *(for TrustGate)* | StatefulSet ×1 |
+    | `neuraltrust-control-plane` CP API/UI/Scheduler | ❌ | runs on NeuralTrust SaaS |
+
+    **Distinct in-cluster images (defaults):**
+
+    - `data-plane-api`, `workers`, `kafka-connect`
+    - `trustgate-ee`, `redis-stack-server`, `postgres` (init Job)
+    - `firewall-cpu` (gateway + 5 worker pods)
+    - `clickhouse-server`, `kafka`, `postgres`
+
+    Total: ~10 distinct image repositories, ~16 running pods on chart defaults.
+  </Tab>
+  <Tab title="Self-hosted (full stack)">
+    Adds Control Plane API, UI, and Scheduler on top of the hybrid footprint.
+
+    | Subchart | Deployed? | Notes |
+    |---|---|---|
+    | `neuraltrust-data-plane` | ✅ | same as hybrid |
+    | `neuraltrust-control-plane` (CP API/UI/Scheduler) | ✅ | API ×2, UI ×2, Scheduler ×1 |
+    | `neuraltrust-control-plane` PostgreSQL | ✅ *(or external)* | shared with TrustGate by default |
+    | `trustgate` | ✅ | same as hybrid |
+    | `neuraltrust-firewall` | ✅ *(default on)* | same as hybrid |
+    | `clickhouse` | ✅ *(or external)* | same as hybrid |
+    | `kafka` | ✅ *(or external)* | same as hybrid |
+
+    **Additional images vs. hybrid:**
+
+    - `control-plane-api`, `app`, `scheduler`
+
+    Total: ~13 distinct image repositories, ~21 running pods on chart defaults.
+  </Tab>
+</Tabs>
+
+## Sizing & resource defaults
+
+Per-component requests / limits (from chart `values.yaml`). Multiply by the replica count to get the per-component total contribution to cluster requests.
+
+| Component | Replicas | CPU req / limit | Memory req / limit | GPU |
+|---|---|---|---|---|
+| ClickHouse | 1 | 2 / 4 | 4 Gi / 8 Gi | — |
+| Kafka | 1 | 500m / 1 | 1 Gi / 2 Gi | — |
+| PostgreSQL | 1 | 1 / 2 | 2 Gi / 4 Gi | — |
+| Data Plane API | 2 | 2 / 4 | 4 Gi / 6 Gi | — |
+| Data Plane worker | 1 | 1 / 2 | 4 Gi / 8 Gi | — |
+| Kafka Connect | 1 | 500m / 1 | 2 Gi / 4 Gi | — |
+| CP scheduler | 1 | 100m / 200m | 256 Mi / 512 Mi | — |
+| CP API | 2 | 1 / 2 | 1 Gi / 2 Gi | — |
+| CP UI (app) | 2 | 250m / 500m | 512 Mi / 1 Gi | — |
+| TrustGate admin | 2 | 500m / 1 | 2 Gi / 4 Gi | — |
+| TrustGate gateway | 2 | 2 / 4 | 4 Gi / 8 Gi | — |
+| TrustGate actions | 2 | 500m / 1 | 2 Gi / 4 Gi | — |
+| Redis | 1 | 500m / 1 | 1 Gi / 2 Gi | — |
+| Firewall gateway | 2 | 250m / 500m | 256 Mi / 512 Mi | — |
+| Firewall worker (×5: toxicity, toolguard, prompt-jailbreak, prompt-moderation, response-jailbreak) | 5 | 1 / 1.5 | 4 Gi / 6 Gi | — |
+| Firewall GPU worker *(replaces CPU worker)* | per pool | same as CPU + `nvidia.com/gpu: 1` | same | 1 GPU |
+| K8s eval Job *(ephemeral, spawned by Data Plane API)* | up to 10 | 100m / 500m | 256 Mi / 1 Gi | — |
+
+### Realistic cluster totals
+
+Firewall is always deployed — the choice is whether its 5 default workers run on the **CPU pool** or move to a **separate GPU pool**.
+
+| Model | CPU pool requests | PVC | Min CPU nodes *(8 vCPU / 32 GiB)* | GPU pool |
+|---|---|---|---|---|
+| **Hybrid + CPU Firewall** *(default)* | ~20.5 vCPU / ~58.5 GiB | ~80 GiB | **≥ 4** | — |
+| **Hybrid + GPU Firewall** | ~15.5 vCPU / ~38.5 GiB | ~80 GiB | **≥ 3** | ≥ 5 GPU pods |
+| **Self-hosted + CPU Firewall** | ~23.1 vCPU / ~61.8 GiB | ~80 GiB | **≥ 5** | — |
+| **Self-hosted + GPU Firewall** | ~18.1 vCPU / ~41.8 GiB | ~80 GiB | **≥ 4** | ≥ 5 GPU pods |
+
+CPU Firewall workers contribute 5 vCPU + 20 GiB to the main pool. Switching to GPU workers moves that load to dedicated GPU nodes (one GPU per worker without CUDA MPS).
+
+For per-cloud node SKUs (e.g. `e2-standard-8`, `m5.2xlarge`, `Standard_D8s_v5`, `g4dn.xlarge` for GPU) and HA layout, see the cloud-specific overview pages and [Deployment models › Sizing baseline](./deployment-models#sizing-baseline).
+
+## Mirroring images for air-gapped installs
+
+To pre-pull every image the chart would deploy with your overrides:
+
+```bash
+helm template neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  -f my-values.yaml \
+  | yq '.. | select(has("image")) | .image' \
+  | sort -u
+```
+
+Then mirror each image to your internal registry and set:
+
+```yaml
+global:
+  imageRegistry: "registry.internal.example.com/neuraltrust"
+```
+
+The chart strips the default `europe-west1-docker.pkg.dev/neuraltrust-app-prod/nt-docker` prefix from subchart image paths and replaces it with your registry. Per-subchart `image.repository` overrides still win if set explicitly.
+
+## Pull policy
+
+| Component | Default pull policy |
+|---|---|
+| Data Plane API, worker, Kafka Connect | `Always` |
+| Control Plane API, UI, Scheduler, Postgres | `Always` |
+| TrustGate admin, gateway, actions | `Always` |
+| TrustGate Redis | `Always` *(parent override)* |
+| Firewall gateway + workers | `IfNotPresent` |
+| ClickHouse, Kafka | `IfNotPresent` |
+
+`Always` ensures pinned tags still revalidate on rollouts. Override per component if you mirror to an internal registry that doesn't change tags.
+
+## Related guides
+
+- [Deployment models](./deployment-models) — hybrid vs self-hosted in depth
+- [Configuration scenarios](./configuration) — values files for each topology
+- [Secrets management](./secrets) — secrets each image needs
+- [Firewall deployment](./firewall) — CPU vs GPU, per-worker overrides

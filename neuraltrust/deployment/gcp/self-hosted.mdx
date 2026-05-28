@@ -1,0 +1,352 @@
+---
+title: GCP — Self-hosted deployment
+description: Complete walkthrough for deploying the full NeuralTrust Platform (Control Plane + Data Plane + TrustGate + Firewall) on Google Kubernetes Engine. Covers cluster prep, full values overlay, ingress for all components, Managed Certificates, and verification.
+---
+
+This guide walks you end-to-end through a **fully self-hosted deployment** on GKE — the Control Plane API, UI, and Scheduler run in your cluster alongside the Data Plane, TrustGate, and Firewall.
+
+If you'd prefer NeuralTrust to host the Control Plane UI, see [GCP hybrid](./hybrid) instead.
+
+## What you'll end up with
+
+| Component | Location | Replicas (default) |
+|---|---|---|
+| Control Plane API | Your GKE cluster | 2 |
+| Control Plane UI | Your GKE cluster | 2 |
+| Control Plane Scheduler | Your GKE cluster | 1 |
+| Data Plane API | Your GKE cluster | 2 |
+| Data Plane worker | Your GKE cluster | 1 |
+| Kafka Connect | Your GKE cluster | 1 |
+| TrustGate admin / gateway / actions | Your GKE cluster | 2 each |
+| Firewall gateway + 5 workers | Your GKE cluster | 2 + 5 |
+| ClickHouse, Kafka, PostgreSQL, Redis | Your GKE cluster (or external) | 1 each |
+
+Sizing baseline: ~21–23 vCPU / 45–50 GiB RAM / 80 GiB PVC. For full image inventory, see [Image catalog](../images).
+
+## Prerequisites
+
+| Resource | Recommended |
+|---|---|
+| GKE version | 1.28+ |
+| Cluster mode | Standard (recommended) or Autopilot |
+| CPU pool machine type | `n2-standard-8` (8 vCPU / 32 GiB) |
+| Min CPU nodes | **≥ 5** across 3 zones (regional cluster). Drop to 4 if Firewall workers run on GPU nodes. |
+| GPU pool *(optional, for GPU Firewall)* | `n1-standard-4` + 1 × T4 — 5 nodes (one per default Firewall worker) |
+| Sizing baseline | ~23.1 vCPU / 61.8 GiB requests / 80 GiB PVC (defaults, CPU Firewall) |
+| Storage | `pd-ssd` recommended for ClickHouse + PostgreSQL in self-hosted |
+| DNS | A control over a base domain (e.g. `platform.example.com`) |
+| Image pull | `gcr-keys.json` from NeuralTrust |
+
+## Step 1 — Provision the GKE cluster
+
+```bash
+gcloud container clusters create neuraltrust \
+  --region <REGION> \
+  --num-nodes 2 \
+  --machine-type n2-standard-8 \
+  --release-channel regular \
+  --addons HorizontalPodAutoscaling,HttpLoadBalancing,GcePersistentDiskCsiDriver
+
+gcloud container clusters get-credentials neuraltrust --region <REGION>
+```
+
+`--num-nodes 2` is per-zone in a regional cluster → 6 worker nodes across 3 zones, which fits the self-hosted CPU pool with HA headroom.
+
+## Step 2 — Namespace and image pull secret
+
+```bash
+kubectl create namespace neuraltrust
+
+kubectl create secret docker-registry gcr-secret \
+  --docker-server=europe-west1-docker.pkg.dev \
+  --docker-username=_json_key \
+  --docker-password="$(cat path/to/gcr-keys.json)" \
+  --docker-email=admin@neuraltrust.ai \
+  -n neuraltrust
+```
+
+## Step 3 — Write your values overlay
+
+Save as `my-values.yaml`:
+
+```yaml
+# Self-hosted deployment on GKE
+global:
+  platform: "gcp"
+  domain: "platform.example.com"
+  storageClass: "pd-ssd"
+  autoGenerateSecrets: true
+
+# Control Plane in your cluster
+neuraltrust-control-plane:
+  controlPlane:
+    enabled: true                        # ← key difference from hybrid
+    components:
+      api:
+        enabled: true
+      app:
+        enabled: true
+      scheduler:
+        enabled: true
+  infrastructure:
+    postgresql:
+      deploy: true                        # shared with TrustGate
+
+# Data Plane
+neuraltrust-data-plane:
+  dataPlane:
+    enabled: true
+
+# TrustGate
+trustgate:
+  enabled: true
+  global:
+    env:
+      SERVER_BASE_DOMAIN: "platform.example.com"
+
+# Firewall (default on)
+neuraltrust-firewall:
+  firewall:
+    enabled: true
+
+# Infrastructure
+infrastructure:
+  clickhouse:
+    deploy: true
+  kafka:
+    deploy: true
+```
+
+### External managed services (recommended for production)
+
+```yaml
+neuraltrust-control-plane:
+  infrastructure:
+    postgresql:
+      deploy: false
+  controlPlane:
+    components:
+      postgresql:
+        secrets:
+          host: "10.x.x.x"               # Cloud SQL private IP
+          port: "5432"
+          user: "neuraltrust"
+          password: ""                   # inject via --set or pre-created secret
+          database: "neuraltrust"
+
+infrastructure:
+  clickhouse:
+    deploy: false
+    external:
+      host: "your-tenant.gcp.clickhouse.cloud"
+      port: "8443"
+      user: "neuraltrust"
+      password: ""
+      database: "neuraltrust"
+  kafka:
+    deploy: false
+    external:
+      bootstrapServers: "pkc-xxxxx.gcp.confluent.cloud:9092"
+```
+
+<Note>
+For **ClickHouse Cloud**, see the [native-port caveat](../feature-flags#required-clickhouse-cloud-caveat). For **Confluent Cloud Kafka**, inject SASL credentials via `extraEnv` — see [Authentication for external Kafka](../feature-flags#authentication-for-external-kafka).
+</Note>
+
+## Step 4 — Install
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust \
+  -f my-values.yaml
+```
+
+Initial install takes 4–6 minutes (Control Plane adds ~1–2 minutes vs hybrid).
+
+```bash
+kubectl get pods -n neuraltrust -w
+```
+
+## Step 5 — DNS and Managed Certificates
+
+The chart creates GCE Ingresses for every public component. Get the assigned IPs:
+
+```bash
+kubectl get ingress -n neuraltrust -o wide
+```
+
+Self-hosted exposes **more** hostnames than hybrid:
+
+| Host | Component | Required |
+|---|---|---|
+| `app.platform.example.com` | Control Plane UI | ✅ |
+| `api.platform.example.com` | Control Plane API | ✅ |
+| `scheduler.platform.example.com` | Control Plane Scheduler | ✅ |
+| `data-plane-api.platform.example.com` | Data Plane API | ✅ |
+| `admin.platform.example.com` | TrustGate admin | ✅ |
+| `gateway.platform.example.com` | TrustGate proxy | ✅ |
+| `actions.platform.example.com` | TrustGate actions | ✅ |
+
+Create A records in Cloud DNS for each host, pointing to the LB IP.
+
+### Add Managed Certificates
+
+```yaml
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: platform-cert
+  namespace: neuraltrust
+spec:
+  domains:
+    - app.platform.example.com
+    - api.platform.example.com
+    - scheduler.platform.example.com
+    - data-plane-api.platform.example.com
+    - admin.platform.example.com
+    - gateway.platform.example.com
+    - actions.platform.example.com
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: platform-fc
+  namespace: neuraltrust
+spec:
+  redirectToHttps:
+    enabled: true
+```
+
+Then reference them from each component's ingress:
+
+```yaml
+neuraltrust-control-plane:
+  controlPlane:
+    components:
+      api:
+        ingress:
+          annotations:
+            networking.gke.io/managed-certificates: "platform-cert"
+            networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
+      app:
+        ingress:
+          annotations:
+            networking.gke.io/managed-certificates: "platform-cert"
+            networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
+      scheduler:
+        ingress:
+          annotations:
+            networking.gke.io/managed-certificates: "platform-cert"
+            networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
+
+neuraltrust-data-plane:
+  dataPlane:
+    components:
+      api:
+        ingress:
+          annotations:
+            networking.gke.io/managed-certificates: "platform-cert"
+            networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
+
+trustgate:
+  ingress:
+    controlPlane:
+      annotations:
+        networking.gke.io/managed-certificates: "platform-cert"
+        networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
+    dataPlane:
+      annotations:
+        networking.gke.io/managed-certificates: "platform-cert"
+        networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
+    actions:
+      annotations:
+        networking.gke.io/managed-certificates: "platform-cert"
+        networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
+```
+
+Re-run `helm upgrade …` to apply.
+
+## Step 6 — First login to the Control Plane
+
+1. Open `https://app.platform.example.com` in your browser.
+2. The chart creates a bootstrap admin during the Prisma migration (CP UI init container). Get the bootstrap credentials:
+
+   ```bash
+   kubectl logs -n neuraltrust deploy/control-plane-app -c init-db | grep -i bootstrap
+   ```
+
+3. Sign in, configure SSO ([Platform › SSO](/platform/sso)), and rotate the bootstrap admin password.
+4. From the dashboard, configure your LLM provider keys, integrations, and policies. See [Platform overview](/platform/overview).
+
+## Step 7 — Send traffic through TrustGate
+
+Point your AI applications at `https://gateway.platform.example.com`. Traffic flows through TrustGate → Data Plane → ClickHouse, surfaced by the Control Plane UI you're hosting.
+
+## Verification
+
+```bash
+kubectl get pods -n neuraltrust
+kubectl get ingress -n neuraltrust -o wide
+kubectl get managedcertificate -n neuraltrust
+
+curl https://api.platform.example.com/health
+curl https://app.platform.example.com
+curl https://data-plane-api.platform.example.com/health
+curl https://gateway.platform.example.com/__health
+```
+
+All endpoints should return 200 or redirect to the UI.
+
+## Upgrading
+
+```bash
+helm upgrade neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <NEW_VERSION> \
+  --namespace neuraltrust \
+  -f my-values.yaml
+```
+
+The Control Plane UI runs a Prisma migration on rollout. Watch the `init-db` init container of the new pod for any migration errors before traffic shifts.
+
+## Migration to hybrid
+
+To hand off the Control Plane to NeuralTrust SaaS later, flip the flag and upgrade:
+
+```yaml
+neuraltrust-control-plane:
+  controlPlane:
+    enabled: false
+```
+
+Then enroll the existing Data Plane against your SaaS tenant from the portal — see [GCP hybrid › Step 6](./hybrid#step-6-enroll-the-data-plane-with-neuraltrust-saas).
+
+## Air-gapped GKE
+
+For clusters without outbound internet:
+
+1. Mirror all chart images to your internal Artifact Registry (see [Image catalog › Mirroring](../images#mirroring-images-for-air-gapped-installs)).
+2. Set `global.imageRegistry` to your internal registry.
+3. Configure `global.proxy.*` if egress goes through a forward proxy.
+4. Provide `huggingface.co` mirrors or pre-load Firewall model weights (if using the Firewall with HF token).
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| CP UI shows blank page | CP API URL wrong in config | Verify `api.<domain>` ingress reachable; confirm `controlPlane.components.app.config.apiUrl` |
+| Login fails | Bootstrap credentials not set, or CP DB migration failed | Check `init-db` init container logs |
+| Scheduler not running jobs | Scheduler can't reach Data Plane API | Verify `data-plane-api.<domain>` resolves and TLS is valid |
+| `PVC` stuck `Pending` | Wrong storage class | `kubectl get storageclass`; ensure cluster quota for `pd-ssd` |
+
+## Related guides
+
+- [Hybrid deployment on GKE](./hybrid) — Control Plane on SaaS
+- [GCP overview](./overview) — cluster prerequisites and GCP-specific defaults
+- [Deployment models](../deployment-models) — hybrid vs self-hosted comparison
+- [Image catalog](../images) — what runs in self-hosted mode
+- [Secrets management](../secrets) — auto-generation, External Secrets Operator
+- [Firewall deployment](../firewall) — GPU workers on GKE
+- [Configuration scenarios](../configuration) — external infrastructure modes

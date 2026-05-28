@@ -1,0 +1,335 @@
+---
+title: Azure — Hybrid deployment
+description: Complete walkthrough for deploying the NeuralTrust Data Plane on Azure Kubernetes Service with the Control Plane running on NeuralTrust SaaS. Covers cluster prep, full values overlay, AGIC or NGINX ingress, Key Vault certificates, enrollment, and verification.
+---
+
+This guide walks you end-to-end through a **hybrid deployment** on AKS — the Data Plane, TrustGate, and (optionally) Firewall run in your cluster; the Control Plane UI, API, and Scheduler run on NeuralTrust SaaS.
+
+For the full-stack alternative, see [Azure self-hosted](./self-hosted).
+
+## What you'll end up with
+
+| Component | Location | Replicas |
+|---|---|---|
+| Data Plane API, worker, Kafka Connect | Your AKS cluster | 2, 1, 1 |
+| TrustGate admin / gateway / actions | Your AKS cluster | 2 each |
+| Firewall gateway + 5 workers | Your AKS cluster | 2 + 5 |
+| ClickHouse, Kafka, PostgreSQL, Redis | Your AKS cluster (or external) | 1 each |
+| Control Plane API, UI, Scheduler | **NeuralTrust SaaS** | — |
+
+See [Image catalog](../images) for the full inventory.
+
+## Prerequisites
+
+| Resource | Recommended |
+|---|---|
+| AKS version | 1.28+ |
+| CPU pool node SKU | `Standard_D8s_v5` (8 vCPU / 32 GiB) |
+| Min CPU nodes | **≥ 4** across 3 availability zones. Drop to 3 if Firewall workers run on GPU nodes. |
+| GPU pool *(optional, for GPU Firewall)* | `Standard_NC4as_T4_v3` — 5 nodes (one per default Firewall worker) |
+| Storage | Azure Disk CSI + `managed-csi-premium` (or `managed-csi` for non-prod) |
+| Ingress | AGIC (managed) or NGINX |
+| Certificate | Key Vault cert (AGIC) or cert-manager + Let's Encrypt (NGINX) |
+| Image pull | `gcr-keys.json` from NeuralTrust |
+| NeuralTrust tenant | A SaaS Control Plane tenant — request from [support@neuraltrust.ai](mailto:support@neuraltrust.ai) |
+
+Sizing baseline: ~20.5 vCPU / 58.5 GiB requests / 80 GiB PVC (defaults with CPU Firewall).
+
+## Step 1 — Provision AKS
+
+```bash
+az aks create -g <RG> -n neuraltrust \
+  --node-count 4 \
+  --node-vm-size Standard_D8s_v5 \
+  --zones 1 2 3 \
+  --enable-managed-identity \
+  --network-plugin azure
+
+az aks get-credentials --resource-group <RG> --name neuraltrust
+kubectl get nodes
+```
+
+For self-hosted, bump `--node-count 5` to fit the additional Control Plane footprint.
+
+Enable AGIC or install NGINX (see [Azure overview › Ingress add-on](./overview#ingress-add-on)).
+
+## Step 2 — Namespace and image pull secret
+
+```bash
+kubectl create namespace neuraltrust
+
+kubectl create secret docker-registry gcr-secret \
+  --docker-server=europe-west1-docker.pkg.dev \
+  --docker-username=_json_key \
+  --docker-password="$(cat path/to/gcr-keys.json)" \
+  --docker-email=admin@neuraltrust.ai \
+  -n neuraltrust
+```
+
+## Step 3 — Write your values overlay
+
+<Tabs>
+  <Tab title="AGIC">
+    ```yaml
+    # Hybrid deployment on AKS with AGIC
+    global:
+      platform: "azure"
+      domain: "platform.example.com"
+      storageClass: "managed-csi-premium"
+      autoGenerateSecrets: true
+
+    # Control Plane on NeuralTrust SaaS
+    neuraltrust-control-plane:
+      controlPlane:
+        enabled: false
+      infrastructure:
+        postgresql:
+          deploy: true
+
+    # Data Plane
+    neuraltrust-data-plane:
+      dataPlane:
+        enabled: true
+        components:
+          api:
+            ingress:
+              enabled: true
+              className: "azure-application-gateway"
+              annotations: &agic
+                kubernetes.io/ingress.class: azure/application-gateway
+                appgw.ingress.kubernetes.io/ssl-redirect: "true"
+                appgw.ingress.kubernetes.io/appgw-ssl-certificate: "<KEY_VAULT_CERT_NAME>"
+
+    # TrustGate
+    trustgate:
+      enabled: true
+      global:
+        env:
+          SERVER_BASE_DOMAIN: "platform.example.com"
+      ingress:
+        controlPlane:
+          className: "azure-application-gateway"
+          annotations: *agic
+        dataPlane:
+          className: "azure-application-gateway"
+          annotations: *agic
+        actions:
+          className: "azure-application-gateway"
+          annotations: *agic
+
+    # Firewall
+    neuraltrust-firewall:
+      firewall:
+        enabled: true
+
+    # Infrastructure
+    infrastructure:
+      clickhouse:
+        deploy: true
+      kafka:
+        deploy: true
+    ```
+  </Tab>
+  <Tab title="NGINX + cert-manager">
+    ```yaml
+    # Hybrid deployment on AKS with NGINX
+    global:
+      platform: "azure"
+      domain: "platform.example.com"
+      storageClass: "managed-csi-premium"
+      autoGenerateSecrets: true
+
+    neuraltrust-control-plane:
+      controlPlane:
+        enabled: false
+      infrastructure:
+        postgresql:
+          deploy: true
+
+    neuraltrust-data-plane:
+      dataPlane:
+        enabled: true
+        components:
+          api:
+            ingress:
+              enabled: true
+              className: "nginx"
+              annotations: &nginx
+                cert-manager.io/cluster-issuer: "letsencrypt-prod"
+                nginx.ingress.kubernetes.io/ssl-redirect: "true"
+
+    trustgate:
+      enabled: true
+      global:
+        env:
+          SERVER_BASE_DOMAIN: "platform.example.com"
+      ingress:
+        controlPlane:
+          className: "nginx"
+          annotations: *nginx
+        dataPlane:
+          className: "nginx"
+          annotations: *nginx
+        actions:
+          className: "nginx"
+          annotations: *nginx
+
+    neuraltrust-firewall:
+      firewall:
+        enabled: true
+
+    infrastructure:
+      clickhouse:
+        deploy: true
+      kafka:
+        deploy: true
+    ```
+  </Tab>
+</Tabs>
+
+### Using managed Azure data services
+
+```yaml
+neuraltrust-control-plane:
+  infrastructure:
+    postgresql:
+      deploy: false
+  controlPlane:
+    components:
+      postgresql:
+        secrets:
+          host: "<flexible-server>.postgres.database.azure.com"
+          port: "5432"
+          user: "neuraltrust"
+          password: ""
+          database: "neuraltrust"
+
+infrastructure:
+  clickhouse:
+    deploy: false
+    external:
+      host: "your-tenant.azure.clickhouse.cloud"
+      port: "8443"
+      user: "neuraltrust"
+      password: ""
+      database: "neuraltrust"
+  kafka:
+    deploy: false
+    external:
+      bootstrapServers: "<event-hubs-namespace>.servicebus.windows.net:9093"
+```
+
+Event Hubs Kafka surface requires SASL/PLAIN over TLS on port 9093. The chart does **not** auto-wire SASL today — inject the credentials via `extraEnv` on each Kafka consumer:
+
+```yaml
+neuraltrust-data-plane:
+  dataPlane:
+    components:
+      api: &eh-env
+        extraEnv:
+          - name: KAFKA_BOOTSTRAP_SERVERS
+            value: "<event-hubs-namespace>.servicebus.windows.net:9093"
+          - name: KAFKA_SECURITY_PROTOCOL
+            value: "SASL_SSL"
+          - name: KAFKA_SASL_MECHANISM
+            value: "PLAIN"
+          - name: KAFKA_SASL_USERNAME
+            value: "$ConnectionString"
+          - name: KAFKA_SASL_PASSWORD
+            valueFrom:
+              secretKeyRef: { name: eventhubs-auth, key: connection-string }
+      worker: *eh-env
+```
+
+See [Feature flags › Authentication for external Kafka](../feature-flags#authentication-for-external-kafka) for the full pattern.
+
+## Step 4 — Install
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust \
+  -f my-values.yaml
+
+kubectl get pods -n neuraltrust -w
+```
+
+## Step 5 — DNS
+
+```bash
+kubectl get ingress -n neuraltrust -o wide
+```
+
+For AGIC, look up the Application Gateway's public IP / FQDN; for NGINX, get the LoadBalancer service's external IP. Create A / CNAME records in Azure DNS for each platform host (`data-plane-api.*`, `admin.*`, `gateway.*`, `actions.*`).
+
+## Step 6 — Enroll the Data Plane with NeuralTrust SaaS
+
+<Steps>
+  <Step title="Get the Data Plane JWT secret">
+    ```bash
+    kubectl get secret data-plane-jwt-secret -n neuraltrust \
+      -o jsonpath='{.data.DATA_PLANE_JWT_SECRET}' | base64 -d
+    ```
+  </Step>
+  <Step title="Open the NeuralTrust portal">
+    Log in at the URL provided by NeuralTrust.
+  </Step>
+  <Step title="Connect the Data Plane">
+    **Team Settings → Advanced → Connect Data Plane**. Provide the Data Plane API URL, JWT secret, and region. See [Platform › Advanced](/platform/advanced).
+  </Step>
+  <Step title="Verify connectivity">
+    On success, your data plane shows as **Connected** in the portal and dashboards populate once traffic starts flowing.
+  </Step>
+</Steps>
+
+## Step 7 — Send traffic through TrustGate
+
+Point your AI applications at `https://gateway.platform.example.com`. See [TrustGate › Getting started](/trustgate/getting-started/overview) for plugin and route configuration.
+
+## Verification
+
+```bash
+kubectl get pods -n neuraltrust
+kubectl get ingress -n neuraltrust -o wide
+curl https://data-plane-api.platform.example.com/health
+curl https://gateway.platform.example.com/__health
+```
+
+## Upgrading
+
+```bash
+helm upgrade neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <NEW_VERSION> \
+  --namespace neuraltrust \
+  -f my-values.yaml
+```
+
+## Migration to self-hosted
+
+```yaml
+neuraltrust-control-plane:
+  controlPlane:
+    enabled: true
+```
+
+Add DNS for `app.*`, `api.*`, `scheduler.*`. See [Self-hosted on AKS](./self-hosted) for the full picture.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Portal says "Data Plane unreachable" | DNS not propagated, cert not provisioned, or NSG blocking SaaS | `curl https://data-plane-api.<domain>/health` from outside the VNet |
+| AGIC ingress without IP | Application Gateway subnet sized too small, or NSG blocking AGIC ↔ pod | Check AGIC logs |
+| `PVC` stuck `Pending` | Storage class missing or quota exhausted | `kubectl get storageclass`; check subscription quota |
+| TrustGate can't reach Firewall | Service name mismatch | Default is `http://firewall:80` — verify `NEURAL_TRUST_FIREWALL_URL` |
+
+## Related guides
+
+- [Self-hosted deployment on AKS](./self-hosted) — Control Plane in your cluster
+- [Azure overview](./overview) — cluster prerequisites and Azure-specific defaults
+- [Deployment models](../deployment-models) — hybrid vs self-hosted comparison
+- [Image catalog](../images) — what runs in hybrid mode
+- [Secrets management](../secrets) — auto-generation, External Secrets Operator
+- [Firewall deployment](../firewall) — GPU workers on AKS

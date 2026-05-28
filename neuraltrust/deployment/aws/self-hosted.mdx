@@ -1,0 +1,297 @@
+---
+title: AWS — Self-hosted deployment
+description: Complete walkthrough for deploying the full NeuralTrust Platform (Control Plane + Data Plane + TrustGate + Firewall) on Amazon EKS. Covers cluster prep, full values overlay, ALB ingress for every component, ACM, and verification.
+---
+
+This guide walks you end-to-end through a **fully self-hosted deployment** on EKS — Control Plane API, UI, and Scheduler run in your cluster alongside the Data Plane, TrustGate, and Firewall.
+
+For the SaaS-hosted Control Plane alternative, see [AWS hybrid](./hybrid).
+
+## What you'll end up with
+
+| Component | Location | Replicas |
+|---|---|---|
+| Control Plane API, UI, Scheduler | Your EKS cluster | 2, 2, 1 |
+| Data Plane API, worker, Kafka Connect | Your EKS cluster | 2, 1, 1 |
+| TrustGate admin / gateway / actions | Your EKS cluster | 2 each |
+| Firewall gateway + 5 workers | Your EKS cluster | 2 + 5 |
+| ClickHouse, Kafka, PostgreSQL, Redis | Your EKS cluster (or external) | 1 each |
+
+Sizing baseline: ~21–23 vCPU / 45–50 GiB RAM / 80 GiB PVC. See [Image catalog](../images) for the full inventory.
+
+## Prerequisites
+
+| Resource | Recommended |
+|---|---|
+| EKS version | 1.28+ |
+| CPU pool node type | `m5.2xlarge` or `m6i.2xlarge` (8 vCPU / 32 GiB) |
+| Min CPU nodes | **≥ 5** across 3 AZs. Drop to 4 if Firewall workers run on GPU nodes. |
+| GPU pool *(optional, for GPU Firewall)* | `g4dn.xlarge` — 5 nodes (one per default Firewall worker) |
+| Sizing baseline | ~23.1 vCPU / 61.8 GiB requests / 80 GiB PVC (defaults, CPU Firewall) |
+| Storage | EBS CSI driver + `gp3` (or `io2` for ClickHouse) |
+| Ingress | AWS Load Balancer Controller v2.6+ |
+| Certificate | ACM cert covering `*.<your-domain>` |
+| DNS | Route 53 hosted zone (or any DNS provider) |
+| Image pull | `gcr-keys.json` from NeuralTrust |
+
+## Step 1 — Provision EKS and add-ons
+
+Same as the hybrid guide — see [AWS hybrid › Step 1](./hybrid#step-1-provision-eks-and-add-ons). Self-hosted has identical cluster requirements aside from a slightly higher CPU/memory headroom for CP components.
+
+## Step 2 — Namespace and image pull secret
+
+```bash
+kubectl create namespace neuraltrust
+
+kubectl create secret docker-registry gcr-secret \
+  --docker-server=europe-west1-docker.pkg.dev \
+  --docker-username=_json_key \
+  --docker-password="$(cat path/to/gcr-keys.json)" \
+  --docker-email=admin@neuraltrust.ai \
+  -n neuraltrust
+```
+
+## Step 3 — Request the ACM certificate
+
+```bash
+aws acm request-certificate \
+  --domain-name "*.platform.example.com" \
+  --validation-method DNS \
+  --region <REGION>
+```
+
+Add the CNAME validation record in Route 53; cert issuance takes a few minutes.
+
+## Step 4 — Write your values overlay
+
+Save as `my-values.yaml`:
+
+```yaml
+# Self-hosted deployment on EKS
+global:
+  platform: "aws"
+  domain: "platform.example.com"
+  storageClass: "gp3"
+  autoGenerateSecrets: true
+
+# Control Plane in your cluster
+neuraltrust-control-plane:
+  controlPlane:
+    enabled: true                       # ← key difference from hybrid
+    components:
+      api:
+        enabled: true
+        ingress:
+          enabled: true
+          annotations: &alb
+            alb.ingress.kubernetes.io/scheme: internet-facing
+            alb.ingress.kubernetes.io/target-type: ip
+            alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+            alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:<REGION>:<ACCOUNT_ID>:certificate/<CERT_ID>"
+      app:
+        enabled: true
+        ingress:
+          enabled: true
+          annotations: *alb
+      scheduler:
+        enabled: true
+        ingress:
+          enabled: true
+          annotations: *alb
+  infrastructure:
+    postgresql:
+      deploy: true
+
+# Data Plane
+neuraltrust-data-plane:
+  dataPlane:
+    enabled: true
+    components:
+      api:
+        ingress:
+          enabled: true
+          annotations: *alb
+
+# TrustGate
+trustgate:
+  enabled: true
+  global:
+    env:
+      SERVER_BASE_DOMAIN: "platform.example.com"
+  ingress:
+    controlPlane:
+      annotations: *alb
+    dataPlane:
+      annotations: *alb
+    actions:
+      annotations: *alb
+
+# Firewall
+neuraltrust-firewall:
+  firewall:
+    enabled: true
+
+# Infrastructure
+infrastructure:
+  clickhouse:
+    deploy: true
+    persistence:
+      storageClass: "io2"
+      size: 200Gi
+  kafka:
+    deploy: true
+```
+
+<Tip>
+The YAML anchor `&alb` and alias `*alb` deduplicate the ALB annotation block across all ingresses. Helm renders it verbatim — no special action required.
+</Tip>
+
+### Using managed AWS data services (recommended for production)
+
+```yaml
+neuraltrust-control-plane:
+  infrastructure:
+    postgresql:
+      deploy: false
+  controlPlane:
+    components:
+      postgresql:
+        secrets:
+          host: "<rds-endpoint>.rds.amazonaws.com"
+          port: "5432"
+          user: "neuraltrust"
+          password: ""
+          database: "neuraltrust"
+
+infrastructure:
+  clickhouse:
+    deploy: false
+    external:
+      host: "your-tenant.aws.clickhouse.cloud"
+      port: "8443"
+      user: "neuraltrust"
+      password: ""
+      database: "neuraltrust"
+  kafka:
+    deploy: false
+    external:
+      bootstrapServers: "b-1.msk-cluster.<id>.kafka.<REGION>.amazonaws.com:9092"
+```
+
+<Note>
+**ClickHouse Cloud** has a [native-port caveat](../feature-flags#required-clickhouse-cloud-caveat) — review before installing. **MSK with IAM auth** requires `extraEnv` + a custom signer image; see [Authentication for external Kafka](../feature-flags#authentication-for-external-kafka).
+</Note>
+
+## Step 5 — Install
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust \
+  -f my-values.yaml
+
+kubectl get pods -n neuraltrust -w
+```
+
+Initial install takes 4–6 minutes.
+
+## Step 6 — DNS
+
+Get the ALB hostnames:
+
+```bash
+kubectl get ingress -n neuraltrust -o wide
+```
+
+Self-hosted exposes:
+
+| Host | Component | Required |
+|---|---|---|
+| `app.platform.example.com` | Control Plane UI | ✅ |
+| `api.platform.example.com` | Control Plane API | ✅ |
+| `scheduler.platform.example.com` | Control Plane Scheduler | ✅ |
+| `data-plane-api.platform.example.com` | Data Plane API | ✅ |
+| `admin.platform.example.com` | TrustGate admin | ✅ |
+| `gateway.platform.example.com` | TrustGate proxy | ✅ |
+| `actions.platform.example.com` | TrustGate actions | ✅ |
+
+Create CNAME records in Route 53 pointing each host at the ALB hostname.
+
+## Step 7 — First login to the Control Plane
+
+1. Open `https://app.platform.example.com`.
+2. Get the bootstrap credentials:
+
+   ```bash
+   kubectl logs -n neuraltrust deploy/control-plane-app -c init-db | grep -i bootstrap
+   ```
+
+3. Sign in, configure SSO ([Platform › SSO](/platform/sso)), and rotate the bootstrap admin password.
+4. From the dashboard, configure LLM providers, integrations, and policies.
+
+## Step 8 — Send traffic through TrustGate
+
+Point your AI applications at `https://gateway.platform.example.com`. Telemetry flows through TrustGate → Data Plane → ClickHouse, surfaced by your self-hosted Control Plane UI.
+
+## Verification
+
+```bash
+kubectl get pods -n neuraltrust
+kubectl get ingress -n neuraltrust -o wide
+
+curl https://api.platform.example.com/health
+curl https://app.platform.example.com
+curl https://data-plane-api.platform.example.com/health
+curl https://gateway.platform.example.com/__health
+```
+
+## Upgrading
+
+```bash
+helm upgrade neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <NEW_VERSION> \
+  --namespace neuraltrust \
+  -f my-values.yaml
+```
+
+The Control Plane UI runs a Prisma migration on rollout — watch the `init-db` init container of the new pod for migration errors.
+
+## Migration to hybrid
+
+Flip the flag and upgrade; enroll your existing Data Plane with the SaaS Control Plane afterwards:
+
+```yaml
+neuraltrust-control-plane:
+  controlPlane:
+    enabled: false
+```
+
+See [AWS hybrid › Step 7](./hybrid#step-7-enroll-the-data-plane-with-neuraltrust-saas).
+
+## Air-gapped EKS
+
+1. Mirror chart images to ECR (see [Image catalog › Mirroring](../images#mirroring-images-for-air-gapped-installs)).
+2. Set `global.imageRegistry` to your ECR repo.
+3. Configure `global.proxy.*` if egress goes through a forward proxy.
+4. Pre-load Firewall model weights or mirror `huggingface.co`.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| CP UI shows blank page | API URL wrong | Verify `api.<domain>` ingress and config |
+| Login fails | DB migration failed | `kubectl logs -c init-db` on CP UI pod |
+| Scheduler not running jobs | Can't reach Data Plane API | Verify `data-plane-api.<domain>` and TLS |
+| `PVC` stuck `Pending` | EBS CSI missing | Verify addon installed |
+
+## Related guides
+
+- [Hybrid deployment on EKS](./hybrid) — Control Plane on SaaS
+- [AWS overview](./overview) — cluster prerequisites and AWS-specific defaults
+- [Deployment models](../deployment-models) — hybrid vs self-hosted comparison
+- [Image catalog](../images) — what runs in self-hosted mode
+- [Secrets management](../secrets) — auto-generation, External Secrets Operator
+- [Firewall deployment](../firewall) — GPU workers on EKS
+- [Configuration scenarios](../configuration) — external infrastructure modes
