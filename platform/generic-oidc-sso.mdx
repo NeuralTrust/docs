@@ -29,6 +29,14 @@ Before configuring Generic OIDC SSO, ensure you have:
 
 ---
 
+## Important: One SSO Provider at a Time
+
+<Warning>
+Only **Microsoft Entra ID** **or** **Generic OIDC** can be configured at a time—not both. To switch providers, delete the current provider's configuration first.
+</Warning>
+
+---
+
 ## Configuration Fields
 
 | Field | Required | Description |
@@ -38,6 +46,15 @@ Before configuring Generic OIDC SSO, ensure you have:
 | **Client Secret** | Yes | The client secret (stored encrypted) |
 | **Display Name** | No | Custom name shown on the login button (e.g., "Sign in with Okta") |
 | **Scopes** | No | OAuth scopes to request (default: `openid profile email`) |
+| **Trust Identity Provider** | No | When enabled, users authenticated by the IdP can join the team without DNS email-domain verification. Default: off. |
+| **Role Mapping from IdP** | No | When enabled, extracts team role from an OIDC token claim and maps IdP values to NeuralTrust roles. |
+| **Role Claim Name** | When role mapping enabled | Exact claim key in the token (e.g., `role`, `roles`, `groups`). |
+| **Role Mappings** | When role mapping enabled | Map IdP claim values to `Admin` or `Member`. Keys are case-sensitive. |
+| **Default Role** | No | Role when claim is missing or unmatched. Default: `Member`. |
+| **Require IdP role match** | No | OIDC only. Deny login if no claim value maps to a NeuralTrust role. Default: off. |
+| **Sync team role from IdP on login** | No | OIDC only. Update the user's team role on every OIDC login from IdP. Default: off. |
+| **Session Policy** | No | `Align with IdP id_token.exp` (default, recommended) or `Fixed app-defined cap`. |
+| **Fixed session cap** | When Fixed policy selected | Duration in minutes (5 min – 30 days; default 24 h if empty). |
 
 ---
 
@@ -51,10 +68,22 @@ Before configuring Generic OIDC SSO, ensure you have:
 
 | Setting | Value |
 |---------|-------|
-| **Sign-in redirect URI** | `https://app.neuraltrust.ai/api/auth/callback/oidc` |
+| **Sign-in redirect URI** | See [Redirect URI](#redirect-uri) below |
 | **Sign-out redirect URI** | `https://app.neuraltrust.ai` (optional) |
 | **Grant types** | Authorization Code |
 | **Scopes** | `openid`, `profile`, `email` |
+
+#### Redirect URI
+
+Register the exact callback URL shown in the in-app setup guide. The path is always `/api/auth/callback/oidc`; the origin depends on your environment:
+
+| Environment | Redirect URI |
+|-------------|--------------|
+| Production (default) | `https://app.neuraltrust.ai/api/auth/callback/oidc` |
+| Custom domain | `https://{your-custom-domain}/api/auth/callback/oidc` |
+| Local dev (`SSO_LOCAL_TEST=true`) | `http://localhost:3000/api/auth/callback/oidc` |
+
+The in-app setup guide shows the **dynamic** callback URL based on the current origin.
 
 ### Step 2: Copy Credentials
 
@@ -65,49 +94,196 @@ From your identity provider, copy:
 
 ### Step 3: Configure in NeuralTrust
 
-1. Navigate to <a href="https://app.neuraltrust.ai/settings/sso" target="_blank">**Settings** → **SSO**</a>
-2. Click the **Generic OIDC** tab
-3. Click **Edit** to enable editing mode
-4. Enter your credentials:
+1. Navigate to **Team Settings** → **SSO** → tab **Generic OIDC**
+   - URL pattern: `https://app.neuraltrust.ai/{locale}/{teamId}/settings/sso`
+2. Click **Edit** to enable editing mode
+3. In the **Generic OIDC Configuration** section, enter your credentials:
    - **Issuer URL**: Paste your issuer URL
    - Click **Validate** to verify the OIDC discovery endpoint
    - **Client ID**: Paste your client ID
    - **Client Secret**: Paste your client secret
    - **Display Name**: (Optional) Custom button text
    - **Scopes**: (Optional) Additional scopes if needed
+4. Optionally configure [Trust Identity Provider](#trust-identity-provider), [Role Mapping from IdP](#role-mapping-from-idp), and [Session Policy](#session-policy)
 5. Click **Save**
 
 ### Step 4: Verify Email Domains
 
 After configuring OIDC:
 
-1. Scroll down to **Email Domains** section
+1. Scroll down to the **Email Domains** section (shared across SSO providers)
 2. Add your corporate email domain(s)
 3. Complete DNS verification (see [Email Domain Verification](#email-domain-verification) below)
 
-### Step 5: Configure Break Glass Users (Recommended)
+---
 
-Before enforcing SSO:
+## Trust Identity Provider
 
-1. In the **Generic OIDC** tab, find the **Break Glass Users** section
-2. Add 1-3 administrator emails who can log in with password during emergencies
-3. Click **Save**
+**UI label:** Trust Identity Provider  
+**Default:** disabled
 
-<Note>
-Break Glass Users are configured per SSO provider. If you have both Microsoft Entra ID and Generic OIDC, each has its own Break Glass configuration.
-</Note>
+When **Trust Identity Provider** is enabled:
 
-### Step 6: Enable SSO Enforcement (Optional)
+- Any user successfully authenticated by your OIDC IdP can join the team **without** DNS verification of their email domain.
+- New users are provisioned on first SSO login (subject to normal team access rules).
 
-When ready to require SSO for all users:
+When disabled (default):
 
-1. Enable the **Enforce SSO** toggle
-2. Confirm the warning about password login being disabled
-3. Users will now be required to authenticate via your OIDC provider
+- New users must either already be team members **or** belong to a **verified** email domain configured under Email Domains.
 
 <Warning>
-Before enabling SSO Enforcement, ensure you have configured Break Glass Users to prevent being locked out during identity provider outages.
+Only enable Trust Identity Provider if you fully trust the IdP to authenticate authorized users only. This bypasses domain ownership verification for user provisioning.
 </Warning>
+
+**Interaction with Email Domains:** Domain verification still matters for team discovery and security when Trust IdP is off. With Trust IdP on, unverified domains do not block IdP-authenticated users from joining.
+
+---
+
+## Role Mapping from IdP
+
+**UI label:** Role Mapping from IdP  
+**Default:** disabled
+
+Automatically assign **Admin** or **Member** team roles during OIDC login based on token claims.
+
+### Setup Steps
+
+1. Enable **Role Mapping from IdP**.
+2. Set **Role Claim Name** to the exact claim key from your IdP token.
+3. Add **Role Mappings**: IdP claim value → NeuralTrust role (`Admin` or `Member`).
+4. Set **Default Role** for users whose claim is missing or has no matching mapping.
+
+### How Mapping Works
+
+| Rule | Detail |
+|------|--------|
+| Assignable roles | **Admin** and **Member** only |
+| Owner role | **Never** assignable from IdP (blocked server-side) |
+| Claim source | Verified **ID token**, merged with **UserInfo** endpoint when the IdP exposes one (UserInfo claims overlay ID token claims) |
+| Scalar claims | A single string value is matched against mapping keys |
+| Array claims | All string values in the array are evaluated (e.g. a `groups` array claim) |
+| Case sensitivity | Mapping keys must match IdP values **exactly** |
+| Multiple matches | Highest privilege wins: **Admin** > **Member** |
+| No match | **Default Role** is applied (default: Member) |
+| Existing members (default) | Role is assigned on **first join** only; subsequent logins **preserve** the existing team role unless sync is enabled (see [Federated role policy](#federated-role-policy-oidc-only)) |
+
+### Example: Multi-Value Group Claim
+
+```text
+Role Claim Name: groups
+
+Mappings:
+  nt-admins   → Admin
+  nt-members  → Member
+
+Default Role: Member
+```
+
+User token:
+
+```json
+{
+  "groups": [
+    "nt-platform-admins",
+    "nt-members",
+    "engineering-team"
+  ]
+}
+```
+
+Result: **Member** (matched `nt-members`).
+
+If the array also contains `nt-admins`, result is **Admin** (Admin wins over Member).
+
+### Example: Scalar Role Claim
+
+```text
+Role Claim Name: role
+
+Mappings:
+  admin-user → Admin
+  staff      → Member
+
+Default Role: Member
+```
+
+Token `{ "role": "admin-user" }` → **Admin**.
+
+<Note>
+Role mapping for Generic OIDC uses **token claims**. Microsoft Entra ID uses a separate **Azure AD Group Sync** mechanism on the [Entra tab](/platform/sso)—not claim mapping. Do not conflate the two.
+</Note>
+
+### Federated Role Policy (OIDC Only)
+
+Two optional toggles appear when **Role Mapping from IdP** is enabled. Both default to **off**. They apply **only to Generic OIDC**, not Entra ID.
+
+#### Require IdP Role Match
+
+When enabled:
+
+- Login is **denied** if **no** value in the configured claim maps to a NeuralTrust role.
+- The user is **not** created in the team for that login attempt.
+- Redirect: `/login?error=insufficient_role`
+- User-facing message: *Access denied: your account does not have a role assigned for this team. Contact your administrator.*
+
+Requirements before enabling:
+
+- Role Mapping from IdP must be on
+- Role Claim Name must be set
+- At least one role mapping must be configured
+
+<Warning>
+Test mappings thoroughly before enabling. Any authenticated user without a mapped claim value will be blocked—even if a Default Role is configured. Default Role does **not** bypass this gate; the claim must contain at least one mapped value.
+</Warning>
+
+#### Sync Team Role from IdP on Login
+
+When enabled:
+
+- The user's NeuralTrust team role is **updated on every OIDC login** to reflect their current IdP role mapping.
+- Promotions and demotions in the IdP take effect on the next login.
+
+Safeguard:
+
+- The **last administrator** of a team (sole Admin or Owner) is **never automatically downgraded**. Their role is preserved silently on login.
+
+When disabled (default):
+
+- Existing team members **keep their current role** on subsequent logins; mapping applies only when the user first joins the team.
+
+#### Behavior Matrix
+
+| Scenario | Require IdP role match off | Require IdP role match on |
+|----------|---------------------------|---------------------------|
+| Claim has no mapped value | Login OK → Default Role | Login **denied** |
+| Claim has mapped value | Mapped role applied | Mapped role applied |
+| Existing member, sync off | Role **unchanged** | Role unchanged (if login allowed) |
+| Existing member, sync on | Role **updated** from IdP | Role updated (if login allowed) |
+
+---
+
+## Session Policy
+
+**UI label:** Session Policy  
+**Default:** Align with IdP `id_token.exp` (recommended)
+
+Controls how long the NeuralTrust application session lasts relative to the IdP.
+
+| Option | Value | Behavior |
+|--------|-------|----------|
+| **Align with IdP id_token.exp (recommended)** | `idp_exp` | Session expires when the IdP ID token expires. NeuralTrust defers fully to the IdP session lifetime. |
+| **Fixed app-defined cap** | `fixed` | Session expires after a fixed duration, regardless of IdP token lifetime. |
+
+When **Fixed** is selected:
+
+- Configure **Fixed session cap** in **minutes**.
+- Allowed range: **5 minutes** to **30 days**.
+- If left empty, default cap is **24 hours** (1440 minutes).
+- A minimum floor of 60 seconds is always applied to avoid immediately expired sessions (clock skew protection).
+
+<Note>
+Session Policy is available for both Generic OIDC and Microsoft Entra ID (same UI component).
+</Note>
 
 ---
 
@@ -162,6 +338,38 @@ A verification token will be displayed. Add a TXT record to your DNS:
 | **Verified** ✓ | Domain ownership confirmed | Domain is active for SSO |
 | **Failed** ✗ | Verification unsuccessful | Check DNS record and retry |
 
+If **Trust Identity Provider** is enabled, new users authenticated by the IdP can join without a verified domain. If Trust IdP is disabled, new users need a verified domain or an existing team membership.
+
+---
+
+## Break Glass Users
+
+Configure emergency password access before enforcing SSO.
+
+1. On the **Generic OIDC** tab, scroll below the OIDC credentials form to find **Break the Glass Users** (below **SSO Enforcement**)
+2. Add up to **10** administrator emails who can log in with password during emergencies
+3. Click **Save**
+
+<Note>
+Break-glass lists are **per provider**. Because only one SSO provider can be active at a time, you configure break-glass users for whichever provider is currently enabled. See [Break the Glass](/platform/break-glass) for full details.
+</Note>
+
+**Requirements:** Users must already exist in NeuralTrust, have a password set, and be team members.
+
+---
+
+## Enable SSO Enforcement
+
+When ready to require SSO for all users:
+
+1. On the **Generic OIDC** tab, enable the **Enforce SSO** toggle (below the credentials form)
+2. Confirm the warning about password login being disabled
+3. Users will now be required to authenticate via your OIDC provider
+
+<Warning>
+Before enabling SSO Enforcement, ensure you have configured [Break Glass Users](#break-glass-users) to prevent being locked out during identity provider outages.
+</Warning>
+
 ---
 
 ## Provider-Specific Guides
@@ -171,7 +379,7 @@ A verification token will be displayed. Add a TXT record to your DNS:
     1. Go to **Applications** → **Create App Integration**
     2. Select **OIDC - OpenID Connect** and **Web Application**
     3. Configure:
-       - **Sign-in redirect URI**: `https://app.neuraltrust.ai/api/auth/callback/oidc`
+       - **Sign-in redirect URI**: Use the callback URL from the in-app setup guide (production: `https://app.neuraltrust.ai/api/auth/callback/oidc`)
        - **Assignments**: Assign users/groups who should access NeuralTrust
     4. Copy **Client ID** and **Client Secret** from the application settings
     5. Your **Issuer URL** is: `https://your-org.okta.com`
@@ -181,14 +389,14 @@ A verification token will be displayed. Add a TXT record to your DNS:
     1. Go to **Applications** → **Create Application**
     2. Select **Regular Web Applications**
     3. In **Settings**:
-       - **Allowed Callback URLs**: `https://app.neuraltrust.ai/api/auth/callback/oidc`
+       - **Allowed Callback URLs**: Use the callback URL from the in-app setup guide (production: `https://app.neuraltrust.ai/api/auth/callback/oidc`)
     4. Copy **Domain** (this is your Issuer URL with `https://`), **Client ID**, and **Client Secret**
   </Accordion>
 
   <Accordion title="Google Workspace">
     1. Go to <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a> → **APIs & Services** → **Credentials**
     2. Create **OAuth 2.0 Client ID** (Web application)
-    3. Add **Authorized redirect URI**: `https://app.neuraltrust.ai/api/auth/callback/oidc`
+    3. Add **Authorized redirect URI**: Use the callback URL from the in-app setup guide (production: `https://app.neuraltrust.ai/api/auth/callback/oidc`)
     4. Copy **Client ID** and **Client Secret**
     5. **Issuer URL**: `https://accounts.google.com`
   </Accordion>
@@ -197,7 +405,7 @@ A verification token will be displayed. Add a TXT record to your DNS:
     1. Go to your Keycloak admin console
     2. Create a new **Client** with:
        - **Client type**: OpenID Connect
-       - **Valid redirect URIs**: `https://app.neuraltrust.ai/api/auth/callback/oidc`
+       - **Valid redirect URIs**: Use the callback URL from the in-app setup guide (production: `https://app.neuraltrust.ai/api/auth/callback/oidc`)
     3. Copy **Client ID** from General Settings
     4. Go to **Credentials** tab and copy **Client Secret**
     5. **Issuer URL**: `https://your-keycloak-domain/realms/your-realm`
@@ -208,18 +416,25 @@ A verification token will be displayed. Add a TXT record to your DNS:
 
 ## Troubleshooting
 
-| Error | Solution |
-|-------|----------|
-| `Invalid issuer` | Verify the Issuer URL is correct and supports OIDC Discovery |
-| `Client authentication failed` | Check Client ID and Client Secret are correct |
-| `Redirect URI mismatch` | Ensure `https://app.neuraltrust.ai/api/auth/callback/oidc` is registered |
-| `User not authorized` | Verify the user's email domain is verified in NeuralTrust |
-| `Discovery endpoint not found` | Add `/.well-known/openid-configuration` to verify your issuer URL supports discovery |
+| Error / Symptom | Cause | Solution |
+|-----------------|-------|----------|
+| `insufficient_role` | **Require IdP role match** is on and no claim value maps to Admin/Member | Verify Role Claim Name, mappings, and IdP groups/roles for the user |
+| `domain_not_verified` | New user; email domain added but DNS not verified | Complete DNS TXT verification or enable Trust IdP (if appropriate) |
+| `unauthorized_team_access` | Email domain not verified and user is not a team member | Add and verify domain, invite user, or enable Trust IdP |
+| `User not authorized` | Generic (legacy message) | See rows above |
+| Wrong role on first login | Mapping misconfiguration | Check case-sensitive keys; for array claims verify all group values |
+| Role not updating on later logins | Sync disabled | Enable **Sync team role from IdP on login** |
+| Admin not demoted after IdP change | Sole-admin safeguard | Expected—add another admin before demotion can apply |
+| `Redirect URI mismatch` | Callback not registered | Register the exact URL shown in the in-app setup guide (includes custom domains) |
+| `Invalid issuer` | Issuer URL wrong or no OIDC Discovery | Verify issuer; ensure `/.well-known/openid-configuration` resolves |
+| `Discovery endpoint not found` | Same as above | Use base issuer URL without the discovery path suffix |
+| `Client authentication failed` | Invalid credentials | Check Client ID and Client Secret are correct |
 
 ---
 
 ## Related Documentation
 
-- [Microsoft Entra ID SSO](/platform/sso) — SSO with Microsoft corporate credentials
+- [Microsoft Entra ID SSO](/platform/sso) — SSO with Microsoft corporate credentials and Azure AD group sync
 - [Break the Glass](/platform/break-glass) — Emergency access configuration
 - [Audit Logs](/platform/audit-logs) — Monitor SSO-related security events
+- [SCIM Provisioning](/platform/scim) — Automated user provisioning (separate from OIDC SSO)
