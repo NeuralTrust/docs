@@ -1,0 +1,266 @@
+---
+title: Vanilla Kubernetes — Hybrid deployment
+description: Complete walkthrough for deploying the NeuralTrust Data Plane on any conformant Kubernetes cluster with the Control Plane running on NeuralTrust SaaS. Covers prerequisites, full values overlay, NGINX or Traefik ingress, cert-manager TLS, enrollment, and verification.
+---
+
+This guide walks you end-to-end through a **hybrid deployment** on any Kubernetes 1.24+ cluster — on-prem, bare metal, k3s, RKE2, Civo, DigitalOcean, IBM IKS, OKE, and so on. The Data Plane, TrustGate, and Firewall run in your cluster; the Control Plane UI, API, and Scheduler run on NeuralTrust SaaS.
+
+If you're on EKS / AKS / GKE / OpenShift, prefer the dedicated guide for richer integrations.
+
+For the full-stack alternative, see [Vanilla Kubernetes self-hosted](./self-hosted).
+
+## What you'll end up with
+
+| Component | Location | Replicas |
+|---|---|---|
+| Data Plane API, worker, Kafka Connect | Your cluster | 2, 1, 1 |
+| TrustGate admin / gateway / actions | Your cluster | 2 each |
+| Firewall gateway + 5 workers | Your cluster | 2 + 5 |
+| ClickHouse, Kafka, PostgreSQL, Redis | Your cluster (or external) | 1 each |
+| Control Plane API, UI, Scheduler | **NeuralTrust SaaS** | — |
+
+See [Image catalog](../images) for the full inventory.
+
+## Prerequisites
+
+| Resource | Recommended |
+|---|---|
+| Kubernetes version | 1.24+ |
+| CPU pool | **≥ 4 × (8 vCPU / 32 GiB)** for HA. Drop to 3 if Firewall workers run on GPU nodes. |
+| GPU pool *(optional, for GPU Firewall)* | 4 vCPU / 16 GiB + 1 × NVIDIA GPU per node — 5 nodes (one per default Firewall worker) |
+| Storage | Default `StorageClass` with `ReadWriteOnce` PVs |
+| Ingress | NGINX, Traefik, HAProxy, or any conformant controller |
+| TLS | cert-manager with Let's Encrypt or internal CA |
+| DNS | A control over a base domain (e.g. `platform.example.com`) |
+| Image pull | `gcr-keys.json` from NeuralTrust |
+| NeuralTrust tenant | A SaaS Control Plane tenant — request from [support@neuraltrust.ai](mailto:support@neuraltrust.ai) |
+
+Sizing baseline: ~20.5 vCPU / 58.5 GiB requests / 80 GiB PVC (defaults with CPU Firewall).
+
+## Step 1 — Cluster prep
+
+Install:
+
+- An ingress controller (NGINX, Traefik, HAProxy — see [Vanilla Kubernetes overview › Required cluster setup](./overview#required-cluster-setup)).
+- cert-manager (for automated TLS).
+- A storage class with `ReadWriteOnce` support (`local-path`, Longhorn, Rook/Ceph, NFS CSI, etc.).
+- (Bare metal only) MetalLB or an external LB to give the ingress controller an IP.
+
+## Step 2 — Namespace and image pull secret
+
+```bash
+kubectl create namespace neuraltrust
+
+kubectl create secret docker-registry gcr-secret \
+  --docker-server=europe-west1-docker.pkg.dev \
+  --docker-username=_json_key \
+  --docker-password="$(cat path/to/gcr-keys.json)" \
+  --docker-email=admin@neuraltrust.ai \
+  -n neuraltrust
+```
+
+## Step 3 — Write your values overlay
+
+Save as `my-values.yaml`:
+
+```yaml
+# Hybrid deployment on vanilla Kubernetes
+global:
+  platform: "kubernetes"
+  domain: "platform.example.com"
+  storageClass: ""               # use cluster default; or specify e.g. "longhorn"
+  autoGenerateSecrets: true
+
+# Control Plane disabled — runs on NeuralTrust SaaS
+neuraltrust-control-plane:
+  controlPlane:
+    enabled: false
+  infrastructure:
+    postgresql:
+      deploy: true        # for TrustGate admin metadata
+
+# Data Plane in your cluster
+neuraltrust-data-plane:
+  dataPlane:
+    enabled: true
+    components:
+      api:
+        ingress:
+          enabled: true
+          className: "nginx"
+          annotations: &nginx
+            cert-manager.io/cluster-issuer: "letsencrypt-prod"
+            nginx.ingress.kubernetes.io/ssl-redirect: "true"
+
+# TrustGate
+trustgate:
+  enabled: true
+  global:
+    env:
+      SERVER_BASE_DOMAIN: "platform.example.com"
+  ingress:
+    controlPlane:
+      className: "nginx"
+      annotations: *nginx
+    dataPlane:
+      className: "nginx"
+      annotations: *nginx
+    actions:
+      className: "nginx"
+      annotations: *nginx
+
+# Firewall in-cluster
+neuraltrust-firewall:
+  firewall:
+    enabled: true
+
+# Infrastructure
+infrastructure:
+  clickhouse:
+    deploy: true
+  kafka:
+    deploy: true
+```
+
+### Using external infrastructure
+
+```yaml
+infrastructure:
+  clickhouse:
+    deploy: false
+    external:
+      host: "your-tenant.clickhouse.cloud"
+      port: "8443"
+      user: "neuraltrust"
+      password: ""
+      database: "neuraltrust"
+  kafka:
+    deploy: false
+    external:
+      bootstrapServers: "<bootstrap>:9092"
+
+neuraltrust-control-plane:
+  infrastructure:
+    postgresql:
+      deploy: false
+  controlPlane:
+    components:
+      postgresql:
+        secrets:
+          host: "<external-postgres>"
+          port: "5432"
+          user: "neuraltrust"
+          password: ""
+          database: "neuraltrust"
+```
+
+<Note>
+For **ClickHouse Cloud**, see the [native-port caveat](../feature-flags#required-clickhouse-cloud-caveat). For external Kafka with SASL/SCRAM/PLAIN/IAM, see [Authentication for external Kafka](../feature-flags#authentication-for-external-kafka). Pre-create the `neuraltrust` and `trustgate` databases/users on Postgres — see [Required databases & users](../feature-flags#required-databases--users-when-external).
+</Note>
+
+## Step 4 — Install
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust \
+  -f my-values.yaml
+
+kubectl get pods -n neuraltrust -w
+```
+
+## Step 5 — DNS
+
+Get the ingress controller's external IP / hostname:
+
+```bash
+kubectl get svc -n ingress-nginx
+```
+
+Add A / CNAME records pointing each platform host to it:
+
+| Host | Component |
+|---|---|
+| `data-plane-api.platform.example.com` | Data Plane API |
+| `admin.platform.example.com` | TrustGate admin |
+| `gateway.platform.example.com` | TrustGate proxy |
+| `actions.platform.example.com` | TrustGate actions |
+
+Once DNS resolves, cert-manager will issue Let's Encrypt certs (if you used the HTTP-01 solver).
+
+## Step 6 — Enroll the Data Plane with NeuralTrust SaaS
+
+<Steps>
+  <Step title="Get the Data Plane JWT secret">
+    ```bash
+    kubectl get secret data-plane-jwt-secret -n neuraltrust \
+      -o jsonpath='{.data.DATA_PLANE_JWT_SECRET}' | base64 -d
+    ```
+  </Step>
+  <Step title="Open the NeuralTrust portal">
+    Log in at the URL provided by NeuralTrust.
+  </Step>
+  <Step title="Connect the Data Plane">
+    **Team Settings → Advanced → Connect Data Plane**. Provide the Data Plane API URL (`https://data-plane-api.platform.example.com`), the JWT secret, and the region. See [Platform › Advanced](/platform/advanced).
+  </Step>
+  <Step title="Verify connectivity">
+    On success, your data plane shows as **Connected** in the portal.
+  </Step>
+</Steps>
+
+## Step 7 — Send traffic through TrustGate
+
+Point your AI applications at `https://gateway.platform.example.com`. See [TrustGate › Getting started](/trustgate/getting-started/overview) for plugin and route configuration.
+
+## Verification
+
+```bash
+kubectl get pods -n neuraltrust
+kubectl get ingress -n neuraltrust -o wide
+kubectl get certificate -n neuraltrust   # if using cert-manager
+
+curl https://data-plane-api.platform.example.com/health
+curl https://gateway.platform.example.com/__health
+```
+
+In the NeuralTrust portal: Data Plane status **Connected**, TrustGate receiving traffic, Firewall classifying (if enabled).
+
+## Upgrading
+
+```bash
+helm upgrade neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <NEW_VERSION> \
+  --namespace neuraltrust \
+  -f my-values.yaml
+```
+
+## Migration to self-hosted
+
+```yaml
+neuraltrust-control-plane:
+  controlPlane:
+    enabled: true
+```
+
+Add DNS for `app.platform.example.com`, `api.platform.example.com`, `scheduler.platform.example.com`. See [Self-hosted on vanilla Kubernetes](./self-hosted) for the full picture.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Portal says "Data Plane unreachable" | DNS not propagated, cert pending, or firewall blocks the SaaS Control Plane | `curl https://data-plane-api.<domain>/health` from outside your network |
+| cert-manager challenge stuck | DNS not resolving, or ingress can't reach the world for HTTP-01 | `kubectl describe challenge -n neuraltrust` |
+| `PVC` stuck `Pending` | No default storage class | Mark one default and re-apply |
+| Pods OOMKilled | Under-sized nodes | Scale node spec or reduce replica counts in values |
+| TrustGate can't reach Firewall | Service name mismatch | Default is `http://firewall:80` |
+
+## Related guides
+
+- [Self-hosted deployment on vanilla Kubernetes](./self-hosted) — Control Plane in your cluster
+- [Vanilla Kubernetes overview](./overview) — cluster prerequisites
+- [Deployment models](../deployment-models) — hybrid vs self-hosted comparison
+- [Image catalog](../images) — what runs in hybrid mode
+- [Secrets management](../secrets) — auto-generation, External Secrets Operator
+- [Firewall deployment](../firewall) — GPU workers

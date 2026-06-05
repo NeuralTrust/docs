@@ -1,50 +1,105 @@
 ---
-title: Architecture
-description: NeuralTrust's high-level architecture — control plane, data plane, deployment modes, and the components that run in each.
+title: Deployment overview
+description: Where the NeuralTrust Platform runs, how the architecture is laid out, and how to pick the right combination of cloud and deployment model for your environment.
 ---
 
-# NeuralTrust architecture
+NeuralTrust ships as a single unified Helm chart — `neuraltrust-platform` — that runs on any Kubernetes cluster: AWS EKS, Google GKE, Azure AKS, Red Hat OpenShift, or vanilla Kubernetes (including on-prem and air-gapped).
 
-NeuralTrust provides enterprise-grade AI security protection, testing, and vulnerability management through a distributed architecture designed for scalability, security, and performance. The platform operates with a unique **data sovereignty model** where your Data Plane runs entirely within your cloud environment while the Control Plane operates in NeuralTrust's secure infrastructure.
+You make two decisions before installing:
 
-## High-Level Architecture
+1. **Where** does it run? → pick your cloud / platform
+2. **What** runs in your cluster? → pick your deployment model
+
+Everything else is covered by the chart's defaults.
+
+## 1. Pick your deployment model
+
+| Model | Control Plane | Data Plane | Best for |
+|---|---|---|---|
+| [**Hybrid**](./deployment-models#hybrid-data-plane-in-your-environment) *(chart default)* | NeuralTrust SaaS | Your cluster | Most customers — fastest to value, no UI to operate |
+| [**Self-hosted**](./deployment-models#self-hosted-everything-in-your-cluster) | Your cluster | Your cluster | Air-gapped, sovereignty mandates, full operational control |
+
+Both modes use the same chart and the same data-plane images. You can switch later without losing data. The complete decision matrix and topology diagrams live in [Deployment models](./deployment-models).
+
+## 2. Pick your environment
+
+Each guide covers cluster prerequisites, then walks through **both deployment models** with cloud-specific examples (storage class, ingress controller, IAM/identity, DNS, certificates, GPU pools).
+
+<CardGroup cols={2}>
+  <Card title="GCP (GKE)" icon="cloud" href="./gcp/overview">
+    Google Kubernetes Engine — GCE Ingress, Managed Certificates, Workload Identity, GPU node pools (`nvidia-l4` / `nvidia-t4`).
+  </Card>
+  <Card title="AWS (EKS)" icon="cloud" href="./aws/overview">
+    Amazon EKS — AWS Load Balancer Controller, ACM, EBS / EFS, IRSA, GPU node groups (`g5` / `g6`).
+  </Card>
+  <Card title="Azure (AKS)" icon="cloud" href="./azure/overview">
+    Azure Kubernetes Service — AGIC or NGINX ingress, Key Vault certs, Azure Disk, GPU node pools (`Standard_NC*`).
+  </Card>
+  <Card title="OpenShift" icon="shield" href="./openshift/overview">
+    OpenShift 4.10+ — Routes (default) or Ingress, SCC handling, `oc` workflow, ROSA / ARO / on-prem.
+  </Card>
+  <Card title="Vanilla Kubernetes" icon="server" href="./kubernetes/overview">
+    Any Kubernetes 1.24+ — on-prem, bare metal, air-gapped, k3s, OKE, and other distributions.
+  </Card>
+</CardGroup>
+
+## High-level architecture
 
 <img
   className="block dark:hidden"
-  src="/images/static/img/nt-architecture-light.drawio.svg"
+  src="/images/static/img/nt-architecture-ligth.drawio.svg"
   alt="NeuralTrust architecture diagram"
- />
+/>
 <img
   className="hidden dark:block"
   src="/images/static/img/nt-architecture-dark.drawio.svg"
   alt="NeuralTrust architecture diagram"
- />
+/>
 
+The platform has two halves:
 
-## Deployment modes
+- **Control Plane** — UI, policy editor, scheduler, RBAC. Runs on NeuralTrust SaaS (hybrid) or in your cluster (self-hosted).
+- **Data Plane** — telemetry ingestion, eval execution, ClickHouse writes. Always runs in your cluster.
 
-NeuralTrust provides several deployment modes to suit your needs:
+TrustGate (the AI gateway), the Firewall (prompt/response safety classifiers), and the infrastructure stores (ClickHouse, Kafka, PostgreSQL) all sit on the data-plane side and run **in your cluster** in both deployment models. Your prompt and response data never leaves your environment.
 
-| Mode | Control Plane location | Data Plane location | Ideal for |
-| --- | --- | --- | --- |
-| 🏢 On-Premises | Your infrastructure | Your infrastructure | Maximum data sovereignty and regulatory control |
-| ☁️ SaaS | NeuralTrust infrastructure | NeuralTrust infrastructure | Fully managed operations with minimal upkeep |
-| 🔗 Hybrid | NeuralTrust infrastructure | Your infrastructure | Balance of managed services with local data residency |
+## What gets deployed
 
-All modes deploy on any Kubernetes cluster or Red Hat OpenShift environment. For implementation examples, [visit NeuralTrust's Helm charts repository](https://github.com/NeuralTrust/neuraltrust-helm-charts/tree/main/helm#neuraltrust---kubernetesopenshift).
+| Component | Purpose | In hybrid? | In self-hosted? |
+|---|---|---|---|
+| Data Plane API + worker | Telemetry ingestion, eval scheduling | ✅ | ✅ |
+| Kafka Connect | Streams events into ClickHouse | ✅ | ✅ |
+| Control Plane API + UI + Scheduler | Dashboards, RBAC, policy distribution | — *(SaaS)* | ✅ |
+| TrustGate (admin + gateway + actions) | AI gateway | ✅ *(typical)* | ✅ |
+| Firewall (gateway + 5 workers) | In-cluster prompt/response safety — CPU or GPU workers | ✅ | ✅ |
+| ClickHouse | Analytics database | ✅ *(or external)* | ✅ *(or external)* |
+| Kafka | Event streaming | ✅ *(or external)* | ✅ *(or external)* |
+| PostgreSQL | Relational store (TrustGate + CP metadata) | ✅ *(or external)* | ✅ *(or external)* |
+| Redis | TrustGate cache (bundled with TrustGate subchart) | ✅ *(or external)* | ✅ *(or external)* |
 
-## LLM endpoint
+For the complete image list per model, including tags, replicas, and resource footprints, see [Image catalog](./images).
 
-Some Neuraltrust components require access to a LLM endpoint to perform their operations. Such as LLM as a Judge evaluators, Topic summarizer, etc.
+## Configurable infrastructure
+
+ClickHouse, Kafka, and PostgreSQL can each be:
+
+- **In-cluster** (default) — the chart deploys and manages StatefulSets, PVCs, and credentials.
+- **External** — you point the chart at managed services (RDS, Cloud SQL, MSK, Confluent Cloud, ClickHouse Cloud, etc.).
+
+This applies in both deployment models. See [Configuration scenarios › External infrastructure](./configuration#external-infrastructure-only).
+
+## LLM endpoints
+
+Some NeuralTrust components require access to an LLM endpoint to perform their operations (LLM-as-a-Judge evaluators, topic summarizer, etc.).
 
 <Warning>
-Take into account that the cluster where you deploy the Data Plane components needs to have access to the LLM endpoint.
+The cluster where you deploy the Data Plane must have network reachability to the LLM endpoint.
 </Warning>
 
-You can configure your LLM provider in the NeuralTrust dashboard. We currently support:
+Configure providers from the NeuralTrust dashboard. Supported out of the box:
 
-| | |
-| --- | --- |
+| Provider | Notes |
+|---|---|
 | **OpenAI** | Direct REST integration |
 | **OpenAI-compatible APIs** | Any provider implementing the OpenAI API shape |
 | **Google Gemini** | Direct REST integration |
@@ -53,227 +108,145 @@ You can configure your LLM provider in the NeuralTrust dashboard. We currently s
 | **Azure OpenAI** | Azure-hosted OpenAI endpoints |
 
 <Note>
-In SaaS mode you can use our LLM endpoint
+In hybrid mode you can use NeuralTrust's managed LLM endpoint.
 </Note>
 
+## LLM targets / upstreams
 
-## LLM target/upstream
+TrustGate and TrustTest both need network reach to the LLM you're protecting or testing.
 
-Some Neuraltrust components require access to your LLM that you want to protect or test. 
-- For testing purposes check our [TrustTest](/trusttest/connect/overview) documentation.
-- For protecting purposes check our [TrustGate](/trustgate/core-concepts/upstream-services-overview) documentation.
+- For testing, see [TrustTest](/trusttest/connect/overview).
+- For protection, see [TrustGate](/trustgate/core-concepts/upstream-services-overview).
 
 <Warning>
-Take into account that the cluster where you deploy the Data Plane components and TrustGate needs to have access to the LLM target/upstream.
+The cluster where you deploy the Data Plane and TrustGate must have network reachability to the LLM target.
 </Warning>
 
-## Data Plane Components
+## Detailed component reference
 
-The Data Plane components manage your private data and endpoints, like user conversations, traces, metrics and more.
+Each component below is documented for its responsibilities and security posture. For *how* to deploy them, follow the per-cloud guide above.
 
-### API
-Your **Data Plane API** serves as the primary ingestion endpoint for AI monitoring data from your applications and systems. This high-performance service provides:
+### Data Plane
 
-- **High-Throughput Ingestion**: Handles millions of AI monitoring events per second with minimal latency
-- **Real-Time Validation**: Validates and enriches incoming data streams for immediate processing
-- **Secure Authentication**: Implements robust API key management and authentication mechanisms
-- **Auto-Scaling**: Automatically scales based on incoming data volume and processing demands
-- **Test Evaluation**: Spawns Kubernetes (k8s) jobs to run the evaluation of tests for AI threat detection
+The Data Plane manages your private data and endpoints — user conversations, traces, metrics, and evals.
 
-### Worker
-The **Data Plane Worker** performs all observability metrics processing operations.
+**API**
+- High-throughput ingestion (millions of events/sec at the upper end).
+- Real-time validation and enrichment of incoming streams.
+- Robust API key management and JWT-based authentication.
+- Horizontal autoscaling against incoming volume.
 
-- **Real-Time Analysis**: Processes AI monitoring events for immediate insights and anomaly detection
-- **Privacy-Preserving Analytics**: Performs analysis while keeping raw data within your environment
-- **Alert Generation**: Triggers immediate alerts for critical AI security and performance events
+**Worker**
+- Real-time analysis for immediate insights and anomaly detection.
+- Privacy-preserving analytics while keeping raw data in your environment.
+- Alert generation for critical AI security and performance events.
 
-### Message Queue
-The **Data Plane Message Queue** provides reliable, high-performance message processing between Data Plane components:
+**Message Queue (Kafka)**
+- Event sourcing — complete audit trails of all AI monitoring events.
+- Guaranteed delivery with configurable durability.
+- Stream processing for real-time workflows.
+- Backpressure management during traffic spikes.
 
-- **Event Sourcing**: Maintains complete audit trails of all AI monitoring events
-- **Guaranteed Delivery**: Ensures no data loss during processing with configurable durability
-- **Stream Processing**: Enables real-time data processing and analysis workflows
-- **Backpressure Management**: Automatically manages load balancing during traffic spikes
+<Note>
+Kafka is the only supported Data Plane message queue today. Deploy in-cluster or point at an external instance (MSK, Confluent Cloud, Event Hubs).
+</Note>
 
-<Note>Currenlty we only support Kafka for the Data Plane Message Queue. Being deployed in the same cluster or as external service.</Note>
+**Database (ClickHouse)**
+- Complete data sovereignty — all raw AI monitoring data stays in your VPC.
+- High-performance analytics, optimized for real-time and complex queries.
+- Encryption at rest with your managed keys.
+- Compliant for GDPR, HIPAA, SOX, and other regulatory frameworks.
 
-### Database
-The **Data Plane Database** stores all sensitive AI monitoring, tests, conversations and more data within a controlled environment:
+<Note>
+ClickHouse is the only supported Data Plane analytics DB today. Deploy in-cluster or external (ClickHouse Cloud).
+</Note>
 
-- **Complete Data Sovereignty**: All raw AI monitoring data remains in your VPC
-- **High-Performance Analytics**: Optimized for real-time queries and complex analytics
-- **Automated Encryption**: All data encrypted at rest with your managed keys
-- **Compliance Ready**: Designed for GDPR, HIPAA, SOX, and other regulatory requirements
+### Control Plane
 
-<Note>Currenlty we only support ClickHouse for the Data Plane Database. Being deployed in the same cluster or as external service.</Note>
+The Control Plane provides centralized management and advanced AI security capabilities.
 
-## Control Plane Components
+**API**
+- Backbone for all Control Plane operations and customer interactions.
+- Powers the NeuralTrust dashboard and customer interfaces.
+- Multi-tenant architecture with strict environment isolation.
+- Global orchestration across multiple customer Data Plane deployments.
 
-The Control Plane components provide centralized management, advanced AI security capabilities.
+**Application (UI)**
+- Real-time dashboards for AI security and performance insights.
+- Cross-environment analytics without compromising individual data privacy.
+- Centralized alert configuration and notification management.
 
-### API
-The **Control Plane API** provides the backbone for all Control Plane operations and customer interactions:
+**Scheduler**
+- Schedules and orchestrates TrustTest execution jobs across customer environments.
+- Coordinates TrustScan security analysis jobs and vulnerability assessments.
+- Coordinates periodic metrics checks for alert generation.
+- Manages the timing and execution of AI testing and scanning workflows.
 
-- **Customer Portal Integration**: Powers the NeuralTrust dashboard and customer interfaces
-- **Multi-Tenant Architecture**: Securely isolates customer environments and data
-- **Global Orchestration**: Coordinates across multiple customer Data Plane deployments
+**Database (PostgreSQL)**
+- Stores only basic operational data for CRUD operations.
+- Never stores customer's sensitive AI monitoring data.
+- Configuration management for system configurations and user preferences.
+- User management for accounts, permissions, and authentication.
 
-### Application
-The **Control Plane Application** web app delivers the comprehensive NeuralTrust user experience:
+<Note>
+PostgreSQL is the only supported Control Plane database today. Deploy in-cluster or external (RDS, Cloud SQL, Azure Database for PostgreSQL).
+</Note>
 
-- **Real-Time Dashboards**: Interactive dashboards showing AI security and performance insights
-- **Global Analytics**: Cross-environment insights that don't compromise individual data privacy
-- **Alert Management**: Centralized alert configuration and notification management
+## Data flow & privacy
 
-### Scheduler
-The **Control Plane Scheduler** manages automated testing and monitoring operations:
+NeuralTrust's architecture ensures complete data sovereignty while enabling comprehensive AI security through privacy-preserving data flows.
 
-- **TrustTest Job Scheduling**: Schedules and orchestrates TrustTest execution jobs across customer environments
-- **TrustScan Job Scheduling**: Schedules and coordinates TrustScan security analysis jobs and vulnerability assessments
-- **Metrics Check Scheduling**: Coordinates periodic metrics checks for alert generation and monitoring
-- **Automated Test Execution**: Manages the timing and execution of AI testing and scanning workflows
+**AI application data flow (your environment):**
 
-### Database
-The **Control Plane Database** stores only basic operational data for CRUD operations:
+1. AI applications route through **TrustGate** for real-time validation against configured security policies.
+2. TrustGate writes validated, protected interaction data directly to the **Data Plane Kafka** for processing.
+3. **Data Plane workers** process and analyze the data while keeping everything in your VPC.
+4. Workers write raw and derived data to the **Data Plane ClickHouse** in your controlled environment.
 
-- **Zero Raw Data**: Never stores customer's sensitive AI monitoring data
-- **Configuration Management**: Stores system configurations and user preferences
-- **User Management**: Handles user accounts, permissions, and authentication data
-- **Operational Metadata**: Basic CRUD operations for system management and administration
+**Policy management flow:**
 
-<Note>Currenlty we only support PostgreSQL for the Control Plane Database. Being deployed in the same cluster or as external service.</Note>
+- The **TrustGate admin** service exposes security policies, routing rules, rate limits, and access controls that govern gateway behavior.
 
-## TrustGate Components
+**Cross-VPC security operations (privacy-safe only):**
 
-TrustGate provides real-time protection for your AI systems through the following components:
+- **TrustTest** runs on the NeuralTrust Control Plane for comprehensive red-teaming, against your data-plane endpoints.
+- **TrustScan** performs analysis within your Data Plane using your complete data.
+- Only aggregated, anonymized security insights cross the VPC boundary.
+- Customer prompts, responses, and user data never leave your environment for vulnerability scanning.
 
-### Control Plane API
-The **Control Plane API** is the administration service used to create gateways and modify them:
+> **Why TrustTest runs in the Control Plane**
+>
+> TrustTest operates exclusively in NeuralTrust's Control Plane infrastructure to maintain a centralized, continuously updated jailbreak database. New jailbreak techniques emerge daily; maintaining an up-to-date threat intelligence database requires continuous research and monitoring. By running TrustTest centrally, all customers immediately benefit from the latest red-teaming capabilities without independently cataloging new attack methods.
 
-- **Centralized Management**: Easily configure, deploy, and manage multiple AI gateways from a single interface
-- **Dynamic Configuration**: Apply policy updates and routing rules in real-time without downtime
-- **Access Control**: Robust role-based access control (RBAC) for gateway administration
+## Cloud-specific guides
 
-### Data Plane API
-The **Data Plane API** receives the requests of the users and decides if this is a malicious request or not for the AI system:
+| Guide | When to use |
+|---|---|
+| [GCP (GKE)](./gcp/overview) | Google Cloud Platform — default chart target |
+| [AWS (EKS)](./aws/overview) | Amazon Web Services |
+| [Azure (AKS)](./azure/overview) | Microsoft Azure |
+| [OpenShift](./openshift/overview) | Red Hat OpenShift 4.10+ on any cloud or on-prem |
+| [Vanilla Kubernetes](./kubernetes/overview) | Any conformant Kubernetes — on-prem, bare metal, air-gapped, k3s, RKE2, OKE, etc. |
 
-- **Real-Time Threat Detection**: Instantly intercepts and analyzes incoming prompts and outgoing responses
-- **Low-Latency Proxy**: Sits seamlessly in the critical path with minimal performance overhead
-- **Policy Enforcement**: Enforces custom security rules, rate limits, and data redaction policies on the fly
+Each guide has hybrid and self-hosted walkthroughs with full YAML examples.
 
-### Firewall
-The **Firewall** is the service where the ML models whose job is to detect malicious prompts are located:
+## Cross-cutting reference
 
-- **Advanced ML Models**: Utilizes state-of-the-art machine learning to identify prompt injections, jailbreaks, and PII leaks
-- **Continuous Updates**: Regularly updated threat intelligence to protect against zero-day AI vulnerabilities
-- **Scalable Inference**: Highly optimized model serving infrastructure designed for high-throughput traffic
+| Topic | When you need it |
+|---|---|
+| [Deployment models](./deployment-models) | Picking between hybrid and self-hosted |
+| [Feature flags reference](./feature-flags) | PostgreSQL / Redis / Kafka / ClickHouse local vs external, image registry, storage class, secret modes |
+| [Image catalog](./images) | Image registry, tags, replicas, sizing |
+| [Configuration scenarios](./configuration) | Side-by-side values files for common topologies |
+| [Secrets management](./secrets) | Auto-generation, pre-generated, External Secrets Operator |
+| [Firewall deployment](./firewall) | CPU vs GPU workers, TrustGate integration |
 
-### Redis
-**Redis** serves as the high-performance cache system:
+## Source code
 
-- **Lightning-Fast Lookups**: Accelerates policy retrieval and threat intelligence lookups
-- **Rate Limiting**: Powers distributed rate limiting to prevent abuse and denial-of-service attacks
-- **Session Management**: Maintains stateful context for complex, multi-turn conversational analysis
-
-### PostgreSQL Database
-The **PostgreSQL DB** stores administration gateway data:
-
-- **Reliable Storage**: Durable and ACID-compliant storage for gateway configurations and policies
-- **Audit Logging**: Maintains a secure history of administrative changes and system events
-- **High Availability**: Supports clustered deployments for fault tolerance and continuous uptime
-
-## Data Flow and Privacy Model
-
-NeuralTrust's architecture ensures complete data sovereignty while enabling comprehensive AI security protection, testing, and vulnerability management through privacy-preserving data flows.
-
-### AI Application Data Flow (Your Environment)
-1. **AI Applications** → **TrustGate Gateway Service**: AI applications route through the Gateway service for real-time validation against configured security policies
-2. **TrustGate Gateway Service** → **DP Queue**: Validated and protected AI interaction data is written directly to the queue for processing
-3. **DP Queue** → **DP Worker**: Workers process and analyze data while keeping everything in your VPC
-4. **DP Worker** → **DP Database**: All raw AI interaction data is stored in your controlled environment
-
-**Policy Management Flow**:
-- **TrustGate Admin Service**: Configure security policies, routing rules, rate limits, and access controls that govern the Gateway service behavior
-
-### Cross-VPC Security Operations (Privacy-Safe Only)
-
-**Privacy-Preserving Security Analysis**:
-NeuralTrust's security products provide comprehensive AI security analysis through different operational models:
-
-- **TrustTest**: Operates in NeuralTrust Control Plane for comprehensive red teaming and testing capabilities
-- **Local Analysis**: TrustScan and AISPM perform analysis within your Data Plane using your complete data
-- **Privacy-Safe Results**: Only aggregated, anonymized security insights cross the VPC boundary  
-- **No Raw Data Transfer**: Customer prompts, responses, and user data never leave your environment for vulnerability scanning and posture management
-
-**Security Product Operations**:
-- **TrustTest Red Teaming**: Runs in NeuralTrust Control Plane to maintain centralized, up-to-date jailbreak database and threat intelligence
-- **TrustScan Vulnerability Assessment**: Conducts security scanning within your environment, shares only privacy-safe threat detection results
-- **AISPM Posture Management**: Scans your complete AI environment including cloud artifacts, Hugging Face models, MCP servers, and external AI service integrations to assess overall security posture and provide comprehensive risk metrics and improvement recommendations
-
-> **Why TrustTest Runs in Control Plane**
-> 
-> TrustTest operates exclusively within NeuralTrust's Control Plane infrastructure to maintain a centralized, continuously updated jailbreak database containing the latest AI attack techniques, prompt injection methods, and adversarial strategies. This centralized approach is critical because new jailbreak techniques emerge daily across the AI security landscape, and maintaining an up-to-date threat intelligence database requires continuous research, monitoring of security communities, and analysis of emerging attack vectors. By running TrustTest in our Control Plane, we ensure that all customers immediately benefit from the latest red teaming capabilities without each organization needing to independently research and catalog new attack methods. Our security research team continuously updates this database with novel jailbreak techniques, sophisticated prompt injection attacks, adversarial examples, and emerging AI vulnerabilities discovered across the global AI security community.
-
-## Multi-Cloud Deployment Support
-
-### Universal Cloud Provider Support
-Your Data Plane can be deployed on any major cloud provider while maintaining identical functionality:
-
-- **Amazon Web Services (AWS)**: Full integration with AWS services and global regions
-- **Google Cloud Platform (GCP)**: Native GCP service integration and optimization  
-- **Microsoft Azure**: Complete Azure ecosystem integration and enterprise features
-
-### Cloud-Agnostic Benefits
-- **Consistent Experience**: Identical features and capabilities across all cloud providers
-- **Provider Independence**: No vendor lock-in to any specific cloud platform
-
-## Security and Compliance
-
-### Data Sovereignty Guarantees
-- **Legal Guarantees**: Your data never leaves your cloud environment or jurisdiction
-- **Audit Trails**: Complete documentation of all data flows and access patterns
-- **Compliance Ready**: Meets requirements for GDPR, HIPAA, SOX, PCI, and other frameworks
-
-### Zero-Trust Architecture
-- **Mutual Authentication**: All communication requires cryptographic verification
-- **Encrypted Channels**: End-to-end encryption for all data in transit
-- **Least Privilege**: Minimal necessary permissions for all system components
-- **Continuous Verification**: Ongoing validation of all system connections and data flows
-
-## Cloud Provider Support
-
-NeuralTrust provides managed deployment across all major cloud providers, handling infrastructure complexity while ensuring your data remains within your environment and under your control.
-
-### Amazon Web Services (AWS)
-Our comprehensive AWS integration provides native support for AWS services and capabilities across all regions. The Data Plane deploys seamlessly into your AWS VPC with full integration into AWS security services, encryption capabilities, and monitoring tools.
-
-**Getting Started**: [AWS Deployment Guide](./aws)
-
-### Microsoft Azure
-Our enterprise Azure integration provides seamless connectivity with Microsoft's cloud platform and enterprise services ecosystem. Deploy your Data Plane into Azure VNets with native integration to Azure security and monitoring services.
-
-**Getting Started**: [Azure Deployment Guide](./azure)
-
-### Google Cloud Platform (GCP)
-Our Google Cloud native architecture leverages GCP's advanced capabilities for enhanced functionality. Data Plane deployment integrates with Google Cloud security services and monitoring capabilities.
-
-**Getting Started**: [GCP Deployment Guide](./gcp)
-
-## Getting Started
-
-### Deployment Process
-1. **Cloud Environment Setup**: Configure your cloud environment with required permissions
-2. **Data Plane Deployment**: Deploy Data Plane components in your VPC
-3. **TrustGate Configuration**: Establish secure connection to NeuralTrust Control Plane
-4. **AI System Integration**: Connect your AI applications to the DP API
-5. **Monitoring Activation**: Begin receiving insights through the Control Plane dashboard
-
-### Support and Maintenance
-- **24/7 Support**: Round-the-clock technical support for deployment and operations
-- **Managed Updates**: Automated security updates and feature deployments
-- **Performance Optimization**: Continuous monitoring and optimization of Data Plane performance
-- **Compliance Assistance**: Expert help with audit preparation and compliance reporting
+- [Helm chart repository](https://github.com/NeuralTrust/neuraltrust-platform)
+- [Releases](https://github.com/NeuralTrust/neuraltrust-platform/releases)
+- [Issue tracker](https://github.com/NeuralTrust/neuraltrust-platform/issues)
 
 ---
 
-> **Data Sovereignty First**: NeuralTrust's unique architecture ensures your sensitive AI data never leaves your environment while providing enterprise-grade AI security monitoring and insights through our advanced Control Plane services.
+> **Data sovereignty first.** NeuralTrust's architecture ensures your sensitive AI data never leaves your environment while providing enterprise-grade AI security monitoring and insights.

@@ -1,0 +1,225 @@
+---
+title: Configuration scenarios
+description: Side-by-side reference for the values files the NeuralTrust Platform Helm chart ships, and ready-made overrides for common deployment topologies.
+---
+
+The chart ships a small set of values files that cover the most common deployment topologies. Pick the file closest to your target environment, copy it to `my-values.yaml`, and override only what you need.
+
+| File | Purpose |
+|---|---|
+| `values-required.yaml` | Minimal starting template — recommended for first-time setup. All other values use chart defaults. |
+| `values.yaml` | Complete reference with every option and inline comments. |
+| `values-openshift.yaml` | Pre-configured for OpenShift with Routes. |
+| `values-openshift-ingress.yaml.example` | OpenShift using Kubernetes Ingress instead of Routes. |
+| `values-external-services.yaml.example` | External ClickHouse, Kafka, and PostgreSQL. |
+| `values-dataplane-gpu.yaml.example` | Data Plane + GPU firewall workers, no TrustGate. |
+| `values-all-deployed.yaml.example` | Everything enabled — useful as a "what does the full stack look like" reference. |
+
+All files live in the [chart repository](https://github.com/NeuralTrust/neuraltrust-platform). Fetch any of them with:
+
+```bash
+curl -sLO https://raw.githubusercontent.com/NeuralTrust/neuraltrust-platform/main/values-required.yaml
+```
+
+## Quick reference
+
+| Scenario | Values file | Platform | Ingress | Routes | Secrets |
+|---|---|---|---|---|---|
+| Zero-config | None (defaults) | Any | No | No | Auto |
+| Kubernetes (cloud) | `values-required.yaml` | `aws` / `gcp` / `azure` / `kubernetes` | Yes | No | Auto |
+| OpenShift (Routes) | `values-openshift.yaml` | `openshift` | No | Yes | Auto |
+| OpenShift (Ingress) | `values-openshift-ingress.yaml.example` | `openshift` | Yes | No | Pre-gen |
+| Everything on | `values-all-deployed.yaml.example` | Configurable | Yes | Configurable | Auto |
+| External infra | `values-external-services.yaml.example` | Configurable | Yes | Configurable | Auto |
+| GPU firewall | `values-dataplane-gpu.yaml.example` | Configurable | Yes | Configurable | Explicit |
+
+## Common scenarios
+
+### Kubernetes with Ingress
+
+```yaml
+global:
+  platform: "aws"        # or "gcp", "azure", "kubernetes"
+  domain: "platform.example.com"
+```
+
+Use `values-required.yaml` and override `global.platform` + `global.domain`. The chart picks the right ingress flavor for the cloud automatically.
+
+### OpenShift with Routes
+
+```yaml
+global:
+  platform: "openshift"
+  domain: "apps.mycluster.example.com"
+```
+
+Start from `values-openshift.yaml`. Routes are created automatically; Ingress is disabled. See [OpenShift overview](./openshift/overview).
+
+### OpenShift with Ingress
+
+```yaml
+global:
+  platform: "openshift"
+  domain: "apps.mycluster.example.com"
+  ingress:
+    provider: "openshift"
+
+trustgate:
+  ingress:
+    enabled: true
+
+neuraltrust-control-plane:
+  controlPlane:
+    components:
+      api:
+        ingress:
+          enabled: true
+      app:
+        ingress:
+          enabled: true
+```
+
+Start from `values-openshift-ingress.yaml.example`.
+
+### External infrastructure only
+
+NeuralTrust services in-cluster, ClickHouse / Kafka / PostgreSQL provided externally:
+
+```yaml
+infrastructure:
+  clickhouse:
+    deploy: false
+    external:
+      host: "clickhouse.example.com"
+      port: "8123"
+      user: "neuraltrust"
+      password: ""        # inject via --set or pre-created secret
+      database: "neuraltrust"
+
+  kafka:
+    deploy: false
+    external:
+      bootstrapServers: "kafka.example.com:9092"
+
+neuraltrust-control-plane:
+  infrastructure:
+    postgresql:
+      deploy: false
+  controlPlane:
+    components:
+      postgresql:
+        secrets:
+          host: "postgres.example.com"
+          port: "5432"
+          user: "neuraltrust"
+          password: ""    # inject via --set or pre-created secret
+          database: "neuraltrust"
+```
+
+Start from `values-external-services.yaml.example`.
+
+### Services-only (no TrustGate)
+
+```yaml
+trustgate:
+  enabled: false
+
+neuraltrust-control-plane:
+  controlPlane:
+    enabled: true
+
+neuraltrust-data-plane:
+  dataPlane:
+    enabled: true
+```
+
+### Pre-generated secrets (CI/CD, Vault)
+
+```yaml
+global:
+  autoGenerateSecrets: false
+  preserveExistingSecrets: true
+```
+
+All required secrets must exist in the namespace before deployment. See [Secrets management › Pre-generated secrets](./secrets#pre-generated-secrets).
+
+### Zero-config
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust --create-namespace
+```
+
+Defaults to `global.platform: "gcp"`, in-cluster infrastructure, auto-generated secrets, and self-signed TLS. Useful for rapid evaluation; **not** suitable for production.
+
+## How infrastructure resolves
+
+| Component | In-cluster service name | External config path |
+|---|---|---|
+| ClickHouse | `clickhouse` *(fixed by `fullnameOverride`)* | `infrastructure.clickhouse.external.host` |
+| Kafka | `<release>-kafka:9092` | `infrastructure.kafka.external.bootstrapServers` |
+| PostgreSQL | `control-plane-postgresql` | `neuraltrust-control-plane.controlPlane.components.postgresql.secrets.host` |
+
+The chart's `_helpers.tpl` resolves the right hostname automatically based on `deploy: true` / `false`. You don't typically need to override these directly.
+
+## Component toggles
+
+Every component can be flipped independently:
+
+```yaml
+neuraltrust-data-plane:
+  dataPlane:
+    enabled: true       # Data Plane API + workers
+
+neuraltrust-control-plane:
+  controlPlane:
+    enabled: true       # Control Plane API + UI + scheduler
+
+trustgate:
+  enabled: true         # TrustGate AI gateway
+
+neuraltrust-firewall:
+  firewall:
+    enabled: true       # Firewall gateway + workers (CPU image by default)
+```
+
+Disabling the Control Plane while keeping the Data Plane is a supported pattern — the Data Plane runs against the NeuralTrust SaaS Control Plane.
+
+## Ingress vs Routes
+
+| Feature | Ingress | Routes (OpenShift) |
+|---|---|---|
+| Platform | Any Kubernetes | OpenShift only |
+| Controller | Required (NGINX, ALB, GCE, etc.) | Built-in |
+| TLS | `kubernetes.io/tls` secrets or cloud-managed | OpenShift router |
+| Enable | `ingress.enabled: true` per component | Default when `platform: "openshift"` |
+
+## Secret management modes
+
+| Mode | Flag | Behavior | Best for |
+|---|---|---|---|
+| Auto-generated | `autoGenerateSecrets: true` | Helm creates and preserves secrets | Dev, staging, quick starts |
+| Explicit values | `autoGenerateSecrets: true` + values set | Your values override auto-generation | Controlled environments |
+| Pre-generated | `preserveExistingSecrets: true` | Helm never touches secrets | Vault, Sealed Secrets, compliance |
+
+Full reference: [Secrets management](./secrets).
+
+## Firewall: CPU and GPU
+
+| Component | Image | Scheduling | CUDA MPS |
+|---|---|---|---|
+| Gateway | `firewall-cpu` | CPU only | N/A |
+| Workers (default) | `firewall-cpu` | CPU only | Omit MPS keys |
+| Workers (GPU) | `firewall-gpu` | GPU nodes with `nvidia.com/gpu`, `nodeSelector`, `tolerations`, `hostIPC` | Set both `cudaMpsActiveThreadPercentage` and `cudaMpsPinnedDeviceMemLimit` |
+
+CUDA MPS env vars are only rendered into the worker ConfigMap when **both** keys are set. Reference files: `values-dataplane-gpu.yaml.example`, `values.yaml`. Detailed setup: [Firewall deployment](./firewall).
+
+## Related guides
+
+- [Feature flags reference](./feature-flags) — every toggle that changes what gets deployed (PG/Redis/Kafka/CH/registry/storage/secrets)
+- [Install on Kubernetes](./kubernetes/overview) — install workflow that consumes these values files
+- [Secrets management](./secrets) — auto-generation, pre-generated, External Secrets Operator
+- [Firewall deployment](./firewall) — CPU/GPU workers and TrustGate integration
+- [OpenShift](./openshift/overview) — Routes, SCC, and `oc`-specific commands

@@ -1,0 +1,223 @@
+---
+title: Firewall deployment
+description: Deploy the NeuralTrust Firewall — gateway plus specialized workers for prompt and response safety, on CPU or GPU.
+---
+
+The NeuralTrust Firewall provides in-cluster prompt and response safety for TrustGate and the Control Plane. It deploys as a lightweight **gateway** plus a pool of five specialized **workers** (toxicity, toolguard, prompt-jailbreak, prompt-moderation, response-jailbreak). The same chart and image versions support both CPU and GPU inference.
+
+A zero-config install ships the gateway plus five **CPU** workers (`neuraltrust-firewall.firewall.enabled: true`). To trade cost for inference latency, move the workers to a separate **GPU** node pool — see [CPU vs GPU](#cpu-vs-gpu) below.
+
+## Architecture
+
+```
+            ┌─────────────────────────────────────────┐
+            │            Firewall Gateway              │
+            │   (CPU router, fans out to workers)      │
+            └────────────────────┬────────────────────┘
+                                 │
+   ┌────────────┬────────────┬───┴───┬──────────────┬─────────────────┐
+   ▼            ▼            ▼       ▼              ▼                 ▼
+toxicity    toolguard   prompt-     prompt-     response-       (workers)
+                        jailbreak   moderation  jailbreak
+```
+
+| Worker | Purpose |
+|---|---|
+| `toxicity` | Toxicity detection on prompts and responses |
+| `toolguard` | Tool-use guardrails for agent calls |
+| `prompt-jailbreak` | Prompt-side jailbreak detection |
+| `prompt-moderation` | Prompt moderation classifier |
+| `response-jailbreak` | Response-side jailbreak detection |
+
+## CPU vs GPU
+
+Two images share the same version tag (e.g. `v2.6.0`):
+
+| Image | Use case |
+|---|---|
+| `firewall-cpu` | Default for both gateway and workers. No GPU scheduling required. |
+| `firewall-gpu` | Workers with GPU inference. Requires `nvidia.com/gpu`, `nodeSelector`, `tolerations`, and `hostIPC: true`. |
+
+The gateway always runs on CPU. Only workers can be switched to the GPU image.
+
+## Enable the Firewall
+
+<Tabs>
+  <Tab title="CPU (default)">
+    Minimal config — workers run on CPU using the chart defaults:
+
+    ```yaml
+    neuraltrust-firewall:
+      firewall:
+        enabled: true
+    ```
+
+    Use this when GPUs aren't available or for lower-volume workloads. Latency is higher than GPU but no specialized node pool is needed.
+  </Tab>
+  <Tab title="GPU workers">
+    ```yaml
+    neuraltrust-firewall:
+      firewall:
+        enabled: true
+        config:
+          # Only set both keys to render CUDA MPS env vars; omit on CPU-only installs
+          cudaMpsActiveThreadPercentage: "50"
+          cudaMpsPinnedDeviceMemLimit: "0=8G"
+        workerDefaults:
+          image:
+            repository: "europe-west1-docker.pkg.dev/.../firewall-gpu"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          nodeSelector:
+            cloud.google.com/gke-accelerator: "nvidia-l4"
+          tolerations:
+            - key: "nvidia.com/gpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+          hostIPC: true
+    ```
+
+    The `cudaMps*` keys are only rendered into the worker ConfigMap when **both** are set. CPU-only installs must omit them.
+  </Tab>
+</Tabs>
+
+<Note>
+The gateway uses `firewall-cpu` even when workers are on GPU — don't override `gateway.image` to a GPU image.
+</Note>
+
+## TrustGate integration
+
+TrustGate calls the firewall via two values stored in `trustgate-secrets`:
+
+```yaml
+trustgate:
+  global:
+    env:
+      NEURAL_TRUST_FIREWALL_URL: "http://firewall:80"
+      NEURAL_TRUST_FIREWALL_SECRET_KEY: ""   # auto-populated from firewall JWT
+```
+
+When `global.autoGenerateSecrets: true` (the default), `NEURAL_TRUST_FIREWALL_SECRET_KEY` is automatically aligned with the firewall's JWT. With pre-generated secrets, you must set both to matching values yourself.
+
+After changing firewall secrets, restart TrustGate to pick up the new values:
+
+```bash
+kubectl rollout restart deployment/trustgate-control-plane -n neuraltrust
+kubectl rollout restart deployment/trustgate-data-plane -n neuraltrust
+kubectl rollout restart deployment/trustgate-actions -n neuraltrust
+```
+
+## Per-worker overrides
+
+`workerDefaults` applies to every worker. To override a single worker (e.g. give `toxicity` more memory), set values under `workers.<name>`:
+
+```yaml
+neuraltrust-firewall:
+  firewall:
+    enabled: true
+    workerDefaults:
+      resources:
+        requests:
+          memory: 2Gi
+          cpu: 500m
+        limits:
+          memory: 4Gi
+    workers:
+      toxicity:
+        resources:
+          requests:
+            memory: 4Gi
+          limits:
+            memory: 8Gi
+      response-jailbreak:
+        replicaCount: 2
+```
+
+The keys under `workers.*` mirror those available under `workerDefaults`, including `image`, `resources`, `nodeSelector`, `tolerations`, and `hostIPC`.
+
+## OpenShift notes
+
+GPU workers on OpenShift typically need a permissive SCC for `hostIPC: true` and a node pool taint that matches your MachineSet:
+
+```yaml
+neuraltrust-firewall:
+  firewall:
+    enabled: true
+    workerDefaults:
+      image:
+        repository: "europe-west1-docker.pkg.dev/.../firewall-gpu"
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      resources:
+        limits:
+          nvidia.com/gpu: "1"
+      hostIPC: true
+```
+
+If pods fail with SCC errors, see [OpenShift › SCC](./openshift#security-context-constraints-scc).
+
+## Verification
+
+```bash
+# Gateway pod
+kubectl get pods -n neuraltrust -l app.kubernetes.io/name=firewall,app.kubernetes.io/component=gateway
+
+# Worker pods
+kubectl get pods -n neuraltrust -l app.kubernetes.io/name=firewall,app.kubernetes.io/component=worker-toxicity
+kubectl get pods -n neuraltrust -l app.kubernetes.io/name=firewall,app.kubernetes.io/component=worker-toolguard
+kubectl get pods -n neuraltrust -l app.kubernetes.io/name=firewall,app.kubernetes.io/component=worker-prompt-jailbreak
+kubectl get pods -n neuraltrust -l app.kubernetes.io/name=firewall,app.kubernetes.io/component=worker-prompt-moderation
+kubectl get pods -n neuraltrust -l app.kubernetes.io/name=firewall,app.kubernetes.io/component=worker-response-jailbreak
+
+# Internal health check (port-forward then curl)
+kubectl port-forward -n neuraltrust svc/firewall-gateway 8000:8000
+curl http://localhost:8000/health
+```
+
+## Troubleshooting
+
+### Gateway can't reach a worker
+
+```bash
+kubectl logs -n neuraltrust -l app.kubernetes.io/name=firewall,app.kubernetes.io/component=gateway
+kubectl get svc -n neuraltrust | grep firewall
+```
+
+Check that the worker Service exists and matches the gateway's expected name (`firewall-worker-<name>`).
+
+### GPU worker stuck pending
+
+```bash
+kubectl describe pod -n neuraltrust <worker-pod>
+```
+
+Common causes:
+
+- No node has the requested `nodeSelector` label — check `kubectl get nodes --show-labels`.
+- Required toleration missing — confirm the GPU taint key matches.
+- Cluster is out of GPU capacity — scale up the GPU node pool.
+
+### CUDA MPS errors
+
+If you see CUDA MPS errors at startup, ensure **both** `cudaMpsActiveThreadPercentage` and `cudaMpsPinnedDeviceMemLimit` are set, or remove both. Setting only one causes the worker to start without a usable MPS configuration.
+
+### TrustGate not calling the firewall
+
+```bash
+kubectl get secret trustgate-secrets -n neuraltrust -o jsonpath='{.data.NEURAL_TRUST_FIREWALL_URL}' | base64 -d
+kubectl get secret trustgate-secrets -n neuraltrust -o jsonpath='{.data.NEURAL_TRUST_FIREWALL_SECRET_KEY}' | base64 -d
+```
+
+If either is empty, set them via `trustgate.global.env.*` and `helm upgrade`, then restart TrustGate deployments.
+
+## Related guides
+
+- [Install on Kubernetes](./kubernetes/overview) — base install workflow
+- [Secrets management](./secrets) — `trustgate-secrets` and `firewall-secrets` lifecycle
+- [OpenShift](./openshift/overview) — SCC and node-pool considerations for GPU workers
+- [Configuration scenarios](./configuration) — `values-dataplane-gpu.yaml.example` and other ready-made topologies
