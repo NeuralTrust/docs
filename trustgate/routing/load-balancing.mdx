@@ -1,0 +1,66 @@
+---
+title: "Load balancing"
+description: "Distribute traffic across a consumer's registries with round-robin, weighted, least-connections, random, or semantic strategies — with health checks and weights."
+---
+
+When a [consumer](/trustgate/concepts/consumers) can reach more than one
+[registry](/trustgate/concepts/registries), the load balancer picks which one serves each
+request. The simplest setup just lists `registry_ids`; for explicit control, define a
+named pool with `lb_config`.
+
+## Strategies
+
+| Algorithm | How it picks |
+|---|---|
+| `round-robin` | Rotates through registries in order. |
+| `weighted-round-robin` | Interlaces picks by per-registry weight (`1..100`). |
+| `least-connections` | Picks the registry with the fewest in-flight requests. |
+| `random` | Uniform random pick. |
+| `semantic` | Embeds the prompt and routes to the registry whose description is the closest cosine match — requires an embedding config. |
+
+## Weights
+
+For weighted round-robin, each registry carries a weight from **1 to 100**, set when you
+attach it to the consumer:
+
+```bash
+POST /v1/gateways/{gateway_id}/consumers/{id}/registries/{registry_id}
+{ "weight": 70 }
+```
+
+A registry at weight 70 receives roughly 70% of the share of one at weight 30.
+
+## Named pools (`lb_config`)
+
+For more than a flat list, define a pool:
+
+```json
+"lb_config": {
+  "enabled": true,
+  "algorithm": "weighted-round-robin",
+  "pool_alias": "prod-pool",
+  "members": [
+    { "registry_id": "<openai>",    "models": ["gpt-4o"] },
+    { "registry_id": "<anthropic>", "models": ["claude-3-5-sonnet"] }
+  ]
+}
+```
+
+- `pool_alias` is referenced from a request via the `pool:<alias>` model reference (see
+  [Model resolution](/trustgate/routing/model-resolution)).
+- `members` scope which models each registry serves within the pool.
+- The `semantic` algorithm additionally needs an `embedding_config`.
+
+## Health checks
+
+LLM registries can define `health_checks`; unhealthy registries are skipped by the load
+balancer until they recover, so traffic shifts to healthy upstreams automatically.
+
+## Session affinity
+
+When the gateway has [session affinity](/trustgate/concepts/gateways#session-affinity)
+enabled, requests carrying a session id are pinned to the same selection across a
+conversation.
+
+Pair load balancing with [fallback](/trustgate/routing/fallback) so a failed pick retries
+the next registry instead of erroring.

@@ -1,0 +1,45 @@
+---
+title: "Semantic cache"
+description: "Cut cost and latency by serving cached responses for semantically similar prompts, using embedding similarity in Redis."
+---
+
+The **`semanticcache`** policy caches completions and serves them for prompts that are
+**semantically similar** — not just byte-identical. It embeds the prompt, looks for a close
+match in a Redis vector store, and returns the cached response on a hit.
+
+It runs in two stages: **`pre_request`** (lookup) and **`post_response`** (populate).
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `similarity_threshold` | float | `0.85` | Minimum cosine similarity for a hit (`0`–`1`). |
+| `ttl` | duration | `24h` | How long entries live. |
+| `embedding.provider` | string | `openai` | Embedding provider. |
+| `embedding.model` | string | `text-embedding-ada-002` | Embedding model. |
+| `embedding.api_key` | string | — | Credential for the embedding provider. |
+
+```json
+{
+  "slug": "semanticcache",
+  "settings": {
+    "similarity_threshold": 0.9,
+    "ttl": "12h",
+    "embedding": { "provider": "openai", "model": "text-embedding-ada-002" }
+  }
+}
+```
+
+## On a hit
+
+The cached response is returned and the proxy sets:
+
+- `X-Cache-Status: HIT`
+- `X-Cache-Similarity: <score>`
+
+## Bypassing
+
+Send `Cache-Control: no-cache` to skip the lookup and force a fresh upstream call (the
+result still populates the cache).
+
+> Tune `similarity_threshold` carefully: too low risks serving a cached answer for a
+> meaningfully different prompt; too high reduces hit rate. Start at `0.9` and lower it
+> while watching answer quality.

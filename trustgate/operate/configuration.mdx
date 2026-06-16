@@ -1,0 +1,64 @@
+---
+title: "Configuration"
+description: "TrustGate is configured entirely from environment variables — servers, datastores, telemetry, timeouts, and discovery. The full reference."
+---
+
+All TrustGate configuration is read from **environment variables**. In development, `.env`
+is loaded automatically via `godotenv`; in production, inject env vars directly (Helm
+values, ECS task definitions, k8s ConfigMap + Secret). Copy `.env.example` for the full set
+with safe defaults.
+
+## Server & discovery
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `APP_ENV` | `dev` | Environment name. |
+| `SERVER_ADMIN_PORT` | `8080` | Admin plane port. |
+| `SERVER_PROXY_PORT` | `8081` | Proxy plane port. |
+| `SERVER_MCP_PORT` | `8082` | MCP plane port. |
+| `SERVER_READ_TIMEOUT` / `SERVER_WRITE_TIMEOUT` | `60s` | HTTP timeouts. |
+| `SERVER_IDLE_TIMEOUT` | `120s` | Idle connection timeout. |
+| `SERVER_SECRET_KEY` | *(required)* | HS256 secret for admin JWTs. |
+| `GATEWAY_BASE_DOMAIN` | `llm.neuraltrust.ai` | Proxy host suffix (`{slug}.<domain>`). |
+| `MCP_BASE_DOMAIN` | `mcp.neuraltrust.ai` | MCP host suffix. |
+| `GATEWAY_DISCOVERY_MODE` | `header` | `header` or `subdomain` (see [Architecture](/trustgate/architecture#gateway-discovery)). |
+
+## Datastores
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DB_HOST` / `DB_PORT` | `localhost` / `5432` | Postgres. |
+| `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `agentgateway` / … | Postgres credentials. |
+| `DB_SSL_MODE` | `disable` | Postgres SSL mode. |
+| `DB_MIN_CONNS` / `DB_MAX_CONNS` | `1` / `10` | pgxpool bounds. |
+| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | Redis. |
+| `REDIS_DB` | `3` | Redis logical DB. |
+| `REDIS_TLS_ENABLED` | `false` | Redis TLS. |
+| `CACHE_LOCAL_TTL` | `5m` | In-process config cache TTL. |
+| `KAFKA_BROKERS` | `localhost:9092` | Kafka brokers (CSV). |
+
+## Telemetry, metrics & upstreams
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TELEMETRY_ENABLED` | `true` | Emit request telemetry. |
+| `TELEMETRY_KAFKA_TOPIC` | `agentgateway.requests` | Telemetry topic. |
+| `TELEMETRY_TRUSTLENS_ENABLED` / `_URL` | `false` / — | TrustLens forwarding. |
+| `METRICS_ENABLED` | `true` | Prometheus metrics. |
+| `METRICS_QUEUE_SIZE` / `_WORKER_COUNT` / `_FLUSH_INTERVAL` | `1000` / `1` / `5s` | Metrics worker. |
+| `UPSTREAM_TIMEOUT` | `60s` | Upstream request timeout. |
+| `UPSTREAM_ERROR_PASSTHROUGH` | `true` | Relay provider error bodies to the client. |
+| `PROVIDER_REQUEST_TIMEOUT` | `60s` | Per-provider timeout. |
+| `PROVIDER_MAX_RETRIES` | `2` | Provider retry count. |
+| `OPENROUTER_API_KEY` | — | Model-catalog sync. |
+| `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | Logging. |
+
+See `.env.example` in the repo for the complete list, including the `CORS_*` server-level
+[CORS](/trustgate/policies/cors#server-level-cors) and playground/STS signing variables.
+
+## Migrations
+
+Database migrations are **in-code Go files** under `pkg/infra/database/migrations/`, named
+`<unix_timestamp>_<snake_name>.go`, each registering itself in `init()`. The Admin plane
+applies any pending migrations automatically on boot — each migration's DDL and its version
+row commit in a single transaction.

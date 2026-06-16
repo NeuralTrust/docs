@@ -1,0 +1,77 @@
+---
+title: "Collectors"
+description: "A collector is a traffic tap — a gateway, SDK, browser extension, or WAF — that sends traffic to TrustGuard's /v1/guard endpoint. It owns a detector chain and an API key."
+---
+
+A **collector** is where TrustGuard receives traffic. It represents one integration
+point — an [AI gateway](/trustgate/getting-started/overview), an application SDK, a
+browser extension, or an edge/WAF worker — that calls
+[`POST /v1/guard`](/trustguard/api/guard) on every request it wants inspected.
+
+You create and manage collectors in the **console** (Collectors). Each collector owns
+two things:
+
+1. A **detector chain** — the [detectors](/trustguard/concepts/detectors) that run on its
+   traffic, managed on the collector's **Policies** tab.
+2. One or more **API keys** — the credentials its integration uses to authenticate.
+   The key is what resolves the collector at runtime.
+
+## Integration types
+
+Collectors are created from a **catalog** grouped by integration type. The integration
+determines the setup snippet you get and where enforcement happens.
+
+| Group | Examples | Where it runs |
+|---|---|---|
+| **Gateway** | TrustGate (recommended), Portkey, LiteLLM, Kong, Apigee, Azure APIM | At the AI gateway, in the request/response path. |
+| **Application** | Python / Node SDK, REST API, middleware | Inside your app, around model calls. |
+| **Browser** | Chrome, Edge, Firefox extensions | In the browser, around AI web apps. |
+| **WAF / Edge** | Cloudflare Workers, AWS CloudFront (Lambda@Edge), Fastly Compute, Akamai EdgeWorkers | At the CDN edge. |
+
+When you create or open a collector, the side panel shows step‑by‑step instructions and a
+ready-to-paste snippet for the chosen integration. See
+[Integrations](/trustguard/integrations/overview) for all of them.
+
+> **TrustGate is the first-class collector.** When TrustGuard runs behind the gateway,
+> the gateway calls `/v1/guard` for you and enforces the verdict natively. Other
+> collectors call the same API directly.
+
+## Authentication & API keys
+
+A collector authenticates with a bearer **API key**, created on the collector's **Auth**
+tab.
+
+- The raw secret is shown **once**, at creation — store it immediately. Afterwards only a
+  non-secret hint is shown.
+- Keys support an optional expiry (never / 7d / 30d / 90d / 1y) and can be revoked.
+- The key carries the collector identity — the runtime resolves the collector from the
+  key, so the request body must never include a collector id.
+
+```bash
+POST /v1/guard
+Authorization: Bearer <collector-api-key>   # ← resolves the collector
+Content-Type: application/json
+```
+
+## The detector chain
+
+Detectors are **team-wide and reusable**. You build a collector's behavior by attaching
+detectors to it on the **Policies** tab.
+
+- Attaching is additive and **unordered** — every enabled, matching detector runs.
+- The same detector can be attached to many collectors; you can disable it on one
+  collector without affecting others.
+
+See [Detectors](/trustguard/concepts/detectors) for how to configure the detectors
+themselves, and [Attribution](#attribution) below for getting per-user/session findings.
+
+## Attribution
+
+Each integration should send, when available:
+
+- **`consumer_id`** — who made the request (user id, email, or device fingerprint).
+- **`session_id`** — which conversation the message belongs to.
+
+These attribute findings to the right user and session in the **Activity** view, and
+power the stateful detectors (multi-turn and behavioral). Every integration snippet shows
+the natural source for each on that platform.

@@ -1,0 +1,213 @@
+---
+title: "Edge / WAF"
+description: "Run TrustGuard enforcement at the CDN edge with Cloudflare Workers, AWS CloudFront (Lambda@Edge), Fastly Compute, or Akamai EdgeWorkers."
+---
+
+Edge collectors enforce at the CDN, in front of your AI application — a network-level
+control independent of the app and gateway. They run **after** your CDN's WAF (Cloudflare
+WAF, AWS WAF, Fastly Next-Gen WAF, Akamai App & API Protector), so blocked web attacks
+never reach TrustGuard. The pattern is the same everywhere: the edge function reads the
+request body, calls [`/v1/guard`](/trustguard/api/guard), and returns a 403 when content
+is flagged — clean traffic forwards to your origin unchanged.
+
+Create an API key on the collector's **Auth** tab first. WAF rules can't call external
+services themselves, so the worker/function is the integration point.
+
+## Cloudflare Workers
+
+1. Create a Worker (`npm create cloudflare@latest`) and paste the code below into
+   `src/index.js`.
+2. Store the key as a secret: `wrangler secret put TRUSTGUARD_API_KEY`.
+3. Route the worker in front of your AI endpoints via `routes` in `wrangler.toml` — zone
+   WAF rules keep running before it.
+4. `wrangler deploy` and send a test request.
+5. *Optional:* push repeat offenders into a Cloudflare IP List and block them with a WAF
+   custom rule before they even reach the Worker.
+
+```js
+// wrangler.toml — run the worker on the routes you want to protect
+name = "trustguard-waf"
+main = "src/index.js"
+routes = [
+  { pattern = "app.example.com/api/chat*", zone_name = "example.com" }
+]
+
+// src/index.js
+export default {
+  async fetch(request, env) {
+    if (request.method === "POST") {
+      const text = await request.clone().text();
+      const result = await fetch("{TRUSTGUARD_URL}/v1/guard", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.TRUSTGUARD_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          protocol: "llm",
+          direction: "input",
+          input: { text },
+          consumer_id: request.headers.get("x-user-id") ?? "",
+          session_id: request.headers.get("x-session-id") ?? "",
+        }),
+      }).then((r) => r.json());
+      if (result.is_flagged) {
+        return new Response("Blocked by TrustGuard", { status: 403 });
+      }
+    }
+    return fetch(request);
+  },
+};
+```
+
+## AWS CloudFront (Lambda@Edge)
+
+AWS WAF can't call external services, so a Lambda@Edge function on the **viewer request**
+trigger is the integration point.
+
+1. Create a Node.js Lambda in **us-east-1** and deploy it as Lambda@Edge on your
+   distribution.
+2. Associate it with the **viewer request** event and check **"Include Body"** — the body
+   isn't exposed by default.
+3. Lambda@Edge has no environment variables: load the key from Secrets Manager / SSM
+   Parameter Store at cold start, or embed it at deploy time.
+4. Deploy and test. Note: CloudFront truncates the exposed body above the viewer-request
+   size limit.
+
+```js
+export const handler = async (event) => {
+  const request = event.Records[0].cf.request;
+
+  if (request.method === "POST" && request.body?.data) {
+    // Body is base64-encoded; "Include Body" must be enabled on the trigger
+    const text = Buffer.from(request.body.data, "base64").toString();
+    const result = await fetch("{TRUSTGUARD_URL}/v1/guard", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer <api-token>",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        protocol: "llm",
+        direction: "input",
+        input: { text },
+        consumer_id: request.headers["x-user-id"]?.[0]?.value ?? "",
+        session_id: request.headers["x-session-id"]?.[0]?.value ?? "",
+      }),
+    }).then((r) => r.json());
+
+    if (result.is_flagged) {
+      return { status: "403", statusDescription: "Forbidden", body: "Blocked by TrustGuard" };
+    }
+  }
+
+  return request;
+};
+```
+
+## Fastly Compute
+
+1. Create a Compute service (`npm create @fastly/compute`) and paste the code into
+   `src/index.js`.
+2. Add the TrustGuard host as a backend named **`trustguard`** and your app as a backend
+   named **`origin`**.
+3. Store the key in a Fastly **Secret Store** rather than hardcoding it.
+4. `fastly compute publish` and test — Next-Gen WAF rules keep running before it.
+
+```js
+addEventListener("fetch", (event) => event.respondWith(handler(event)));
+
+async function handler(event) {
+  const req = event.request;
+
+  if (req.method === "POST") {
+    const text = await req.clone().text();
+    const result = await fetch("{TRUSTGUARD_URL}/v1/guard", {
+      method: "POST",
+      backend: "trustguard",
+      headers: {
+        Authorization: "Bearer <api-token>",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        protocol: "llm",
+        direction: "input",
+        input: { text },
+        consumer_id: req.headers.get("x-user-id") ?? "",
+        session_id: req.headers.get("x-session-id") ?? "",
+      }),
+    }).then((r) => r.json());
+
+    if (result.is_flagged) {
+      return new Response("Blocked by TrustGuard", { status: 403 });
+    }
+  }
+
+  return fetch(req, { backend: "origin" });
+}
+```
+
+## Akamai EdgeWorkers
+
+EdgeWorkers sub-requests can only reach hostnames served through Akamai, so the TrustGuard
+endpoint must first be mapped behind your property.
+
+1. In **Property Manager**, route a path such as `/trustguard/*` to the TrustGuard origin
+   — sub-requests to non-Akamai hostnames fail with a 400.
+2. Create an EdgeWorker with the `responseProvider` handler below and attach it after App
+   & API Protector.
+3. Keep the guard call inside the **4-second** wall-time budget — set a sub-request
+   timeout and decide fail-open vs fail-closed on timeout.
+4. Activate the property and test.
+
+```js
+import { httpRequest } from "http-request";
+import { createResponse } from "create-response";
+
+export async function responseProvider(request) {
+  if (request.method === "POST") {
+    const text = await request.text();
+    // Path mapped to the TrustGuard origin in Property Manager
+    const guardResponse = await httpRequest("/trustguard/v1/guard", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer <api-token>",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        protocol: "llm",
+        direction: "input",
+        input: { text },
+        consumer_id: request.getHeader("X-User-Id")?.[0] ?? "",
+        session_id: request.getHeader("X-Session-Id")?.[0] ?? "",
+      }),
+      timeout: 3000,
+    });
+    const result = await guardResponse.json();
+
+    if (result.is_flagged) {
+      return createResponse(403, {}, "Blocked by TrustGuard");
+    }
+
+    const originResponse = await httpRequest(request.url, {
+      method: "POST",
+      headers: { "Content-Type": request.getHeader("Content-Type") ?? "" },
+      body: text,
+    });
+    return createResponse(originResponse.status, {}, originResponse.body);
+  }
+
+  const originResponse = await httpRequest(request.url);
+  return createResponse(originResponse.status, {}, originResponse.body);
+}
+```
+
+## Considerations
+
+- **Latency** — keep TrustGuard close to the edge region, or use it for input screening
+  where the extra hop is acceptable. The same fail-open behavior applies.
+- **Both directions** — screen the response by calling `/v1/guard` with
+  `direction:"output"` in the response phase.
+- **Identity** — forward a stable `consumer_id` (and `session_id` for chat) from your
+  auth/headers so behavioral and multi-turn detectors work.
+- Use a dedicated collector per edge deployment so its policies and telemetry are isolated.

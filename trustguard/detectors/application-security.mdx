@@ -1,0 +1,92 @@
+---
+title: "Application security detectors"
+description: "Classic injection and code-injection detection for AI request payloads: injection_protection and code_sanitation."
+---
+
+Application-security detectors catch traditional web-attack patterns that ride into AI
+systems through prompts, tool arguments, and request bodies — SQL/command injection,
+code execution, XSS, path traversal, and similar. They run in-process (no external
+calls) and are detection-only (`observe` or `block`).
+
+| Detector | Slug | Sides | Protocols | Modes |
+|---|---|---|---|---|
+| Injection Protection | `injection_protection` | input | all | observe, block |
+| Code Sanitation | `code_sanitation` | input | all | observe, block |
+
+> `injection_protection` is functional but currently not shown in the catalog picker.
+> Contact NeuralTrust if you need it enabled for your team.
+
+## Injection Protection
+
+Scans the request scopes you select for known injection-attack signatures and reports
+each match as a finding.
+
+**Detected attack types:** `sql`, `nosql`, `command`, `path_traversal`, `xss`, `ldap`,
+`xpath`, `header`, `file_inclusion` (or `all`).
+
+### Settings
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `content_to_check` | array&lt;enum&gt; | ✅ | Scopes to scan: `headers`, `path_and_query`, `body`, `all`. |
+| `predefined_injections` | array&lt;`{ type, enabled }`&gt; | — | Built-in attack types to enable. Empty = all enabled. |
+| `custom_injections` | array&lt;`{ name, pattern, content_to_check }`&gt; | — | Your own regex signatures, scoped per scope. |
+
+```json
+{
+  "name": "Block injections (body)",
+  "type": "injection_protection",
+  "mode": "block",
+  "direction": "input",
+  "settings": {
+    "content_to_check": ["body"],
+    "predefined_injections": [
+      { "type": "sql", "enabled": true },
+      { "type": "command", "enabled": true }
+    ],
+    "custom_injections": [
+      { "name": "ssti", "pattern": "\\{\\{.*\\}\\}", "content_to_check": "body" }
+    ]
+  }
+}
+```
+
+## Code Sanitation
+
+Detects dangerous code-injection patterns by language in the request. Reports matches;
+never rewrites.
+
+**Built-in languages:** `javascript`, `python`, `php`, `sql`, `shell`, `html`.
+
+### Settings
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `apply_all_languages` | boolean | `false` | Enable every built-in language pattern set. |
+| `languages` | array&lt;`{ language, enabled }`&gt; | — | Enable specific languages. |
+| `custom_patterns` | array&lt;`{ name, pattern, description, content_type }`&gt; | — | Custom regex signatures. |
+
+```json
+{
+  "name": "Flag code injection",
+  "type": "code_sanitation",
+  "mode": "observe",
+  "direction": "input",
+  "settings": {
+    "apply_all_languages": false,
+    "languages": [
+      { "language": "shell", "enabled": true },
+      { "language": "python", "enabled": true }
+    ]
+  }
+}
+```
+
+## When to use
+
+- Put these in front of any system that forwards prompt/tool content into databases,
+  shells, templating engines, or downstream APIs.
+- Start in `observe` to baseline false positives on your real traffic, then promote to
+  `block`.
+- These are pattern-based and complementary to the LLM-aware
+  [content-security](/trustguard/detectors/content-security) detectors — run both.

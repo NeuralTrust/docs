@@ -1,0 +1,82 @@
+---
+title: "Registries"
+description: "A registry is an upstream backend — an LLM provider endpoint or an MCP server — with its own credentials, options, and health checks."
+---
+
+A **registry** is a single upstream backend that a gateway can route to. It is the one
+abstraction for everything downstream: there are two kinds.
+
+| Type | Points at | Used by |
+|---|---|---|
+| **`LLM`** | A model provider endpoint (OpenAI, Anthropic, Bedrock, …). | Chat/Responses/Messages traffic. |
+| **`MCP`** | A Model Context Protocol server. | The [MCP plane](/trustgate/mcp/overview). |
+
+A registry has a `name`, an `enabled` flag, a `description`, and either an `LLMTarget` or
+an `MCPTarget`. [Consumers](/trustgate/concepts/consumers) and
+[roles](/trustgate/concepts/roles) reference registries to decide where traffic goes.
+
+## LLM registries
+
+An `LLMTarget` selects a provider and carries its options and upstream credential:
+
+| Field | Meaning |
+|---|---|
+| `provider` | One of the [supported providers](#supported-providers). |
+| `provider_options` | Provider-specific (e.g. OpenAI `{api, base_url}`; Vertex `{project, location, version}`; `openai_compatible` `{base_url}`). |
+| `auth` | The upstream credential (see [Target auth](#target-auth)). |
+| `health_checks` | Optional active health checking for load-balancer eligibility. |
+
+### Supported providers
+
+`openai` · `openai_compatible` · `anthropic` · `azure` · `bedrock` · `google` (Gemini) ·
+`vertex` · `groq` · `mistral`.
+
+TrustGate normalizes the inbound format (OpenAI / Anthropic / Responses) to each provider's
+wire format, so a client speaks one dialect regardless of the upstream.
+
+### Target auth
+
+The credential TrustGate uses to call the **provider** (distinct from the
+[consumer auth](/trustgate/concepts/auth) your clients use):
+
+| `type` | For | Key fields |
+|---|---|---|
+| `api_key` | Most providers | `api_key`, optional header/param placement. |
+| `azure` | Azure OpenAI | endpoint, version; API key, service principal, or managed identity. |
+| `aws` | Bedrock | access key/secret + region, or an assumed `role`. |
+| `oauth2` | OAuth2-protected upstreams | full client-credentials config. |
+| `gcp_service_account` | Vertex AI | encrypted service-account JSON. |
+
+## MCP registries
+
+An `MCPTarget` points at an MCP server:
+
+| Field | Meaning |
+|---|---|
+| `code` | Catalog code (e.g. `com.asana/mcp`). |
+| `url` | `https://` endpoint. |
+| `transport` | `streamable-http` (the supported transport). |
+| `headers` | Static headers to send upstream. |
+| `auth` | MCP auth mode: `none` · `static` · `passthrough` · `exchange` · `forwarded`. |
+
+The `exchange` mode supports token-exchange patterns (`impersonation`, `delegation`,
+`obo`, `token_exchange`) for downstream identity. See [MCP](/trustgate/mcp/overview).
+
+## Catalogs
+
+TrustGate ships read-only catalogs to help you configure registries:
+
+- **Providers** (`GET /v1/providers-catalog`) — supported providers, wire formats, auth
+  types, and the options schema.
+- **Models** (`GET /v1/models-catalog`) — model metadata (context window, pricing,
+  capabilities), synced from OpenRouter.
+- **MCP servers** (`GET /v1/mcp-servers-catalog`) — pre-seeded enterprise MCP servers.
+
+## Managing registries
+
+CRUD lives under `/v1/gateways/{gateway_id}/registries`. You can **test connectivity**
+before saving (`POST …/registries/test-connection`) and **list an MCP registry's tools**
+(`GET …/registries/{id}/tools`, which calls the live MCP server). See the
+[Registries API](/trustgate/api/overview).
+
+Next: give applications an identity with [consumers](/trustgate/concepts/consumers).

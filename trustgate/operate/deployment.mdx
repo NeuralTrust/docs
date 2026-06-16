@@ -1,0 +1,59 @@
+---
+title: "Deployment"
+description: "Run TrustGate's planes as independently scalable processes via Docker or Kubernetes, backed by Postgres, Redis, and Kafka."
+---
+
+TrustGate is a single static binary plus three datastores. Because the planes are selected
+by an argument, you scale **Admin**, **Proxy**, and **MCP** independently.
+
+## Topology
+
+| Plane | Argument | Scale for |
+|---|---|---|
+| Admin | `admin` | Config throughput (low — runs migrations on boot). |
+| Proxy | `proxy` | Request volume (high — your data plane). |
+| MCP | `mcp` | Agent/tool traffic. |
+
+Single-node setups can run admin + proxy together with `./trustgate run`.
+
+## Docker
+
+The published image runs one plane per container:
+
+```dockerfile
+# Builder: golang (CGO_ENABLED=1) — CGO is required by confluent-kafka-go
+# Runtime: distroless nonroot
+EXPOSE 8080 8081
+ENTRYPOINT ["/app/trustgate"]
+CMD ["proxy"]
+```
+
+Compose files: `docker-compose.yaml` (infra only — Postgres, Redis, Kafka), plus
+`docker-compose.api.yaml` (admin + proxy) and `docker-compose.frontend.yaml`. `make up`
+brings up the full stack. The image is `linux/amd64` (librdkafka).
+
+## Kubernetes
+
+Manifests live under `k8s/` (kustomize); each plane is its own `Deployment` with the
+matching `args` (`["admin"]`, `["proxy"]`, `["mcp"]`):
+
+```bash
+kubectl apply -k k8s/
+```
+
+Provide configuration via a ConfigMap + Secret (see
+[Configuration](/trustgate/operate/configuration)); `secrets.env.example` lists what each
+plane needs.
+
+## Health & readiness
+
+Every plane exposes probes for orchestration:
+
+```bash
+GET /healthz     # liveness
+GET /readyz      # readiness (dependencies reachable)
+GET /__/version  # build version, commit, date
+```
+
+Point your load balancer at `/readyz` so a plane only receives traffic once Postgres, Redis,
+and Kafka are reachable.
