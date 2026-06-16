@@ -1,0 +1,48 @@
+---
+title: "Telemetry"
+description: "TrustGate streams a rich per-request event to Kafka — model, tokens, cost, latency breakdown, policy chain, and routing attempts — and can forward to TrustLens."
+---
+
+Where [metrics](/trustgate/observability/metrics) give aggregate counters, **telemetry**
+emits one structured event per request, off the critical path, to Kafka. Each event
+captures everything needed to analyze cost, latency, routing, and policy decisions.
+
+## Configuration
+
+Telemetry is configured globally by environment and refined per gateway.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TELEMETRY_ENABLED` | `true` | Toggle telemetry. |
+| `TELEMETRY_KAFKA_TOPIC` | `agentgateway.requests` | Destination topic. |
+| `TELEMETRY_ENABLE_REQUEST_TRACES` | `true` | Include request traces. |
+| `TELEMETRY_ENABLE_PLUGIN_TRACES` | `true` | Include per-policy traces. |
+| `TELEMETRY_TRUSTLENS_ENABLED` | `false` | Forward to TrustLens. |
+| `TELEMETRY_TRUSTLENS_URL` | — | TrustLens endpoint. |
+
+Per [gateway](/trustgate/concepts/gateways), `telemetry` can define its own exporters
+(`{ name: "kafka", settings: { host, port, topic } }`), static `extra_params` appended to
+every event, trace toggles, and a `header_mapping` that copies inbound headers into event
+fields.
+
+## The event
+
+Events are versioned (`schema_version`) and include, among others:
+
+| Group | Fields |
+|---|---|
+| Identity | `trace_id`, `gateway_id`, `team_id`, `consumer`, `session_id`, `turn_id`, `ip`. |
+| Request | method, path, provider, registry id, requested vs resolved model, temperature, max tokens, stream flag, prompt tokens. |
+| Response | status code, latency, completion tokens, finish reason, streaming. |
+| Usage | prompt / completion / total tokens, cached input, reasoning output. |
+| Cost | prompt / completion / total USD. |
+| Latency | total, provider, policies, routing, gateway (ms). |
+| Attempts | per-registry attempts with fallback/pinned/route/outcome. |
+| Policy chain | per-policy decision, stage, latency, score, flagged. |
+
+## Using the stream
+
+Point any Kafka consumer at the topic to build dashboards, billing, or anomaly detection;
+or enable the **TrustLens** integration to forward events to NeuralTrust's analytics. The
+`attempts` and `policy_chain` arrays make it possible to reconstruct exactly how each
+request was routed and which policies fired.

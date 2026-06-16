@@ -1,0 +1,69 @@
+---
+title: "Consumers"
+description: "A consumer is the calling application's identity — it owns routing, credentials, and model policies, and its slug is the proxy URL path segment."
+---
+
+A **consumer** is the runtime identity of a calling application. It is what holds
+credentials and routing configuration, and its **`slug`** (a short, URL-safe random
+string) is the first path segment on the proxy:
+
+```text
+POST /{consumer_slug}/v1/chat/completions
+```
+
+Each consumer belongs to one gateway and has a `type`:
+
+| `type` | Traffic |
+|---|---|
+| `LLM` | Chat / Responses / Messages (default). |
+| `MCP` | MCP tool endpoints. |
+| `A2A` | Agent-to-agent (planned). |
+
+## Routing modes
+
+A consumer routes in one of two modes:
+
+| Mode | Routing config lives on | Auth |
+|---|---|---|
+| **`inline`** (default) | The consumer directly — `registry_ids`, `lb_config`, `fallback`, `model_policies`. | API key or OAuth2. |
+| **`role_based`** | The consumer's [roles](/trustgate/concepts/roles); roles are selected from IDP token claims. | IDP JWT. |
+
+### Inline routing
+
+Inline consumers own their routing directly:
+
+| Field | Meaning |
+|---|---|
+| `registry_ids` | The [registries](/trustgate/concepts/registries) this consumer may use. |
+| `registry_weights` | Per-registry weight (`1..100`) for weighted load balancing. |
+| `lb_config` | Named load-balancing pool (overrides simple `registry_ids`) — see [Load balancing](/trustgate/routing/load-balancing). |
+| `fallback` | Ordered retry chain across registries — see [Fallback](/trustgate/routing/fallback). |
+| `model_policies` | Per-registry allow-list and default model — see [Model resolution](/trustgate/routing/model-resolution). |
+
+### Model policies
+
+`model_policies` maps a registry to `{ allowed: string[], default: string }`. `allowed`
+restricts which models a consumer may request from that registry (empty = all); `default`
+is used when the request names no model and must be in `allowed`.
+
+## Credentials, headers, and MCP
+
+| Field | Meaning |
+|---|---|
+| `auth_ids` | The [auth credentials](/trustgate/concepts/auth) that can authenticate as this consumer. |
+| `headers` | Static headers injected on forwarded requests. |
+| `mcp` | For MCP consumers: `{ toolkit, fail_mode }`. |
+| `active` | Whether the consumer can authenticate at all. |
+
+## Managing consumers
+
+CRUD lives under `/v1/gateways/{gateway_id}/consumers`, plus attach/detach sub-resources:
+
+- `…/{id}/registries/{registry_id}` — attach a registry (body `{ "weight": 1..100 }`).
+- `…/{id}/roles/{role_id}` — attach a role (role-based mode).
+- `…/{id}/auths/{auth_id}` — attach an auth credential.
+- `…/{id}/policies/{policy_id}` — attach a [policy](/trustgate/policies/overview).
+
+See the [Consumers API](/trustgate/api/overview).
+
+Next: authenticate consumers with [auth credentials](/trustgate/concepts/auth).

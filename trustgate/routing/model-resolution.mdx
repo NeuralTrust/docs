@@ -1,0 +1,45 @@
+---
+title: "Model resolution"
+description: "How the model field in a request selects a registry — short pass-through, provider-qualified, or pool reference — and how model policies constrain it."
+---
+
+A client never names a provider URL — it names a **model**, and TrustGate resolves which
+[registry](/trustgate/concepts/registries) to use. The `model` field accepts three forms.
+
+## Model reference syntax
+
+| Form | Example | Meaning |
+|---|---|---|
+| **Short** (pass-through) | `gpt-4o-mini` | Sent as-is to the selected registry. The [load balancer](/trustgate/routing/load-balancing) picks among the consumer's registries. |
+| **Provider-qualified** | `@openai/gpt-4o` | Restrict routing to registries of provider `openai`, then pick. |
+| **Pool reference** | `pool:my-pool` | Route via the consumer's enabled load-balancing pool whose `pool_alias` matches (case-insensitive), across the pool's members. Inline routing only. |
+
+## Model policies
+
+[Consumers](/trustgate/concepts/consumers) and [roles](/trustgate/concepts/roles) can
+constrain which models are reachable per registry with `model_policies`:
+
+```json
+"model_policies": {
+  "<registry_id>": {
+    "allowed": ["gpt-4o", "gpt-4o-mini"],
+    "default": "gpt-4o-mini"
+  }
+}
+```
+
+- **`allowed`** — the allow-list of models for that registry. Empty/omitted means all
+  models are permitted.
+- **`default`** — used when the request names no model; it must be a member of `allowed`.
+
+A request for a model outside the allow-list is rejected before it reaches the provider.
+
+## Resolution order
+
+1. Parse the `model` reference (short / qualified / pool).
+2. Narrow the candidate registries (the consumer's `registry_ids` or the pool members,
+   filtered by provider for qualified refs).
+3. Apply `model_policies` — reject disallowed models; fill in the `default` when none was
+   given.
+4. Hand the candidates to the [load balancer](/trustgate/routing/load-balancing) to pick
+   one, with [fallback](/trustgate/routing/fallback) on failure.

@@ -1,0 +1,96 @@
+---
+title: "Architecture"
+description: "TrustGate is one Go binary that boots one of three independent planes — Admin, Proxy, MCP — backed by Postgres, Redis, and Kafka. How a request flows end to end."
+---
+
+TrustGate ships a **single binary** (`trustgate`) that boots **one** HTTP server, chosen
+by its first argument. In production each pod runs the same image with a different
+argument, so the planes scale independently.
+
+```bash
+./trustgate          # → proxy (default)
+./trustgate admin    # → admin
+./trustgate mcp      # → MCP server
+./trustgate run      # → admin + proxy together (single-node)
+```
+
+## The three planes
+
+| Plane | Port | Responsibility |
+|---|---|---|
+| **Admin** | `8080` | REST CRUD for gateways, registries, consumers, auth, policies, roles, and catalogs. Applies DB migrations on boot. |
+| **Proxy** | `8081` | Request routing, auth validation, policy execution, load balancing, provider forwarding, streaming, telemetry. |
+| **MCP** | `8082` | Model Context Protocol server: exposes registered [MCP](/trustgate/mcp/overview) servers and tools to agents, with an OAuth2 authorization server. |
+
+The Admin plane is the **control plane** (you configure it); the Proxy and MCP planes are
+the **data plane** (your traffic flows through them).
+
+## Request lifecycle (proxy)
+
+1. A client calls the proxy with a consumer API key (or OAuth2/IDP token).
+2. TrustGate resolves the **gateway** (from `X-AG-Gateway-Slug` or the host), the
+   **consumer** (from the URL `slug`), and the applicable **policies**.
+3. The applicable **policies** run at their **stages** — rate limit, token rate limit,
+   request size, semantic cache, CORS — sequentially or in parallel.
+4. The **load balancer** picks a healthy registry from the consumer's pool (round-robin,
+   weighted, least-connections, random, or semantic), with fallback.
+5. The request is forwarded to the selected **provider adapter** (OpenAI, Anthropic,
+   Bedrock, …), streaming when the client asked for it.
+6. The response returns, the semantic cache is populated, and a **telemetry** event is
+   emitted to Kafka.
+
+```text
+Client ─▶ Proxy :8081
+   │  middleware: request-id · CORS · access-log · metrics · recover · security-headers
+   │  auth: API-key hash compare · OAuth2 / IDP JWT · mTLS
+   ├─ resolve gateway (header/subdomain) → consumer (slug) → policies
+   ├─ policies run at their stages (parallel or sequential)
+   ├─ load balancer → registry (+ fallback chain)
+   ├─ provider adapter → upstream (stream or full)
+   └─ response ─▶ client          telemetry ─▶ Kafka
+```
+
+### Gateway discovery
+
+`GATEWAY_DISCOVERY_MODE` controls how the proxy finds the gateway:
+
+- **`header`** (default, self-hosted) — reads the `X-AG-Gateway-Slug` header, falling back
+  to a `Host` match against `{slug}.<GATEWAY_BASE_DOMAIN>`.
+- **`subdomain`** (cloud) — `Host`-only.
+
+## Infrastructure
+
+| Component | Role |
+|---|---|
+| **PostgreSQL** | Source of truth for all configuration (gateways, registries, consumers, …). The Admin plane runs migrations on boot. |
+| **Redis** | Rate-limit counters, the semantic-cache vector store, session store, and a pub/sub channel for cache invalidation. |
+| **Kafka** | Asynchronous telemetry export (`TELEMETRY_KAFKA_TOPIC`). Off the request critical path. |
+
+### Caching & invalidation
+
+To avoid a database round-trip per request, the proxy keeps an **in-process TTL cache**
+(`CACHE_LOCAL_TTL`, default `5m`) of resolved gateways, consumers, and auths. Admin
+mutations publish invalidation events over Redis pub/sub, and the proxy flushes the
+affected entries — so config changes propagate without a restart.
+
+## Endpoints the proxy serves
+
+All proxy traffic is shaped as `/{consumer_slug}/...`, and the inbound format is detected
+from the path:
+
+| Path | Format |
+|---|---|
+| `POST /{consumer_slug}/v1/chat/completions` | OpenAI Chat Completions |
+| `POST /{consumer_slug}/v1/messages` | Anthropic Messages |
+| `POST /{consumer_slug}/v1/responses` | OpenAI Responses API |
+
+Streaming (`"stream": true`) is supported on all three; the proxy flushes each SSE chunk
+and surfaces mid-stream upstream failures as an explicit error event rather than a silent
+truncation.
+
+## Repository layout
+
+TrustGate follows a hexagonal layout — domain entities and ports in `pkg/domain`,
+use-cases in `pkg/app`, and adapters in `pkg/infra` (providers, policies, load balancer,
+database, telemetry). Configuration is **environment-only**; see
+[Configuration](/trustgate/operate/configuration).

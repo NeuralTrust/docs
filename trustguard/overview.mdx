@@ -1,0 +1,92 @@
+---
+title: "Overview"
+description: "TrustGuard is NeuralTrust's runtime security service: it evaluates AI traffic against a collector's chain of detectors and reports per-detector findings — without ever dropping traffic."
+---
+
+**TrustGuard** is NeuralTrust's runtime security engine for generative-AI and agentic
+traffic. It inspects prompts, model output, documents, URLs, and agent/tool activity
+in flight and returns a structured security verdict for each request.
+
+TrustGuard is deliberately **decision-only**: it tells you *what* it found and *what*
+it would do, but it never blocks or drops traffic itself. The component that calls
+TrustGuard (the [collector](/trustguard/concepts/collectors)) decides whether to
+allow, mask, or block based on the verdict. This keeps TrustGuard safe to deploy
+inline anywhere — a failure or timeout can never take your application down.
+
+> TrustGuard is one of four NeuralTrust products. It pairs naturally with
+> **[TrustGate](/trustgate/getting-started/overview)** (the AI gateway, the most common
+> collector), **TrustLens** (AI security posture), and **TrustTest** (red teaming).
+
+## What it does
+
+<CardGroup cols={2}>
+  <Card title="Prompt & content security" icon="shield-check">
+    Jailbreak and prompt-injection detection, topic moderation, toxicity scoring,
+    and document/URL analysis on both input and output.
+  </Card>
+  <Card title="Data loss prevention" icon="eye-off">
+    Detect and mask 60+ PII entities and secrets (API keys, tokens, JWTs) in flight,
+    returning a transformed payload.
+  </Card>
+  <Card title="Agent & MCP security" icon="bot">
+    Guard tool/function definitions, enforce tool allow/deny lists, and validate the
+    tool calls a model emits.
+  </Card>
+  <Card title="Behavioral security" icon="activity">
+    Detect abusive actors — bot-like cadence, repeated payloads, and escalation —
+    across requests and collectors.
+  </Card>
+</CardGroup>
+
+## The model in one minute
+
+TrustGuard has two building blocks. You compose them once, then send traffic.
+
+| Concept | What it is |
+|---|---|
+| **[Detector](/trustguard/concepts/detectors)** | A reusable, named detection — one capability from the [built-in catalog](/trustguard/detectors/overview) (e.g. `prompt_guard`, `data_loss_prevention`) configured with a `mode` (`observe` / `redact` / `block`), `protocol`, `direction`, and `settings`. |
+| **[Collector](/trustguard/concepts/collectors)** | A traffic tap (gateway, SDK, browser, WAF) authenticated by an API key. Each collector has a **chain** of attached detectors. |
+
+```text
+                    POST /v1/guard  (Authorization: Bearer <collector key>)
+                                      │
+   ┌──────────┐   resolves    ┌───────▼────────┐   runs        ┌─────────────┐
+   │ API key  │──────────────▶│   Collector    │──────────────▶│  Detector   │ prompt_guard (block)
+   └──────────┘   collector   │  (the tap)     │   its chain   │  Detector   │ data_loss_prevention (redact)
+                              └────────────────┘   concurrently └─────────────┘ anomaly_detector (observe)
+                                      │
+                                      ▼
+              { is_flagged, transformed_payload, findings[], trace_id }
+```
+
+A request names **no detectors**: TrustGuard runs the collector's *entire effective
+chain* (every enabled, attached detector that matches the request's direction and
+protocol). See [How it works](/trustguard/how-it-works).
+
+## What makes it safe to run inline
+
+- **Never drops traffic.** A detection is always `HTTP 200` with the finding in the
+  response body. Non-2xx is reserved for auth (401), bad requests (400), and system
+  failures (500).
+- **Fail-open by default.** If a detector errors (e.g. an upstream model API is down),
+  TrustGuard returns no finding for it rather than failing the request, so a TrustGuard
+  issue never breaks your traffic. Fail-closed is opt-in.
+- **Enforcement is the caller's choice.** `is_flagged` is advisory. Your collector
+  decides what to do with it.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="How it works" icon="workflow" href="/trustguard/how-it-works">
+    The guard pipeline, modes, and the findings model.
+  </Card>
+  <Card title="Core concepts" icon="boxes" href="/trustguard/concepts/collectors">
+    Collectors and detectors.
+  </Card>
+  <Card title="Detector catalog" icon="list" href="/trustguard/detectors/overview">
+    Every built-in detection and its settings.
+  </Card>
+  <Card title="Guard API" icon="code" href="/trustguard/api/guard">
+    The `/v1/guard` request and response contract.
+  </Card>
+</CardGroup>

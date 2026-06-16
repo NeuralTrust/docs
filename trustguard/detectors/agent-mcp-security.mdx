@@ -1,0 +1,80 @@
+---
+title: "Agent & MCP security detectors"
+description: "Secure agentic and MCP traffic: guard tool/function definitions, enforce tool allow/deny lists, and validate the tool calls a model emits."
+---
+
+Agentic systems add an attack surface that prompt-only defenses miss: the agent's own
+**tool and function definitions**, the **tools a caller is allowed to use**, and the
+**tool calls the model emits**. These detectors are scoped to the `mcp` protocol.
+
+| Detector | Slug | Sides | Protocols | Backend |
+|---|---|---|---|---|
+| Tool Guard | `tool_guard` | input | mcp | NeuralTrust Firewall |
+| Tool Permission | `tool_permission` | input | mcp | in-process list |
+| Tool Selection | `tool_selection` | output | mcp | optional NeuralTrust/OpenAI |
+
+> `tool_permission` and `tool_selection` are functional but currently not shown in the
+> catalog picker. Contact NeuralTrust if you need them enabled for your team.
+
+## Tool Guard — `tool_guard`
+
+Scans the agent's **own definition** — system prompt and tool/function descriptions —
+for jailbreaks and prompt injections planted there (e.g. a poisoned MCP tool
+description). Uses the NeuralTrust Firewall jailbreak detector.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `jailbreak.threshold` | number | ✅ | Score in `[0,1]`. |
+| `credentials.*` | object | — | Override global firewall creds. |
+
+```json
+{ "type": "tool_guard", "mode": "block", "protocol": "mcp", "direction": "input",
+  "settings": { "jailbreak": { "threshold": 0.6 } } }
+```
+
+## Tool Permission — `tool_permission`
+
+Checks the tools declared in an MCP request against an allow/deny list. In-process, no
+external calls.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `allowed_tools` | array&lt;string&gt; | — | Empty = permit any non-denied tool. |
+| `denied_tools` | array&lt;string&gt; | — | Checked first; always wins. |
+| `tools_field` | string | `"tools"` | JSON path to the tools list in the body. |
+
+```json
+{ "type": "tool_permission", "mode": "block", "protocol": "mcp", "direction": "input",
+  "settings": { "allowed_tools": ["search", "calculator"], "denied_tools": ["shell_exec"] } }
+```
+
+## Tool Selection — `tool_selection`
+
+Validates the tool calls a model **emits** against a catalog of known tools and their
+argument schemas — catching hallucinated tools and malformed arguments. Runs on
+`output`.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `known_tools` | array&lt;`{ name, parameters: { type, required[] } }`&gt; | ✅ | The legitimate tool catalog. |
+| `provider` | enum | — | `neuraltrust` (default) or `openai`, used only if semantic check is on. |
+| `semantic_check.threshold` | number | required if blocking | Score in `[0,1]` for the semantic match. |
+| `credentials.*` | object | — | Provider creds. |
+
+```json
+{ "type": "tool_selection", "mode": "observe", "protocol": "mcp", "direction": "output",
+  "settings": {
+    "known_tools": [
+      { "name": "search", "parameters": { "type": "object", "required": ["query"] } }
+    ]
+  } }
+```
+
+## When to use
+
+- **`tool_guard` (input)** whenever you load third-party or user-supplied MCP servers /
+  tool descriptions — it catches injections hidden in tool metadata.
+- **`tool_permission` (input)** to enforce least-privilege: which tools a given collector
+  may invoke.
+- **`tool_selection` (output)** to catch a compromised or hallucinating model calling
+  tools that don't exist or with bad arguments.

@@ -1,0 +1,48 @@
+---
+title: "Fallback"
+description: "Retry across registries when an upstream fails — configurable triggers, an attempt/latency budget, and an ordered fallback chain."
+---
+
+**Fallback** turns a single upstream failure into a retry on the next registry instead of
+an error to the client. It is configured per [consumer](/trustgate/concepts/consumers)
+(inline routing) and engages when a forward fails with a matching trigger.
+
+```json
+"fallback": {
+  "enabled": true,
+  "triggers": ["http_5xx", "http_429", "timeout", "provider_error"],
+  "budget": { "max_attempts": 3, "max_total_latency": "20s" },
+  "chain": ["<primary_registry>", "<secondary_registry>", "<tertiary_registry>"]
+}
+```
+
+## Triggers
+
+A retry only happens when the failure matches a configured trigger:
+
+| Trigger | Fires on |
+|---|---|
+| `http_5xx` | Upstream 5xx responses. |
+| `http_429` | Upstream rate-limit responses. |
+| `timeout` | Upstream timeouts. |
+| `provider_error` | Provider-reported errors. |
+| `plugin_rejection` | A policy rejected the request (the trigger value is `plugin_rejection`). |
+
+## Budget
+
+The `budget` caps how hard TrustGate tries:
+
+- **`max_attempts`** — total forward attempts (including the first).
+- **`max_total_latency`** — wall-clock ceiling across all attempts.
+
+When either limit is reached, the last error is returned to the client.
+
+## The chain
+
+`chain` is the ordered list of registries to try. On each failure TrustGate moves to the
+next entry and adds the failed registry to an **exclude set**, so the
+[load balancer](/trustgate/routing/load-balancing) never re-picks an already-failed
+registry within the same request.
+
+> Use fallback to span providers (e.g. OpenAI → Azure OpenAI → Bedrock) for resilience, or
+> to degrade from a premium model to a cheaper one under load.

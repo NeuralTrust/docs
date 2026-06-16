@@ -1,0 +1,73 @@
+---
+title: "Policies"
+description: "A policy is a configured governance rule on a gateway's traffic — rate limiting, caching, CORS, and more — run at request/response stages, scoped globally or per consumer."
+---
+
+A **policy** attaches behavior to a gateway's traffic. Each policy is a single built-in
+capability — identified by its **`slug`** (e.g. `ratelimit`, `semanticcache`, `cors`) —
+configured with `settings` and run at one or more lifecycle **stages**, with a `mode`,
+`priority`, and a scope (global or per consumer).
+
+## Built-in policies
+
+| Policy (`slug`) | Purpose |
+|---|---|
+| [`ratelimit`](/trustgate/policies/rate-limiting) | Per-consumer / per-gateway request rate limiting. |
+| [`tokenratelimit`](/trustgate/policies/rate-limiting) | Token-based limiting for LLM cost control. |
+| [`requestsize`](/trustgate/policies/request-size) | Reject requests above a size / character budget. |
+| [`semanticcache`](/trustgate/policies/semantic-cache) | Embedding-based response caching for repeated prompts. |
+| [`cors`](/trustgate/policies/cors) | Cross-origin resource sharing for browser clients. |
+
+> **Security policies.** Jailbreak, PII, toxicity, and tool-abuse detection are **not**
+> built into the gateway — they're provided by [TrustGuard](/trustguard/overview), attached
+> as a gateway policy. See the [TrustGate integration](/trustguard/integrations/gateway).
+
+## Stages
+
+A policy fires in one or more lifecycle **stages**:
+
+| Stage | When |
+|---|---|
+| `pre_request` | Before the request is forwarded upstream. |
+| `post_request` | After the request is built, before sending. |
+| `pre_response` | After the upstream responds, before returning. |
+| `post_response` | After the response is returned (e.g. cache populate). |
+
+Some policies run across two stages — the [semantic cache](/trustgate/policies/semantic-cache)
+looks up at `pre_request` and populates at `post_response`.
+
+## Mode
+
+A policy's `mode` sets its enforcement intent:
+
+| Mode | Behavior |
+|---|---|
+| `enforce` | Reject the request on violation (default). |
+| `throttle` | Slow down but pass. |
+| `observe` | Log only — no enforcement. |
+
+## Ordering and scope
+
+| Field | Meaning |
+|---|---|
+| `slug` | The built-in capability this policy configures. |
+| `settings` | The policy's configuration (limits, thresholds, origins…). |
+| `priority` | Lower runs earlier. |
+| `parallel` | Run alongside other policies at the same stage concurrently. |
+| `global` | Apply to **all** consumers in the gateway. |
+| `enabled` | Toggle without deleting. |
+
+Global policies are the gateway-wide baseline (e.g. a default request-size guard);
+consumer-scoped policies tune behavior per tenant. The proxy resolves both sets and runs
+them in `priority` order. Policies that partition by a key (the rate limiters) also accept
+a `group_by_header` to sub-partition within scope.
+
+## Managing policies
+
+CRUD lives under `/v1/gateways/{gateway_id}/policies`, plus:
+
+- `…/{id}/global` (`POST`/`DELETE`) — promote/demote to global.
+- `…/{id}/duplicate` (`POST`) — clone a policy.
+- Attach to a consumer via `…/consumers/{id}/policies/{policy_id}`.
+
+See the [Policies API](/trustgate/api/overview).

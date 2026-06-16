@@ -1,0 +1,82 @@
+---
+title: "Integrations overview"
+description: "Every way to send traffic to TrustGuard — gateway, application SDK, browser, and edge/WAF collectors — all using the same /v1/guard call."
+---
+
+A [collector](/trustguard/concepts/collectors) is wherever you call
+[`/v1/guard`](/trustguard/api/guard). When you create or open a collector in the console,
+its side panel shows the exact steps and a ready-to-paste snippet for the integration you
+picked. This section documents each one.
+
+<CardGroup cols={2}>
+  <Card title="Gateway" icon="network" href="/trustguard/integrations/gateway">
+    Enforce at the AI gateway. TrustGate is first-class; Portkey, LiteLLM, Kong, Apigee,
+    and Azure APIM are supported.
+  </Card>
+  <Card title="Application" icon="code" href="/trustguard/integrations/application">
+    Wrap model calls in your app with the Python / Node SDKs, middleware, or the REST API.
+  </Card>
+  <Card title="Browser" icon="globe" href="/trustguard/integrations/browser">
+    Monitor AI web apps from a managed Chrome / Edge / Firefox extension.
+  </Card>
+  <Card title="Edge / WAF" icon="shield" href="/trustguard/integrations/edge-waf">
+    Run at the CDN edge: Cloudflare Workers, CloudFront Lambda@Edge, Fastly, Akamai.
+  </Card>
+</CardGroup>
+
+## The call is always the same
+
+Every integration makes one call:
+
+```http
+POST {TRUSTGUARD_URL}/v1/guard
+Authorization: Bearer <collector API key>
+Content-Type: application/json
+
+{
+  "protocol": "llm",                 // llm | mcp | a2a
+  "direction": "input",              // "input" (prompt) or "output" (completion)
+  "input": { "text": "…" },
+  "session_id": "sess-123",          // the conversation
+  "consumer_id": "alex@acme.com"     // the user / device
+}
+```
+
+…and reacts to the verdict:
+
+```text
+if  is_flagged             → block the request (e.g. 403)
+elif transformed_payload   → forward the masked payload instead
+else                       → forward unchanged
+```
+
+Inspect **input** before calling the model and **output** before returning it — usually
+two calls per interaction. See the full contract in the [Guard API](/trustguard/api/guard).
+
+## Two rules for every integration
+
+1. **Create the API key on the collector's Auth tab** and pass it as
+   `Authorization: Bearer <key>`.
+2. **Always send `consumer_id` and `session_id`** when you have them. They attribute
+   findings to the right user and conversation in **Activity** and power the multi-turn
+   and behavioral detectors. Each snippet shows the natural source on its platform
+   (auth context, headers, cookies).
+
+## SDKs
+
+For application code, prefer the official TrustGuard SDKs over hand-rolled HTTP — they
+take the base URL and call `/v1/guard` for you:
+
+| Language | Package |
+|---|---|
+| Node / TypeScript | `@neuraltrust/trustguard-sdk` |
+| Python | `neuraltrust-trustguard` (import `from trustguard import TrustGuard`) |
+| Go | `github.com/NeuralTrust/trustguard-sdk/go` |
+
+Gateway and edge integrations use raw HTTP, since they run inside vendor config or edge
+runtimes where the SDKs don't apply.
+
+## Run several at once
+
+You can run multiple collectors simultaneously (e.g. gateway + browser). Each has its own
+key and detector chain, and behavioral signals correlate across them by `consumer_id`.

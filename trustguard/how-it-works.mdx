@@ -1,0 +1,105 @@
+---
+title: "How it works"
+description: "The /v1/guard evaluation pipeline: how a collector is resolved, how its detector chain runs, the observe/redact/block modes, and the findings response."
+---
+
+Every inspection goes through a single runtime endpoint, `POST /v1/guard`. This page
+explains what happens between the request and the verdict.
+
+## 1. Authenticate and resolve the collector
+
+The caller sends `Authorization: Bearer <api-key>`. TrustGuard hashes the key
+(`SHA-256`), looks it up (cached for low latency), checks it is active and not expired,
+and resolves the **collector** it belongs to. The `collector_id` is **never** sent in the
+request body — it always comes from the key.
+
+If the key is missing or invalid you get `401`; if it is found but inactive/expired the
+request is rejected before any detector runs.
+
+## 2. Load the effective detector chain
+
+TrustGuard loads the collector's chain — every detector attached via a
+collector–detector link. A detector is part of the **effective chain** only when both
+the link and the detector itself are enabled. The chain is **unordered**: there is no
+priority field.
+
+It then filters the chain for this request:
+
+- **Direction** — the request's `direction` (`input` or `output`) must match the
+  detector's direction.
+- **Protocol** — the request's `protocol` (`all` / `llm` / `mcp` / `a2a`) must match
+  the detector's protocol. `all` on either side is a wildcard.
+
+There is **no per-request detector selection** — you cannot ask for "just one
+detector". You shape behavior by composing the chain.
+
+## 3. Run detectors, then transformers
+
+The matched detectors are split by capability:
+
+| Phase | Detectors | Execution |
+|---|---|---|
+| **Detect** | Every detection-only detector | Run **concurrently**; results merged deterministically (sorted by type). They read the body but never modify it. |
+| **Transform** | Only mutable detectors (today: `data_loss_prevention`) | Run **sequentially** after detection. In `redact` mode they rewrite the payload, producing `transformed_payload`. |
+
+File attachments (`input.attachments`) are decoded once and shared with the detectors
+that consume them (`doc_analyzer`, `url_analyzer`). Remote attachment URLs are fetched
+server-side under a strict SSRF guard (HTTPS only; loopback, private, link-local,
+CGNAT, and cloud-metadata addresses blocked) and are **never stored**.
+
+## 4. Modes shape the verdict
+
+Each detector carries a **mode**. The mode decides how a detection affects the response —
+not whether the detector runs.
+
+| Mode | Reports a finding | Sets `is_flagged` | Rewrites payload |
+|---|---|---|---|
+| `observe` | ✅ | — | — |
+| `redact` | ✅ | — | ✅ (mutable detectors only) |
+| `block` | ✅ | ✅ on that finding | — |
+
+`redact` is only valid for mutable detectors; configuring it on any other detector is
+rejected when you create the detector. The top-level `is_flagged` is an **OR** over all
+findings — it is `true` when at least one `block`-mode detector fired.
+
+## 5. The response
+
+```json
+{
+  "is_flagged": false,
+  "transformed_payload": { "email": "[MASKED_EMAIL]" },
+  "findings": [
+    {
+      "detection_type": "pii",
+      "confidence": 0.95,
+      "rule_name": "",
+      "is_flagged": false,
+      "details": { "masked": 1, "entities": ["email"] }
+    }
+  ],
+  "trace_id": "f1e2…",
+  "request_id": "a9b8…"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `is_flagged` | `true` only when a `block`-mode detector fired. Advisory — the caller enforces. |
+| `transformed_payload` | The rewritten payload, or `null` if no `redact`-mode detector changed anything. |
+| `findings[]` | One entry per detector that reported something, sorted by detector type. |
+| `trace_id` / `request_id` | Correlation IDs propagated through logs and telemetry. |
+
+See the full contract — including every field of a finding — in the
+[Guard API](/trustguard/api/guard) reference.
+
+## Failure behavior
+
+If a detector hits an error (an upstream provider is down, a timeout, etc.):
+
+- **Fail-open (default)** — TrustGuard returns no finding for that detector and the
+  request still succeeds, so a TrustGuard issue never breaks your traffic.
+- **Fail-closed (opt-in)** — the request returns `500` so the caller can decide to hold
+  traffic. Ask NeuralTrust to enable this for your deployment.
+
+Because TrustGuard returns `200` on every detection, your integration acts on
+`is_flagged` / `findings` — it never relies on TrustGuard to reject a request.

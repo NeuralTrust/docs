@@ -1,0 +1,90 @@
+---
+title: "Installation"
+description: "Install and run TrustGate with the one-line installer, Docker Compose, local dev, or Kubernetes."
+---
+
+TrustGate is one Go binary plus Postgres, Redis, and Kafka. Pick the workflow that fits.
+
+## One-line install
+
+Clones the repo, seeds `.env`, brings up the full stack in Docker, and (when Go is
+installed) builds and installs the `trustgate` CLI on your `PATH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NeuralTrust/AgentGateway/main/scripts/install.sh | bash
+```
+
+Requires `git`, `docker`, and Docker Compose (plus Go to build the CLI). Re-running updates
+the checkout and never overwrites your `.env`. Useful overrides:
+
+| Variable | Effect |
+|---|---|
+| `AG_REF=develop` | Install a different branch / tag / commit. |
+| `AG_DIR=/path/to/dir` | Where to clone. |
+| `AG_BIN_DIR=~/.local/bin` | Where to install the `trustgate` CLI. |
+| `AG_INSTALL_CLI=0` | Skip building the CLI. |
+| `AG_NO_START=1` | Skip `docker compose up`. |
+
+## Docker Compose
+
+```bash
+git clone https://github.com/NeuralTrust/AgentGateway.git
+cd AgentGateway
+cp .env.example .env          # adjust as needed
+
+make up                       # Postgres, Redis, Kafka + admin, proxy & mcp
+make logs                     # tail
+make down                     # tear down
+```
+
+Check the health probes:
+
+```bash
+curl localhost:8080/healthz       # admin
+curl localhost:8081/healthz       # proxy
+curl localhost:8082/healthz       # mcp
+curl localhost:8080/__/version    # build info (version, commit, date)
+```
+
+> The image is pinned to `linux/amd64` because `confluent-kafka-go` only bundles an amd64
+> `librdkafka`; on Apple Silicon the build runs under emulation out of the box.
+
+## Local development
+
+Run the infra in Docker and the binary on your machine so you can attach a debugger:
+
+```bash
+make compose-up     # boot Postgres, Redis, Kafka, Zookeeper
+
+make run-all        # admin :8080 + proxy :8081 in one process (simplest)
+# ...or each plane in its own terminal (closer to production):
+make run-admin      # applies migrations, admin on :8080
+make run-proxy      # proxy on :8081
+make run-mcp        # MCP server on :8082
+
+make compose-down   # stop infra (add -v to wipe volumes)
+```
+
+## Kubernetes
+
+Manifests live under `k8s/` (kustomize); each plane is its own `Deployment`:
+
+```bash
+kubectl apply -k k8s/
+```
+
+## Configuration
+
+All configuration is read from **environment variables** — in dev, `.env` is loaded
+automatically; in production, inject them via Helm values, ECS task definitions, or a k8s
+ConfigMap + Secret. See [Configuration](/trustgate/operate/configuration) for the full
+reference, and [Deployment](/trustgate/operate/deployment) for production topology.
+
+## Run the tests
+
+```bash
+make test            # unit
+make test-race       # unit + race detector
+make test-cover      # unit + coverage
+make test-functional # functional tests against a real admin server
+```

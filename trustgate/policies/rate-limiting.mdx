@@ -1,0 +1,48 @@
+---
+title: "Rate limiting"
+description: "Limit requests with the ratelimit policy and LLM tokens with tokenratelimit — scoped per consumer or gateway, optionally partitioned by a header."
+---
+
+TrustGate ships two rate-limiting policies backed by Redis counters. Both follow their
+[policy](/trustgate/policies/overview) scope: per consumer when the policy targets
+consumers, gateway-wide when the policy is `global`. A `group_by_header` sub-partitions the
+counter within that scope (e.g. per end-user or tenant).
+
+## `ratelimit` — request rate limiting
+
+Counts requests in a sliding window.
+
+| Setting | Type | Notes |
+|---|---|---|
+| `limit` | int | Max requests per window. |
+| `window` | duration | Go duration string: `30s`, `1m`, `1h`. |
+| `retry_after` | string | `Retry-After` value when limited (default `60`). |
+| `group_by_header` | string | Optional sub-partition key (e.g. a tenant header). |
+
+```json
+{ "slug": "ratelimit", "settings": { "limit": 100, "window": "1m" } }
+```
+
+Responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and
+(when limited) `Retry-After`.
+
+## `tokenratelimit` — token rate limiting
+
+Counts prompt + completion tokens from the provider's usage block — the right control for
+LLM **cost**, since a few large requests can cost more than many small ones.
+
+| Setting | Type | Notes |
+|---|---|---|
+| `window.unit` | enum | `second` · `minute` · `hour` · `day`. |
+| `window.max` | int | Max tokens per window. |
+| `group_by_header` | string | Optional sub-partition key. |
+
+```json
+{ "slug": "tokenratelimit", "settings": { "window": { "unit": "minute", "max": 50000 } } }
+```
+
+## Choosing a scope
+
+- **Global policy** → a gateway-wide ceiling protecting your upstream spend.
+- **Consumer-scoped policy** → per-tenant quotas.
+- **`group_by_header`** → fairness within a tenant (per end-user), without a policy per user.

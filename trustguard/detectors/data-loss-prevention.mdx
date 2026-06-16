@@ -1,0 +1,97 @@
+---
+title: "Data loss prevention"
+description: "Detect and mask 60+ PII entities and secrets in AI traffic in flight, on input and output. The only transform-capable detector."
+---
+
+The **Data Loss Prevention** detector (`data_loss_prevention`) finds sensitive data —
+PII and secrets — in prompts and model output, and can **mask it in flight**. It is the
+only **mutable** detector: the only one that supports `redact` mode and the only one that
+populates `transformed_payload`.
+
+| Property | Value |
+|---|---|
+| Slug | `data_loss_prevention` |
+| Category | data_loss_prevention |
+| Sides | input, output |
+| Protocols | all |
+| Modes | `observe`, `block`, `redact` |
+| Mutable | ✅ |
+
+JSON bodies are masked **structurally** (string values only — keys are never touched);
+text bodies are masked directly. Detected secrets (passwords, API keys, access tokens,
+JWTs) are reported with `detection_type: "secret"`; other entities as `"pii"`.
+
+## Modes
+
+- **`observe`** — report what was found, change nothing.
+- **`block`** — report and set `is_flagged` (caller blocks).
+- **`redact`** — report and return a `transformed_payload` with matches masked. Forward
+  the masked payload instead of the original.
+
+## Settings
+
+| Field | Type | Notes |
+|---|---|---|
+| `apply_all` | boolean | Mask every catalog entity. |
+| `predefined_entities` | array&lt;`{ entity, enabled, mask_with, preserve_len }`&gt; | Select specific PII entities and how to mask them. |
+| `rules` | array&lt;`{ pattern, type, mask_with, preserve_len }`&gt; | Custom rules; `type` is `keyword` or `regex`. |
+
+- `mask_with` — the replacement token (e.g. `[MASKED_EMAIL]`).
+- `preserve_len` — keep the original length when masking.
+
+```json
+{
+  "name": "Redact PII (in & out)",
+  "type": "data_loss_prevention",
+  "mode": "redact",
+  "direction": "output",
+  "settings": {
+    "predefined_entities": [
+      { "entity": "email", "enabled": true, "mask_with": "[EMAIL]" },
+      { "entity": "credit_card", "enabled": true, "preserve_len": true },
+      { "entity": "api_key", "enabled": true }
+    ],
+    "rules": [
+      { "pattern": "ACME-\\d{6}", "type": "regex", "mask_with": "[ACCOUNT]" }
+    ]
+  }
+}
+```
+
+A `redact` response:
+
+```json
+{
+  "is_flagged": false,
+  "transformed_payload": { "answer": "Email us at [EMAIL]" },
+  "findings": [
+    { "detection_type": "pii", "confidence": 0.95,
+      "details": { "masked": 1, "entities": ["email"] } }
+  ]
+}
+```
+
+## Entity catalog
+
+60+ built-in entities, grouped by false-positive risk. Pick the tier appropriate to
+your tolerance — Tier 1 is safe to enable broadly; Tier 3 benefits from `observe` first.
+
+**Tier 1 — near-zero false positives:** `password`, `api_key`, `access_token`, `email`,
+`uuid`, `jwt_token`, `crypto_wallet`, `stripe_key`, `ip_address`, `ip6_address`,
+`mac_address`, `device_mac`, `italian_cf`, `mexican_curp`, `french_nir`, `cvv`.
+
+**Tier 2 — structural markers:** `spanish_iban`, `iban`, `us_medicare`, `ssn`,
+`brazilian_cnpj`, `brazilian_cpf`, `credit_card`, `spanish_dni`, `spanish_nie`,
+`spanish_cif`, `spanish_nss`, `spanish_phone`, `german_id`, `mexican_rfc`,
+`chilean_rut`, `date`, `swift_bic`, `address`.
+
+**Tier 3 — higher false positives (validate first):** `device_imei`, `bank_account`,
+`colombian_cc`, `tax_id`, `routing_number`, `peruvian_dni`, `argentine_dni`, `zip_code`,
+`phone_number`, `vehicle_vin`, `passport`, `drivers_license`, `isin`.
+
+## When to use
+
+- **Output `redact`** to strip PII the model regurgitates before it reaches the user.
+- **Input `redact`** to keep PII out of third-party model providers entirely.
+- **`block` secrets** (`api_key`, `password`, `access_token`, `jwt_token`) to stop
+  credential leakage.

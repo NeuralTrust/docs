@@ -1,0 +1,115 @@
+---
+title: "Guard API"
+description: "POST /v1/guard — the single runtime endpoint. Request and response contract, authentication, attachments and SSRF, and status codes."
+---
+
+`POST /v1/guard` is the only runtime endpoint. A [collector](/trustguard/concepts/collectors)
+calls it to evaluate one request against its detector chain. See
+[How it works](/trustguard/how-it-works) for the pipeline behind it.
+
+## Authentication
+
+```http
+POST /v1/guard
+Authorization: Bearer <collector-api-key>
+Content-Type: application/json
+```
+
+The collector is resolved from the API key. **Do not** send a `collector_id` in the body.
+
+## Request
+
+```json
+{
+  "input": {
+    "messages": ["What's the weather?"],
+    "attachments": [
+      { "filename": "policy.pdf", "content_type": "application/pdf", "data": "<base64>" },
+      { "url": "https://example.com/page" }
+    ]
+  },
+  "direction": "input",
+  "protocol": "llm",
+  "session_id": "sess-123",
+  "consumer_id": "alex@acme.com",
+  "metadata": { "content_type": "application/json" }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `input` | object | ✅ | Free-form payload to inspect. `input.attachments` is extracted separately (not sent to text detectors). |
+| `direction` | enum | — | `input` (default) or `output`. Selects which detectors run. |
+| `protocol` | enum | — | `all` (default) · `llm` · `mcp` · `a2a`. Selects which detectors run. |
+| `session_id` | string | — | Conversation key for stateful detectors (`multiturn_guard`). Synthesised if omitted (treated as single-turn). |
+| `consumer_id` | string | — | Actor identifier used by `anomaly_detector` for per-actor tracking. |
+| `metadata` | object | — | Free-form. `metadata.content_type` overrides the content type used to skip inapplicable detectors. |
+
+Unknown top-level fields are rejected with `400` (strict decoding).
+
+### Attachments & SSRF
+
+Each attachment provides **either** base64 `data` **or** a `url`:
+
+- URL fetches are HTTPS-only and bounded (10s timeout, 50 MiB cap, max 5 redirects).
+- A strict **SSRF guard** resolves DNS before dialing and rejects loopback, private,
+  link-local, multicast, CGNAT (`100.64/10`), `0.0.0.0/8`, and cloud-metadata
+  (`169.254.169.254`) targets. Proxy env vars are ignored.
+- Attachment bytes are **never persisted**.
+
+## Response
+
+Always `200` for a detection — TrustGuard never drops traffic.
+
+```json
+{
+  "is_flagged": false,
+  "transformed_payload": { "email": "[MASKED_EMAIL]" },
+  "findings": [
+    {
+      "detection_type": "pii",
+      "confidence": 0.95,
+      "rule_name": "",
+      "is_flagged": false,
+      "details": { "masked": 1, "entities": ["email"] }
+    }
+  ],
+  "trace_id": "f1e2…",
+  "request_id": "a9b8…"
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `is_flagged` | boolean | OR over all findings; `true` only when a `block`-mode detector fired. |
+| `transformed_payload` | object \| null | The rewritten payload; `null` unless a `redact`-mode mutable detector changed it. |
+| `findings[]` | array | One entry per detector that reported, sorted by detector type. |
+| `findings[].detection_type` | string | e.g. `pii`, `secret`, `jailbreak`, `injection`, `toxicity`. |
+| `findings[].confidence` | number | Detector-specific score. |
+| `findings[].rule_name` | string | Optional, set by some detectors. |
+| `findings[].is_flagged` | boolean | Whether this finding's detector was in `block` mode. |
+| `findings[].details` | object | Free-form, detector-specific context (e.g. matched entities, masked count). |
+| `trace_id` / `request_id` | string | Correlation IDs (also on logs and telemetry). |
+
+## Status codes
+
+| Code | When |
+|---|---|
+| `200` | Always, for any detection (including block findings). The caller enforces. |
+| `400` | Invalid body, unknown fields, bad `direction`/`protocol`. |
+| `401` | Missing or invalid API key. |
+| `403` | Key found but inactive/expired. |
+| `500` | A detector errored **and** the deployment is configured fail-closed (opt-in). With the fail-open default you get `200`. |
+
+## Enforcing the verdict
+
+TrustGuard is advisory. Your collector inspects the response and decides:
+
+```text
+if response.is_flagged                  → block / 4xx the original request
+else if response.transformed_payload    → forward the masked payload instead
+else                                    → forward unchanged
+```
+
+When TrustGuard runs behind [TrustGate](/trustgate/getting-started/overview), the
+gateway performs this enforcement for you.

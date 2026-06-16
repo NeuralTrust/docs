@@ -1,0 +1,165 @@
+---
+title: "Gateway integrations"
+description: "Run TrustGuard behind an AI gateway — TrustGate (first-class), Portkey, LiteLLM, Kong, Apigee, or Azure APIM — with the exact configuration each uses."
+---
+
+Running TrustGuard behind a gateway is the lowest-friction deployment: the gateway is
+already in the request/response path, so it calls [`/v1/guard`](/trustguard/api/guard) and
+enforces the verdict for **every** model call with no application changes.
+
+Every gateway integration starts the same way: **create an API key on the collector's
+Auth tab**, then wire the gateway to call the guard endpoint and block when
+`is_flagged` is `true`.
+
+## TrustGate (recommended)
+
+[TrustGate](/trustgate/getting-started/overview) is NeuralTrust's own AI gateway and the
+first-class collector — findings appear as first-class spans in TrustGate traces, across
+LLM, MCP, and A2A traffic.
+
+1. Create an API key on the collector's **Auth** tab.
+2. Open your TrustGate gateway configuration.
+3. Enable the **TrustGuard policy** on the routes you want to protect and paste the API
+   key into its settings.
+4. Send a test request — it appears in TrustGuard's **Activity** page within seconds.
+
+## Portkey
+
+Portkey calls TrustGuard through a **Bring-Your-Own-Guardrails** webhook check on requests
+and responses.
+
+1. Create an API key (Auth tab).
+2. In Portkey, create a Guardrail with a **Webhook** check pointing at the guard endpoint.
+3. Add it to `input_guardrails` / `output_guardrails` in your Portkey Config with
+   `deny: true` to enforce.
+4. Portkey expects a `{ verdict }` response — map `verdict = !is_flagged` with a thin
+   adapter if your plan doesn't support response mapping. Map Portkey request metadata
+   (user, trace id) to `consumer_id` and `session_id`.
+
+```json
+{
+  "input_guardrails": [{
+    "default.webhook": {
+      "webhookURL": "{TRUSTGUARD_URL}/v1/guard",
+      "headers": { "Authorization": "Bearer <api-token>" }
+    },
+    "deny": true
+  }]
+}
+```
+
+## LiteLLM
+
+Add TrustGuard as a LiteLLM **custom guardrail** that calls the guard endpoint on every
+request.
+
+1. Create an API key (Auth tab).
+2. Create `trustguard_guardrail.py`: a `CustomGuardrail` subclass that calls TrustGuard via
+   the Python SDK (`pip install neuraltrust-trustguard`) and raises when `is_flagged` is
+   true. Set `consumer_id` from the LiteLLM user/key alias and `session_id` from
+   `litellm_session_id`.
+3. Reference the class from your proxy `config.yaml`.
+4. Restart your LiteLLM proxy.
+
+```yaml
+guardrails:
+  - guardrail_name: trustguard
+    litellm_params:
+      guardrail: trustguard_guardrail.TrustGuard
+      mode: [pre_call, post_call]
+      api_base: {TRUSTGUARD_URL}/v1/guard
+      api_key: <api-token>
+      default_on: true
+```
+
+## Kong
+
+Use Kong's **`ai-custom-guardrail`** plugin (requires AI Proxy) to send prompts and
+completions to the guard endpoint.
+
+1. Create an API key (Auth tab).
+2. Configure the **AI Proxy** (or AI Proxy Advanced) plugin on your route.
+3. Add the **`ai-custom-guardrail`** plugin pointing at the guard endpoint. Include
+   `consumer_id` (Kong's `X-Consumer-ID`) and `session_id` in the body template.
+4. Apply the config — requests are blocked when TrustGuard returns `is_flagged: true`.
+
+```yaml
+plugins:
+  - name: ai-custom-guardrail
+    config:
+      guarding_mode: BOTH
+      text_source: concatenate_all_content
+      params:
+        api_key: "<api-token>"
+      request:
+        url: {TRUSTGUARD_URL}/v1/guard
+        headers:
+          Authorization: Bearer $(conf.params.api_key)
+        body:
+          protocol: llm
+          direction: input
+          input:
+            text: "$(content)"
+      response:
+        block: "$(check_response.block)"
+        block_message: "$(check_response.block_message)"
+      functions:
+        check_response: |
+          return function(resp)
+            return {
+              block = resp.is_flagged == true,
+              block_message = "Blocked by TrustGuard"
+            }
+          end
+```
+
+## Apigee
+
+Call the guard endpoint from a **Shared Flow** and raise a fault when content is flagged.
+
+1. Create an API key (Auth tab).
+2. Create a Shared Flow with an **AssignMessage** policy that builds the request body
+   (`{ protocol, direction, input, consumer_id, session_id }`) — use the client_id /
+   developer app as `consumer_id`.
+3. Add a **ServiceCallout** policy that POSTs it to the guard endpoint with the
+   `Authorization: Bearer` header.
+4. Add a **RaiseFault** policy (403) conditioned on `is_flagged = true`.
+5. Attach the Shared Flow to your proxies with a FlowCallout.
+
+## Azure APIM
+
+Call the guard endpoint with a **`send-request`** policy and block flagged requests before
+they reach your backend.
+
+1. Create an API key (Auth tab).
+2. Open your API in the Azure portal.
+3. Add a `send-request` policy in the **inbound** section posting the prompt to the guard
+   endpoint.
+4. Return 403 when the response has `is_flagged: true`; repeat in **outbound** for
+   completions.
+
+```xml
+<inbound>
+  <send-request mode="new" response-variable-name="guard" timeout="10">
+    <set-url>{TRUSTGUARD_URL}/v1/guard</set-url>
+    <set-method>POST</set-method>
+    <set-header name="Authorization" exists-action="override">
+      <value>Bearer <api-token></value>
+    </set-header>
+    <set-body>@(JsonConvert.SerializeObject(new {
+      protocol = "llm",
+      direction = "input",
+      input = new { text = context.Request.Body.As<string>(preserveContent: true) },
+      consumer_id = context.Subscription?.Id ?? "",
+      session_id = context.Request.Headers.GetValueOrDefault("X-Session-Id", "")
+    }))</set-body>
+  </send-request>
+  <choose>
+    <when condition="@(((IResponse)context.Variables["guard"]).Body.As<JObject>()["is_flagged"].Value<bool>())">
+      <return-response>
+        <set-status code="403" reason="Blocked by TrustGuard" />
+      </return-response>
+    </when>
+  </choose>
+</inbound>
+```

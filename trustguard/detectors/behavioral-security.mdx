@@ -1,0 +1,71 @@
+---
+title: "Behavioral security detectors"
+description: "Detect abusive actors — bot-like cadence, repeated payloads, and malicious escalation — across requests and collectors with anomaly_detector."
+---
+
+Behavioral-security detection looks beyond a single request to the **actor's behavior
+over time**. The `anomaly_detector` detector scores each actor (keyed on `consumer_id`)
+for bot-like timing, repeated payloads, repeated failures, and abuse spread across
+collectors.
+
+| Property | Value |
+|---|---|
+| Slug | `anomaly_detector` |
+| Category | behavioral_security |
+| Sides | input |
+| Protocols | all |
+| Modes | `observe`, `block` |
+| State | Stateful — tracks history per `consumer_id` |
+
+Because it tracks per-actor state, always pass a stable **`consumer_id`** on the guard
+request (e.g. the authenticated user or API client). Without it, behavioral scoring
+can't attribute activity.
+
+## How it scores
+
+The detector combines three weighted signals into a single score in `[0,1]`:
+
+- **Timing pattern** — unnaturally regular or rapid request cadence (bot-like).
+- **Content similarity** — repeated or near-identical payloads (scripted abuse).
+- **Cross-collector** — the same actor hitting many collectors/keys.
+
+The weights must sum to `1.0`. A finding is reported above `threshold`.
+
+## Settings
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `threshold` | number | `0.7` | Score above which the actor is flagged. |
+| `retention_period` | integer | `300` | Seconds of actor history retained. |
+| `min_time_between_requests` | integer | `1` | Seconds; faster cadence raises the timing signal. |
+| `max_requests_to_analyze` | integer | `10` | Sample window size. |
+| `max_failures` | integer | `5` | Failure count that contributes to the score. |
+| `cross_collector_max` | integer | `5` | Distinct collectors before cross-collector signal saturates. |
+| `timing_pattern_weight` | number | `0.33` | Must sum to `1.0`… |
+| `content_similarity_weight` | number | `0.33` | …with the other two weights. |
+| `cross_collector_weight` | number | `0.33` | |
+
+```json
+{
+  "name": "Flag abusive actors",
+  "type": "anomaly_detector",
+  "mode": "observe",
+  "direction": "input",
+  "settings": {
+    "threshold": 0.7,
+    "retention_period": 300,
+    "min_time_between_requests": 1,
+    "timing_pattern_weight": 0.4,
+    "content_similarity_weight": 0.4,
+    "cross_collector_weight": 0.2
+  }
+}
+```
+
+## When to use
+
+- Pair with [rate limiting at TrustGate](/trustgate/getting-started/overview) — rate
+  limits cap volume, `anomaly_detector` catches *patterns* that stay under the cap.
+- Start in `observe` and tune the weights/threshold against real traffic before moving
+  to `block`, since behavioral signals are probabilistic.
+- Requires a stable `consumer_id` across requests to be effective.

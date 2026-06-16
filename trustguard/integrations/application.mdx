@@ -1,0 +1,153 @@
+---
+title: "Application integrations"
+description: "Call TrustGuard from your own code — the Python and Node SDKs, framework middleware, or the raw REST API — around your model calls."
+---
+
+When you own the application, integrate TrustGuard directly around your model calls. This
+gives you full control over what to inspect and how to enforce, and works with any model
+provider. Create an API key on the collector's **Auth** tab first.
+
+Prefer the official SDKs over hand-rolled HTTP — they take the base URL and call
+`/v1/guard` for you:
+
+| Language | Package |
+|---|---|
+| Node / TypeScript | `@neuraltrust/trustguard-sdk` |
+| Python | `neuraltrust-trustguard` |
+| Go | `github.com/NeuralTrust/trustguard-sdk/go` |
+
+## Python SDK
+
+1. `pip install neuraltrust-trustguard`
+2. Call `client.guard()` with `direction="input"` (prompt) or `direction="output"`
+   (completion).
+3. Pass `consumer_id` and `session_id` for attribution.
+4. Block when `is_flagged` is true; use `transformed_payload` when present (redaction).
+
+```python
+from trustguard import TrustGuard, TrustGuardAPIError
+
+client = TrustGuard("<your-trustguard-url>", "<api-token>")
+
+response = client.guard(
+    {"text": user_input},
+    direction="input",            # "output" for completions
+    consumer_id="alex@acme.com",  # who: user id, email, or device fingerprint
+    session_id="sess-123",        # which conversation the message belongs to
+)
+
+if response.is_flagged:
+    raise PermissionError("Blocked by TrustGuard")
+# response.transformed_payload carries redacted content when a masking detector ran
+```
+
+## Node.js SDK
+
+1. `npm install @neuraltrust/trustguard-sdk`
+2. Call `client.guard()` with `direction` `"input"` / `"output"`.
+3. Pass `consumerId` and `sessionId`.
+4. Block when `isFlagged` is true; use `transformedPayload` when present.
+
+```ts
+import { TrustGuard } from "@neuraltrust/trustguard-sdk";
+
+const client = new TrustGuard({
+  baseUrl: "<your-trustguard-url>",
+  apiKey: "<api-token>",
+});
+
+const response = await client.guard({
+  input: { text: userInput },
+  direction: "input",          // "output" for completions
+  consumerId: user.id,         // who: user id, email, or device fingerprint
+  sessionId: conversationId,   // which conversation the message belongs to
+});
+
+if (response.isFlagged) throw new Error("Blocked by TrustGuard");
+// response.transformedPayload carries redacted content when a masking detector ran
+```
+
+## REST API
+
+Any language can call the guard endpoint directly (Go users: use the Go SDK instead of
+hand-rolling).
+
+```bash
+curl -X POST "{TRUSTGUARD_URL}/v1/guard" \
+  -H "Authorization: Bearer <api-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "protocol": "llm",
+    "direction": "input",
+    "input": { "text": "summarize this customer call" },
+    "session_id": "sess-123",
+    "consumer_id": "alex@acme.com"
+  }'
+
+# Response:
+# { "is_flagged": false, "findings": [], "transformed_payload": null, ... }
+```
+
+## Python middleware (FastAPI / Django / Flask)
+
+Guard inbound user traffic in-process with a middleware in front of your AI routes.
+
+```python
+from fastapi import FastAPI, Request
+from starlette.responses import JSONResponse
+from trustguard import AsyncTrustGuard
+
+app = FastAPI()
+client = AsyncTrustGuard("<your-trustguard-url>", "<api-token>")
+
+@app.middleware("http")
+async def trustguard_middleware(request: Request, call_next):
+    if request.method == "POST":
+        body = await request.body()
+        response = await client.guard(
+            {"text": body.decode()},
+            consumer_id=request.headers.get("x-user-id", ""),
+            session_id=request.cookies.get("session_id", ""),
+        )
+        if response.is_flagged:
+            return JSONResponse({"detail": "Blocked by TrustGuard"}, status_code=403)
+    return await call_next(request)
+```
+
+## Node.js middleware (Express / Next.js)
+
+```ts
+import express from "express";
+import { TrustGuard } from "@neuraltrust/trustguard-sdk";
+
+const app = express();
+app.use(express.json());
+
+const client = new TrustGuard({
+  baseUrl: "<your-trustguard-url>",
+  apiKey: "<api-token>",
+});
+
+app.use(async (req, res, next) => {
+  if (req.method !== "POST") return next();
+  const response = await client.guard({
+    input: { text: JSON.stringify(req.body) },
+    consumerId: req.get("x-user-id") ?? "",
+    sessionId: req.cookies?.session_id ?? "",
+  });
+  if (response.isFlagged) {
+    return res.status(403).json({ detail: "Blocked by TrustGuard" });
+  }
+  next();
+});
+```
+
+## Tips
+
+- Inspect both sides: `direction:"input"` before the model call, `direction:"output"`
+  on the completion.
+- Send documents/links as `input.attachments` to engage the
+  [document and URL analyzers](/trustguard/detectors/content-security) — see the
+  [Guard API](/trustguard/api/guard) for the attachment + SSRF rules.
+- TrustGuard is fail-open by default, so an outage won't break your app — you decide
+  whether to hold traffic on errors.

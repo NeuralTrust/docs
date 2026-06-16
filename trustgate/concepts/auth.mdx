@@ -1,0 +1,57 @@
+---
+title: "Auth"
+description: "Auth credentials authenticate clients as a consumer — API key, OAuth2, IDP JWT, or mTLS. Created per gateway and attached to consumers."
+---
+
+An **auth** credential is how a client proves it may act as a
+[consumer](/trustgate/concepts/consumers). Credentials are created at the gateway level and
+**attached** to one or more consumers, so you can rotate or share them independently of the
+consumer itself.
+
+This is distinct from a registry's [target auth](/trustgate/concepts/registries#target-auth),
+which is how TrustGate authenticates to the **upstream provider**.
+
+## Auth types
+
+| `type` | How the client authenticates | Routing mode |
+|---|---|---|
+| **`api_key`** | `X-AG-API-Key: ag_…` header | inline |
+| **`oauth2`** | `Authorization: Bearer <jwt>` validated against an OAuth2 provider | inline |
+| **`idp`** | `Authorization: Bearer <jwt>` from your IDP; claims select a [role](/trustgate/concepts/roles) | role_based |
+| **`mtls`** | Client certificate | inline |
+
+## API keys
+
+API keys are prefixed **`ag_`**. The raw secret is returned **once**, at creation — store
+it then. TrustGate only persists a SHA-256 hash; at request time it hashes the inbound key
+and compares, so the secret is never recoverable from the gateway.
+
+```bash
+# create → returns api_key (cleartext) once
+POST /v1/gateways/{gateway_id}/auths
+{ "name": "my-app-key", "type": "api_key" }
+
+# attach to a consumer
+POST /v1/gateways/{gateway_id}/consumers/{id}/auths/{auth_id}
+```
+
+## OAuth2 / IDP / mTLS
+
+JWT- and certificate-based credentials carry a `config` block:
+
+| Type | Config fields |
+|---|---|
+| `oauth2` | `issuer`, `audiences`, `jwks_url`, `introspection_url`, `client_id`/`secret`, `required_scopes`, `allowed_algorithms`. |
+| `idp` | `issuer`, `audiences`, `jwks_url`, `public_keys`, `required_scopes`, `allowed_algorithms`, `subject_claim`. |
+| `mtls` | `ca_cert`, `allowed_common_names`, `allowed_dns_names`, `allowed_fingerprints`. |
+
+For **`idp`** credentials, the validated token's claims are matched against role
+[IDP mappings](/trustgate/concepts/roles) to select the consumer's routing — this is how
+identity-based routing works.
+
+## Managing auth
+
+CRUD lives under `/v1/gateways/{gateway_id}/auths`; attach/detach via the consumer's
+`…/auths/{auth_id}` sub-resource. See the [Auth API](/trustgate/api/overview).
+
+Next: govern traffic with [policies](/trustgate/policies/overview).
