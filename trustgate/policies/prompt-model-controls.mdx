@@ -1,0 +1,68 @@
+---
+title: "Prompt & model controls"
+description: "Shape requests before they reach the model: inject and version system prompts with prompt_template, and restrict which models a consumer may call with model_allowlist."
+---
+
+Two policies shape the request itself before it is forwarded. Both run at `pre_request` and
+are scoped like any other [policy](/trustgate/policies/overview).
+
+## `model_allowlist`
+
+Restrict which models a consumer or gateway may call, matching by name with glob patterns.
+This is the policy-based complement to a consumer's
+[`model_policies`](/trustgate/routing/model-resolution) — use it for a gateway-wide default.
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `allowed_models` | string[] | — | Name patterns permitted, `*` wildcard (e.g. `gpt-5*`). **Required.** |
+| `behavior_on_disallowed` | enum | `reject` | `reject` (403) or `substitute`. |
+| `substitute_with` | string | — | Model written back when `substitute` (must match the allowlist). |
+| `default_model` | string | — | Model injected when the request omits one (must match the allowlist). |
+
+```json
+{
+  "slug": "model_allowlist",
+  "settings": {
+    "allowed_models": ["gpt-4o", "gpt-4o-mini"],
+    "behavior_on_disallowed": "substitute",
+    "substitute_with": "gpt-4o-mini"
+  }
+}
+```
+
+## `prompt_template`
+
+Inject and version prompts server-side, so system instructions live in the gateway rather
+than in every client. It supports two modes, which can be combined:
+
+- **Mode A — inject templates:** render operator-defined system prompts from context
+  variables (headers or JWT claims) and inject them into the request.
+- **Mode B — named templates:** maintain named, versioned templates that clients reference by
+  `{template://name@label}`, with required-variable validation.
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `template_engine` | enum | `mustache` | Rendering engine (`mustache` in v1). |
+| `context_variables` | map | — | Named values resolved from `header` or `jwt_claim` sources. |
+| `inject_templates` | array | — | Mode A: `[{ id, content, position, on_existing_system }]`. |
+| `named_templates` | array | — | Mode B: named templates with `versions[]` (each `{ version, labels, content, required_variables }`). |
+| `allow_untemplated_requests` | bool | `true` | When false + named templates set, reject requests with no template reference. |
+| `on_missing_context_variable` | enum | `error` | `error`, `empty_string`, or `skip_injection`. |
+| `default_label` | string | — | Label used when a reference omits `@label`. |
+
+```json
+{
+  "slug": "prompt_template",
+  "settings": {
+    "context_variables": {
+      "tenant": { "source": "header", "name": "X-Tenant-Id" }
+    },
+    "inject_templates": [
+      { "id": "base", "content": "You are the assistant for {{tenant}}.", "on_existing_system": "merge" }
+    ]
+  }
+}
+```
+
+Injected content is placed in the `system` role; `on_existing_system` chooses whether to
+`merge` with or `replace` an existing system prompt.

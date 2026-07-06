@@ -1,6 +1,6 @@
 ---
 title: "Overview"
-description: "TrustGuard is NeuralTrust's runtime security service: it evaluates AI traffic against a collector's chain of detectors and reports per-detector findings — without ever dropping traffic."
+description: "TrustGuard is NeuralTrust's runtime security service: it evaluates AI traffic against the collector's policy and reports findings — without ever dropping traffic."
 ---
 
 **TrustGuard** is NeuralTrust's runtime security engine for generative-AI and agentic
@@ -25,12 +25,12 @@ inline anywhere — a failure or timeout can never take your application down.
     and document/URL analysis on both input and output.
   </Card>
   <Card title="Data loss prevention" icon="eye-off">
-    Detect and mask 60+ PII entities and secrets (API keys, tokens, JWTs) in flight,
+    Detect and mask 43 PII entities and secrets (API keys, tokens, JWTs) in flight,
     returning a transformed payload.
   </Card>
   <Card title="Agent & MCP security" icon="bot">
-    Guard tool/function definitions, enforce tool allow/deny lists, and validate the
-    tool calls a model emits.
+    Scan an agent's own system prompt and tool/function definitions for jailbreaks
+    and prompt injections planted there.
   </Card>
   <Card title="Behavioral security" icon="activity">
     Detect abusive actors — bot-like cadence, repeated payloads, and escalation —
@@ -40,48 +40,55 @@ inline anywhere — a failure or timeout can never take your application down.
 
 ## The model in one minute
 
-TrustGuard has two building blocks. You compose them once, then send traffic.
+TrustGuard has five building blocks. You compose them once, then send traffic.
 
 | Concept | What it is |
 |---|---|
-| **[Detector](/trustguard/concepts/detectors)** | A reusable, named detection — one capability from the [built-in catalog](/trustguard/detectors/overview) (e.g. `prompt_guard`, `data_loss_prevention`) configured with a `mode` (`observe` / `redact` / `block`), `protocol`, `direction`, and `settings`. |
-| **[Collector](/trustguard/concepts/collectors)** | A traffic tap (gateway, SDK, browser, WAF) authenticated by an API key. Each collector has a **chain** of attached detectors. |
+| **Plugin** | A built‑in detection capability from the [catalog](/trustguard/detectors/overview) (e.g. `prompt_guard`, `data_loss_prevention`). Detection‑only. |
+| **[Detector](/trustguard/concepts/detectors)** | A reusable, named instance of a plugin plus its `settings` (thresholds, entity lists, …). Still detection‑only — it decides *what* it finds, not what to do. |
+| **[Policy](/trustguard/concepts/policies)** | Where enforcement lives: **gates** (match request attributes before detection) + **detector rules** (run detectors with a Monitor / Block / Transform action), plus a **Report / Enforce** switch. |
+| **[Collector](/trustguard/concepts/collectors)** | A traffic tap (gateway, SDK, browser, WAF) authenticated by an API key. It routes each request to a policy. |
+| **Finding** | What a gate or detector reported — its `source`, `signal`, `outcome`, and `evidence`. |
 
 ```text
-                    POST /v1/guard  (Authorization: Bearer <collector key>)
-                                      │
-   ┌──────────┐   resolves    ┌───────▼────────┐   runs        ┌─────────────┐
-   │ API key  │──────────────▶│   Collector    │──────────────▶│  Detector   │ prompt_guard (block)
-   └──────────┘   collector   │  (the tap)     │   its chain   │  Detector   │ data_loss_prevention (redact)
-                              └────────────────┘   concurrently └─────────────┘ anomaly_detector (observe)
-                                      │
-                                      ▼
-              { is_flagged, transformed_payload, findings[], trace_id }
+        POST /v1/guard  (Authorization: Bearer <collector api key>)
+                              │
+ ┌──────────┐  resolves  ┌────▼─────┐  routes to  ┌──────────────────────────────┐
+ │ API key  │───────────▶│Collector │────────────▶│ Policy                       │
+ └──────────┘  collector └──────────┘   a policy   │  gates → detector rules      │
+                                                    └──────────────┬───────────────┘
+                                                                   ▼
+                    { status, findings[], transformed_payload, trace_id }
 ```
 
-A request names **no detectors**: TrustGuard runs the collector's *entire effective
-chain* (every enabled, attached detector that matches the request's direction and
-protocol). See [How it works](/trustguard/how-it-works).
+A request names **no detectors**: TrustGuard resolves the collector's policy and
+runs its gates and the detector rules that match the request's direction and
+conditions. See [How it works](/trustguard/how-it-works).
 
 ## What makes it safe to run inline
 
 - **Never drops traffic.** A detection is always `HTTP 200` with the finding in the
   response body. Non-2xx is reserved for auth (401), bad requests (400), and system
   failures (500).
-- **Fail-open by default.** If a detector errors (e.g. an upstream model API is down),
-  TrustGuard returns no finding for it rather than failing the request, so a TrustGuard
-  issue never breaks your traffic. Fail-closed is opt-in.
-- **Enforcement is the caller's choice.** `is_flagged` is advisory. Your collector
+- **Fail-open or fail-closed — your choice.** If a detector errors (e.g. an upstream
+  model API is down), TrustGuard either drops that detector's result and continues
+  (fail-open) or returns `500` so you can hold traffic (fail-closed), per your
+  deployment's setting. A structured block decision always applies.
+- **Enforcement is the caller's choice.** The response `status`
+  (`allow` / `report` / `transform` / `block`) is advisory. Your collector
   decides what to do with it.
 
 ## Where to go next
 
 <CardGroup cols={2}>
   <Card title="How it works" icon="workflow" href="/trustguard/how-it-works">
-    The guard pipeline, modes, and the findings model.
+    The guard pipeline, gates, and the findings model.
   </Card>
-  <Card title="Core concepts" icon="boxes" href="/trustguard/concepts/collectors">
-    Collectors and detectors.
+  <Card title="Core concepts" icon="boxes" href="/trustguard/concepts/detectors">
+    Detectors, policies, and collectors.
+  </Card>
+  <Card title="Policies" icon="shield-check" href="/trustguard/concepts/policies">
+    Gates, detector rules, and the Report / Enforce switch.
   </Card>
   <Card title="Detector catalog" icon="list" href="/trustguard/detectors/overview">
     Every built-in detection and its settings.

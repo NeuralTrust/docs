@@ -1,28 +1,40 @@
 ---
 title: "Semantic cache"
-description: "Cut cost and latency by serving cached responses for semantically similar prompts, using embedding similarity in Redis."
+description: "Cut cost and latency by serving cached responses for exact or semantically similar prompts, with a Redis, pgvector, or in-memory vector store."
 ---
 
-The **`semanticcache`** policy caches completions and serves them for prompts that are
-**semantically similar** — not just byte-identical. It embeds the prompt, looks for a close
-match in a Redis vector store, and returns the cached response on a hit.
+The **`semantic_cache`** policy serves cached completions for repeated requests — either
+**exact** (normalized text equality), **semantic** (embedding similarity), or **both**. It
+embeds the prompt, looks for a close match in the configured vector store, and returns the
+cached response on a hit.
 
 It runs in two stages: **`pre_request`** (lookup) and **`post_response`** (populate).
 
+## Settings
+
 | Setting | Type | Default | Notes |
 |---|---|---|---|
-| `similarity_threshold` | float | `0.85` | Minimum cosine similarity for a hit (`0`–`1`). |
-| `ttl` | duration | `24h` | How long entries live. |
-| `embedding.provider` | string | `openai` | Embedding provider. |
+| `mode` | enum | `semantic` | `exact`, `semantic`, or `both`. |
+| `scope` | enum | `consumer` | `consumer` isolates entries per consumer; `global` shares them gateway-wide. |
+| `vector_store` | enum | `redis` | `redis`, `pgvector`, or `in_memory`. |
+| `similarity_threshold` | number | `0.85` | Cosine similarity in `(0, 1]` required for a hit. |
+| `ttl_seconds` | int | — | Entry lifetime in seconds (takes precedence over `ttl`). |
+| `ttl` | duration | `24h` | Legacy duration form, superseded by `ttl_seconds`. |
+| `embedding.provider` | string | `openai` | Embedding provider used to vectorize requests. |
 | `embedding.model` | string | `text-embedding-ada-002` | Embedding model. |
 | `embedding.api_key` | string | — | Credential for the embedding provider. |
+| `cache_only_on_status` | int[] | `[200]` | Status codes whose responses may be cached. |
+| `bypass_header` | string | `X-Cache-Bypass` | Request header whose presence bypasses lookup + store. |
+| `skip_if_tools_present` | bool | `true` | Skip caching when the request/response involves tool calls. |
+| `skip_if_streaming` | bool | `false` | Skip caching for streaming requests/responses. |
 
 ```json
 {
-  "slug": "semanticcache",
+  "slug": "semantic_cache",
   "settings": {
+    "mode": "semantic",
     "similarity_threshold": 0.9,
-    "ttl": "12h",
+    "ttl_seconds": 43200,
     "embedding": { "provider": "openai", "model": "text-embedding-ada-002" }
   }
 }
@@ -30,15 +42,9 @@ It runs in two stages: **`pre_request`** (lookup) and **`post_response`** (popul
 
 ## On a hit
 
-The cached response is returned and the proxy sets:
-
-- `X-Cache-Status: HIT`
-- `X-Cache-Similarity: <score>`
-
-## Bypassing
-
-Send `Cache-Control: no-cache` to skip the lookup and force a fresh upstream call (the
-result still populates the cache).
+The cached response is returned and the proxy sets cache headers (`X-Cache-Status: HIT` and a
+similarity score). To skip the cache for a single request, send the configured
+`bypass_header` (default `X-Cache-Bypass`); the fresh response still populates the cache.
 
 > Tune `similarity_threshold` carefully: too low risks serving a cached answer for a
 > meaningfully different prompt; too high reduces hit rate. Start at `0.9` and lower it

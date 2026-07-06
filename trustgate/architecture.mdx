@@ -27,7 +27,7 @@ the **data plane** (your traffic flows through them).
 
 ## Request lifecycle (proxy)
 
-1. A client calls the proxy with a consumer API key (or OAuth2/IDP token).
+1. A client calls the proxy with a consumer API key (or OAuth2/OIDC token, or client cert).
 2. TrustGate resolves the **gateway** (from `X-AG-Gateway-Slug` or the host), the
    **consumer** (from the URL `slug`), and the applicable **policies**.
 3. The applicable **policies** run at their **stages** — rate limit, token rate limit,
@@ -42,7 +42,7 @@ the **data plane** (your traffic flows through them).
 ```text
 Client ─▶ Proxy :8081
    │  middleware: request-id · CORS · access-log · metrics · recover · security-headers
-   │  auth: API-key hash compare · OAuth2 / IDP JWT · mTLS
+   │  auth: API-key hash compare · OAuth2 / OIDC JWT · mTLS
    ├─ resolve gateway (header/subdomain) → consumer (slug) → policies
    ├─ policies run at their stages (parallel or sequential)
    ├─ load balancer → registry (+ fallback chain)
@@ -83,10 +83,15 @@ from the path:
 | `POST /{consumer_slug}/v1/chat/completions` | OpenAI Chat Completions |
 | `POST /{consumer_slug}/v1/messages` | Anthropic Messages |
 | `POST /{consumer_slug}/v1/responses` | OpenAI Responses API |
+| `POST /{consumer_slug}/v1beta/models/{model}:generateContent` (and `:streamGenerateContent`) | Google Gemini |
 
-Streaming (`"stream": true`) is supported on all three; the proxy flushes each SSE chunk
-and surfaces mid-stream upstream failures as an explicit error event rather than a silent
-truncation.
+The inbound format is chosen by the path, independent of the upstream provider — TrustGate
+adapts between formats, so an OpenAI-format client can be routed to an Anthropic or Gemini
+upstream. Any other path returns `404`.
+
+Streaming (`"stream": true`, or the Gemini `:streamGenerateContent` path) is supported on all
+routes; the proxy flushes each SSE chunk and surfaces mid-stream upstream failures as an
+explicit error event rather than a silent truncation.
 
 ## Repository layout
 

@@ -1,45 +1,68 @@
 ---
-title: "Rate limiting"
-description: "Limit requests with the ratelimit policy and LLM tokens with tokenratelimit — scoped per consumer or gateway, optionally partitioned by a header."
+title: "Rate limiting & budgets"
+description: "Limit request volume with rate_limiter and cap LLM spend with token_rate_limiter (LLM Budget) — token or dollar budgets, aggregate or per-model, scoped per consumer or gateway."
 ---
 
-TrustGate ships two rate-limiting policies backed by Redis counters. Both follow their
-[policy](/trustgate/policies/overview) scope: per consumer when the policy targets
-consumers, gateway-wide when the policy is `global`. A `group_by_header` sub-partitions the
-counter within that scope (e.g. per end-user or tenant).
+TrustGate ships two Redis-backed quota policies: **`rate_limiter`** for request volume and
+**`token_rate_limiter`** ("LLM Budget") for token or dollar spend. Both follow their
+[policy](/trustgate/policies/overview) scope — per consumer, or gateway-wide when `global` —
+and accept a `group_by_header` to sub-partition the counter within that scope (e.g. per
+end-user or tenant).
 
-## `ratelimit` — request rate limiting
+## `rate_limiter` — request rate limiting
 
-Counts requests in a sliding window.
+Counts requests in a sliding window. Runs at `pre_request`.
 
 | Setting | Type | Notes |
 |---|---|---|
-| `limit` | int | Max requests per window. |
-| `window` | duration | Go duration string: `30s`, `1m`, `1h`. |
-| `retry_after` | string | `Retry-After` value when limited (default `60`). |
-| `group_by_header` | string | Optional sub-partition key (e.g. a tenant header). |
+| `limit` | int | Max requests per window. **Required.** |
+| `window` | duration | Go duration string: `30s`, `1m`, `1h`. **Required.** |
+| `retry_after` | string | `Retry-After` value in seconds when limited (default `60`). |
+| `group_by_header` | string | Optional sub-partition key (e.g. `X-User-Id`). |
 
 ```json
-{ "slug": "ratelimit", "settings": { "limit": 100, "window": "1m" } }
+{ "slug": "rate_limiter", "settings": { "limit": 100, "window": "1m" } }
 ```
 
 Responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and
 (when limited) `Retry-After`.
 
-## `tokenratelimit` — token rate limiting
+## `token_rate_limiter` — LLM Budget
 
-Counts prompt + completion tokens from the provider's usage block — the right control for
-LLM **cost**, since a few large requests can cost more than many small ones.
+Caps LLM usage by **provider tokens or USD cost** over time windows — the right control for
+LLM cost, since a few large requests can cost more than many small ones. It checks the budget
+at `pre_request` and accrues usage at `post_response`.
 
-| Setting | Type | Notes |
-|---|---|---|
-| `window.unit` | enum | `second` · `minute` · `hour` · `day`. |
-| `window.max` | int | Max tokens per window. |
-| `group_by_header` | string | Optional sub-partition key. |
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `unit` | enum | `tokens` | `tokens` or `dollars`. |
+| `counting` | enum | `total` | Which usage accrues: `total`, `input`, or `output`. |
+| `aggregate` | object | — | Single budget for the whole scope: `{ max, time_window }`. |
+| `rules` | array | — | Per-model budgets: `[{ model, max, time_window }]` (most specific pattern wins). |
+| `behavior_on_exceeded` | enum | `reject` | `reject`, `throttle`, `downgrade_model`, or `alert_only`. |
+| `downgrade_to` | string | — | Target model for `downgrade_model` (same provider). |
+| `stream_usage_injection` | bool | `false` | Request + inject usage on streams so accrual works on streaming responses. |
+| `count_cache_reads` | bool | `false` | Include Anthropic cache-read input tokens in counted/costed usage. |
+| `custom_pricing` | map | — | Per-token USD rates by model pattern, consulted before the built-in table (for dollar budgets). |
+| `group_by_header` | string | — | Optional sub-partition key. |
+
+Use **either** `aggregate` (one counter for the scope) **or** `rules` (per-model). Window
+values below `60s` are raised to `60s`.
 
 ```json
-{ "slug": "tokenratelimit", "settings": { "window": { "unit": "minute", "max": 50000 } } }
+{
+  "slug": "token_rate_limiter",
+  "settings": {
+    "unit": "dollars",
+    "aggregate": { "max": 50, "time_window": "1d" },
+    "behavior_on_exceeded": "downgrade_model",
+    "downgrade_to": "gpt-4o-mini"
+  }
+}
 ```
+
+For a stateless per-request price guard (rather than a running budget), see the
+[cost cap](/trustgate/policies/cost-cap) policy.
 
 ## Choosing a scope
 

@@ -1,0 +1,140 @@
+---
+title: "Guardrails"
+description: "Inspect prompts and responses inline at the gateway with TrustGuard, OpenAI Moderation, Azure Content Safety, or AWS Bedrock guardrail policies."
+---
+
+Beyond routing and cost controls, TrustGate ships **guardrail policies** that inspect request
+and/or response content and block (or transform) what they flag. Attach one — or several — as
+a [policy](/trustgate/policies/overview), global or per consumer.
+
+| Policy (`slug`) | Provider | Stages |
+|---|---|---|
+| [`trustguard`](#trustguard) | NeuralTrust TrustGuard | `pre_request` · `pre_response` |
+| [`openai_moderation`](#openai-moderation) | OpenAI Moderations API | `pre_request` · `pre_response` |
+| [`azure_content_safety`](#azure-content-safety) | Azure AI Content Safety | `pre_request` |
+| [`bedrock_guardrail`](#aws-bedrock-guardrail) | AWS Bedrock Guardrails | `pre_request` · `pre_response` |
+
+<Note>
+Streaming responses cannot be inspected or blocked in realtime by these policies. Apply
+guardrails on the request leg (or to non-streaming responses) for enforcement.
+</Note>
+
+---
+
+## TrustGuard
+
+The **`trustguard`** policy inspects content with [TrustGuard](/trustguard/overview) — NeuralTrust's runtime security
+service for jailbreaks, PII, toxicity, and tool abuse — and block what it flags. This is the
+**deepest** detection option and the recommended default for NeuralTrust deployments.
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `collector_id` | string | — | TrustGuard collector UUID bound to this policy. **Required.** |
+| `direction` | enum | `request` | `request`, `response`, or `request_response`. |
+
+TrustGuard **fails open**: on any transport error, timeout, non-2xx response, or missing base
+URL, the request passes through. Connection settings come from the deployment's
+`TRUSTGUARD_*` environment. See the [TrustGate integration](/trustguard/integrations/gateway).
+
+```json
+{ "slug": "trustguard", "settings": { "collector_id": "<uuid>", "direction": "request_response" } }
+```
+
+## OpenAI Moderation
+
+The **`openai_moderation`** policy screens text with the OpenAI Moderations API and blocks
+content that crosses configured category thresholds. **Text-only.**
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `api_key` | string | — | OpenAI credential (Bearer). **Required.** |
+| `model` | string | `omni-moderation-latest` | Moderations model. |
+| `stages` | enum[] | — | Legs to inspect: `pre_request`, `pre_response`. |
+| `categories` | string[] | — | Categories to evaluate (empty = all returned). |
+| `thresholds` | map | — | Per-category score threshold `0..1`; a score ≥ threshold blocks. |
+| `block_on_flagged` | bool | `false` | Block anything OpenAI marks flagged, even without a threshold. |
+| `action.message` | string | — | Block message returned to the caller. |
+
+In `enforce` mode this policy **fails closed** (HTTP 502) on any moderator error; `observe`
+mode records and passes through.
+
+```json
+{
+  "slug": "openai_moderation",
+  "settings": {
+    "api_key": "sk-…",
+    "stages": ["pre_request"],
+    "thresholds": { "harassment": 0.7, "hate": 0.5 },
+    "block_on_flagged": true
+  }
+}
+```
+
+## Azure Content Safety
+
+The **`azure_content_safety`** policy screens request content with the Azure AI Content Safety
+Analyze Text API and blocks categories whose severity meets the configured threshold.
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `api_key` | string | — | Azure subscription key (`Ocp-Apim-Subscription-Key`). **Required.** |
+| `endpoint` | string | — | Absolute Analyze Text endpoint URL. **Required.** |
+| `output_type` | enum | `FourSeverityLevels` | `FourSeverityLevels` (0/2/4/6) or `EightSeverityLevels` (0–7). |
+| `categories` | enum[] | all | `Hate`, `Violence`, `SelfHarm`, `Sexual`. |
+| `category_severity` | map | — | Per-category severity threshold; only listed categories are enforced. **Required.** |
+| `message` | string | — | Optional block message. |
+
+Fails closed in `enforce` mode.
+
+```json
+{
+  "slug": "azure_content_safety",
+  "settings": {
+    "api_key": "…",
+    "endpoint": "https://<resource>.cognitiveservices.azure.com/contentsafety/text:analyze?api-version=2024-09-01",
+    "category_severity": { "Hate": 4, "Violence": 4 }
+  }
+}
+```
+
+## AWS Bedrock guardrail
+
+The **`bedrock_guardrail`** policy applies an AWS Bedrock guardrail to request prompts and/or
+responses. It inspects the topic,
+content, word, sensitive-information (PII), and contextual-grounding policy families configured
+on the guardrail, and blocks with a `403` or anonymizes PII in place. Streaming responses pass
+through untouched.
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `guardrail_id` | string | — | AWS Bedrock guardrail identifier. **Required.** |
+| `version` | string | `DRAFT` | Guardrail version. |
+| `pii_action` | enum | `block` | On sensitive-info match: `block` or `anonymize`. |
+| `message` | string | — | Optional block message. |
+| `credentials` | object | — | AWS auth (region, static keys **or** `use_role` + `role_arn`). **Required.** |
+
+```json
+{
+  "slug": "bedrock_guardrail",
+  "settings": {
+    "guardrail_id": "abcd1234",
+    "version": "DRAFT",
+    "pii_action": "anonymize",
+    "credentials": { "aws_region": "us-east-1", "use_role": true, "role_arn": "arn:aws:iam::…:role/…" }
+  }
+}
+```
+
+---
+
+## Choosing a guardrail
+
+- **`trustguard`** — the richest, NeuralTrust-native detection; use it as the primary
+  guardrail and correlate its findings with [Telemetry Alerts](/platform/alerts).
+- **`openai_moderation` / `azure_content_safety`** — lightweight content moderation if you
+  already use those providers.
+- **`bedrock_guardrail`** — reuse guardrails you've already defined in AWS Bedrock, including
+  in-place PII anonymization.
+
+Guardrails compose: run several in one policy chain (e.g. TrustGuard on the request plus a
+Bedrock guardrail for PII anonymization on the response).

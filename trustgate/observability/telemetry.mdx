@@ -3,9 +3,10 @@ title: "Telemetry"
 description: "TrustGate streams a rich per-request event to Kafka — model, tokens, cost, latency breakdown, policy chain, and routing attempts — and can forward to TrustLens."
 ---
 
-Where [metrics](/trustgate/observability/metrics) give aggregate counters, **telemetry**
-emits one structured event per request, off the critical path, to Kafka. Each event
-captures everything needed to analyze cost, latency, routing, and policy decisions.
+**Telemetry** is the per-request event that the [metrics worker](/trustgate/observability/metrics)
+builds and ships off the critical path. Each event captures everything needed to analyze
+cost, latency, routing, and policy decisions. The default sink is **Kafka**; a per-gateway
+**OpenTelemetry (OTLP)** exporter and **TrustLens** forwarding are opt-in.
 
 ## Configuration
 
@@ -20,14 +21,27 @@ Telemetry is configured globally by environment and refined per gateway.
 | `TELEMETRY_TRUSTLENS_ENABLED` | `false` | Forward to TrustLens. |
 | `TELEMETRY_TRUSTLENS_URL` | — | TrustLens endpoint. |
 
-Per [gateway](/trustgate/concepts/gateways), `telemetry` can define its own exporters
-(`{ name: "kafka", settings: { host, port, topic } }`), static `extra_params` appended to
-every event, trace toggles, and a `header_mapping` that copies inbound headers into event
-fields.
+Per [gateway](/trustgate/concepts/gateways), `telemetry` can define its own exporters,
+static `extra_params` appended to every event, trace toggles, and a `header_mapping` that
+copies inbound headers into event fields.
+
+### Exporters
+
+A gateway's `telemetry.exporters[]` selects where its events go. Per-gateway exporters are
+**merged with** (not a replacement for) the process-level Kafka default:
+
+| `name` | Settings | Notes |
+|---|---|---|
+| `kafka` | `{ host, port, topic }` | Stream events to a Kafka topic. |
+| `otlp` | OTLP endpoint / headers | Export each request as an OpenTelemetry **log record** (`event.name = "gateway.request"`). Only the `logs` signal is supported. |
+
+Process-level OTLP defaults come from the standard `OTEL_EXPORTER_OTLP_*` environment
+variables; a gateway opts in by adding an `otlp` exporter.
 
 ## The event
 
-Events are versioned (`schema_version`) and include, among others:
+Events are versioned (`schema_version`, currently **3**) and carry a `kind` of `llm` or
+`mcp`. Each includes, among others:
 
 | Group | Fields |
 |---|---|

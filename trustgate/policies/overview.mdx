@@ -1,26 +1,73 @@
 ---
 title: "Policies"
-description: "A policy is a configured governance rule on a gateway's traffic — rate limiting, caching, CORS, and more — run at request/response stages, scoped globally or per consumer."
+description: "A policy is a configured governance rule on a gateway's traffic — rate limits, budgets, caching, tool governance, guardrails, and more — run at request/response stages, scoped globally or per consumer."
 ---
 
-A **policy** attaches behavior to a gateway's traffic. Each policy is a single built-in
-capability — identified by its **`slug`** (e.g. `ratelimit`, `semanticcache`, `cors`) —
-configured with `settings` and run at one or more lifecycle **stages**, with a `mode`,
-`priority`, and a scope (global or per consumer).
+A **policy** attaches behavior to a gateway's traffic. Each policy configures one built-in
+plugin — identified by its **`slug`** (e.g. `rate_limiter`, `semantic_cache`, `cors`) — with
+`settings`, and runs at one or more lifecycle **stages**, with a `mode`, `priority`, and a
+scope (global or per consumer).
+
+<Note>
+A policy's `slug` is the **plugin name** it configures — always the underscore form
+(`rate_limiter`, `token_rate_limiter`, `request_size_limiter`, `semantic_cache`, …). Browse
+the live catalog and its settings schema at `GET /v1/policies-catalog`.
+</Note>
 
 ## Built-in policies
 
+TrustGate ships **16 built-in plugins**, grouped by purpose:
+
+### Traffic control
+
 | Policy (`slug`) | Purpose |
 |---|---|
-| [`ratelimit`](/trustgate/policies/rate-limiting) | Per-consumer / per-gateway request rate limiting. |
-| [`tokenratelimit`](/trustgate/policies/rate-limiting) | Token-based limiting for LLM cost control. |
-| [`requestsize`](/trustgate/policies/request-size) | Reject requests above a size / character budget. |
-| [`semanticcache`](/trustgate/policies/semantic-cache) | Embedding-based response caching for repeated prompts. |
+| [`rate_limiter`](/trustgate/policies/rate-limiting) | Per-consumer / per-gateway request rate limiting (sliding window). |
+| [`request_size_limiter`](/trustgate/policies/request-size) | Reject requests above a byte / character budget. |
+| [`per_tool_rate_limiter`](/trustgate/policies/tool-governance) | Rate-limit individual tool calls observed in responses. |
 | [`cors`](/trustgate/policies/cors) | Cross-origin resource sharing for browser clients. |
 
-> **Security policies.** Jailbreak, PII, toxicity, and tool-abuse detection are **not**
-> built into the gateway — they're provided by [TrustGuard](/trustguard/overview), attached
-> as a gateway policy. See the [TrustGate integration](/trustguard/integrations/gateway).
+### Quota & cost
+
+| Policy (`slug`) | Purpose |
+|---|---|
+| [`token_rate_limiter`](/trustgate/policies/rate-limiting) ("LLM Budget") | Token or dollar budgets over time windows, aggregate or per-model. |
+| [`cost_cap`](/trustgate/policies/cost-cap) ("LLM Cost Cap") | Per-request guard on a model's list price per 1k tokens. |
+
+### Routing
+
+| Policy (`slug`) | Purpose |
+|---|---|
+| [`semantic_cache`](/trustgate/policies/semantic-cache) | Exact or embedding-similarity response caching. |
+| [`model_allowlist`](/trustgate/policies/prompt-model-controls) | Restrict which models a consumer/gateway may call. |
+| [`tool_allowlist`](/trustgate/policies/tool-governance) | Allow/deny the tools in a request `tools[]` array. |
+
+### Prompt management
+
+| Policy (`slug`) | Purpose |
+|---|---|
+| [`prompt_template`](/trustgate/policies/prompt-model-controls) | Inject context-bound system prompts and render named, versioned templates. |
+
+### Tool governance
+
+| Policy (`slug`) | Purpose |
+|---|---|
+| [`tool_call_validation`](/trustgate/policies/tool-governance) | Validate / redact the tool calls a model returns. |
+| [`tool_definition_transformation`](/trustgate/policies/tool-governance) | Patch tool schemas, override descriptions, and inject tools. |
+
+### Guardrails
+
+| Policy (`slug`) | Purpose |
+|---|---|
+| [`trustguard`](/trustgate/policies/guardrails) | Inspect prompts/responses with [TrustGuard](/trustguard/overview) (jailbreaks, PII, toxicity, tool abuse). |
+| [`openai_moderation`](/trustgate/policies/guardrails) | Screen text with the OpenAI Moderations API. |
+| [`azure_content_safety`](/trustgate/policies/guardrails) | Screen text with Azure AI Content Safety. |
+| [`bedrock_guardrail`](/trustgate/policies/guardrails) | Apply an AWS Bedrock guardrail (topics, content, PII, grounding). |
+
+> **NeuralTrust-native detection.** The gateway ships several guardrail plugins, but the
+> deepest jailbreak / PII / toxicity / tool-abuse detection is [TrustGuard](/trustguard/overview),
+> attached via the [`trustguard`](/trustgate/policies/guardrails) policy. See the
+> [TrustGate integration](/trustguard/integrations/gateway).
 
 ## Stages
 
@@ -29,38 +76,41 @@ A policy fires in one or more lifecycle **stages**:
 | Stage | When |
 |---|---|
 | `pre_request` | Before the request is forwarded upstream. |
-| `post_request` | After the request is built, before sending. |
-| `pre_response` | After the upstream responds, before returning. |
-| `post_response` | After the response is returned (e.g. cache populate). |
+| `pre_response` | After the upstream responds, before returning to the client. |
+| `post_response` | After the response is returned (e.g. cache populate, budget accrual). |
 
-Some policies run across two stages — the [semantic cache](/trustgate/policies/semantic-cache)
-looks up at `pre_request` and populates at `post_response`.
+Some policies span two stages — the [semantic cache](/trustgate/policies/semantic-cache)
+looks up at `pre_request` and populates at `post_response`; the
+[LLM Budget](/trustgate/policies/rate-limiting) checks at `pre_request` and accrues usage at
+`post_response`. (A `post_request` stage exists in the model but is not executed on the proxy
+forward path.)
 
 ## Mode
 
-A policy's `mode` sets its enforcement intent:
+A policy's `mode` sets its enforcement intent. Not every plugin supports every mode:
 
 | Mode | Behavior |
 |---|---|
-| `enforce` | Reject the request on violation (default). |
-| `throttle` | Slow down but pass. |
-| `observe` | Log only — no enforcement. |
+| `enforce` | Act on violations — reject, transform, or block (default). |
+| `throttle` | Delay rather than reject (supported by the rate/budget plugins). |
+| `observe` | Record only — no enforcement. |
 
 ## Ordering and scope
 
 | Field | Meaning |
 |---|---|
-| `slug` | The built-in capability this policy configures. |
+| `slug` | The built-in plugin this policy configures. |
 | `settings` | The policy's configuration (limits, thresholds, origins…). |
 | `priority` | Lower runs earlier. |
-| `parallel` | Run alongside other policies at the same stage concurrently. |
+| `parallel` | Run alongside other same-priority policies concurrently. |
 | `global` | Apply to **all** consumers in the gateway. |
 | `enabled` | Toggle without deleting. |
 
 Global policies are the gateway-wide baseline (e.g. a default request-size guard);
 consumer-scoped policies tune behavior per tenant. The proxy resolves both sets and runs
-them in `priority` order. Policies that partition by a key (the rate limiters) also accept
-a `group_by_header` to sub-partition within scope.
+them in `priority` order. When same-priority policies run in `parallel`, only one may mutate
+a given part of the request/response per batch. Policies that partition by a key (the rate
+limiters and budgets) also accept a `group_by_header` to sub-partition within scope.
 
 ## Managing policies
 
