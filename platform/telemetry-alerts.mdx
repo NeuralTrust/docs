@@ -1,0 +1,195 @@
+---
+title: Telemetry Alerts
+description: "Turn TrustGuard and TrustGate telemetry into prioritized, deduplicated alerts. Enable predefined detection use cases, author custom rules, correlate across products, and forward findings to your SIEM."
+---
+
+# Telemetry Alerts
+
+**Telemetry Alerts** continuously evaluate the security and traffic telemetry produced by [TrustGuard](/trustguard/overview) and [TrustGate](/trustgate/overview) and raise an alert whenever activity crosses a rule you care about — a burst of blocked prompt injections, a leaked secret, an authentication anomaly, an elevated error rate, or a cross‑product coverage gap.
+
+Instead of watching dashboards, your team enables **detection use cases** (rules); the platform evaluates them over rolling time windows, deduplicates matches into a single actionable alert per entity, and — when configured — forwards each finding to your SIEM.
+
+The **Telemetry** section of the console has three views:
+
+<CardGroup cols={3}>
+  <Card title="Alerts" icon="siren">
+    The raised alerts — severity, source, entity, status, and assignee — with a detail side panel and bulk actions.
+  </Card>
+  <Card title="Use Cases" icon="list-checks">
+    The rule catalog — predefined templates plus your custom rules — that you enable per team.
+  </Card>
+  <Card title="Integrations" icon="plug">
+    SIEM destinations (Sentinel, Datadog, Splunk, Elastic, QRadar, Webhook) that receive forwarded findings.
+  </Card>
+</CardGroup>
+
+---
+
+## How it works
+
+<Steps>
+  <Step title="Telemetry is collected">
+    TrustGuard (guardrail detections) and TrustGate (gateway request events) emit telemetry that lands in NeuralTrust's analytics store, scoped per team.
+  </Step>
+  <Step title="Use cases are evaluated">
+    Each enabled use case runs on a schedule over its declared time window. A rule counts matching events per **entity** (consumer, session, IP, app, route, or provider) and fires when it crosses the rule's threshold.
+  </Step>
+  <Step title="Alerts are deduplicated">
+    Repeated matches for the same rule and entity collapse into one alert with an occurrence count and first/last-seen timestamps — so a sustained attack is one alert, not thousands.
+  </Step>
+  <Step title="Findings are forwarded (optional)">
+    When a brand-new alert is raised, it is rendered as an <Tooltip tip="Open Cybersecurity Schema Framework">OCSF</Tooltip> Detection Finding and delivered to every connected SIEM whose filters match.
+  </Step>
+</Steps>
+
+---
+
+## Key concepts
+
+| Concept | Description |
+|---|---|
+| **Use case** | A detection rule. Comes in two flavors: **predefined** (global, read‑only templates maintained by NeuralTrust) and **custom** (team‑authored). |
+| **Alert** | A raised finding produced when a use case matches. Deduplicated per rule + entity, with a running occurrence count. |
+| **Source** | The product that produced the signal: **TrustGuard**, **TrustGate**, or **Cross** (a correlation across both). |
+| **Severity** | `Low`, `Medium`, `High`, or `Critical` — how urgent the finding is. |
+| **Status** | The lifecycle state of an alert: `Open`, `Acknowledged`, or `Resolved`. |
+| **Entity** | What a rule groups by — `consumer`, `session`, `ip`, `app`, `route`, or `provider`. The entity is the subject of the alert. |
+| **Assignee** | A team member responsible for triaging the alert. |
+
+---
+
+## Detection use cases
+
+Use cases are the rules that decide what becomes an alert.
+
+### Predefined vs. custom
+
+- **Predefined** use cases are global, versioned templates identified by a stable code (`nt-uc-NNN`). They are **read‑only** — you enable or disable them per team, but you cannot edit their logic. To change a threshold or scope, **copy a predefined use case into a custom rule** and edit the copy.
+- **Custom** use cases are owned by your team. Create them from scratch or by copying a predefined template, then tune the window, threshold, grouping, and match conditions.
+
+<Note>
+Enabling a use case is a per‑team action. A predefined template that ships with the platform does nothing until a team turns it on.
+</Note>
+
+### Rule types
+
+Every use case compiles to one of four evaluation models:
+
+| Type | Fires when | Typical use |
+|---|---|---|
+| **Per event** | Any single event matches the conditions. | Catch a single high‑confidence threat immediately. |
+| **Windowed** | Matches for an entity reach a `threshold` within a `window`. | A burst of blocked attempts against one consumer. |
+| **Aggregate** | A metric over the window per group crosses a threshold — `ratio`, `p95`, `p90`, `avg`, or `sum`. | Error rate > 2%, p95 latency > 5s. |
+| **Cross** | A TrustGate event and a TrustGuard detection correlate on a shared key (e.g. `session`) within a window. | A guard block that the gateway didn't enforce. |
+
+---
+
+## Predefined catalog
+
+The platform ships with the following predefined use cases. All are disabled until a team enables them.
+
+### TrustGuard
+
+| Code | Alert | Severity | Fires when |
+|---|---|---|---|
+| `nt-uc-101` | High‑Confidence Threat (catch‑all) | High | A threat is blocked with ≥ 0.90 confidence for a detection type that has no dedicated rule. |
+| `nt-uc-102` | Prompt Injection Spike | High | 5 or more prompt‑injection attempts are blocked against the same consumer within 15 minutes. |
+| `nt-uc-103` | Secrets Leaked — Output | Critical | A secret reaches a response without being contained (allowed, or a report‑only guard couldn't strip it). |
+| `nt-uc-104` | PII Leaked — Output | High | Personal data reaches a response without being contained. |
+| `nt-uc-105` | Toxicity Burst | High | 20 or more toxic messages are blocked against the same consumer within 15 minutes. |
+| `nt-uc-111` | Unidentified Consumer Surge | Medium | 20 or more flagged detections in 15 minutes come from one source IP with no identified consumer. |
+| `nt-uc-112` | Threat Detected but Not Enforced | Critical | A block‑worthy threat was detected but not enforced — relevant when a guard runs in advisory (report‑only) mode. |
+| `nt-uc-113` | Sensitive Data Generated in Output (contained) | Medium | One app repeatedly emits sensitive output that the guard contains (5+ times in an hour) — an upstream problem to fix. |
+| `nt-uc-114` | Mass Redaction / Transform Spike | Medium | One app triggers 50 or more redactions/transforms within 15 minutes. |
+
+### TrustGate
+
+| Code | Alert | Severity | Fires when |
+|---|---|---|---|
+| `nt-uc-201` | Auth Anomaly | High | A single source IP triggers 10 or more failed auth responses (401/403) within 5 minutes. |
+| `nt-uc-202` | Rate Limit Abuse | High | A single source IP is rate‑limited (429) 100 or more times within 5 minutes. |
+| `nt-uc-205` | Error Rate Elevated | Medium | More than 2% of requests to a route return a server error (5xx) over a 10‑minute window. |
+| `nt-uc-206` | Latency Degradation | Medium | The 95th‑percentile response time for a route stays above 5 seconds over a 10‑minute window. |
+| `nt-uc-209` | Upstream Provider Errors | High | More than 5% of requests to a single upstream provider return 5xx over a 10‑minute window. |
+
+### Cross‑product
+
+| Code | Alert | Severity | Fires when |
+|---|---|---|---|
+| `nt-uc-401` | Coverage Gap / Bypass | Critical | TrustGuard blocked a high‑confidence threat while TrustGate still allowed 3 or more requests in the same session within an hour. Requires both products to be active. |
+
+<Note>
+The catalog grows over time. Additional detections — posture and behavioral‑drift use cases, relative/baseline thresholds, and further cross‑product correlations — are on the roadmap.
+</Note>
+
+---
+
+## Working with alerts
+
+The **Alerts** view is a table you can search, filter, sort, and act on.
+
+### Columns and filters
+
+Each row shows the alert **severity**, **name**, **source**, **entity**, **status**, **date**, and **assignee**. Filter by **severity**, **status**, and **source** to focus a triage session, or search by name.
+
+### Alert detail
+
+Selecting a row opens a side panel with:
+
+- **Details** — a human summary and the evidence (related logs) that raised the alert.
+- **Use case** — the rule, source, entity, occurrence count, and first/last‑seen times.
+- **Raw event** — the underlying telemetry record behind the alert.
+
+Custom and predefined use cases also expose a read‑only **rule preview** so you can see exactly which logic is evaluated.
+
+### Status lifecycle
+
+| Status | Meaning |
+|---|---|
+| **Open** | The alert is active and awaiting triage. |
+| **Acknowledged** | Someone has picked it up and is investigating. |
+| **Resolved** | The condition has been handled. Stale alerts can also auto‑resolve once activity stops. |
+
+### Bulk actions and assignment
+
+Select multiple alerts to **mark them Open, Acknowledged, or Resolved** in one action, or **export the selection** to CSV. Assign any alert to a team member so ownership is clear.
+
+---
+
+## Forward to your SIEM
+
+Connect a destination in the **Integrations** view to stream every new alert to your security tooling as an OCSF Detection Finding.
+
+| Provider | Transport |
+|---|---|
+| Microsoft Sentinel | Azure Monitor Logs (DCR) |
+| Datadog | Logs intake API |
+| Splunk | HTTP Event Collector (HEC) |
+| Elastic | Elasticsearch document API |
+| IBM QRadar | LEEF over syslog (TLS) |
+| Webhook | Generic HTTP POST (optional HMAC signature) |
+
+A connected integration forwards **all** matching alerts by default. Optional **filters** narrow the stream by minimum severity, source, or an explicit severity allow‑list. Connection secrets are validated when you save and encrypted at rest, and failed deliveries are retried with backoff and surfaced for inspection.
+
+<Note>
+This is distinct from [platform SIEM integration](/platform/siem-integration), which forwards **audit logs**. Telemetry Alerts forward **security findings** derived from TrustGuard and TrustGate telemetry.
+</Note>
+
+---
+
+## Related documentation
+
+<CardGroup cols={2}>
+  <Card title="TrustGuard" icon="zap" href="/trustguard/overview">
+    The guardrail detections (prompt injection, PII, secrets, toxicity) that feed TrustGuard use cases.
+  </Card>
+  <Card title="TrustGate" icon="door-open" href="/trustgate/overview">
+    The AI gateway whose request telemetry feeds TrustGate use cases.
+  </Card>
+  <Card title="SIEM Integration" icon="share-2" href="/platform/siem-integration">
+    Forward NeuralTrust audit logs to your SIEM (separate from alert forwarding).
+  </Card>
+  <Card title="Audit Logs" icon="scroll-text" href="/platform/audit-logs">
+    The tenant audit trail for configuration and access events.
+  </Card>
+</CardGroup>
