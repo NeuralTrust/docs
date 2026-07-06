@@ -1,0 +1,115 @@
+---
+title: "Policies"
+description: "A policy is where enforcement lives: gates that match request attributes before detection, detector rules that run detectors and decide the action, and a policy-wide Report/Enforce switch."
+---
+
+A **policy** turns detection into a decision. [Detectors](/trustguard/concepts/detectors)
+say *what* is in the traffic; a policy says *what to do about it*. You build
+policies in the console's **Policies** screen, then attach them to
+[collectors](/trustguard/concepts/collectors).
+
+A policy has five tabs: **Gates**, **Detectors**, **Collectors**, **Test**, and
+**History** — plus a policy-wide **Enforcement mode**.
+
+## Enforcement mode — Report vs Enforce
+
+A single switch controls whether the policy can act:
+
+| Mode | Effect |
+|---|---|
+| **Report** | Every gate and detector action is downgraded to a non-blocking record. Nothing is blocked or transformed. Use it to measure signal and false positives before turning on enforcement. |
+| **Enforce** | Actions apply as configured — gates can block, detector rules can block or transform. |
+
+Report mode maps to the API's `report_only` flag. A typical rollout runs a new
+policy in **Report** first, reviews findings, then flips to **Enforce**.
+
+## Gates — match before you detect
+
+**Gates** are evaluated **before** any detector runs. A gate matches on request
+**attributes** (not content) and takes an action. Because they run first, gates
+are how you cheaply allow, block, or waive traffic without spending detection.
+
+Each gate is a set of **conditions** joined by **And**/**Or**, and a **Then**
+action:
+
+| Gate action | Effect |
+|---|---|
+| **Block** | Block the request immediately; **detectors are skipped**. (In Report mode this is recorded, not enforced.) |
+| **Report** | Record a finding and continue to detection. |
+| **Skip** | Stop gate evaluation and proceed to detectors — no finding. Use it to waive specific traffic. |
+
+All gates are evaluated and the **most restrictive** outcome wins; if any gate
+blocks, the request is blocked and detection is skipped.
+
+### Condition attributes
+
+Conditions target these request attributes:
+
+| Group | Attributes |
+|---|---|
+| **Consumer** | `consumer.id`, `consumer.name`, `consumer.tag`, `consumer.type` |
+| **Model** | `model.name`, `model.provider` |
+| **Collector** | `collector.id`, `collector.type` |
+| **Session** | `session.id` |
+| **Protocol** | `protocol` |
+
+**Operators:** Equals (`eq`), Not equals (`neq`), Greater than (`gt`), Less than
+(`lt`), Contains (`contains`), Does not contain (`not_contains`), In (`in` — a
+comma‑separated list), Matches (`match` — a regular expression).
+
+The `consumer.*`, `model.*` and `collector.type` values come from the guard
+request's `attributes`; `collector.id`, `session.id` and `protocol` are resolved
+by TrustGuard.
+
+## Detectors — run detectors and decide the action
+
+The policy's **Detectors** tab holds its detector rules, split by **evaluation
+phase**:
+
+- **Input** — evaluate the prompt/request.
+- **Output** — evaluate the completion/response.
+
+Each rule references one [detector](/trustguard/concepts/detectors), an
+**action**, and optional **conditions** (same attribute model as gates):
+
+| Action | Console label | Effect | Rewrites payload |
+|---|---|---|---|
+| `report` | **Monitor** | Record a finding only. | — |
+| `block` | **Block** | Flag the request for blocking; stops the remaining detector chain. | — |
+| `transform` | **Transform** | Mask/rewrite the payload. Only valid for a **mutable** detector (`data_loss_prevention`). | ✅ |
+
+All matching rules for the phase are evaluated and the **most restrictive**
+action wins.
+
+## Verdict precedence
+
+TrustGuard reduces everything that fired into one top‑level `status`, from most
+to least restrictive:
+
+```text
+block  →  transform  →  report  →  allow
+```
+
+`allow` means nothing fired (or everything was waived). The caller enforces the
+verdict — see the [Guard API](/trustguard/api/guard).
+
+## Test and History
+
+- **Test** runs a sample input or output through the **last saved** version of
+  the policy and shows the decision (Blocked / Transformed / Reported / Allowed)
+  and every finding — without touching production or emitting telemetry.
+- **History** is the policy's change log: created/updated/deleted events for the
+  policy, its gates, its detector rules, and collector routing.
+
+## Routing: attaching policies to collectors
+
+A policy runs when a [collector](/trustguard/concepts/collectors) routes traffic
+to it. On the policy's **Collectors** tab you attach collectors with a routing
+mode:
+
+- **Default** — the collector's fallback policy for all its traffic.
+- **Consumer ID** — the policy only applies to requests from a specific
+  consumer, letting one collector send different consumers to different policies.
+
+If a collector has no policy for a request, that request is **unguarded** (no
+gates, no detectors).

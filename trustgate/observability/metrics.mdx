@@ -1,35 +1,51 @@
 ---
-title: "Metrics"
-description: "TrustGate exposes Prometheus metrics for connections, request counts, and latency breakdowns from the proxy plane."
+title: "Metrics worker"
+description: "How TrustGate records a per-request metrics event and ships it off the hot path through an asynchronous worker — no scraping, no request-path overhead."
 ---
 
-The proxy plane exports **Prometheus** metrics through a background worker, so scraping
-never blocks request handling. Enable with `METRICS_ENABLED=true` (default).
+TrustGate captures a **structured metrics event for every proxied request** — model,
+tokens, cost, latency breakdown, routing attempts, and the policy chain — and publishes it
+through an **asynchronous worker** so measurement never blocks request handling.
 
-## The metrics worker
+<Note>
+There is **no Prometheus `/metrics` scrape endpoint**. TrustGate is a data-plane proxy: it
+*emits* a rich event per request to your sinks (Kafka by default, OpenTelemetry/OTLP
+optionally) rather than exposing scrape-style counters. Point your analytics or a Kafka
+consumer at the stream — see [Telemetry](/trustgate/observability/telemetry) for the event
+shape.
+</Note>
 
-Metrics are queued and flushed asynchronously:
+## How it works
+
+1. A proxy middleware opens a **request trace** at the start of each request and records
+   timings, routing attempts, and per-policy decisions as the request flows.
+2. When the response finishes (including after a fully-streamed SSE response), the trace is
+   handed to an in-memory **worker queue** — never inline on the response path.
+3. Worker goroutines drain the queue, build the event, and **publish it to the configured
+   exporters** (and, for playground requests, a short-lived trace store).
+
+Because the build-and-publish step runs on background workers, a slow or unavailable sink
+(e.g. Kafka) never adds latency to or fails a user request.
+
+## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `METRICS_ENABLED` | `true` | Toggle metrics export. |
-| `METRICS_QUEUE_SIZE` | `1000` | Buffered metric events. |
+| `TELEMETRY_ENABLED` | `true` | Master switch — records and emits the per-request event. |
+| `METRICS_QUEUE_SIZE` | `1000` | Capacity of the in-memory event queue. |
 | `METRICS_WORKER_COUNT` | `1` | Worker goroutines draining the queue. |
-| `METRICS_FLUSH_INTERVAL` | `5s` | How often the worker flushes. |
+| `METRICS_FLUSH_INTERVAL` | `5s` | How often workers flush buffered events. |
 
-## Exposed metrics
+Trace depth is tuned with `TELEMETRY_ENABLE_REQUEST_TRACES` and
+`TELEMETRY_ENABLE_PLUGIN_TRACES` (both default `true`) — see
+[Configuration](/trustgate/operate/configuration).
 
-| Metric | Type | What it tracks |
-|---|---|---|
-| `trustgate_connections` | gauge | In-flight connections. |
-| `trustgate_requests_total` | counter | Total requests (labelled by outcome). |
-| `trustgate_latency_ms` | histogram | End-to-end request latency. |
-| `trustgate_detailed_latency_ms` | histogram | Latency split by phase (routing, policies, gateway). |
-| `trustgate_upstream_latency_ms` | histogram | Time spent in the provider call. |
+## What the event carries
 
-The detailed and upstream histograms let you separate **gateway overhead** from
-**provider time** — useful for spotting whether latency is your policies or the upstream
-model.
+Each event is a single record with identity, request, response, usage, **cost**, a
+**latency breakdown** (total / provider / policies / routing / gateway), per-registry
+routing **attempts**, and the **policy chain**. The exact schema and how to consume it are
+documented in [Telemetry](/trustgate/observability/telemetry).
 
-For per-request detail (model, tokens, cost, policy chain, attempts), use the
-[telemetry stream](/trustgate/observability/telemetry).
+For interactive, single-request inspection (rather than a stream), the Admin plane also
+exposes the [playground](/trustgate/api/overview) trace for a given `trace_id`.

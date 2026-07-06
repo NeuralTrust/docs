@@ -1,6 +1,6 @@
 ---
 title: "Auth"
-description: "Auth credentials authenticate clients as a consumer — API key, OAuth2, IDP JWT, or mTLS. Created per gateway and attached to consumers."
+description: "Auth credentials authenticate clients as a consumer — API key, OAuth2, OIDC, or mTLS. Created per gateway and attached to consumers."
 ---
 
 An **auth** credential is how a client proves it may act as a
@@ -16,9 +16,12 @@ which is how TrustGate authenticates to the **upstream provider**.
 | `type` | How the client authenticates | Routing mode |
 |---|---|---|
 | **`api_key`** | `X-AG-API-Key: ag_…` header | inline |
-| **`oauth2`** | `Authorization: Bearer <jwt>` validated against an OAuth2 provider | inline |
-| **`idp`** | `Authorization: Bearer <jwt>` from your IDP; claims select a [role](/trustgate/concepts/roles) | role_based |
-| **`mtls`** | Client certificate | inline |
+| **`oauth2`** | `Authorization: Bearer <jwt>` (or opaque token + introspection) validated against an OAuth2 provider | inline or role_based |
+| **`oidc`** | `Authorization: Bearer <jwt>` from your IdP; claims select a [role](/trustgate/concepts/roles) | inline or role_based |
+| **`mtls`** | Client certificate (or a trusted `X-Forwarded-Client-Cert` header) | inline |
+
+MCP consumers accept `api_key`, `oauth2`, and `mtls` (not `oidc`). A `role_based` consumer
+carries exactly one identity credential — `oauth2` or `oidc`.
 
 ## API keys
 
@@ -35,19 +38,19 @@ POST /v1/gateways/{gateway_id}/auths
 POST /v1/gateways/{gateway_id}/consumers/{id}/auths/{auth_id}
 ```
 
-## OAuth2 / IDP / mTLS
+## OAuth2 / OIDC / mTLS
 
 JWT- and certificate-based credentials carry a `config` block:
 
 | Type | Config fields |
 |---|---|
-| `oauth2` | `issuer`, `audiences`, `jwks_url`, `introspection_url`, `client_id`/`secret`, `required_scopes`, `allowed_algorithms`. |
-| `idp` | `issuer`, `audiences`, `jwks_url`, `public_keys`, `required_scopes`, `allowed_algorithms`, `subject_claim`. |
+| `oauth2` | `issuer`, `audiences`, `jwks_url`, `introspection_url`, `client_id`/`secret`, `required_scopes`, `allowed_algorithms`, optional `session_mode`. |
+| `oidc` | `issuer`, `audiences`, `jwks_url`, `public_keys`, `required_scopes`, `allowed_algorithms`, `subject_claim`. |
 | `mtls` | `ca_cert`, `allowed_common_names`, `allowed_dns_names`, `allowed_fingerprints`. |
 
-For **`idp`** credentials, the validated token's claims are matched against role
-[IDP mappings](/trustgate/concepts/roles) to select the consumer's routing — this is how
-identity-based routing works.
+For **`oidc`** credentials on a `role_based` consumer, the validated token's claims are
+matched against role [OIDC mappings](/trustgate/concepts/roles) to select the consumer's
+routing — this is how identity-based routing works.
 
 ## Managing auth
 

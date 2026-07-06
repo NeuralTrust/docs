@@ -3,116 +3,86 @@ title: "Content security detectors"
 description: "Jailbreak and prompt-injection detection, toxicity, topic moderation, and document/URL analysis on AI input and output."
 ---
 
-Content-security detectors are the LLM-aware core of TrustGuard: they score prompts and
-model output for jailbreaks, toxicity, off-topic/disallowed content, and analyze
-documents and URLs. Several call the **NeuralTrust Firewall** or an external provider
-(OpenAI, Azure, AWS Bedrock); configure provider credentials globally (env) or
-per-detector under `settings.credentials`.
+Content‑security detectors are the LLM‑aware core of TrustGuard: they score
+prompts and model output for jailbreaks, toxicity, and off‑topic/disallowed
+content, and analyze documents and URLs. Several call the **NeuralTrust
+Firewall**; its credentials are configured globally (env) or overridden
+per‑detector under `settings.credentials`.
 
-| Detector | Slug | Sides | Protocols | Backend |
+All of these are **detection‑only** — the action (**Monitor** / **Block**) and
+evaluation phase (Input / Output) are set on the
+[policy](/trustguard/concepts/policies) rule that references the detector.
+
+| Plugin | Slug | Sides | Protocols | Backend |
 |---|---|---|---|---|
 | Prompt Guard | `prompt_guard` | input, output | all | NeuralTrust Firewall |
-| Multi-turn Guard | `multiturn_guard` | input | all | Stateful (per session) |
-| Toxicity | `toxicity` | input, output | all | NeuralTrust / OpenAI |
-| Toxicity (OpenAI) | `toxicity_openai` | input, output | all | OpenAI Moderation |
-| Toxicity (Azure) | `toxicity_azure` | input, output | all | Azure Content Safety |
+| Toxicity | `toxicity` | input, output | all | NeuralTrust Firewall |
 | Prompt Moderation | `prompt_moderation` | input, output | all | keyword/regex + NeuralTrust topics |
 | URL Analyzer | `url_analyzer` | input | llm, mcp | fetch + NeuralTrust Firewall |
 | Document Analyzer | `doc_analyzer` | input | llm | extract/OCR + PII + Firewall |
-| Bedrock Guardrail | `bedrock_guardrail` | both | all | AWS Bedrock |
+| Multi‑turn Guard | `multiturn_guard` | input | all | Stateful (per session) |
 
 ## Prompt Guard — `prompt_guard`
 
-Scores input/output with the NeuralTrust Firewall jailbreak detector and flags above a
-threshold. Sensitivity 1–4 (default 2).
+Scores input/output with the NeuralTrust Firewall jailbreak detector and reports
+a finding (`signal.type: "jailbreak"`) above a threshold. Sensitivity 1–4
+(default 2).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `jailbreak.threshold` | number | ✅ | Score in `[0,1]` above which content is flagged. |
+| `jailbreak.threshold` | number | ✅ | Score in `[0, 1]` above which content is flagged. |
 | `credentials.{base_url,token,openai_api_key}` | string | — | Override global firewall creds. |
 
 ```json
-{ "type": "prompt_guard", "mode": "block", "direction": "input",
-  "settings": { "jailbreak": { "threshold": 0.6 } } }
+{
+  "name": "Jailbreak — strict",
+  "plugin_slug": "prompt_guard",
+  "settings": { "jailbreak": { "threshold": 0.6 } }
+}
 ```
-
-## Multi-turn Guard — `multiturn_guard`
-
-Records conversation turns keyed on `session_id` and evaluates them across the
-conversation — catching jailbreaks that build up gradually across turns rather than in a
-single message. Pass a stable `session_id` on the guard request.
-
-| Field | Type | Default | Notes |
-|---|---|---|---|
-| `session_ttl` | integer | `3600` | Seconds to retain session state. |
-| `retention_period` | integer | — | Seconds; malicious-counter TTL. |
-| `threshold` | number | `0.7` | Score in `[0,1]`. |
 
 ## Toxicity — `toxicity`
 
-Scores content for toxicity via the configured provider.
-
-| Field | Type | Default | Notes |
-|---|---|---|---|
-| `provider` | enum | `neuraltrust` | `neuraltrust` or `openai`. |
-| `toxicity.threshold` | number | — (required) | Score in `[0,1]`. |
-| `mapping_field` | string | — | JSON path to the text to score. |
-| `credentials.*` | object | — | Override global creds. |
-
-## Toxicity (OpenAI) — `toxicity_openai`
-
-Uses the OpenAI Moderation API (`omni-moderation-latest`).
+Scores content with the NeuralTrust Firewall toxicity detector and reports a
+finding above threshold. The `signal.type` is the firewall category that scored
+highest (e.g. `hate`, `violence`, `harassment`, `self_harm`, `sexual`).
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `openai_key` | string | ✅ | OpenAI API key. |
-| `categories` | array&lt;string&gt; | — | Moderation categories to consider. |
-| `thresholds` | map&lt;string, number&gt; | — | Per-category score threshold `[0,1]`. |
-
-## Toxicity (Azure) — `toxicity_azure`
-
-Uses Azure AI Content Safety.
-
-| Field | Type | Required | Default | Notes |
-|---|---|---|---|---|
-| `api_key` | string | ✅ | — | Azure key. |
-| `endpoints.text` | string | ✅ | — | Text analyze URL. |
-| `endpoints.image` | string | — | — | Image analyze URL. |
-| `output_type` | enum | — | `FourSeverityLevels` | or `EightSeverityLevels`. |
-| `categories` | array&lt;string&gt; | — | `Hate, Violence, SelfHarm, Sexual` | |
-| `category_severity` | map&lt;string,int&gt; | — | — | Per-category min severity. |
+| `toxicity.threshold` | number | ✅ | Score in `[0, 1]`. |
+| `credentials.*` | object | — | Override global firewall creds. |
 
 ## Prompt Moderation — `prompt_moderation`
 
-Dual-mode moderation; enable at least one mode.
+Dual‑mode moderation — enable at least one mode.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `keyreg_moderation.enabled` | boolean | `false` | Keyword/regex matching. |
+| `keyreg_moderation.enabled` | boolean | `false` | Keyword/regex matching (`signal.type: "keyreg"`). |
 | `keyreg_moderation.keywords` | array&lt;string&gt; | — | |
 | `keyreg_moderation.regex` | array&lt;string&gt; | — | Each must compile. |
 | `keyreg_moderation.similarity_threshold` | number | `0.8` | |
-| `nt_topic_moderation.enabled` | boolean | `false` | NeuralTrust topic probability. |
+| `nt_topic_moderation.enabled` | boolean | `false` | NeuralTrust topic probability (`signal.type: "nt_topic"`). |
 | `nt_topic_moderation.topics` | array&lt;string&gt; | — | |
-| `nt_topic_moderation.thresholds` | map&lt;string, number&gt; | — | Per-topic threshold. |
+| `nt_topic_moderation.thresholds` | map&lt;string, number&gt; | — | Per‑topic threshold. |
 
 ## URL Analyzer — `url_analyzer`
 
-Extracts URLs from content, fetches each page (SSRF-guarded, size/timeout-bounded), and
-screens the fetched text for jailbreaks and PII.
+Extracts URLs from content, fetches each page (SSRF‑guarded, size/timeout‑bounded,
+up to 10 URLs per request), and screens the fetched text for jailbreaks and PII.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `threshold` | number | `0.7` | Jailbreak score threshold. |
 | `url.timeout` | integer | `20000` | Milliseconds. |
-| `url.max_content_size` | integer | `1048576` | Bytes. |
+| `url.max_content_size` | integer | `1048576` | Bytes (1 MiB). |
 | `url.allowed_domains` / `url.blocked_domains` | array&lt;string&gt; | — | Allow/deny lists. |
 | `pii.entities` | array&lt;enum&gt; | — | PII entities to check in fetched content. |
 
 ## Document Analyzer — `doc_analyzer`
 
-Extracts text from uploaded documents (PDF, Office, images via OCR, plain text) sent as
-`input.attachments`, then screens for PII and (optionally) jailbreaks.
+Extracts text from uploaded documents (PDF, Office, images via OCR, plain text)
+sent as `payload.attachments`, then screens for PII and (optionally) jailbreaks.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
@@ -123,23 +93,30 @@ Extracts text from uploaded documents (PDF, Office, images via OCR, plain text) 
 | `ocr.enabled` | boolean | `false` | OCR for images/scans (requires the OCR build). |
 | `ocr.languages` | array&lt;string&gt; | — | Tesseract language codes. |
 
-## Bedrock Guardrail — `bedrock_guardrail`
+## Multi‑turn Guard — `multiturn_guard`
 
-Applies an AWS Bedrock guardrail and reports topic, content, or sensitive-information
-violations.
+Records conversation turns keyed on `session_id` and evaluates the incoming turn
+against accumulated history — catching jailbreaks that build up gradually across
+turns rather than in a single message (`signal.type: "multiturn_attack"`). Pass a
+stable `session_id` on the guard request.
 
-| Field | Type | Required | Default | Notes |
-|---|---|---|---|---|
-| `guardrail_id` | string | ✅ | — | |
-| `version` | string | — | `"1"` | |
-| `credentials.aws_access_key` / `aws_secret_key` / `aws_region` / `aws_session_token` | string | — | — | Static creds. |
-| `credentials.use_role` | boolean | — | `false` | Assume a role instead. |
-| `credentials.role_arn` | string | — | — | Required when `use_role=true`. |
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `session_ttl` | integer | `3600` | Seconds to retain session state. |
+| `retention_period` | integer | — | Seconds; malicious‑counter TTL. |
+| `threshold` | number | `0.7` | Score in `[0, 1]`. |
+
+<Note>
+`multiturn_guard` is functional but hidden from the catalog picker by default,
+and it depends on Redis and the session‑analysis worker. Contact NeuralTrust to
+enable it for your team.
+</Note>
 
 ## When to use
 
-- **`prompt_guard` (input, block)** is the baseline jailbreak defense; add
-  **`multiturn_guard`** for chat where attacks unfold over turns.
-- **`url_analyzer` / `doc_analyzer`** for RAG and agent flows that ingest links/files.
-- Pick **one** toxicity provider per side that matches your stack.
+- **`prompt_guard`** is the baseline jailbreak defense; add **`multiturn_guard`**
+  for chat where attacks unfold over turns.
+- **`url_analyzer` / `doc_analyzer`** for RAG and agent flows that ingest
+  links/files.
+- **`toxicity`** on input and/or output for abuse and safety.
 - **`prompt_moderation`** for topic/scope control ("only answer about X").

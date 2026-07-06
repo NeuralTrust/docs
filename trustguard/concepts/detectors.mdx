@@ -1,63 +1,71 @@
 ---
 title: "Detectors"
-description: "A detector is a reusable, named detection — a catalog capability configured with a mode, protocol, direction, and settings. You attach detectors to collectors to form a chain."
+description: "A detector is a reusable, configured instance of a catalog plugin. It is detection-only — it decides what it finds, never what to do. Enforcement is decided by the policy that references it."
 ---
 
-A **detector** is a named, reusable detection: one capability from the
-[detector catalog](/trustguard/detectors/overview) configured for your needs. It is the
-unit you compose into [collector](/trustguard/concepts/collectors) chains — the same
-detector (say *"Block jailbreaks (strict)"*) can be attached to many collectors. You
-create and edit detectors in the **console** (Detectors).
+A **detector** is a reusable, named instance of one capability from the
+[detector catalog](/trustguard/detectors/overview) — a catalog **plugin**
+(e.g. `prompt_guard`) plus the **settings** you configure (thresholds, entity
+lists, allow/deny lists, …). You create and edit detectors in the console's
+**Detectors** screen, and the same detector can be referenced by many
+[policies](/trustguard/concepts/policies).
 
-A detector is defined by:
+<Note>
+Detectors are **detection-only**. A detector decides *what* it finds and how
+confident it is — it never decides whether to block, mask, or allow. That
+decision lives on the [policy](/trustguard/concepts/policies) that uses the
+detector (its **Gates** and **Detectors** tabs). This separation lets you reuse
+one well-tuned detector across many policies with different enforcement.
+</Note>
+
+## What defines a detector
 
 | Property | Values | Meaning |
 |---|---|---|
-| **Type** | one of the [catalog](/trustguard/detectors/overview) | The detection capability it configures (e.g. `prompt_guard`). |
-| **Mode** | `observe` · `block` · `redact` | What a detection *does*. |
-| **Protocol** | `all` · `llm` · `mcp` · `a2a` | Which traffic type it applies to. |
-| **Direction** | `input` · `output` | Whether it inspects prompts or responses. |
-| **Settings** | type-specific | The detection's configuration (thresholds, entities, lists…). |
+| **Plugin** | one slug from the [catalog](/trustguard/detectors/overview) | The detection capability (e.g. `prompt_guard`, `data_loss_prevention`). Fixed — you can't change its code, only its settings. |
+| **Name** | free text | A human label (e.g. *"Jailbreak — strict"*) so you can tell two instances of the same plugin apart. |
+| **Settings** | plugin-specific | The detection's configuration — thresholds, entity lists, keyword/regex lists, and so on. The console renders and validates the form. |
+| **Enabled** | on / off | A disabled detector is skipped everywhere it's referenced. |
 
-## Mode — what a detection does
-
-The mode is the detector's enforcement *intent*. It changes how a detection shapes the
-[guard response](/trustguard/api/guard), not whether the detector runs.
-
-| Mode | Console label | Reports finding | `is_flagged` | Rewrites payload |
-|---|---|---|---|---|
-| `observe` | Observe | ✅ | — | — |
-| `block` | Enforce | ✅ | ✅ | — |
-| `redact` | Redact | ✅ | — | ✅ |
-
-`redact` is only available for **mutable** detectors (today:
-[`data_loss_prevention`](/trustguard/detectors/data-loss-prevention)). A typical rollout
-starts a detector in **Observe** to measure signal and false positives, then promotes it
-to **Enforce** (or **Redact** for DLP) once you trust it.
-
-## Direction — input vs output
-
-- **Input** detectors inspect what goes *into* the model/agent (the prompt, an uploaded
-  document, requested tools).
-- **Output** detectors inspect what comes *back* (the completion, the tool calls the
-  model emitted).
-
-A detector only runs on requests whose `direction` matches. Many detectors support both
-sides; some are input-only or output-only (see each one's supported sides in the
-[catalog](/trustguard/detectors/overview)).
-
-## Protocol — LLM, MCP, A2A
-
-`protocol` scopes a detector to a traffic type. `all` matches everything; `llm`, `mcp`,
-and `a2a` match that protocol only. The agent/MCP detectors are `mcp`-scoped, for
-example.
+A detector does **not** carry a mode, a direction, or a protocol. Those belong
+to the policy rule that puts the detector to work — see
+[Policies](/trustguard/concepts/policies).
 
 ## Settings
 
-Each catalog type exposes a settings form (thresholds, entity lists, allow/deny lists,
-provider credentials, …). The console renders and validates this form for you. See the
-[detector catalog](/trustguard/detectors/overview) for each type's settings.
+Every plugin exposes its own settings schema (`GET /v1/plugins` returns the
+catalog and each plugin's fields). Examples:
 
-Creating a detector doesn't run it — attach it to a
-[collector](/trustguard/concepts/collectors) on its **Policies** tab to put it in the
-chain.
+- `prompt_guard`, `toxicity`, `tool_guard` — a `threshold` in `[0, 1]`.
+- `data_loss_prevention` — which PII entities to detect/mask, plus custom
+  keyword/regex rules.
+- `prompt_moderation` — keyword/regex lists and/or NeuralTrust topic thresholds.
+- `anomaly_detector` — retention window and behavioral scoring weights.
+
+See each plugin's full settings on its
+[category page](/trustguard/detectors/overview).
+
+## Mutable (transform-capable) detectors
+
+Most detectors only read the payload. A **mutable** detector can rewrite it —
+today only [`data_loss_prevention`](/trustguard/detectors/data-loss-prevention),
+which masks matched values in flight and populates `transformed_payload`.
+
+Only a mutable detector can be used with the **Transform** action in a policy;
+choosing Transform for any other detector is rejected when you save the policy.
+
+## Putting a detector to work
+
+Creating a detector doesn't run it. To evaluate traffic you reference the
+detector from a [policy](/trustguard/concepts/policies):
+
+1. Open a policy → **Detectors** tab.
+2. Pick an **evaluation phase** — **Input** (prompt/request) or **Output**
+   (completion/response).
+3. Add a rule that selects the detector and an **action** — **Monitor**
+   (record a finding only), **Block**, or **Transform** (mutable detectors).
+4. Optionally add **conditions** so the rule only runs for certain consumers,
+   models, collectors, protocols, or sessions.
+
+Then attach the policy to a [collector](/trustguard/concepts/collectors) so its
+traffic is evaluated.

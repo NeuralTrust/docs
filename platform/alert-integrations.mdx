@@ -1,0 +1,164 @@
+---
+title: Integrations
+description: "Forward NeuralTrust alert findings to your SIEM. Connect Microsoft Sentinel, Datadog, Splunk, Elastic, IBM QRadar, or a generic webhook and stream each new alert as an OCSF Detection Finding."
+---
+
+# Integrations
+
+The **Integrations** view in the Telemetry section connects [Alerts](/platform/alerts) to your security tooling. Once a destination is connected, every **new** alert is rendered as an <Tooltip tip="Open Cybersecurity Schema Framework">OCSF</Tooltip> Detection Finding and delivered to it in near real time.
+
+<Note>
+This forwards **alert findings** derived from TrustGuard and TrustGate telemetry — the security detections raised in [Alerts](/platform/alerts). To forward the tenant **audit trail** (authentication, user management, configuration changes) instead, see [Audit Logs](/platform/audit-logs).
+</Note>
+
+---
+
+## Supported destinations
+
+| Destination | Transport |
+|---|---|
+| Microsoft Sentinel | Azure Monitor HTTP Data Collector API |
+| Datadog | Logs intake API |
+| Splunk | HTTP Event Collector (HEC) |
+| Elastic | Elasticsearch index / data stream |
+| IBM QRadar | LEEF 2.0 over syslog (TLS) |
+| Webhook | Generic HTTP POST (optional header auth + HMAC signature) |
+
+You can connect more than one destination — each new alert fans out to every connected integration whose filters match.
+
+---
+
+## How forwarding works
+
+<Steps>
+  <Step title="A new alert is raised">
+    Forwarding fires only for **brand-new** alerts. Repeated occurrences that dedupe into an existing alert do not re-forward, so a sustained attack won't flood your SIEM.
+  </Step>
+  <Step title="The alert is rendered as OCSF">
+    The alert is serialized into an OCSF Detection Finding — a vendor-neutral security event schema — carrying severity, source, entity, rule, and timestamps.
+  </Step>
+  <Step title="Filters decide the recipients">
+    The finding is delivered to every connected destination whose filters match (see [Delivery filters](#delivery-filters)).
+  </Step>
+  <Step title="Delivery is retried on failure">
+    Transient failures are retried with exponential backoff; permanently failed deliveries land in a dead-letter list you can inspect and requeue.
+  </Step>
+</Steps>
+
+---
+
+## Connect a destination
+
+Open **Telemetry → Integrations**, choose a provider, and fill in its connection fields. Connections are **validated on save** — malformed settings are rejected before any alert is forwarded — and every secret is **encrypted at rest**.
+
+<AccordionGroup>
+  <Accordion title="Microsoft Sentinel">
+    Streams findings to a Log Analytics workspace via the Azure Monitor HTTP Data Collector API.
+
+    | Field | Required | Description |
+    |---|---|---|
+    | **Workspace ID** | Yes | Log Analytics workspace ID (GUID). |
+    | **Shared Key** | Yes | Workspace primary or secondary key (base64). |
+    | **Log Type** | No | Custom log table name (default `NeuralTrustAlert`). |
+
+    Find both values in the Azure portal under **Log Analytics workspace → Agents → Log Analytics agent instructions**.
+  </Accordion>
+
+  <Accordion title="Datadog">
+    Forwards findings to the Datadog logs intake.
+
+    | Field | Required | Description |
+    |---|---|---|
+    | **API Key** | Yes | Created under **Organization Settings → API Keys**; sent as the `DD-API-KEY` header. |
+    | **Region** | No | Your Datadog site (e.g. `US1-datadoghq.com`). Must match your account region. |
+    | **Service Tag** | No | Optional service tag attached to all events. |
+    | **Source** | No | Source tag attached to events (e.g. `neuraltrust`). |
+  </Accordion>
+
+  <Accordion title="Splunk">
+    Posts findings to a Splunk HTTP Event Collector (HEC).
+
+    | Field | Required | Description |
+    |---|---|---|
+    | **HEC URL** | Yes | HEC base URL (e.g. `https://splunk.example:8088`). |
+    | **HEC Token** | Yes | HTTP Event Collector token. |
+    | **Index** | No | Target index. |
+    | **Source Type** | No | Event source type (e.g. `neuraltrust:alert`). |
+  </Accordion>
+
+  <Accordion title="Elastic">
+    Indexes findings into an Elasticsearch index or data stream. Authenticate with an API key **or** basic auth.
+
+    | Field | Required | Description |
+    |---|---|---|
+    | **URL** | Yes | Elasticsearch base URL (e.g. `https://es.example:9200`). |
+    | **Index** | Yes | Target index or data stream. |
+    | **API Key** | No | Base64 Elasticsearch API key. |
+    | **Username** / **Password** | No | HTTP basic auth (alternative to the API key). |
+  </Accordion>
+
+  <Accordion title="IBM QRadar">
+    Sends LEEF 2.0 events to a QRadar event collector over syslog.
+
+    | Field | Required | Description |
+    |---|---|---|
+    | **Host** | Yes | QRadar event collector hostname or IP. |
+    | **Port** | No | Collector port (default `514`). |
+    | **Use TLS** | No | Send over a TLS connection. |
+    | **Skip TLS verification** | No | Accept self-signed collector certificates. |
+  </Accordion>
+
+  <Accordion title="Webhook">
+    POSTs the raw OCSF finding to any HTTP endpoint.
+
+    | Field | Required | Description |
+    |---|---|---|
+    | **URL** | Yes | Destination URL. |
+    | **Header Name** / **Header Value** | No | An optional static request header for auth. |
+    | **HMAC Secret** | No | If set, adds an `X-NeuralTrust-Signature` signature over the request body so the receiver can verify authenticity. |
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+Use **Test connection** after saving to send a synthetic finding through the destination and confirm connectivity before real alerts depend on it.
+</Tip>
+
+---
+
+## Delivery filters
+
+A connected destination forwards **all** matching alerts by default. Filters only narrow that stream:
+
+| Filter | Effect |
+|---|---|
+| **Minimum severity** | Forward only alerts at or above a severity floor (e.g. `High` sends High and Critical). |
+| **Sources** | Restrict to specific products (TrustGuard, TrustGate, Cross). Empty = all. |
+| **Severities** | An explicit severity allow-list, when you want an exact set rather than a floor. Empty = all. |
+
+You can also **pause** a destination to stop forwarding without deleting its configuration.
+
+---
+
+## Delivery health & troubleshooting
+
+Each integration tracks a rolling 24-hour **delivery health** — the count of forwarded and failed events and the time of the last successful delivery.
+
+| Issue | What to check |
+|---|---|
+| Events not arriving | Verify the endpoint URL, credentials, and that the destination isn't paused. |
+| Authentication failed | Regenerate the API key / token and re-save (settings are re-validated on save). |
+| Deliveries failing | Inspect the failed-delivery (dead-letter) list and **requeue** once the destination is healthy. |
+| Nothing forwarded at all | Confirm the alert's severity/source passes the destination's filters. |
+
+---
+
+## Related documentation
+
+<CardGroup cols={2}>
+  <Card title="Alerts" icon="siren" href="/platform/alerts">
+    The detection use cases and alerts that produce the findings forwarded here.
+  </Card>
+  <Card title="Audit Logs" icon="scroll-text" href="/platform/audit-logs">
+    The tenant audit trail for authentication, user management, and configuration events.
+  </Card>
+</CardGroup>

@@ -5,7 +5,7 @@ description: "Call TrustGuard from your own code — the Python and Node SDKs, f
 
 When you own the application, integrate TrustGuard directly around your model calls. This
 gives you full control over what to inspect and how to enforce, and works with any model
-provider. Create an API key on the collector's **Auth** tab first.
+provider. Create an API key on the collector first.
 
 Prefer the official SDKs over hand-rolled HTTP — they take the base URL and call
 `/v1/guard` for you:
@@ -16,29 +16,33 @@ Prefer the official SDKs over hand-rolled HTTP — they take the base URL and ca
 | Python | `neuraltrust-trustguard` |
 | Go | `github.com/NeuralTrust/trustguard-sdk/go` |
 
+The response carries a `status` (`allow` / `report` / `transform` / `block`); the SDKs
+expose `is_blocked` / `isBlocked` (true when `status == "block"`) and the
+`transformed_payload` for masked content.
+
 ## Python SDK
 
 1. `pip install neuraltrust-trustguard`
 2. Call `client.guard()` with `direction="input"` (prompt) or `direction="output"`
    (completion).
 3. Pass `consumer_id` and `session_id` for attribution.
-4. Block when `is_flagged` is true; use `transformed_payload` when present (redaction).
+4. Block when `is_blocked` is true; forward `transformed_payload` when present.
 
 ```python
-from trustguard import TrustGuard, TrustGuardAPIError
+from trustguard import TrustGuard
 
-client = TrustGuard("<your-trustguard-url>", "<api-token>")
+client = TrustGuard("<your-trustguard-url>", "<collector-api-key>")
 
 response = client.guard(
-    {"text": user_input},
+    {"input": user_input},
     direction="input",            # "output" for completions
     consumer_id="alex@acme.com",  # who: user id, email, or device fingerprint
     session_id="sess-123",        # which conversation the message belongs to
 )
 
-if response.is_flagged:
+if response.is_blocked:
     raise PermissionError("Blocked by TrustGuard")
-# response.transformed_payload carries redacted content when a masking detector ran
+# response.transformed_payload carries masked content when a Transform rule ran
 ```
 
 ## Node.js SDK
@@ -46,25 +50,25 @@ if response.is_flagged:
 1. `npm install @neuraltrust/trustguard-sdk`
 2. Call `client.guard()` with `direction` `"input"` / `"output"`.
 3. Pass `consumerId` and `sessionId`.
-4. Block when `isFlagged` is true; use `transformedPayload` when present.
+4. Block when `isBlocked` is true; forward `transformedPayload` when present.
 
 ```ts
 import { TrustGuard } from "@neuraltrust/trustguard-sdk";
 
 const client = new TrustGuard({
   baseUrl: "<your-trustguard-url>",
-  apiKey: "<api-token>",
+  apiKey: "<collector-api-key>",
 });
 
 const response = await client.guard({
-  input: { text: userInput },
+  payload: { input: userInput },
   direction: "input",          // "output" for completions
   consumerId: user.id,         // who: user id, email, or device fingerprint
   sessionId: conversationId,   // which conversation the message belongs to
 });
 
-if (response.isFlagged) throw new Error("Blocked by TrustGuard");
-// response.transformedPayload carries redacted content when a masking detector ran
+if (response.isBlocked) throw new Error("Blocked by TrustGuard");
+// response.transformedPayload carries masked content when a Transform rule ran
 ```
 
 ## REST API
@@ -74,18 +78,18 @@ hand-rolling).
 
 ```bash
 curl -X POST "{TRUSTGUARD_URL}/v1/guard" \
-  -H "Authorization: Bearer <api-token>" \
+  -H "Authorization: Bearer <collector-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
     "protocol": "llm",
     "direction": "input",
-    "input": { "text": "summarize this customer call" },
+    "payload": { "input": "summarize this customer call" },
     "session_id": "sess-123",
     "consumer_id": "alex@acme.com"
   }'
 
 # Response:
-# { "is_flagged": false, "findings": [], "transformed_payload": null, ... }
+# { "status": "allow", "findings": [], "transformed_payload": null, "trace_id": "…", "request_id": "…" }
 ```
 
 ## Python middleware (FastAPI / Django / Flask)
@@ -98,18 +102,18 @@ from starlette.responses import JSONResponse
 from trustguard import AsyncTrustGuard
 
 app = FastAPI()
-client = AsyncTrustGuard("<your-trustguard-url>", "<api-token>")
+client = AsyncTrustGuard("<your-trustguard-url>", "<collector-api-key>")
 
 @app.middleware("http")
 async def trustguard_middleware(request: Request, call_next):
     if request.method == "POST":
         body = await request.body()
         response = await client.guard(
-            {"text": body.decode()},
+            {"input": body.decode()},
             consumer_id=request.headers.get("x-user-id", ""),
             session_id=request.cookies.get("session_id", ""),
         )
-        if response.is_flagged:
+        if response.is_blocked:
             return JSONResponse({"detail": "Blocked by TrustGuard"}, status_code=403)
     return await call_next(request)
 ```
@@ -125,17 +129,17 @@ app.use(express.json());
 
 const client = new TrustGuard({
   baseUrl: "<your-trustguard-url>",
-  apiKey: "<api-token>",
+  apiKey: "<collector-api-key>",
 });
 
 app.use(async (req, res, next) => {
   if (req.method !== "POST") return next();
   const response = await client.guard({
-    input: { text: JSON.stringify(req.body) },
+    payload: { input: JSON.stringify(req.body) },
     consumerId: req.get("x-user-id") ?? "",
     sessionId: req.cookies?.session_id ?? "",
   });
-  if (response.isFlagged) {
+  if (response.isBlocked) {
     return res.status(403).json({ detail: "Blocked by TrustGuard" });
   }
   next();
@@ -146,8 +150,9 @@ app.use(async (req, res, next) => {
 
 - Inspect both sides: `direction:"input"` before the model call, `direction:"output"`
   on the completion.
-- Send documents/links as `input.attachments` to engage the
+- Send documents/links via the `attachments` argument (folded into
+  `payload.attachments`) to engage the
   [document and URL analyzers](/trustguard/detectors/content-security) — see the
   [Guard API](/trustguard/api/guard) for the attachment + SSRF rules.
-- TrustGuard is fail-open by default, so an outage won't break your app — you decide
-  whether to hold traffic on errors.
+- On a detector infrastructure error TrustGuard follows your deployment's fail-open /
+  fail-closed setting — decide whether to hold traffic on errors accordingly.

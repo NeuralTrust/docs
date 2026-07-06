@@ -1,25 +1,25 @@
 ---
 title: "Collectors"
-description: "A collector is a traffic tap — a gateway, SDK, browser extension, or WAF — that sends traffic to TrustGuard's /v1/guard endpoint. It owns a detector chain and an API key."
+description: "A collector is a traffic tap — a gateway, SDK, browser extension, or WAF — that calls /v1/guard. It authenticates with an API key and routes each request to a policy."
 ---
 
-A **collector** is where TrustGuard receives traffic. It represents one integration
-point — an [AI gateway](/trustgate/overview), an application SDK, a
+A **collector** is where TrustGuard receives traffic. It represents one
+integration point — an [AI gateway](/trustgate/overview), an application SDK, a
 browser extension, or an edge/WAF worker — that calls
 [`POST /v1/guard`](/trustguard/api/guard) on every request it wants inspected.
 
-You create and manage collectors in the **console** (Collectors). Each collector owns
-two things:
+You create and manage collectors in the console's **Collectors** screen. Each
+collector owns:
 
-1. A **detector chain** — the [detectors](/trustguard/concepts/detectors) that run on its
-   traffic, managed on the collector's **Policies** tab.
-2. One or more **API keys** — the credentials its integration uses to authenticate.
-   The key is what resolves the collector at runtime.
+1. One or more **API keys** — the credentials its integration uses to
+   authenticate. The key resolves the collector at runtime.
+2. A **policy routing** — which [policy](/trustguard/concepts/policies) evaluates
+   its traffic (a default policy, and optionally per‑consumer overrides).
 
 ## Integration types
 
-Collectors are created from a **catalog** grouped by integration type. The integration
-determines the setup snippet you get and where enforcement happens.
+Collectors are created from a catalog grouped by integration type. The
+integration determines the setup snippet you get and where enforcement happens.
 
 | Group | Examples | Where it runs |
 |---|---|---|
@@ -28,24 +28,27 @@ determines the setup snippet you get and where enforcement happens.
 | **Browser** | Chrome, Edge, Firefox extensions | In the browser, around AI web apps. |
 | **WAF / Edge** | Cloudflare Workers, AWS CloudFront (Lambda@Edge), Fastly Compute, Akamai EdgeWorkers | At the CDN edge. |
 
-When you create or open a collector, the side panel shows step‑by‑step instructions and a
-ready-to-paste snippet for the chosen integration. See
+When you create or open a collector, the side panel shows step‑by‑step
+instructions and a ready‑to‑paste snippet for the chosen integration. See
 [Integrations](/trustguard/integrations/overview) for all of them.
 
-> **TrustGate is the first-class collector.** When TrustGuard runs behind the gateway,
-> the gateway calls `/v1/guard` for you and enforces the verdict natively. Other
-> collectors call the same API directly.
+<Note>
+**TrustGate is the first‑class collector.** When TrustGuard runs behind the
+gateway, the gateway calls `/v1/guard` for you and enforces the verdict
+natively. Other collectors call the same API directly and enforce the verdict
+themselves.
+</Note>
 
 ## Authentication & API keys
 
-A collector authenticates with a bearer **API key**, created on the collector's **Auth**
-tab.
+A collector authenticates with a bearer **API key**, created on the collector in
+the console.
 
-- The raw secret is shown **once**, at creation — store it immediately. Afterwards only a
-  non-secret hint is shown.
-- Keys support an optional expiry (never / 7d / 30d / 90d / 1y) and can be revoked.
-- The key carries the collector identity — the runtime resolves the collector from the
-  key, so the request body must never include a collector id.
+- The raw secret is shown **once**, at creation — store it immediately.
+  Afterwards only a non‑secret prefix hint is shown.
+- Keys support an optional expiry and can be revoked.
+- The key carries the collector identity — the runtime resolves the collector
+  from the key, so the request body never needs a collector id.
 
 ```bash
 POST /v1/guard
@@ -53,25 +56,34 @@ Authorization: Bearer <collector-api-key>   # ← resolves the collector
 Content-Type: application/json
 ```
 
-## The detector chain
+## Routing traffic to a policy
 
-Detectors are **team-wide and reusable**. You build a collector's behavior by attaching
-detectors to it on the **Policies** tab.
+A collector decides which [policy](/trustguard/concepts/policies) evaluates a
+request:
 
-- Attaching is additive and **unordered** — every enabled, matching detector runs.
-- The same detector can be attached to many collectors; you can disable it on one
-  collector without affecting others.
+- **Default policy** — the fallback used for all of the collector's traffic.
+- **Per‑consumer policy** — an override keyed on `consumer_id`, so one collector
+  can send different consumers to different policies.
 
-See [Detectors](/trustguard/concepts/detectors) for how to configure the detectors
-themselves, and [Attribution](#attribution) below for getting per-user/session findings.
+Resolution is: if the request's `consumer_id` has a per‑consumer policy, use it;
+otherwise use the default policy. A collector with **no** matching policy leaves
+that request **unguarded** — it returns `allow` with no findings.
+
+You attach a collector to a policy from the policy's **Collectors** tab (routing
+mode **Default** or **Consumer ID**).
 
 ## Attribution
 
 Each integration should send, when available:
 
-- **`consumer_id`** — who made the request (user id, email, or device fingerprint).
-- **`session_id`** — which conversation the message belongs to.
+- **`consumer_id`** — who made the request (user id, email, or device
+  fingerprint). Used for per‑consumer routing and by `anomaly_detector`.
+- **`session_id`** — which conversation the message belongs to. Used by the
+  multi‑turn detector; synthesised if omitted (treated as single‑turn).
+- **`attributes`** — optional context (`consumer.name`, `consumer.tag`,
+  `consumer.type`, `model.name`, `model.provider`, `collector.type`) that gates
+  and detector rules can match on.
 
-These attribute findings to the right user and session in the **Activity** view, and
-power the stateful detectors (multi-turn and behavioral). Every integration snippet shows
-the natural source for each on that platform.
+These attribute findings to the right user and session in the **Activity** view
+and power the stateful detectors. Every integration snippet shows the natural
+source for each on that platform.
