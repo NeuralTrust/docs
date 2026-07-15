@@ -3,27 +3,31 @@ title: Deployment overview
 description: Where the NeuralTrust Platform runs, how the architecture is laid out, and how to pick the right combination of cloud and deployment model for your environment.
 ---
 
-NeuralTrust ships as a single unified Helm chart — `neuraltrust-platform` — that runs on any Kubernetes cluster: AWS EKS, Google GKE, Azure AKS, Red Hat OpenShift, or vanilla Kubernetes (including on-prem and air-gapped).
+<Note>
+This section covers the **Hybrid** deployment, where the Data Plane runs in your own cluster. On **SaaS**, NeuralTrust hosts everything and there is nothing to install — start from the [platform overview](/platform/overview).
+</Note>
 
-You make two decisions before installing:
+NeuralTrust ships the Data Plane as a single unified Helm chart — `neuraltrust-platform` — that runs on any Kubernetes cluster: AWS EKS, Google GKE, Azure AKS, Red Hat OpenShift, or vanilla Kubernetes (including on-prem).
+
+For a Hybrid install you make two decisions:
 
 1. **Where** does it run? → pick your cloud / platform
-2. **What** runs in your cluster? → pick your deployment model
+2. **What** do you bring? → the products (TrustGate, Firewall) plus a PostgreSQL and Redis. Metadata leaves your cluster over OpenTelemetry to the NeuralTrust SaaS collector; raw prompt/response bodies stay in your own PostgreSQL.
 
 Everything else is covered by the chart's defaults.
 
-## 1. Pick your deployment model
+## 1. Deployment models
 
 | Model | Control Plane | Data Plane | Best for |
 |---|---|---|---|
-| [**Hybrid**](./deployment-models#hybrid-data-plane-in-your-environment) *(chart default)* | NeuralTrust SaaS | Your cluster | Most customers — fastest to value, no UI to operate |
-| [**Self-hosted**](./deployment-models#self-hosted-everything-in-your-cluster) | Your cluster | Your cluster | Air-gapped, sovereignty mandates, full operational control |
+| [**SaaS**](./deployment-models#saas-fully-managed) *(fully managed)* | NeuralTrust SaaS | NeuralTrust SaaS | Fastest to value — nothing to install |
+| [**Hybrid**](./deployment-models#hybrid-data-plane-in-your-environment) | NeuralTrust SaaS | Your cluster | Data residency / sovereignty requirements |
 
-Both modes use the same chart and the same data-plane images. You can switch later without losing data. The complete decision matrix and topology diagrams live in [Deployment models](./deployment-models).
+**SaaS has nothing to deploy.** The rest of this section is the **Hybrid** data-plane install. The full decision matrix and topology diagrams live in [Deployment models](./deployment-models).
 
 ## 2. Pick your environment
 
-Each guide covers cluster prerequisites, then walks through **both deployment models** with cloud-specific examples (storage class, ingress controller, IAM/identity, DNS, certificates, GPU pools).
+Each guide covers cluster prerequisites, then walks through the **Hybrid data-plane install** with cloud-specific examples (storage class, ingress controller, IAM/identity, DNS, certificates, GPU pools).
 
 <CardGroup cols={2}>
   <Card title="GCP (GKE)" icon="cloud" href="./gcp/overview">
@@ -39,7 +43,7 @@ Each guide covers cluster prerequisites, then walks through **both deployment mo
     OpenShift 4.10+ — Routes (default) or Ingress, SCC handling, `oc` workflow, ROSA / ARO / on-prem.
   </Card>
   <Card title="Vanilla Kubernetes" icon="server" href="./kubernetes/overview">
-    Any Kubernetes 1.24+ — on-prem, bare metal, air-gapped, k3s, OKE, and other distributions.
+    Any Kubernetes 1.24+ — on-prem, bare metal, k3s, OKE, and other distributions.
   </Card>
 </CardGroup>
 
@@ -58,35 +62,38 @@ Each guide covers cluster prerequisites, then walks through **both deployment mo
 
 The platform has two halves:
 
-- **Control Plane** — UI, policy editor, scheduler, RBAC. Runs on NeuralTrust SaaS (hybrid) or in your cluster (self-hosted).
-- **Data Plane** — telemetry ingestion, eval execution, ClickHouse writes. Always runs in your cluster.
+- **Control Plane** — UI, policy editor, scheduler, RBAC, the **OpenTelemetry collector**, the **ClickHouse** metadata store, and the **AlertEngine** (rule evaluation, alerts, SIEM forwarding). Always runs on NeuralTrust SaaS.
+- **Data Plane** — the products that sit in your request path: **TrustGate** (the AI gateway) and the **Firewall** (prompt/response safety classifiers), plus their **PostgreSQL** and **Redis**. Runs in your cluster (Hybrid) or on NeuralTrust SaaS (SaaS).
 
-TrustGate (the AI gateway), the Firewall (prompt/response safety classifiers), and the infrastructure stores (ClickHouse, Kafka, PostgreSQL) all sit on the data-plane side and run **in your cluster** in both deployment models. Your prompt and response data never leaves your environment.
+Each product emits per-request **metadata over OpenTelemetry (OTLP)** to the NeuralTrust SaaS collector, which lands it in ClickHouse for the AlertEngine and dashboards. Raw prompt/response bodies are written to a **PostgreSQL** store — in **Hybrid** that Postgres lives in your cluster, so your prompt and response data never leaves your environment; in **SaaS** everything runs on NeuralTrust SaaS.
 
 ## What gets deployed
 
-| Component | Purpose | In hybrid? | In self-hosted? |
-|---|---|---|---|
-| Data Plane API + worker | Telemetry ingestion, eval scheduling | ✅ | ✅ |
-| Kafka Connect | Streams events into ClickHouse | ✅ | ✅ |
-| Control Plane API + UI + Scheduler | Dashboards, RBAC, policy distribution | — *(SaaS)* | ✅ |
-| TrustGate (admin + gateway + actions) | AI gateway | ✅ *(typical)* | ✅ |
-| Firewall (gateway + 5 workers) | In-cluster prompt/response safety — CPU or GPU workers | ✅ | ✅ |
-| ClickHouse | Analytics database | ✅ *(or external)* | ✅ *(or external)* |
-| Kafka | Event streaming | ✅ *(or external)* | ✅ *(or external)* |
-| PostgreSQL | Relational store (TrustGate + CP metadata) | ✅ *(or external)* | ✅ *(or external)* |
-| Redis | TrustGate cache (bundled with TrustGate subchart) | ✅ *(or external)* | ✅ *(or external)* |
+In **SaaS**, all of these are hosted and managed by NeuralTrust — nothing is deployed in your environment. In **Hybrid**, the chart deploys the data-plane components in your cluster; the Control Plane (including the OTel collector, ClickHouse, and the AlertEngine) always runs on NeuralTrust SaaS:
 
-For the complete image list per model, including tags, replicas, and resource footprints, see [Image catalog](./images).
+| Component | Purpose | Deployed in your cluster (Hybrid) |
+|---|---|---|
+| TrustGate (admin + gateway + actions) | AI gateway | ✅ *(typical)* |
+| Firewall (gateway + 5 workers) | In-cluster prompt/response safety — CPU or GPU workers | ✅ |
+| PostgreSQL | TrustGate admin metadata **and** the raw prompt/response store | ✅ *(or external)* |
+| Redis | TrustGate / Firewall cache and session store | ✅ *(or external)* |
+| OpenTelemetry collector | Receives product metadata, lands it in ClickHouse | — *(on NeuralTrust SaaS)* |
+| ClickHouse | Metadata store for alerts and dashboards | — *(on NeuralTrust SaaS)* |
+| AlertEngine | Rule evaluation, alert dedup, SIEM forwarding | — *(on NeuralTrust SaaS)* |
+| Control Plane API + UI + Scheduler | Dashboards, RBAC, policy distribution | — *(on NeuralTrust SaaS)* |
+
+For the complete image list, including tags, replicas, and resource footprints, see [Image catalog](./images).
 
 ## Configurable infrastructure
 
-ClickHouse, Kafka, and PostgreSQL can each be:
+In a Hybrid install you bring two stores in your cluster:
 
-- **In-cluster** (default) — the chart deploys and manages StatefulSets, PVCs, and credentials.
-- **External** — you point the chart at managed services (RDS, Cloud SQL, MSK, Confluent Cloud, ClickHouse Cloud, etc.).
+- **PostgreSQL** — TrustGate admin metadata and the raw prompt/response store.
+- **Redis** — TrustGate / Firewall cache and sessions.
 
-This applies in both deployment models. See [Configuration scenarios › External infrastructure](./configuration#external-infrastructure-only).
+Each can be **in-cluster** (default — the chart deploys and manages StatefulSets, PVCs, and credentials) or **external** (point the chart at a managed service such as RDS, Cloud SQL, Azure Database for PostgreSQL, or managed Redis).
+
+The **OpenTelemetry collector** and **ClickHouse** are not deployed in your cluster — products send metadata over OTLP to the NeuralTrust SaaS collector. See [Configuration scenarios › External infrastructure](./configuration#external-infrastructure-only).
 
 ## LLM endpoints
 
@@ -128,42 +135,34 @@ Each component below is documented for its responsibilities and security posture
 
 ### Data Plane
 
-The Data Plane manages your private data and endpoints — user conversations, traces, metrics, and evals.
+The Data Plane is the set of products that sit in your request path and manage your private data — TrustGate, the Firewall, and their stores.
 
-**API**
-- High-throughput ingestion (millions of events/sec at the upper end).
-- Real-time validation and enrichment of incoming streams.
-- Robust API key management and JWT-based authentication.
+**TrustGate (AI gateway)**
+- Real-time validation of AI traffic against configured security policies.
+- API key management and JWT-based authentication.
 - Horizontal autoscaling against incoming volume.
 
-**Worker**
-- Real-time analysis for immediate insights and anomaly detection.
-- Privacy-preserving analytics while keeping raw data in your environment.
-- Alert generation for critical AI security and performance events.
+**Firewall (gateway + workers)**
+- In-cluster prompt/response safety classifiers (CPU or GPU workers).
+- Runs entirely within your environment.
 
-**Message Queue (Kafka)**
-- Event sourcing — complete audit trails of all AI monitoring events.
-- Guaranteed delivery with configurable durability.
-- Stream processing for real-time workflows.
-- Backpressure management during traffic spikes.
+**Telemetry export (OpenTelemetry)**
+- Each product emits per-request **metadata over OTLP** — verdicts, counters, finding labels, latency, cost — to the NeuralTrust SaaS collector.
+- No raw prompt/response text is in the metadata stream.
+- No Kafka and no in-cluster ClickHouse: the collector and metadata store are on NeuralTrust SaaS.
 
-<Note>
-Kafka is the only supported Data Plane message queue today. Deploy in-cluster or point at an external instance (MSK, Confluent Cloud, Event Hubs).
-</Note>
-
-**Database (ClickHouse)**
-- Complete data sovereignty — all raw AI monitoring data stays in your VPC.
-- High-performance analytics, optimized for real-time and complex queries.
-- Encryption at rest with your managed keys.
-- Compliant for GDPR, HIPAA, SOX, and other regulatory frameworks.
+**Raw payload store (PostgreSQL)**
+- Raw prompt/response bodies are written to a PostgreSQL store in your cluster (e.g. the Firewall's `trustguard_data`).
+- Used only so you can view prompt/response in the platform; the UI fetches raw **on demand** by `(team_id, trace_id)`.
+- In Hybrid, raw data never leaves your environment.
 
 <Note>
-ClickHouse is the only supported Data Plane analytics DB today. Deploy in-cluster or external (ClickHouse Cloud).
+PostgreSQL and Redis are the stores you bring in a Hybrid data plane. Deploy in-cluster or point at managed services (RDS, Cloud SQL, Azure Database for PostgreSQL, managed Redis).
 </Note>
 
 ### Control Plane
 
-The Control Plane provides centralized management and advanced AI security capabilities.
+The Control Plane provides centralized management and advanced AI security capabilities. It always runs on NeuralTrust SaaS.
 
 **API**
 - Backbone for all Control Plane operations and customer interactions.
@@ -179,29 +178,37 @@ The Control Plane provides centralized management and advanced AI security capab
 **Scheduler**
 - Schedules and orchestrates TrustTest execution jobs across customer environments.
 - Coordinates TrustScan security analysis jobs and vulnerability assessments.
-- Coordinates periodic metrics checks for alert generation.
 - Manages the timing and execution of AI testing and scanning workflows.
 
-**Database (PostgreSQL)**
-- Stores only basic operational data for CRUD operations.
-- Never stores customer's sensitive AI monitoring data.
-- Configuration management for system configurations and user preferences.
-- User management for accounts, permissions, and authentication.
+**OpenTelemetry collector + ClickHouse**
+- The collector receives product metadata over OTLP and lands it in ClickHouse.
+- Materialized views fan it out into the per-product event tables the AlertEngine and dashboards read.
 
-<Note>
-PostgreSQL is the only supported Control Plane database today. Deploy in-cluster or external (RDS, Cloud SQL, Azure Database for PostgreSQL).
-</Note>
+**AlertEngine**
+- Evaluates predefined and custom detection rules over the metadata in ClickHouse.
+- Deduplicates alerts, forwards findings to customer SIEMs, and serves the Telemetry UI (Alerts / Logs / Integrations).
+- Never reads raw payloads — drill-down is a separate on-demand fetch.
+
+**Database (PostgreSQL)**
+- Stores only basic operational data for CRUD operations (Control Plane and AlertEngine state).
+- Never stores customer's sensitive AI monitoring data.
+- Configuration management and user management for accounts, permissions, and authentication.
 
 ## Data flow & privacy
 
-NeuralTrust's architecture ensures complete data sovereignty while enabling comprehensive AI security through privacy-preserving data flows.
+This describes the **Hybrid** model, where NeuralTrust's architecture ensures complete data sovereignty while enabling comprehensive AI security through privacy-preserving data flows. (In **SaaS**, this flow runs entirely within NeuralTrust SaaS.)
 
 **AI application data flow (your environment):**
 
-1. AI applications route through **TrustGate** for real-time validation against configured security policies.
-2. TrustGate writes validated, protected interaction data directly to the **Data Plane Kafka** for processing.
-3. **Data Plane workers** process and analyze the data while keeping everything in your VPC.
-4. Workers write raw and derived data to the **Data Plane ClickHouse** in your controlled environment.
+1. AI applications route through **TrustGate** and the **Firewall** for real-time validation against configured security policies.
+2. Each product emits per-request **metadata over OpenTelemetry (OTLP)** — verdicts, finding labels, latency, cost, correlation ids — to the **NeuralTrust SaaS OTel collector**. No raw prompt/response text is in this stream.
+3. The collector lands metadata in **SaaS ClickHouse**, where materialized views populate the per-product event tables.
+4. The **AlertEngine** (SaaS) evaluates detection rules over those tables, raises and deduplicates alerts, and forwards findings to your SIEMs.
+
+**Raw prompt/response (stays in your environment):**
+
+- If you want to view prompt/response in the platform, the products write raw bodies to a **PostgreSQL** store in your cluster.
+- The platform resolves raw **on demand** by `(team_id, trace_id)` from your data plane — raw data never crosses the VPC boundary in Hybrid.
 
 **Policy management flow:**
 
@@ -226,16 +233,16 @@ NeuralTrust's architecture ensures complete data sovereignty while enabling comp
 | [AWS (EKS)](./aws/overview) | Amazon Web Services |
 | [Azure (AKS)](./azure/overview) | Microsoft Azure |
 | [OpenShift](./openshift/overview) | Red Hat OpenShift 4.10+ on any cloud or on-prem |
-| [Vanilla Kubernetes](./kubernetes/overview) | Any conformant Kubernetes — on-prem, bare metal, air-gapped, k3s, RKE2, OKE, etc. |
+| [Vanilla Kubernetes](./kubernetes/overview) | Any conformant Kubernetes — on-prem, bare metal, k3s, RKE2, OKE, etc. |
 
-Each guide has hybrid and self-hosted walkthroughs with full YAML examples.
+Each guide walks through the Hybrid data-plane install with full YAML examples.
 
 ## Cross-cutting reference
 
 | Topic | When you need it |
 |---|---|
-| [Deployment models](./deployment-models) | Picking between hybrid and self-hosted |
-| [Feature flags reference](./feature-flags) | PostgreSQL / Redis / Kafka / ClickHouse local vs external, image registry, storage class, secret modes |
+| [Deployment models](./deployment-models) | Picking between SaaS and Hybrid |
+| [Feature flags reference](./feature-flags) | PostgreSQL / Redis local vs external, image registry, storage class, secret modes |
 | [Image catalog](./images) | Image registry, tags, replicas, sizing |
 | [Configuration scenarios](./configuration) | Side-by-side values files for common topologies |
 | [Secrets management](./secrets) | Auto-generation, pre-generated, External Secrets Operator |
@@ -249,4 +256,4 @@ Each guide has hybrid and self-hosted walkthroughs with full YAML examples.
 
 ---
 
-> **Data sovereignty first.** NeuralTrust's architecture ensures your sensitive AI data never leaves your environment while providing enterprise-grade AI security monitoring and insights.
+> **Data sovereignty first.** In **Hybrid**, NeuralTrust's architecture ensures your sensitive AI data never leaves your environment while providing enterprise-grade AI security monitoring and insights.

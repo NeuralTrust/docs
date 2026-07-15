@@ -1,33 +1,56 @@
 ---
 title: Deployment models
-description: NeuralTrust Platform supports two main deployment topologies — hybrid (Data Plane in your environment, Control Plane in NeuralTrust SaaS) and self-hosted (everything in your cluster). This page explains the differences, trade-offs, and how to choose.
+description: NeuralTrust supports two deployment models — SaaS (fully managed by NeuralTrust) and Hybrid (Data Plane in your environment, Control Plane in NeuralTrust SaaS). This page explains the differences, trade-offs, and how to choose.
 ---
 
-The NeuralTrust Platform Helm chart can run in two main topologies. Both ship from the same OCI chart; the difference is **which subcharts you enable** and **where the Control Plane runs**.
+NeuralTrust runs in one of two models. **SaaS** is fully managed — you deploy nothing. **Hybrid** keeps your prompt/response data in your own cluster while NeuralTrust hosts the Control Plane.
 
-| Model | Control Plane | Data Plane | TrustGate | Firewall | Best for |
-|---|---|---|---|---|---|
-| **Hybrid** *(default install)* | NeuralTrust SaaS | Your cluster | Your cluster *(typical)* | Your cluster *(optional)* | Most customers — fastest to value, no UI to operate |
-| **Self-hosted** | Your cluster | Your cluster | Your cluster | Your cluster | Air-gapped, sovereignty mandates, full operational control |
+| Model | Control Plane | Data Plane | Where prompts/telemetry live | Best for |
+|---|---|---|---|---|
+| **SaaS** *(fully managed)* | NeuralTrust SaaS | NeuralTrust SaaS | NeuralTrust SaaS | Fastest to value — no infrastructure to run |
+| **Hybrid** | NeuralTrust SaaS | Your cluster | Your environment | Data residency / sovereignty requirements |
 
 <Note>
-The chart's **zero-config default is hybrid** — `helm install` with no overrides leaves the Control Plane subchart disabled. See [Chart defaults](#chart-defaults) for the full breakdown.
+NeuralTrust no longer offers a fully private (self-hosted) deployment where the Control Plane also runs in your cluster. The two supported models are **SaaS** and **Hybrid**. The rest of this deployment section — the `neuraltrust-platform` Helm chart, per-cloud guides, and sizing — applies to **Hybrid**; SaaS has nothing to install.
 </Note>
 
 ## Decision matrix
 
-Use this table to pick the model that matches your constraints. You can always migrate later — the data plane components are identical in both modes.
+Use this table to pick the model that matches your constraints.
 
-| Concern | Pick hybrid | Pick self-hosted |
+| Concern | Pick SaaS | Pick Hybrid |
 |---|---|---|
-| Time to first deploy | ✅ Hours | Days (you operate the UI, scheduler, RBAC) |
-| Operational burden | ✅ NeuralTrust runs the UI, alerts, policy distribution | You run everything |
-| Data residency | ✅ All prompt/response/telemetry stays in your VPC; metadata + dashboards on SaaS | ✅ Nothing leaves your environment |
-| Air-gapped network | ❌ Requires outbound HTTPS to NeuralTrust SaaS | ✅ No external dependencies (after image mirroring) |
-| Hardware-isolated dashboards | ❌ | ✅ |
-| Latest features automatically | ✅ Control Plane updates roll out from NeuralTrust | You upgrade on your schedule |
-| Multi-region | ✅ Multiple data planes attached to one SaaS Control Plane | Each region needs its own CP or shared one you operate |
-| Compliance scope | Smaller — only your data plane is in scope | Larger — full stack is in scope |
+| Time to first deploy | ✅ Minutes — nothing to install | Hours — install the data plane via Helm |
+| Operational burden | ✅ NeuralTrust runs everything | You operate the data plane + infra in your cluster |
+| Data residency | Prompts/responses/telemetry are processed in NeuralTrust SaaS | ✅ All prompt/response/telemetry stays in your VPC; only metadata + dashboards on SaaS |
+| Latest features automatically | ✅ Rolled out by NeuralTrust | ✅ Control Plane updates from SaaS; you upgrade the data-plane chart on your schedule |
+| Multi-region | ✅ Managed by NeuralTrust | Multiple data planes attached to one SaaS Control Plane |
+| Compliance scope | NeuralTrust SaaS is in scope | Smaller — only your data plane is in scope |
+
+## SaaS (fully managed)
+
+Everything runs on NeuralTrust SaaS — Control Plane, TrustGate, Firewall, the OpenTelemetry collector, ClickHouse, the AlertEngine, and PostgreSQL. You deploy nothing; you point your AI applications (or gateway traffic) at the NeuralTrust-hosted endpoints and configure everything from the dashboard.
+
+```
+┌──────────────────────────────────────────────────┐
+│  NeuralTrust SaaS                                  │
+│  ────────────────────────────────────────────────  │
+│  • Control Plane API + UI + Scheduler              │
+│  • TrustGate (admin / gateway / actions)           │
+│  • Firewall (prompt/response safety)               │
+│  • OTel collector + ClickHouse + AlertEngine       │
+│  • PostgreSQL                                      │
+└──────────────────────────────────────────────────┘
+                        ▲
+                        │ HTTPS
+                   Your AI applications
+```
+
+- No cluster, no Helm chart, no infrastructure to size or operate.
+- Prompts, responses, and telemetry are processed and stored in NeuralTrust SaaS.
+- Best for teams that want the fastest path to value and have no data-residency constraint requiring raw data to stay on their own infrastructure.
+
+There is nothing to install for SaaS — skip the rest of this deployment section and start from the [platform overview](/platform/overview).
 
 ## Hybrid (Data Plane in your environment)
 
@@ -35,10 +58,11 @@ Use this table to pick the model that matches your constraints. You can always m
 ┌────────────────────────────┐         ┌────────────────────────────────────────┐
 │  NeuralTrust SaaS          │         │  Your Kubernetes Cluster               │
 │  ────────────────────────  │         │  ───────────────────────────────────── │
-│  • Control Plane API       │◄────────│  • Data Plane API + workers            │
-│  • Control Plane UI        │  HTTPS  │  • TrustGate (admin / gateway / actions)│
-│  • Scheduler               │ outbound│  • Firewall (gateway + workers)        │
-│  • Policy / RBAC / Alerts  │         │  • ClickHouse, Kafka, PostgreSQL       │
+│  • Control Plane API + UI  │         │  • TrustGate (admin / gateway / actions)│
+│  • Scheduler               │◄────────│  • Firewall (gateway + workers)        │
+│  • OTel collector          │  OTLP   │  • PostgreSQL (admin + raw payloads)   │
+│  • ClickHouse              │ outbound│  • Redis                               │
+│  • AlertEngine / RBAC      │         │                                        │
 └────────────────────────────┘         └────────────────────────────────────────┘
                                                        ▲
                                                        │ HTTPS in
@@ -49,23 +73,22 @@ Use this table to pick the model that matches your constraints. You can always m
 
 | Component | Status | Notes |
 |---|---|---|
-| Data Plane API + worker | **Always** | Telemetry ingestion, eval scheduling, ClickHouse writes |
-| Kafka Connect | **Always** | Streams events into ClickHouse |
 | TrustGate (admin + gateway + actions) | **Typical** | Disable with `trustgate.enabled: false` for data-plane-only / red-team setups |
 | Firewall (gateway + 5 workers) | **Optional** | On by chart default; in-cluster service `http://firewall:80` |
-| ClickHouse | **Required** | In-cluster (default) or external |
-| Kafka | **Required** | In-cluster (default) or external |
-| PostgreSQL | **Required if TrustGate enabled** | TrustGate admin metadata only — Control Plane has its own DB on SaaS |
-| Redis | **Required if TrustGate enabled** | Bundled in the TrustGate subchart (or external) |
+| PostgreSQL | **Required** | TrustGate admin metadata **and** the raw prompt/response store — in-cluster (default) or external |
+| Redis | **Required** | TrustGate / Firewall cache and sessions — in-cluster (default) or external |
+
+No Kafka and no ClickHouse run in your cluster. Products emit metadata over OTLP to the NeuralTrust SaaS collector.
 
 ### What runs on NeuralTrust SaaS
 
 - Control Plane API and UI (dashboards, policy editor, RBAC, integrations).
-- Scheduler (runs eval jobs that target your data plane via the data plane API).
-- Notification / alert delivery.
+- Scheduler (runs eval jobs that target your data plane).
+- **OpenTelemetry collector + ClickHouse** — receive product metadata and store it for alerts and dashboards.
+- **AlertEngine** — evaluates detection rules over the metadata, deduplicates alerts, and forwards findings to your SIEMs.
 - Multi-tenant control surface.
 
-Your prompts, responses, and telemetry **never** leave your cluster. The Control Plane stores configuration, metadata, and aggregated insights only.
+Only **metadata** (verdicts, finding labels, counters, latency, cost, correlation ids) leaves your cluster. Raw prompts and responses **never** leave your environment — they stay in your PostgreSQL and the platform reads them on demand for drill-down.
 
 ### Connectivity requirements (hybrid)
 
@@ -73,10 +96,10 @@ Your prompts, responses, and telemetry **never** leave your cluster. The Control
 |---|---|---|---|
 | Outbound | `europe-west1-docker.pkg.dev` | 443 | Container image pulls (or your mirror) |
 | Outbound | NeuralTrust SaaS Control Plane | 443 | Enrollment, policy sync, scheduled jobs (region-specific hostname) |
-| Outbound | `collector.neuraltrust.ai` | 4318 | Optional hosted observability (`global.observability.hostedExport`) |
+| Outbound | NeuralTrust SaaS OTel collector | 4317 / 4318 | **Metadata export (OTLP)** — the per-request telemetry stream |
 | Outbound | LLM upstreams | 443 | OpenAI, Gemini, Anthropic, Azure OpenAI, Bedrock, custom |
 | Outbound | `huggingface.co` | 443 | Firewall model weights *(only if you provide `HUGGINGFACE_TOKEN`)* |
-| Inbound | Your apps → Data Plane API + TrustGate gateway | 443 | Telemetry + proxied LLM traffic |
+| Inbound | Your apps → TrustGate gateway / Firewall | 443 | Proxied LLM traffic |
 
 The Helm chart does **not** hardcode the SaaS Control Plane hostname. Linking is done from the NeuralTrust portal during enrollment — see [Connect your data plane](/platform/advanced) for the exact flow.
 
@@ -85,14 +108,10 @@ The Helm chart does **not** hardcode the SaaS Control Plane hostname. Linking is
 ```yaml
 neuraltrust-control-plane:
   controlPlane:
-    enabled: false        # Control Plane runs on NeuralTrust SaaS
+    enabled: false        # Control Plane (incl. collector, ClickHouse, AlertEngine) runs on NeuralTrust SaaS
   infrastructure:
     postgresql:
-      deploy: true        # for TrustGate admin metadata
-
-neuraltrust-data-plane:
-  dataPlane:
-    enabled: true         # Data Plane API + workers + Kafka Connect
+      deploy: true        # TrustGate admin metadata + raw prompt/response store
 
 trustgate:
   enabled: true           # AI gateway in your cluster (optional)
@@ -100,88 +119,11 @@ trustgate:
 neuraltrust-firewall:
   firewall:
     enabled: true         # in-cluster safety classifiers (optional)
-
-infrastructure:
-  clickhouse:
-    deploy: true
-  kafka:
-    deploy: true
 ```
 
 This matches the chart's **out-of-the-box defaults**. The only thing you typically override is `global.platform` and `global.domain`.
 
-## Self-hosted (everything in your cluster)
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  Your Kubernetes Cluster                                            │
-│  ─────────────────────────────────────────────────────────────────  │
-│  • Control Plane API + UI + Scheduler                               │
-│  • Data Plane API + workers + Kafka Connect                         │
-│  • TrustGate (admin / gateway / actions)                            │
-│  • Firewall (gateway + 5 workers, optional GPU)                     │
-│  • ClickHouse + Kafka + PostgreSQL (in-cluster or external)         │
-│  • Redis (bundled with TrustGate)                                   │
-└─────────────────────────────────────────────────────────────────────┘
-                              ▲
-                              │ HTTPS in
-                         Your AI applications
-```
-
-### What changes vs. hybrid
-
-| Add when going self-hosted | Why |
-|---|---|
-| `neuraltrust-control-plane.controlPlane.enabled: true` | Deploys CP API, UI, and Scheduler in your cluster |
-| `control-plane-secrets` (or auto-generated) | JWT secrets for CP API ↔ TrustGate, CP API ↔ Firewall |
-| 3 additional Ingress / Routes | `api.<domain>`, `app.<domain>`, `scheduler.<domain>` |
-| Additional PostgreSQL load | CP schema lives in the same Postgres as TrustGate (or in its own) |
-| ~3 vCPU / 4 GiB RAM | For CP API (2 replicas), CP UI (2 replicas), Scheduler (1) |
-
-The Data Plane, TrustGate, Firewall, and infrastructure components are **identical** in hybrid and self-hosted. Migration in either direction is supported.
-
-### Connectivity requirements (self-hosted)
-
-No outbound dependency on NeuralTrust SaaS. The only required egress is:
-
-| Direction | Destination | Port | Purpose |
-|---|---|---|---|
-| Outbound | `europe-west1-docker.pkg.dev` | 443 | Image pulls (or your mirror) |
-| Outbound | LLM upstreams | 443 | OpenAI, Gemini, Anthropic, etc. |
-| Outbound | `huggingface.co` | 443 | Firewall model weights *(only with HF token)* |
-| Inbound | Your users + apps | 443 | Control Plane UI, Data Plane API, TrustGate |
-
-For air-gapped clusters, mirror the GCR images and the Firewall model weights ahead of time, then point `global.imageRegistry` and `huggingface.co` at your internal mirrors.
-
-### Self-hosted example overlay
-
-```yaml
-neuraltrust-control-plane:
-  controlPlane:
-    enabled: true         # ← the key change
-  infrastructure:
-    postgresql:
-      deploy: true        # or false + external managed Postgres
-
-neuraltrust-data-plane:
-  dataPlane:
-    enabled: true
-
-trustgate:
-  enabled: true
-
-neuraltrust-firewall:
-  firewall:
-    enabled: true
-
-infrastructure:
-  clickhouse:
-    deploy: true
-  kafka:
-    deploy: true
-```
-
-For larger environments, swap in-cluster ClickHouse / Kafka / Postgres for managed equivalents — see [Configuration scenarios › External infrastructure](./configuration#external-infrastructure-only).
+For larger environments, swap in-cluster Postgres / Redis for managed equivalents — see [Configuration scenarios › External infrastructure](./configuration#external-infrastructure-only).
 
 ## Chart defaults
 
@@ -189,16 +131,13 @@ A bare `helm install neuraltrust-platform …` with no values overrides resolves
 
 | Component | Default | Resulting model |
 |---|---|---|
-| `neuraltrust-data-plane.dataPlane.enabled` | `true` | — |
-| `neuraltrust-control-plane.controlPlane.enabled` | **`false`** | hybrid-ish |
+| `neuraltrust-control-plane.controlPlane.enabled` | **`false`** | hybrid (CP on SaaS) |
 | `trustgate.enabled` | `true` | — |
 | `neuraltrust-firewall.firewall.enabled` | `true` | — |
-| `infrastructure.clickhouse.deploy` | `true` | in-cluster |
-| `infrastructure.kafka.deploy` | `true` | in-cluster |
-| `neuraltrust-control-plane.infrastructure.postgresql.deploy` | `true` | in-cluster (for TrustGate) |
+| `neuraltrust-control-plane.infrastructure.postgresql.deploy` | `true` | in-cluster (TrustGate + raw store) |
 | `neuraltrust-siem-connectors.siemConnectors.enabled` | `false` | off |
 
-So zero-config = hybrid-shaped stack (Data Plane + TrustGate + Firewall + in-cluster infra). You enroll the data plane against your NeuralTrust SaaS tenant from the portal. To go self-hosted, set `controlPlane.enabled: true`.
+So zero-config = a hybrid stack (TrustGate + Firewall + in-cluster Postgres/Redis) with the Control Plane — including the OTel collector, ClickHouse, and the AlertEngine — on NeuralTrust SaaS. You enroll the data plane against your NeuralTrust SaaS tenant from the portal.
 
 ## Sizing baseline
 
@@ -210,8 +149,6 @@ Firewall is always deployed in supported topologies — the choice is whether it
 |---|---|---|---|---|
 | **Hybrid + CPU Firewall** *(default)* | **~20.5 vCPU** | **~58.5 GiB** | ~80 GiB | ~16 |
 | **Hybrid + GPU Firewall** *(CPU pool only)* | ~15.5 vCPU | ~38.5 GiB | ~80 GiB | ~11 |
-| **Self-hosted + CPU Firewall** | **~23.1 vCPU** | **~61.8 GiB** | ~80 GiB | ~21 |
-| **Self-hosted + GPU Firewall** *(CPU pool only)* | ~18.1 vCPU | ~41.8 GiB | ~80 GiB | ~16 |
 
 The "+ GPU Firewall" rows show the **CPU pool** requests only — Firewall workers move to a separate GPU pool. Each GPU worker still requests 1 vCPU / 4 GiB but it lands on a GPU node rather than the general worker pool. See the GPU pool sizing below.
 
@@ -227,8 +164,6 @@ Assuming ~85% allocatable per node (after kubelet + system reserved) and the **r
 |---|---|---|
 | **Hybrid + CPU Firewall** | ≥ **4 nodes** | — |
 | **Hybrid + GPU Firewall** | ≥ **3 nodes** | ≥ 5 GPU pods *(one per default worker)* |
-| **Self-hosted + CPU Firewall** | ≥ **5 nodes** | — |
-| **Self-hosted + GPU Firewall** | ≥ **4 nodes** | ≥ 5 GPU pods |
 
 Smaller `4 vCPU / 16 GiB` nodes also work but ~double the node count (≥ 7–8 nodes for CPU-Firewall topologies). For HA, distribute the CPU pool across at least 3 availability zones.
 
@@ -248,29 +183,18 @@ To pack multiple workers on the same GPU, enable CUDA MPS — fewer GPU nodes at
 
 For per-component requests/limits and the full image inventory, see [Image catalog](./images).
 
-## Migration
+## Moving between SaaS and Hybrid
 
-You can switch models in place without losing data.
+SaaS and Hybrid differ in **where the data plane and its stored data live**, so switching is a data-relocation exercise, not a config flag:
 
-### Hybrid → Self-hosted
+- **SaaS → Hybrid** — stand up the data-plane chart in your cluster (per the guides below), enroll it against your SaaS tenant, and cut traffic over. New prompt/response data then stays in your environment.
+- **Hybrid → SaaS** — point your applications at the NeuralTrust-hosted endpoints and retire your in-cluster data plane.
 
-1. Flip `neuraltrust-control-plane.controlPlane.enabled: true`.
-2. `helm upgrade …`. The chart provisions CP API, UI, Scheduler, and (if you haven't pre-created) `control-plane-secrets`.
-3. Add DNS for `api.<domain>`, `app.<domain>`, `scheduler.<domain>` (or the OpenShift Route equivalents).
-4. In the NeuralTrust portal, archive your hybrid data-plane registration once the self-hosted CP is taking traffic.
-
-### Self-hosted → Hybrid
-
-1. Flip `neuraltrust-control-plane.controlPlane.enabled: false`.
-2. `helm upgrade …`. The chart removes CP API/UI/Scheduler. Your data plane keeps running.
-3. Enroll the existing data plane against your NeuralTrust SaaS tenant from the portal.
-4. (Optional) drop the now-unused CP DNS records and `control-plane-secrets`.
-
-In both directions, ClickHouse, Kafka, and PostgreSQL data is preserved.
+Contact NeuralTrust support to plan a migration and any historical-data handling.
 
 ## Related guides
 
-- [Feature flags reference](./feature-flags) — PostgreSQL / Redis / Kafka / ClickHouse local vs external, image registry, storage class, secret modes
+- [Feature flags reference](./feature-flags) — PostgreSQL / Redis local vs external, image registry, storage class, secret modes
 - [Image catalog](./images) — every image deployed in each model
 - [Configuration scenarios](./configuration) — values files for common topologies
 - [Secrets management](./secrets) — what secrets each model needs

@@ -1,6 +1,6 @@
 ---
 title: Vanilla Kubernetes overview
-description: Install the NeuralTrust Platform on any conformant Kubernetes cluster — on-prem, bare metal, air-gapped, k3s, RKE2, OKE, IBM Cloud Kubernetes Service, or any other distribution. Covers prerequisites, ingress, storage, and cert-manager.
+description: Install the NeuralTrust Platform on any conformant Kubernetes cluster — on-prem, bare metal, k3s, RKE2, OKE, IBM Cloud Kubernetes Service, or any other distribution. Covers prerequisites, ingress, storage, and cert-manager.
 ---
 
 NeuralTrust Platform runs on any Kubernetes 1.24+ distribution — managed clouds, on-prem clusters, bare metal, k3s / RKE2, IBM Cloud Kubernetes Service, Oracle OKE, Civo, DigitalOcean Kubernetes, and so on. This guide covers the **cloud-agnostic** path; if you're on EKS / AKS / GKE / OpenShift, use the dedicated guide for richer integrations:
@@ -16,9 +16,6 @@ NeuralTrust Platform runs on any Kubernetes 1.24+ distribution — managed cloud
   <Card title="Hybrid" icon="cloud" href="./hybrid">
     Data Plane + TrustGate + Firewall in your cluster. Control Plane runs on NeuralTrust SaaS. Fastest to first dashboard.
   </Card>
-  <Card title="Self-hosted" icon="shield" href="./self-hosted">
-    Full stack including Control Plane API, UI, and Scheduler in your cluster. For air-gapped, on-prem, or sovereignty mandates.
-  </Card>
 </CardGroup>
 
 If you're unsure which model fits your environment, see [Deployment models](../deployment-models).
@@ -28,13 +25,13 @@ If you're unsure which model fits your environment, see [Deployment models](../d
 | Resource | Recommended |
 |---|---|
 | Kubernetes version | 1.24+ |
-| CPU pool node spec | **8 vCPU / 32 GiB recommended**; **≥ 4 nodes for hybrid (CPU Firewall)**, **≥ 5 nodes for self-hosted (CPU Firewall)**. Subtract one when using GPU Firewall workers. |
+| CPU pool node spec | **8 vCPU / 32 GiB recommended**; **≥ 4 nodes (CPU Firewall)**. Subtract one when using GPU Firewall workers. |
 | GPU pool *(optional)* | 4 vCPU / 16 GiB + 1 × NVIDIA GPU per node — 5 nodes (one per default Firewall worker) |
 | Storage class | A default `StorageClass` with `ReadWriteOnce` PV provisioning (`local-path`, Longhorn, Rook/Ceph, NFS CSI, etc.) |
 | Ingress controller | [NGINX](https://kubernetes.github.io/ingress-nginx/), [Traefik](https://traefik.io/traefik/), [HAProxy](https://www.haproxy.com/documentation/haproxy-enterprise-kubernetes-ingress-controller/), or any conformant ingress |
 | TLS | [cert-manager](https://cert-manager.io/) with Let's Encrypt or internal CA, or pre-existing TLS secrets |
 | DNS | Any DNS provider that can resolve your domain to the ingress LB/node IPs |
-| Image pull | `gcr-secret` (docker-registry) with `gcr-keys.json` from NeuralTrust, OR a mirrored internal registry for air-gapped |
+| Image pull | `gcr-secret` (docker-registry) with `gcr-keys.json` from NeuralTrust, OR a mirrored internal registry |
 | Optional | NVIDIA device plugin for GPU Firewall workers |
 
 ### Required cluster setup
@@ -99,34 +96,37 @@ If you're unsure which model fits your environment, see [Deployment models](../d
 
 ```mermaid
 flowchart LR
-    subgraph NT[NeuralTrust SaaS Control Plane optional]
-        Portal[Control Plane]
+    subgraph NT[NeuralTrust SaaS Control Plane]
+        Portal[Control Plane API + UI + Scheduler]
+        OTEL[OTel collector]
+        CH[(ClickHouse)]
+        AE[AlertEngine]
+        OTEL --> CH --> AE
     end
 
     subgraph K8S[Your Kubernetes Cluster]
         Ingress[Ingress Controller]
         TG[TrustGate]
-        CP[Control Plane]
         DP[Data Plane API + Workers]
         FW[Firewall]
-        CH[(ClickHouse)]
-        KAF[(Kafka)]
-        PG[(PostgreSQL)]
+        PG[(PostgreSQL admin + raw payloads)]
+        RD[(Redis)]
     end
 
     Apps[Your AI apps] --> Ingress --> TG
     TG --> DP
-    DP --> CH
-    DP --> KAF
-    CP --> PG
+    TG --> FW
+    DP --> PG
 
-    Portal -. hybrid mode only .- CP
+    TG -. OTLP metadata 4317/4318 .-> OTEL
+    FW -. OTLP metadata 4317/4318 .-> OTEL
+    Portal -. enroll / policy sync .- DP
 
     style K8S fill:#f5f5f5
     style NT fill:#e8f5e8
 ```
 
-All workloads run inside your cluster. Data never leaves your environment.
+TrustGate, Firewall, and your Postgres/Redis run inside your cluster. Only OTLP metadata and control-plane sync leave the cluster (to the NeuralTrust SaaS collector on 4317/4318); raw prompts and responses stay in your in-cluster PostgreSQL. The OTel collector, ClickHouse, and AlertEngine all run on NeuralTrust SaaS.
 
 ## Kubernetes-specific defaults
 
@@ -174,15 +174,6 @@ global:
   # storageClass: "nfs-client"         # NFS CSI
 ```
 
-Per-component override for ClickHouse on faster storage:
-
-```yaml
-clickhouse:
-  persistence:
-    storageClass: "rook-ceph-block"
-    size: 200Gi
-```
-
 ### GPU node label for Firewall workers
 
 ```bash
@@ -195,10 +186,11 @@ Install the [NVIDIA device plugin](https://github.com/NVIDIA/k8s-device-plugin),
 
 Because there's no cloud-managed backup story on vanilla Kubernetes, choose an explicit backup strategy:
 
-- **PostgreSQL**: schedule `pg_dump` CronJobs to your S3-compatible object store, or use [CloudNativePG](https://cloudnative-pg.io/) for built-in PITR.
-- **ClickHouse**: enable `clickhouse.backup.enabled: true` with any S3-compatible endpoint (MinIO, Wasabi, on-prem Ceph RGW, etc.).
-- **Kafka**: standard MirrorMaker or a managed Kafka offering.
+- **PostgreSQL**: schedule `pg_dump` CronJobs to your S3-compatible object store, or use [CloudNativePG](https://cloudnative-pg.io/) for built-in PITR. This store holds TrustGate admin metadata **and** the raw prompt/response payloads.
+- **Redis**: back up if you use it as more than an ephemeral cache; otherwise it can be rebuilt.
 - **PVC snapshots**: use [Velero](https://velero.io/) with restic for cluster-wide backup and DR.
+
+ClickHouse and the AlertEngine run on NeuralTrust SaaS — there is nothing to back up for them in your cluster.
 
 External-infra reference: [Configuration scenarios](../configuration#external-infrastructure-only).
 
@@ -224,9 +216,8 @@ curl https://data-plane-api.platform.example.com/health
 ## Next steps
 
 - [Hybrid deployment on vanilla Kubernetes](./hybrid) — Data Plane only, Control Plane on SaaS
-- [Self-hosted deployment on vanilla Kubernetes](./self-hosted) — full stack including CP
-- [Deployment models](../deployment-models) — hybrid vs self-hosted in depth
-- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis/Kafka/CH, image registry, storage, secrets
-- [Image catalog](../images) — what runs where, including air-gapped mirroring
+- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
+- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis, image registry, storage, secrets
+- [Image catalog](../images) — what runs where, including internal-registry mirroring
 - [Firewall deployment](../firewall) — GPU workers on vanilla Kubernetes
 - [Secrets management](../secrets) — auto-generation, External Secrets Operator

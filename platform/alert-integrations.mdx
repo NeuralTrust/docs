@@ -47,6 +47,154 @@ You can connect more than one destination — each new alert fans out to every c
 
 ---
 
+## OCSF Detection Finding format
+
+Every destination receives the same **OCSF Detection Finding** document (class UID **2004**, category **Findings**). Splunk, Datadog, Elastic, and webhooks get this JSON as the event body; QRadar receives a LEEF mapping derived from it; Sentinel wraps it for Log Analytics.
+
+### Top-level fields
+
+| Field | Type | Description |
+|---|---|---|
+| `class_uid` | `2004` | OCSF Detection Finding class |
+| `category_uid` | `2` | Findings category |
+| `type_uid` | `200401` | Create activity (`class_uid × 100 + activity_id`) |
+| `activity_id` | `1` | Create |
+| `severity_id` | int | OCSF severity: 2 Low, 3 Medium, 4 High, 5 Critical |
+| `status_id` | int | 1 New (open), 2 In Progress (acknowledged), 4 Resolved |
+| `time` | ms epoch | Last seen |
+| `start_time` | ms epoch | First seen |
+| `end_time` | ms epoch | Last seen |
+| `count` | int | Occurrence count (deduplicated matches) |
+| `message` | string | Alert summary / use case description |
+
+### `finding_info`
+
+| Field | Description |
+|---|---|
+| `uid` | Alert UUID |
+| `title` | Use case / rule name |
+| `desc` | Human-readable summary |
+| `created_time` | First seen (ms epoch) |
+| `types` | Product source array, e.g. `["trustguard"]` |
+| `analytic.name` | Rule name (when present) |
+| `analytic.type` | `"Rule"` |
+
+### `metadata`
+
+| Field | Description |
+|---|---|
+| `product.name` | `NeuralTrust AlertEngine` |
+| `product.vendor_name` | `NeuralTrust` |
+| `version` | OCSF schema version (`1.3.0`) |
+| `tenant_uid` | Team ID |
+| `correlation_uid` | Dedup key (`use_case_id:entity_ref`) |
+
+### `observables`
+
+When the alert has an entity, one observable is included:
+
+| Field | Description |
+|---|---|
+| `name` | Entity type (e.g. `entity`, `user`) |
+| `type` | OCSF observable type ID: 2 IP, 21 User, 99 Other |
+| `value` | Entity reference (typically `consumer_id` UUID) |
+
+### `related_events`
+
+Array of `{ "uid": "<trace_id>" }` entries — sample trace IDs linked to the alert for investigation.
+
+### Example (TrustGuard high-confidence threat)
+
+This is the **event body** posted to Splunk HEC (inside the HEC envelope's `event` field):
+
+```json
+{
+  "time": 1784134299689,
+  "count": 1,
+  "message": "A very high-confidence threat was blocked on a detection type without a dedicated rule.",
+  "end_time": 1784134299689,
+  "start_time": 1784134299689,
+  "metadata": {
+    "product": {
+      "name": "NeuralTrust AlertEngine",
+      "vendor_name": "NeuralTrust"
+    },
+    "version": "1.3.0",
+    "tenant_uid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "correlation_uid": "00000000-0000-4000-a000-000000000101:aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+  },
+  "type_uid": 200401,
+  "class_uid": 2004,
+  "status_id": 1,
+  "activity_id": 1,
+  "observables": [
+    {
+      "name": "entity",
+      "type": 99,
+      "value": "aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+    }
+  ],
+  "severity_id": 4,
+  "category_uid": 2,
+  "finding_info": {
+    "uid": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "desc": "A very high-confidence threat was blocked on a detection type without a dedicated rule.",
+    "title": "High-Confidence Threat (catch-all)",
+    "types": ["trustguard"],
+    "analytic": {
+      "name": "High-Confidence Threat (catch-all)",
+      "type": "Rule"
+    },
+    "created_time": 1784134299689
+  },
+  "related_events": [
+    { "uid": "550e8400-e29b-41d4-a716-446655440000" }
+  ]
+}
+```
+
+<Note>
+`start_time`, `end_time`, `time`, and `finding_info.created_time` are Unix **milliseconds**. If you see `-62135596800000`, that indicates a zero first-seen timestamp from an older AlertEngine build — upgrade to a current release where first-seen is populated from the match timestamp.
+</Note>
+
+### Splunk HEC envelope
+
+Splunk receives an outer wrapper around the OCSF body:
+
+```json
+{
+  "event": { "... OCSF finding above ..." },
+  "source": "neuraltrust",
+  "sourcetype": "neuraltrust:alert",
+  "index": "your_index"
+}
+```
+
+Default **source type** is `neuraltrust:alert` unless you override it in the integration settings.
+
+### Splunk search examples
+
+```spl
+index=your_index sourcetype="neuraltrust:alert"
+| spath path=finding_info.title output=title
+| spath path=severity_id output=severity_id
+| spath path=finding_info.types{} output=source
+| spath path=observables{0}.value output=entity
+| spath path=related_events{0}.uid output=trace_id
+| table _time title severity_id source entity trace_id correlation_uid
+```
+
+Map OCSF severity to labels:
+
+| `severity_id` | NeuralTrust severity |
+|---|---|
+| 2 | Low |
+| 3 | Medium |
+| 4 | High |
+| 5 | Critical |
+
+---
+
 ## Connect a destination
 
 Open **Telemetry → Integrations**, choose a provider, and fill in its connection fields. Connections are **validated on save** — malformed settings are rejected before any alert is forwarded — and every secret is **encrypted at rest**.
@@ -76,14 +224,16 @@ Open **Telemetry → Integrations**, choose a provider, and fill in its connecti
   </Accordion>
 
   <Accordion title="Splunk">
-    Posts findings to a Splunk HTTP Event Collector (HEC).
+    Posts findings to a Splunk HTTP Event Collector (HEC). Each alert is sent as one HEC event; the **event** payload is the OCSF Detection Finding JSON (see [OCSF format](#ocsf-detection-finding-format) above).
 
     | Field | Required | Description |
     |---|---|---|
-    | **HEC URL** | Yes | HEC base URL (e.g. `https://splunk.example:8088`). |
+    | **HEC URL** | Yes | HEC base URL. Splunk Cloud trial: `https://inputs.<stack>.splunkcloud.com:8088`. Production: `https://http-inputs-<stack>.splunkcloud.com` (port 443). |
     | **HEC Token** | Yes | HTTP Event Collector token. |
     | **Index** | No | Target index. |
-    | **Source Type** | No | Event source type (e.g. `neuraltrust:alert`). |
+    | **Source Type** | No | Event source type (default `neuraltrust:alert`). |
+    | **Skip TLS verification** | No | Disable SSL verification for the HEC endpoint. |
+    | **CA Certificate** | No | Optional PEM CA for custom TLS verification. |
   </Accordion>
 
   <Accordion title="Elastic">
@@ -157,6 +307,12 @@ Each integration tracks a rolling 24-hour **delivery health** — the count of f
 <CardGroup cols={2}>
   <Card title="Alerts" icon="siren" href="/platform/alerts">
     The detection use cases and alerts that produce the findings forwarded here.
+  </Card>
+  <Card title="Use Cases" icon="list-checks" href="/platform/use-cases">
+    Custom rule builder and compiled rule YAML reference.
+  </Card>
+  <Card title="Telemetry data" icon="database" href="/platform/telemetry-data">
+    Metadata schema and detection field normalization.
   </Card>
   <Card title="Audit Logs" icon="scroll-text" href="/platform/audit-logs">
     The tenant audit trail for authentication, user management, and configuration events.

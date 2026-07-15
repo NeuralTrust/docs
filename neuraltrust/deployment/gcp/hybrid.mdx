@@ -5,21 +5,19 @@ description: Complete walkthrough for deploying the NeuralTrust Data Plane on Go
 
 This guide walks you end-to-end through a **hybrid deployment** on GKE — the Data Plane, TrustGate, and Firewall run in your cluster; the Control Plane UI, API, and Scheduler run on NeuralTrust SaaS.
 
-If you want everything (including the UI) in your own cluster, see [GCP self-hosted](./self-hosted) instead.
-
 ## What you'll end up with
 
 | Component | Location | Replicas (default) |
 |---|---|---|
 | Data Plane API | Your GKE cluster | 2 |
 | Data Plane worker | Your GKE cluster | 1 |
-| Kafka Connect | Your GKE cluster | 1 |
 | TrustGate admin / gateway / actions | Your GKE cluster | 2 each |
 | Firewall gateway + 5 workers | Your GKE cluster | 2 + 5 |
-| ClickHouse, Kafka, PostgreSQL, Redis | Your GKE cluster (or external) | 1 each |
+| PostgreSQL (admin + raw payloads), Redis | Your GKE cluster (or external) | 1 each |
 | Control Plane API, UI, Scheduler | **NeuralTrust SaaS** | — |
+| OTel collector, ClickHouse, AlertEngine | **NeuralTrust SaaS** | — |
 
-For the full image inventory and resource baseline, see [Image catalog](../images).
+For the full image inventory and resource baseline, see [Image catalog](../images). Products emit per-request **metadata** over OTLP (ports 4317/4318) to the NeuralTrust SaaS collector; no Kafka and no in-cluster ClickHouse run in your cluster.
 
 ## Prerequisites
 
@@ -29,7 +27,7 @@ For the full image inventory and resource baseline, see [Image catalog](../image
 | CPU pool machine type | `e2-standard-8` (8 vCPU / 32 GiB) |
 | Min CPU nodes | **≥ 4** across 3 zones (regional cluster). Drop to 3 if Firewall workers run on GPU nodes. |
 | GPU pool *(optional, for GPU Firewall)* | `n1-standard-4` + 1 × T4 — 5 nodes (one per default Firewall worker) |
-| Storage | `pd-balanced` (default) or `pd-ssd` for ClickHouse |
+| Storage | `pd-balanced` (default) or `pd-ssd` for high-IOPS PostgreSQL |
 | Sizing baseline | ~20.5 vCPU / 58.5 GiB requests / 80 GiB PVC (defaults with CPU Firewall) |
 | DNS | A control over a base domain (e.g. `platform.example.com`) |
 | Image pull | `gcr-keys.json` from NeuralTrust |
@@ -100,38 +98,17 @@ trustgate:
 neuraltrust-firewall:
   firewall:
     enabled: true
-
-# Infrastructure
-infrastructure:
-  clickhouse:
-    deploy: true
-  kafka:
-    deploy: true
 ```
 
 <Tip>
-Most fields above are chart defaults — the only required overrides are `global.platform`, `global.domain`, and `trustgate.global.env.SERVER_BASE_DOMAIN`. Everything else is shown for clarity.
+Most fields above are chart defaults — the only required overrides are `global.platform`, `global.domain`, and `trustgate.global.env.SERVER_BASE_DOMAIN`. Everything else is shown for clarity. The OTel collector, ClickHouse, and AlertEngine run on the NeuralTrust SaaS Control Plane — there is no Kafka and no in-cluster ClickHouse to configure.
 </Tip>
 
 ### External infrastructure (optional)
 
-To use Cloud SQL, ClickHouse Cloud, or Confluent Cloud instead of in-cluster, swap in:
+Bring PostgreSQL and Redis as managed services (Cloud SQL, Memorystore) instead of running them in-cluster:
 
 ```yaml
-infrastructure:
-  clickhouse:
-    deploy: false
-    external:
-      host: "your-clickhouse.cloud"
-      port: "8443"
-      user: "neuraltrust"
-      password: ""        # inject via --set or pre-created secret
-      database: "neuraltrust"
-  kafka:
-    deploy: false
-    external:
-      bootstrapServers: "pkc-xxxxx.gcp.confluent.cloud:9092"
-
 neuraltrust-control-plane:
   infrastructure:
     postgresql:
@@ -147,7 +124,7 @@ neuraltrust-control-plane:
           database: "neuraltrust"
 ```
 
-Full external-infra reference: [Configuration scenarios › External infrastructure](../configuration#external-infrastructure-only). For ClickHouse Cloud, see the [native-port caveat](../feature-flags#required-clickhouse-cloud-caveat) before installing.
+PostgreSQL holds the TrustGate admin metadata **and** the raw prompt/response store. Full external-infra reference: [Configuration scenarios › External infrastructure](../configuration#external-infrastructure-only).
 
 ## Step 4 — Install
 
@@ -282,7 +259,7 @@ This is the **hybrid-specific step** that connects your in-cluster Data Plane to
 
 ## Step 7 — Send traffic through TrustGate
 
-Point your AI applications at the TrustGate gateway URL (`https://gateway.platform.example.com`). All telemetry will flow through the local Data Plane, into ClickHouse, and surface in the NeuralTrust SaaS dashboards.
+Point your AI applications at the TrustGate gateway URL (`https://gateway.platform.example.com`). TrustGate and Firewall emit per-request metadata over OTLP (ports 4317/4318) to the NeuralTrust SaaS collector, which lands it in SaaS-side ClickHouse and surfaces in the NeuralTrust dashboards. Raw prompts and responses stay in your in-cluster PostgreSQL and are read on demand for drill-down.
 
 For TrustGate gateway / route / plugin configuration, see [TrustGate › Getting started](/trustgate/overview).
 
@@ -320,18 +297,6 @@ helm upgrade neuraltrust-platform \
 
 Auto-generated secrets and PVCs are preserved. Always check the [release notes](https://github.com/NeuralTrust/neuraltrust-platform/releases) before upgrading.
 
-## Migration to self-hosted
-
-To bring the Control Plane in-house later, flip one flag and upgrade:
-
-```yaml
-neuraltrust-control-plane:
-  controlPlane:
-    enabled: true
-```
-
-Then add DNS for `api.platform.example.com`, `app.platform.example.com`, `scheduler.platform.example.com`. The rest of the stack keeps running unchanged — see [Self-hosted on GKE](./self-hosted) for the full picture.
-
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -339,16 +304,16 @@ Then add DNS for `api.platform.example.com`, `app.platform.example.com`, `schedu
 | Portal says "Data Plane unreachable" | DNS not resolved, certificate provisioning incomplete, or firewall rule blocking the SaaS Control Plane | Confirm `curl https://data-plane-api.<domain>/health` succeeds from outside your VPC |
 | `ManagedCertificate` stays `Provisioning` | DNS not yet pointing at the load balancer | Confirm `dig <host>` returns the LB IP, then wait up to 60 minutes |
 | `ImagePullBackOff` | Missing or wrong `gcr-secret` | Recreate the secret with the JSON key from NeuralTrust |
-| Data Plane API restarts | ClickHouse not reachable, Kafka not reachable | Check `kubectl logs` on the API; verify dependency pods are `Running` |
+| Data Plane API restarts | PostgreSQL or Redis not reachable | Check `kubectl logs` on the API; verify dependency pods are `Running` |
+| No data in SaaS dashboards | Outbound OTLP to the SaaS collector blocked | Confirm egress to the NeuralTrust SaaS collector on ports 4317/4318 |
 | TrustGate can't reach the Firewall | Service name mismatch | Default is `http://firewall:80` — verify `NEURAL_TRUST_FIREWALL_URL` in `trustgate-secrets` |
 
 For deeper troubleshooting, see [Vanilla Kubernetes troubleshooting](../kubernetes/overview#common-issues).
 
 ## Related guides
 
-- [Self-hosted deployment on GKE](./self-hosted) — Control Plane in your cluster
 - [GCP overview](./overview) — cluster prerequisites and GCP-specific defaults
-- [Deployment models](../deployment-models) — hybrid vs self-hosted comparison
+- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
 - [Image catalog](../images) — what runs in hybrid mode
 - [Secrets management](../secrets) — auto-generation, External Secrets Operator
 - [Firewall deployment](../firewall) — GPU workers on GKE

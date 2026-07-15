@@ -15,8 +15,8 @@ The **Telemetry** section of the console has three views:
   <Card title="Alerts" icon="siren">
     The raised alerts — severity, source, entity, status, and assignee — with a detail side panel and bulk actions.
   </Card>
-  <Card title="Use Cases" icon="list-checks">
-    The rule catalog — predefined templates plus your custom rules — that you enable per team.
+  <Card title="Use Cases" icon="list-checks" href="/platform/use-cases">
+    The rule catalog — predefined templates plus custom rules you author per team.
   </Card>
   <Card title="Integrations" icon="plug" href="/platform/alert-integrations">
     SIEM destinations (Sentinel, Datadog, Splunk, Elastic, QRadar, Webhook) that receive forwarded findings.
@@ -32,7 +32,7 @@ The **Telemetry** section of the console has three views:
     TrustGuard (guardrail detections) and TrustGate (gateway request events) emit telemetry that lands in NeuralTrust's analytics store, scoped per team.
   </Step>
   <Step title="Use cases are evaluated">
-    Each enabled use case runs on a schedule over its declared time window. A rule counts matching events per **entity** (consumer, session, IP, app, route, or provider) and fires when it crosses the rule's threshold.
+    Each enabled use case runs on a schedule over its declared time window. A rule counts matching events per **entity** (consumer, session, app/gateway/collector, route, or provider) and fires when it crosses the rule's threshold.
   </Step>
   <Step title="Alerts are deduplicated">
     Repeated matches for the same rule and entity collapse into one alert with an occurrence count and first/last-seen timestamps — so a sustained attack is one alert, not thousands.
@@ -53,7 +53,7 @@ The **Telemetry** section of the console has three views:
 | **Source** | The product that produced the signal: **TrustGuard**, **TrustGate**, or **Cross** (a correlation across both). |
 | **Severity** | `Low`, `Medium`, `High`, or `Critical` — how urgent the finding is. |
 | **Status** | The lifecycle state of an alert: `Open`, `Acknowledged`, or `Resolved`. |
-| **Entity** | What a rule groups by — `consumer`, `session`, `ip`, `app`, `route`, or `provider`. The entity is the subject of the alert. |
+| **Entity** | What a rule groups by — typically **consumer** (entity ref), **session**, **app** (gateway or collector), **route**, or **provider**. There is no IP field in stored metadata. |
 | **Assignee** | A team member responsible for triaging the alert. |
 
 ---
@@ -65,7 +65,7 @@ Use cases are the rules that decide what becomes an alert.
 ### Predefined vs. custom
 
 - **Predefined** use cases are global, versioned templates identified by a stable code (`nt-uc-NNN`). They are **read‑only** — you enable or disable them per team, but you cannot edit their logic. To change a threshold or scope, **copy a predefined use case into a custom rule** and edit the copy.
-- **Custom** use cases are owned by your team. Create them from scratch or by copying a predefined template, then tune the window, threshold, grouping, and match conditions.
+- **Custom** use cases are owned by your team. Create them from scratch or by copying a predefined template, then tune conditions, window, grouping, and scope in the [Use Cases](/platform/use-cases) rule builder.
 
 <Note>
 Enabling a use case is a per‑team action. A predefined template that ships with the platform does nothing until a team turns it on.
@@ -79,8 +79,15 @@ Every use case compiles to one of four evaluation models:
 |---|---|---|
 | **Per event** | Any single event matches the conditions. | Catch a single high‑confidence threat immediately. |
 | **Windowed** | Matches for an entity reach a `threshold` within a `window`. | A burst of blocked attempts against one consumer. |
-| **Aggregate** | A metric over the window per group crosses a threshold — `ratio`, `p95`, `p90`, `avg`, or `sum`. | Error rate > 2%, p95 latency > 5s. |
+| **Aggregate** | A metric over the window per group crosses a threshold — `ratio`, `p95`, `p90`, `avg`, `sum`, or `count_distinct`. | Error rate > 2%, p95 latency > 5s. |
 | **Cross** | A TrustGate event and a TrustGuard detection correlate on a shared key (e.g. `session`) within a window. | A guard block that the gateway didn't enforce. |
+
+Predicate combination inside a rule:
+
+- Conditions within a `match:` or `detection:` block are **AND**ed.
+- **OR** is expressed with `any:` — a list of selection groups (OR of AND-groups). The custom rule builder exposes this via **And** / **Or** connectors between condition rows.
+
+See **[Use Cases](/platform/use-cases)** for the full custom builder, field catalog, and YAML examples.
 
 ---
 
@@ -97,7 +104,7 @@ The platform ships with the following predefined use cases. All are disabled unt
 | `nt-uc-103` | Secrets Leaked — Output | Critical | A secret reaches a response without being contained (allowed, or a report‑only guard couldn't strip it). |
 | `nt-uc-104` | PII Leaked — Output | High | Personal data reaches a response without being contained. |
 | `nt-uc-105` | Toxicity Burst | High | 20 or more toxic messages are blocked against the same consumer within 15 minutes. |
-| `nt-uc-111` | Unidentified Consumer Surge | Medium | 20 or more flagged detections in 15 minutes come from one source IP with no identified consumer. |
+| `nt-uc-111` | Unidentified Consumer Surge | Medium | 20 or more flagged events against the same **session** within 15 minutes from an unidentified consumer. |
 | `nt-uc-112` | Threat Detected but Not Enforced | Critical | A block‑worthy threat was detected but not enforced — relevant when a guard runs in advisory (report‑only) mode. |
 | `nt-uc-113` | Sensitive Data Generated in Output (contained) | Medium | One app repeatedly emits sensitive output that the guard contains (5+ times in an hour) — an upstream problem to fix. |
 | `nt-uc-114` | Mass Redaction / Transform Spike | Medium | One app triggers 50 or more redactions/transforms within 15 minutes. |
@@ -152,7 +159,7 @@ Custom and predefined use cases also expose a read‑only **rule preview** so yo
 
 ### Bulk actions and assignment
 
-Select multiple alerts to **mark them Open, Acknowledged, or Resolved** in one action, or **export the selection** to CSV. Assign any alert to a team member so ownership is clear.
+Select multiple alerts to **mark them Open, Acknowledged, or Resolved** in one action, or **assign** them to a team member.
 
 ---
 
@@ -167,14 +174,20 @@ See **[Integrations](/platform/alert-integrations)** for per-provider setup, fil
 ## Related documentation
 
 <CardGroup cols={2}>
+  <Card title="Use Cases" icon="list-checks" href="/platform/use-cases">
+    Custom rule builder, AND/OR conditions, time windows, and the full field catalog.
+  </Card>
+  <Card title="Telemetry data" icon="database" href="/platform/telemetry-data">
+    Metadata schema, detection normalization, and grouping keys.
+  </Card>
   <Card title="TrustGuard" icon="zap" href="/trustguard/overview">
-    The guardrail detections (prompt injection, PII, secrets, toxicity) that feed TrustGuard use cases.
+    The guardrail detections that feed TrustGuard use cases.
   </Card>
   <Card title="TrustGate" icon="door-open" href="/trustgate/overview">
     The AI gateway whose request telemetry feeds TrustGate use cases.
   </Card>
   <Card title="Integrations" icon="plug" href="/platform/alert-integrations">
-    Connect SIEM destinations to forward alert findings, with per-provider setup and filters.
+    OCSF payload format, Splunk HEC, and per-provider setup.
   </Card>
   <Card title="Audit Logs" icon="scroll-text" href="/platform/audit-logs">
     The tenant audit trail for configuration and access events.
