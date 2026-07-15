@@ -1,0 +1,242 @@
+---
+title: Use Cases
+description: "Author custom detection rules over TrustGuard and TrustGate telemetry. Configure scope, AND/OR conditions, time windows, severity, and assignees — with a live rule preview compiled to the AlertEngine DSL."
+---
+
+# Use Cases
+
+The **Use Cases** view in Telemetry holds the rule catalog that drives [Alerts](/platform/alerts). Each **use case** is a detection rule evaluated on a schedule by the AlertEngine over metadata stored in ClickHouse.
+
+- **Predefined** templates (`nt-uc-NNN`) ship with the platform. They are read-only — enable or disable them per team, or **copy to custom** to change thresholds or scope.
+- **Custom** use cases are team-owned. Create them from scratch or by copying a predefined template, then edit logic in the create/edit side panel.
+
+Open **Telemetry → Use Cases → Create use case** (or edit an existing custom rule) to use the rule builder described below.
+
+---
+
+## Rule builder tabs
+
+The create/edit side panel has three tabs. Changes in **Scope** and **Conditions** compile live into the **Rule preview** tab.
+
+<Steps>
+  <Step title="General (Scope)">
+    Set the rule **name** and **description**, choose which **products** are in scope (TrustGate and/or TrustGuard), and pick the **gateways** or **collectors** the rule applies to. Use **Select all** to apply the rule to every gateway/collector for a product, or pick individual targets.
+  </Step>
+  <Step title="Conditions">
+    Build **match** predicates (event attributes) and optional **detection** predicates (TrustGuard detector chain). Combine rows with **And** / **Or** connectors, optionally enable a **time window**, and set **severity** plus a default **assignee**.
+  </Step>
+  <Step title="Rule preview">
+    Read-only YAML — exactly what AlertEngine stores and evaluates. Use this to verify the compiled rule before saving.
+  </Step>
+</Steps>
+
+---
+
+## Products and condition fields
+
+Each custom rule compiles to a single `source` in the rule YAML: `trustgate` or `trustguard`. The condition field picker shows **only fields valid for that product**.
+
+On the **General** tab, select which products participate in scope (gateways, collectors). The **active product** for conditions is determined by your product selection:
+
+- If only **TrustGate** or only **TrustGuard** is selected, conditions use that product's fields.
+- If **both** are selected, click the product row you want to author conditions for. Clicking an already-selected (inactive) product switches the condition field set without removing it from scope; click again to deselect it.
+
+<Note>
+**Cross-product** rules (`source: cross`) are not exposed in the custom builder yet. Use predefined template `nt-uc-401` (Coverage Gap) or author cross rules directly in YAML outside the UI.
+</Note>
+
+---
+
+## Conditions
+
+### AND / OR logic
+
+Each condition row is a predicate: **field · operator · value**.
+
+- **And** between rows keeps predicates in the same group (all must match).
+- **Or** starts a new group. The compiler emits YAML `any:` — disjunctive normal form (OR of AND-groups).
+
+Click the **And** / **Or** pill between rows to toggle the connector. Use **And +** or **Or +** under a row to insert a new condition with that connector.
+
+### Operators
+
+| Operator | Meaning | Typical value types |
+|---|---|---|
+| **is** (`eq`) | Equals | string, number, boolean, enum |
+| **in** | One of (comma-separated list) | string, number, enum |
+| **contains** | Substring match | string (e.g. security tags) |
+| **>** / **≥** / **<** / **≤** | Numeric comparison | number |
+
+Boolean fields use **True** / **False**. Enum fields (status outcome, detection type, direction, protocol, kind) show allowed values in the picker.
+
+### Field picker
+
+Fields are grouped in the dropdown for readability. Each option includes a short description. Groups:
+
+| Group | Contents |
+|---|---|
+| **Outcome & status** | Status code, status outcome, flagged, security tags |
+| **Request** | Product-specific request metadata (route, model, provider, gateway/collector, policy, direction, protocol, …) |
+| **Identity** | Consumer, consumer name, session, trace ID |
+| **Latency & usage** | Latency breakdown, token usage, cost (TrustGate); detector/overhead latency (TrustGuard) |
+| **MCP** | MCP method, tool, server name (TrustGate only) |
+| **Detection** | Detection type, action, confidence, enforced (TrustGuard only) |
+
+See [Telemetry data reference](/platform/telemetry-data) for how each logical field maps to stored events.
+
+### TrustGate condition fields (24)
+
+| Field | Description |
+|---|---|
+| `status.code` | HTTP status code (e.g. 200, 403, 500) |
+| `status.outcome` | Policy outcome: `block`, `transform`, `report`, `allow` |
+| `model` | LLM model name |
+| `is_flagged` | True when any detector fired or outcome ≠ allow |
+| `security` | Security tag labels (`contains`) |
+| `session` | Session identifier |
+| `consumer` | Consumer (entity) ID |
+| `consumer.name` | Consumer display name |
+| `trace_id` | Trace correlation ID |
+| `http_method` | HTTP verb (GET, POST, …) |
+| `total_ms` | Total request latency (ms) |
+| `provider` | Upstream LLM provider |
+| `route` | HTTP URL path |
+| `gateway_id` | TrustGate gateway ID |
+| `kind` | Request kind: `llm`, `mcp`, `a2a` |
+| `latency.provider_ms` | Provider latency (ms) |
+| `latency.gateway_ms` | Gateway latency (ms) |
+| `usage.total_tokens` | Total tokens |
+| `usage.input_tokens` | Input tokens |
+| `usage.output_tokens` | Output tokens |
+| `cost.total_usd` | Estimated cost (USD) |
+| `mcp.method` | MCP JSON-RPC method |
+| `mcp.tool` | MCP tool name |
+| `mcp.server_name` | MCP server name |
+
+### TrustGuard condition fields (22)
+
+Includes all **Outcome**, **Identity**, and shared fields above, plus:
+
+| Field | Description |
+|---|---|
+| `collector_id` | TrustGuard collector instance ID |
+| `collector_name` | Collector display name |
+| `direction` | `input` (prompt) or `output` (response) |
+| `protocol` | `llm`, `mcp`, or `a2a` |
+| `policy_id` | Runtime policy ID |
+| `policy_name` | Runtime policy name |
+| `latency.detectors_ms` | Detector execution time (ms) |
+| `latency.overhead_ms` | Processing overhead (ms) |
+| `detection.type` | Normalized detection category (e.g. `prompt_injection`, `pii`, `secrets`) |
+| `detection.action` | Detector action: `block`, `transform`, `allow` |
+| `detection.confidence` | Confidence score 0–1 |
+| `detection.enforced` | True when action is `block` or `transform` |
+
+TrustGuard **detection.*** fields compile into a separate `detection:` block in the rule YAML (matched over the normalized detector chain). All other fields compile into `match:`.
+
+<Warning>
+**IP address is not a supported field.** There is no `ip` column in the metadata store. Group by **session** or **consumer** instead of IP for surge and anomaly rules.
+</Warning>
+
+---
+
+## Time window
+
+Enable **Time window** to require a minimum number of matching events within a rolling period before the rule fires (windowed count) instead of alerting on every single match.
+
+When enabled, configure:
+
+| Control | Description |
+|---|---|
+| **Amount + unit** | Window length (minutes or hours) |
+| **Per** (group by) | Entity bucket: **Consumer** (default), **Session**, **App** (gateway or collector), or **Route** (TrustGate only) |
+
+The UI focuses on window duration and group-by. The compiled rule uses sensible defaults for measure (`count`) and threshold; inspect **Rule preview** for the exact `window`, `group_by`, and `threshold` values.
+
+---
+
+## Alert output
+
+| Setting | Description |
+|---|---|
+| **Severity** | Default severity for alerts from this rule: Low, Medium, High, Critical |
+| **Default assignee** | Optional team member pre-assigned when the alert is raised |
+
+Gateway/collector scope from the General tab is compiled as an additional `gateway_id` or `collector_id` predicate when specific targets are selected (not when **Select all** is on).
+
+---
+
+## Example compiled rules
+
+### Per-event TrustGuard detection (similar to nt-uc-101)
+
+```yaml
+title: "High-Confidence Threat"
+description: "Blocked threat with confidence >= 0.90"
+source: trustguard
+severity: high
+kind: per_event
+detection:
+  - field: detection.confidence
+    gte: 0.90
+  - field: detection.action
+    eq: "block"
+```
+
+### Windowed TrustGate auth anomaly (similar to nt-uc-201)
+
+```yaml
+title: "Auth Anomaly"
+source: trustgate
+severity: high
+kind: windowed
+window: 5m
+group_by: session
+threshold: 10
+match:
+  - field: status.code
+    in: [401, 403]
+```
+
+### OR groups (401 or 403 per event)
+
+```yaml
+kind: per_event
+source: trustgate
+any:
+  - match:
+      - field: status.code
+        eq: 401
+  - match:
+      - field: status.code
+        eq: 403
+```
+
+---
+
+## Rule kinds (evaluation models)
+
+| `kind` | Fires when | YAML extras |
+|---|---|---|
+| `per_event` | Any single matching event | — |
+| `windowed` | Event count ≥ `threshold` per `group_by` within `window` | `window`, `group_by`, `threshold` |
+| `aggregate` | Metric (ratio, p95, avg, sum, count_distinct) crosses threshold | `metric:` block |
+| `cross` | TrustGate ⋈ TrustGuard on `correlate_on` | `gate:`, `guard:` selections |
+
+The custom builder today covers **per_event** and **windowed** rules. **Aggregate** and **cross** rules are available in predefined templates or by editing YAML directly.
+
+---
+
+## Related documentation
+
+<CardGroup cols={2}>
+  <Card title="Alerts" icon="siren" href="/platform/alerts">
+    The raised findings, triage workflow, and predefined catalog.
+  </Card>
+  <Card title="Telemetry data" icon="database" href="/platform/telemetry-data">
+    Event schema, detection normalization, and field mapping for rule authors.
+  </Card>
+  <Card title="Integrations" icon="plug" href="/platform/alert-integrations">
+    Forward findings to Splunk and other SIEMs as OCSF events.
+  </Card>
+</CardGroup>
