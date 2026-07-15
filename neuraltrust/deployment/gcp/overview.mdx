@@ -11,9 +11,6 @@ NeuralTrust Platform runs on Google Kubernetes Engine using GCP-native primitive
   <Card title="Hybrid (recommended)" icon="cloud" href="./hybrid">
     Data Plane + TrustGate + Firewall in your GKE cluster. Control Plane runs on NeuralTrust SaaS. Fastest to first dashboard.
   </Card>
-  <Card title="Self-hosted" icon="shield" href="./self-hosted">
-    Full stack including Control Plane API, UI, and Scheduler in your GKE cluster. For sovereignty and air-gapped requirements.
-  </Card>
 </CardGroup>
 
 If you're unsure which model fits your environment, see [Deployment models](../deployment-models).
@@ -25,9 +22,9 @@ If you're unsure which model fits your environment, see [Deployment models](../d
 | GKE version | 1.28 or newer |
 | Cluster mode | Standard or Autopilot *(Standard recommended for GPU workloads)* |
 | CPU pool machine type | `e2-standard-8` or `n2-standard-8` (8 vCPU / 32 GiB) |
-| Min CPU nodes | **4 for hybrid (CPU Firewall)**, **5 for self-hosted (CPU Firewall)**. Subtract one when using GPU Firewall workers. ≥ 3 zones for HA. |
+| Min CPU nodes | **4 (CPU Firewall)**. Subtract one when using GPU Firewall workers. ≥ 3 zones for HA. |
 | GPU pool *(optional)* | `n1-standard-4` + 1 × T4 — 5 nodes (one per default Firewall worker) |
-| Storage | `pd-balanced` (default) or `pd-ssd` for ClickHouse |
+| Storage | `pd-balanced` (default) or `pd-ssd` for high-IOPS PostgreSQL |
 | Ingress | GCE Ingress (default) with Managed Certificates, or NGINX |
 | DNS | Cloud DNS or any DNS provider for the platform base domain |
 | Container Registry | NeuralTrust ships images from `europe-west1-docker.pkg.dev` |
@@ -58,19 +55,19 @@ GCE Ingress, Managed Certificates, and the Persistent Disk CSI driver are all en
 
 ```mermaid
 flowchart LR
-    subgraph NT[NeuralTrust SaaS Control Plane optional]
-        Portal[Control Plane]
+    subgraph NT[NeuralTrust SaaS Control Plane]
+        Portal[Control Plane API + UI]
+        OTEL[OTel collector]
+        CH[(ClickHouse)]
+        AE[AlertEngine]
     end
 
     subgraph GCP[Your GCP Project]
         subgraph GKE[Google Kubernetes Engine]
             TG[TrustGate]
-            CP[Control Plane]
-            DP[Data Plane API + Workers]
             FW[Firewall]
-            CH[(ClickHouse)]
-            KAF[(Kafka)]
-            PG[(PostgreSQL)]
+            PG[(PostgreSQL admin + raw)]
+            RD[(Redis)]
         end
         LB[GCE Load Balancer]
         MC[Managed Certificate]
@@ -78,19 +75,21 @@ flowchart LR
     end
 
     Apps[Your AI apps] --> LB --> TG
-    TG --> DP
-    DP --> CH
-    DP --> KAF
-    CP --> PG
+    TG --> FW
+    TG --> PG
+    TG --> RD
+    TG -. OTLP 4317/4318 .-> OTEL
+    FW -. OTLP 4317/4318 .-> OTEL
+    OTEL --> CH
+    AE --> CH
+    Portal -. policy sync .- TG
     LB -. cert .- MC
-
-    Portal -. hybrid mode only .- CP
 
     style GCP fill:#e8f0fe
     style NT fill:#e8f5e8
 ```
 
-All workloads run inside your GCP project and VPC. Data never leaves your environment.
+TrustGate, Firewall, and your data stores run inside your GCP project and VPC. Only per-request **metadata** leaves the cluster over OTLP (ports 4317/4318) to the NeuralTrust SaaS collector, which lands it in SaaS-side ClickHouse for the AlertEngine and dashboards. Raw prompts and responses stay in your in-cluster PostgreSQL and never leave your environment.
 
 ## GCP-specific defaults
 
@@ -109,16 +108,7 @@ When `global.platform: "gcp"` (the chart default):
 ```yaml
 global:
   storageClass: "pd-balanced"        # default — balanced cost / perf
-  # storageClass: "pd-ssd"           # SSD for high-throughput ClickHouse
-```
-
-Per-component override for ClickHouse on `pd-ssd`:
-
-```yaml
-clickhouse:
-  persistence:
-    storageClass: "pd-ssd"
-    size: 200Gi
+  # storageClass: "pd-ssd"           # SSD for high-IOPS PostgreSQL
 ```
 
 ### Managed Certificates
@@ -208,9 +198,10 @@ For Assured Workloads or specific sovereign-cloud requirements, contact [support
 
 For production, configure backups against the persistent stores rather than relying on Persistent Disk snapshots alone:
 
-- **PostgreSQL**: use Cloud SQL for PostgreSQL externally and set `neuraltrust-control-plane.infrastructure.postgresql.deploy: false`.
-- **ClickHouse**: use `clickhouse.backup.enabled: true` to back up to GCS (S3-compatible endpoint `https://storage.googleapis.com/<bucket>/<prefix>`), or run ClickHouse Cloud externally.
-- **Kafka**: use Confluent Cloud and set `infrastructure.kafka.deploy: false`.
+- **PostgreSQL** (TrustGate admin metadata **and** the raw prompt/response store): use Cloud SQL for PostgreSQL externally and set `neuraltrust-control-plane.infrastructure.postgresql.deploy: false`.
+- **Redis**: use Memorystore for Redis externally if you don't want to run it in-cluster.
+
+ClickHouse and the AlertEngine run on the NeuralTrust SaaS Control Plane, so metadata storage and its backups are managed by NeuralTrust — nothing to back up in your cluster.
 
 Pointing the chart at managed GCP data services is documented in [Configuration scenarios › External infrastructure](../configuration#external-infrastructure-only).
 
@@ -237,8 +228,7 @@ curl https://data-plane-api.platform.example.com/health
 ## Next steps
 
 - [Hybrid deployment on GKE](./hybrid) — Data Plane only, Control Plane on SaaS
-- [Self-hosted deployment on GKE](./self-hosted) — full stack including CP
-- [Deployment models](../deployment-models) — hybrid vs self-hosted in depth
-- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis/Kafka/CH, image registry, storage, secrets
+- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
+- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis, image registry, storage, secrets
 - [Image catalog](../images) — what runs where
 - [Firewall deployment](../firewall) — GPU workers on GKE

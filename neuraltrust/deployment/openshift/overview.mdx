@@ -11,9 +11,6 @@ NeuralTrust Platform has first-class support for Red Hat OpenShift 4.10 and newe
   <Card title="Hybrid (recommended)" icon="cloud" href="./hybrid">
     Data Plane + TrustGate + Firewall in your OpenShift cluster. Control Plane on NeuralTrust SaaS. Fastest path.
   </Card>
-  <Card title="Self-hosted" icon="shield" href="./self-hosted">
-    Full stack including Control Plane UI in your cluster. For sovereignty, air-gapped, or fully-disconnected OpenShift environments.
-  </Card>
 </CardGroup>
 
 If you're unsure which model fits, see [Deployment models](../deployment-models).
@@ -24,7 +21,7 @@ If you're unsure which model fits, see [Deployment models](../deployment-models)
 |---|---|
 | OpenShift version | 4.10 or newer |
 | CPU pool node type | **8 vCPU / 32 GiB recommended** (4 vCPU / 16 GiB also works but doubles the node count) |
-| Min CPU nodes | **≥ 4 for hybrid (CPU Firewall)**, **≥ 5 for self-hosted (CPU Firewall)**. Subtract one when using GPU Firewall workers. ≥ 3 AZs for HA. |
+| Min CPU nodes | **≥ 4 (CPU Firewall)**. Subtract one when using GPU Firewall workers. ≥ 3 AZs for HA. |
 | GPU pool *(optional)* | 4 vCPU / 16 GiB + 1 × NVIDIA GPU — 5 nodes (one per default Firewall worker). Requires the NVIDIA GPU Operator. |
 | Storage class | Cluster default (typically `gp3-csi`, `managed-premium`, `pd-balanced`, or `ocs-storagecluster-ceph-rbd`) |
 | External access | OpenShift Routes (default) or Ingress (when integrating with external L7 LB) |
@@ -63,36 +60,39 @@ For the NVIDIA GPU Operator: follow the [Red Hat documentation](https://docs.nvi
 
 ```mermaid
 flowchart LR
-    subgraph NT[NeuralTrust SaaS Control Plane optional]
-        Portal[Control Plane]
+    subgraph NT[NeuralTrust SaaS Control Plane]
+        Portal[Control Plane API + UI + Scheduler]
+        OTEL[OTel collector]
+        CH[(ClickHouse)]
+        AE[AlertEngine]
+        OTEL --> CH --> AE
     end
 
     subgraph OCP[Your OpenShift Cluster]
         subgraph WORK[Workloads]
             TG[TrustGate]
-            CP[Control Plane]
             DP[Data Plane API + Workers]
             FW[Firewall]
-            CH[(ClickHouse)]
-            KAF[(Kafka)]
-            PG[(PostgreSQL)]
+            PG[(PostgreSQL admin + raw payloads)]
+            RD[(Redis)]
         end
         Router[OpenShift Router]
     end
 
     Apps[Your AI apps] --> Router --> TG
     TG --> DP
-    DP --> CH
-    DP --> KAF
-    CP --> PG
+    TG --> FW
+    DP --> PG
 
-    Portal -. hybrid mode only .- CP
+    TG -. OTLP metadata 4317/4318 .-> OTEL
+    FW -. OTLP metadata 4317/4318 .-> OTEL
+    Portal -. enroll / policy sync .- DP
 
     style OCP fill:#fce4ec
     style NT fill:#e8f5e8
 ```
 
-All workloads run inside your OpenShift cluster. Data never leaves your environment.
+TrustGate, Firewall, and your Postgres/Redis run inside your OpenShift cluster. Only OTLP metadata and control-plane sync leave the cluster (to the NeuralTrust SaaS collector on 4317/4318); raw prompts and responses stay in your in-cluster PostgreSQL. The OTel collector, ClickHouse, and AlertEngine all run on NeuralTrust SaaS.
 
 ## OpenShift-specific defaults
 
@@ -115,7 +115,7 @@ When `global.platform: "openshift"`:
   </Note>
 
 - **TLS**: edge-terminated Routes use the OpenShift router cert by default. For custom certs, populate `spec.tls.certificate` on the Route (the chart's per-Route values support this).
-- **Security context**: respects SCC. The chart relaxes hardcoded UID/GID where OpenShift assigns them; ClickHouse and PostgreSQL specifically have OpenShift-aware container security contexts.
+- **Security context**: respects SCC. The chart relaxes hardcoded UID/GID where OpenShift assigns them; PostgreSQL specifically has an OpenShift-aware container security context.
 - **Image pull**: `gcr-secret` must be linked to each component's service account (`oc secrets link <sa> gcr-secret --for=pull`).
 
 ### Switching to Ingress
@@ -200,9 +200,10 @@ Then enable Firewall GPU workers (see [Firewall deployment](../firewall)).
 
 For production OpenShift:
 
-- **PostgreSQL**: use managed databases (RDS, Azure Database for PostgreSQL, Cloud SQL) and set `neuraltrust-control-plane.infrastructure.postgresql.deploy: false`.
-- **ClickHouse**: enable `clickhouse.backup.enabled: true` with S3, GCS, or Azure Blob targets, or run ClickHouse Cloud externally.
-- **Kafka**: external Confluent Cloud / MSK / Event Hubs; set `infrastructure.kafka.deploy: false`.
+- **PostgreSQL**: use managed databases (RDS, Azure Database for PostgreSQL, Cloud SQL) and set `neuraltrust-control-plane.infrastructure.postgresql.deploy: false`. This store holds TrustGate admin metadata **and** the raw prompt/response payloads.
+- **Redis**: use a managed Redis, or run the in-cluster Redis.
+
+ClickHouse and the AlertEngine run on NeuralTrust SaaS — there is nothing to back up for them in your cluster.
 
 External-infra reference: [Configuration scenarios](../configuration#external-infrastructure-only).
 
@@ -223,13 +224,11 @@ curl https://data-plane-api.apps.<cluster>.openshift.com/health
 | Route hostname unexpected | Mixing Route vs Ingress | When Ingress is enabled on a component, the chart skips its Route |
 | Pod fails to start with SCC error | Custom UID conflicts with SCC | Use `oc adm policy add-scc-to-user anyuid -z <sa>` only as a last resort; prefer adjusting the chart values |
 | `PVC` stuck `Pending` | Wrong storage class | `oc get sc`; set `global.storageClass` to a valid one |
-| ClickHouse fails on first start | UID/GID mismatch | The chart sets OpenShift-friendly SCC for CH; verify you haven't overridden `podSecurityContext` |
 
 ## Next steps
 
 - [Hybrid deployment on OpenShift](./hybrid) — Data Plane only, Control Plane on SaaS
-- [Self-hosted deployment on OpenShift](./self-hosted) — full stack including CP
-- [Deployment models](../deployment-models) — hybrid vs self-hosted in depth
-- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis/Kafka/CH, image registry, storage, secrets
+- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
+- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis, image registry, storage, secrets
 - [Image catalog](../images) — what runs where
 - [Firewall deployment](../firewall) — GPU workers on OpenShift

@@ -5,19 +5,18 @@ description: Complete walkthrough for deploying the NeuralTrust Data Plane on Am
 
 This guide walks you end-to-end through a **hybrid deployment** on EKS — the Data Plane, TrustGate, and Firewall run in your EKS cluster; the Control Plane UI, API, and Scheduler run on NeuralTrust SaaS.
 
-For the full-stack alternative, see [AWS self-hosted](./self-hosted).
-
 ## What you'll end up with
 
 | Component | Location | Replicas |
 |---|---|---|
-| Data Plane API, worker, Kafka Connect | Your EKS cluster | 2, 1, 1 |
+| Data Plane API + worker | Your EKS cluster | 2, 1 |
 | TrustGate admin / gateway / actions | Your EKS cluster | 2 each |
 | Firewall gateway + 5 workers | Your EKS cluster | 2 + 5 |
-| ClickHouse, Kafka, PostgreSQL, Redis | Your EKS cluster (or external) | 1 each |
+| PostgreSQL (admin + raw payloads), Redis | Your EKS cluster (or external) | 1 each |
 | Control Plane API, UI, Scheduler | **NeuralTrust SaaS** | — |
+| OTel collector, ClickHouse, AlertEngine | **NeuralTrust SaaS** | — |
 
-See [Image catalog](../images) for the full inventory.
+See [Image catalog](../images) for the full inventory. Products emit per-request **metadata** over OTLP (ports 4317/4318) to the NeuralTrust SaaS collector; no Kafka and no in-cluster ClickHouse run in your cluster.
 
 ## Prerequisites
 
@@ -52,8 +51,6 @@ eksctl create cluster \
 aws eks update-kubeconfig --region <REGION> --name neuraltrust
 kubectl get nodes
 ```
-
-For self-hosted, bump `--nodes 5 --nodes-min 5` to fit the additional Control Plane footprint.
 
 Install the AWS Load Balancer Controller and EBS CSI driver (see [AWS overview › Required cluster add-ons](./overview#required-cluster-add-ons)).
 
@@ -145,35 +142,15 @@ trustgate:
 neuraltrust-firewall:
   firewall:
     enabled: true
-
-# Infrastructure
-infrastructure:
-  clickhouse:
-    deploy: true
-  kafka:
-    deploy: true
 ```
+
+The OTel collector, ClickHouse, and AlertEngine run on the NeuralTrust SaaS Control Plane — there is no Kafka and no in-cluster ClickHouse to configure. TrustGate and Firewall export metadata over OTLP to the SaaS collector once the data plane is enrolled.
 
 ### Using managed AWS data services
 
+Bring PostgreSQL and Redis as managed services instead of running them in-cluster:
+
 ```yaml
-infrastructure:
-  clickhouse:
-    deploy: false
-    external:
-      host: "your-tenant.aws.clickhouse.cloud"
-      port: "8443"
-      user: "neuraltrust"
-      password: ""
-      database: "neuraltrust"
-  kafka:
-    deploy: false
-    external:
-      bootstrapServers: "b-1.msk-cluster.<id>.kafka.<REGION>.amazonaws.com:9092"
-
-# MSK with IAM auth requires extraEnv + a custom signer image; see Feature flags ›
-# Authentication for external Kafka before adopting in production.
-
 neuraltrust-control-plane:
   infrastructure:
     postgresql:
@@ -189,8 +166,10 @@ neuraltrust-control-plane:
           database: "neuraltrust"
 ```
 
+Use Amazon RDS for PostgreSQL (TrustGate admin metadata **and** the raw prompt/response store) and Amazon ElastiCache for Redis.
+
 <Note>
-**ClickHouse Cloud** has a [native-port caveat](../feature-flags#required-clickhouse-cloud-caveat) — review before installing. For external Postgres, pre-create the `neuraltrust` and `trustgate` databases/users; see [Required databases & users](../feature-flags#required-databases--users-when-external).
+For external Postgres, pre-create the `neuraltrust` and `trustgate` databases/users; see [Required databases & users](../feature-flags#required-databases--users-when-external).
 </Note>
 
 ## Step 5 — Install
@@ -269,18 +248,6 @@ helm upgrade neuraltrust-platform \
   -f my-values.yaml
 ```
 
-## Migration to self-hosted
-
-Flip the Control Plane flag and add DNS for `app.*`, `api.*`, `scheduler.*`:
-
-```yaml
-neuraltrust-control-plane:
-  controlPlane:
-    enabled: true
-```
-
-See [Self-hosted on EKS](./self-hosted) for the complete picture.
-
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -292,9 +259,8 @@ See [Self-hosted on EKS](./self-hosted) for the complete picture.
 
 ## Related guides
 
-- [Self-hosted deployment on EKS](./self-hosted) — Control Plane in your cluster
 - [AWS overview](./overview) — cluster prerequisites and AWS-specific defaults
-- [Deployment models](../deployment-models) — hybrid vs self-hosted comparison
+- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
 - [Image catalog](../images) — what runs in hybrid mode
 - [Secrets management](../secrets) — auto-generation, External Secrets Operator
 - [Firewall deployment](../firewall) — GPU workers on EKS

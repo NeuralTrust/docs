@@ -11,7 +11,7 @@ The chart ships a small set of values files that cover the most common deploymen
 | `values.yaml` | Complete reference with every option and inline comments. |
 | `values-openshift.yaml` | Pre-configured for OpenShift with Routes. |
 | `values-openshift-ingress.yaml.example` | OpenShift using Kubernetes Ingress instead of Routes. |
-| `values-external-services.yaml.example` | External ClickHouse, Kafka, and PostgreSQL. |
+| `values-external-services.yaml.example` | External PostgreSQL (and Redis). |
 | `values-dataplane-gpu.yaml.example` | Data Plane + GPU firewall workers, no TrustGate. |
 | `values-all-deployed.yaml.example` | Everything enabled — useful as a "what does the full stack look like" reference. |
 
@@ -83,24 +83,9 @@ Start from `values-openshift-ingress.yaml.example`.
 
 ### External infrastructure only
 
-NeuralTrust services in-cluster, ClickHouse / Kafka / PostgreSQL provided externally:
+NeuralTrust services in-cluster, PostgreSQL provided externally (Redis can be externalized the same way — see [Feature flags › Redis](./feature-flags#redis-in-cluster-or-external)):
 
 ```yaml
-infrastructure:
-  clickhouse:
-    deploy: false
-    external:
-      host: "clickhouse.example.com"
-      port: "8123"
-      user: "neuraltrust"
-      password: ""        # inject via --set or pre-created secret
-      database: "neuraltrust"
-
-  kafka:
-    deploy: false
-    external:
-      bootstrapServers: "kafka.example.com:9092"
-
 neuraltrust-control-plane:
   infrastructure:
     postgresql:
@@ -116,7 +101,7 @@ neuraltrust-control-plane:
           database: "neuraltrust"
 ```
 
-Start from `values-external-services.yaml.example`.
+Start from `values-external-services.yaml.example`. The OpenTelemetry collector and ClickHouse are **not** in-cluster infrastructure — products export metadata over OTLP to the NeuralTrust SaaS collector, so there is nothing external to configure for telemetry.
 
 ### Services-only (no TrustGate)
 
@@ -158,11 +143,11 @@ Defaults to `global.platform: "gcp"`, in-cluster infrastructure, auto-generated 
 
 | Component | In-cluster service name | External config path |
 |---|---|---|
-| ClickHouse | `clickhouse` *(fixed by `fullnameOverride`)* | `infrastructure.clickhouse.external.host` |
-| Kafka | `<release>-kafka:9092` | `infrastructure.kafka.external.bootstrapServers` |
 | PostgreSQL | `control-plane-postgresql` | `neuraltrust-control-plane.controlPlane.components.postgresql.secrets.host` |
 
 The chart's `_helpers.tpl` resolves the right hostname automatically based on `deploy: true` / `false`. You don't typically need to override these directly.
+
+Telemetry is not resolved this way: products emit per-request metadata over OTLP to the **NeuralTrust SaaS OpenTelemetry collector** (ports 4317 / 4318), which lands it in SaaS ClickHouse. There is no in-cluster collector or ClickHouse to point at.
 
 ## Component toggles
 
@@ -218,7 +203,7 @@ CUDA MPS env vars are only rendered into the worker ConfigMap when **both** keys
 
 ## Related guides
 
-- [Feature flags reference](./feature-flags) — every toggle that changes what gets deployed (PG/Redis/Kafka/CH/registry/storage/secrets)
+- [Feature flags reference](./feature-flags) — every toggle that changes what gets deployed (PG/Redis/registry/storage/secrets)
 - [Install on Kubernetes](./kubernetes/overview) — install workflow that consumes these values files
 - [Secrets management](./secrets) — auto-generation, pre-generated, External Secrets Operator
 - [Firewall deployment](./firewall) — CPU/GPU workers and TrustGate integration

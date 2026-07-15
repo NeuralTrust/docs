@@ -11,9 +11,6 @@ NeuralTrust Platform runs on Azure Kubernetes Service using Azure-native primiti
   <Card title="Hybrid (recommended)" icon="cloud" href="./hybrid">
     Data Plane + TrustGate + Firewall in your AKS cluster. Control Plane runs on NeuralTrust SaaS. Fastest to first dashboard.
   </Card>
-  <Card title="Self-hosted" icon="shield" href="./self-hosted">
-    Full stack including Control Plane API, UI, and Scheduler in your AKS cluster. For sovereignty and air-gapped requirements.
-  </Card>
 </CardGroup>
 
 If you're unsure which model fits your environment, see [Deployment models](../deployment-models).
@@ -24,7 +21,7 @@ If you're unsure which model fits your environment, see [Deployment models](../d
 |---|---|
 | AKS version | 1.28 or newer |
 | CPU pool node SKU | `Standard_D8s_v5` or `Standard_D8ds_v5` (8 vCPU / 32 GiB) |
-| Min CPU nodes | **≥ 4 for hybrid (CPU Firewall)**, **≥ 5 for self-hosted (CPU Firewall)**. Subtract one when using GPU Firewall workers. Across 3 AZs for HA. |
+| Min CPU nodes | **≥ 4 (CPU Firewall)**. Subtract one when using GPU Firewall workers. Across 3 AZs for HA. |
 | GPU pool *(optional)* | `Standard_NC4as_T4_v3` (4 vCPU / 28 GiB / 1 × T4) — 5 nodes (one per default Firewall worker) |
 | VNet | Dedicated VNet with subnets for AKS and Application Gateway (if using AGIC) |
 | Storage | Azure Disk CSI driver (default); `managed-csi-premium` for production |
@@ -81,39 +78,41 @@ The Azure Disk CSI driver is enabled by default on AKS.
 
 ```mermaid
 flowchart LR
-    subgraph NT[NeuralTrust SaaS Control Plane optional]
-        Portal[Control Plane]
+    subgraph NT[NeuralTrust SaaS Control Plane]
+        Portal[Control Plane API + UI + Scheduler]
+        OTEL[OTel collector]
+        CH[(ClickHouse)]
+        AE[AlertEngine]
+        OTEL --> CH --> AE
     end
 
     subgraph AZ[Your Azure Subscription]
         subgraph AKS[Azure Kubernetes Service]
             TG[TrustGate]
-            CP[Control Plane]
             DP[Data Plane API + Workers]
             FW[Firewall]
-            CH[(ClickHouse)]
-            KAF[(Kafka)]
-            PG[(PostgreSQL)]
+            PG[(PostgreSQL admin + raw payloads)]
+            RD[(Redis)]
         end
         AGW[Application Gateway]
         KV[Key Vault]
-        ADLS[(Azure Storage)]
     end
 
     Apps[Your AI apps] --> AGW --> TG
     TG --> DP
-    DP --> CH
-    DP --> KAF
-    CP --> PG
+    TG --> FW
+    DP --> PG
     AGW -. cert .- KV
 
-    Portal -. hybrid mode only .- CP
+    TG -. OTLP metadata 4317/4318 .-> OTEL
+    FW -. OTLP metadata 4317/4318 .-> OTEL
+    Portal -. enroll / policy sync .- DP
 
     style AZ fill:#e3f2fd
     style NT fill:#e8f5e8
 ```
 
-All workloads run inside your Azure subscription and VNet. Data never leaves your environment.
+TrustGate, Firewall, and your Postgres/Redis run inside your Azure subscription and VNet. Only OTLP metadata and control-plane sync leave the cluster (to the NeuralTrust SaaS collector on 4317/4318); raw prompts and responses stay in your in-cluster PostgreSQL. The OTel collector, ClickHouse, and AlertEngine all run on NeuralTrust SaaS.
 
 ## Azure-specific defaults
 
@@ -161,15 +160,6 @@ global:
   # storageClass: "azurefile-csi"        # only for RWX scenarios
 ```
 
-ClickHouse override on Premium SSD:
-
-```yaml
-clickhouse:
-  persistence:
-    storageClass: "managed-csi-premium"
-    size: 200Gi
-```
-
 ### Internal-only ingress
 
 For private AKS clusters and VNet-internal endpoints, AGIC with a private Application Gateway, or NGINX with an internal LB:
@@ -201,9 +191,10 @@ For Azure Government clouds or sovereign-cloud regions, contact [support@neuralt
 
 For production, configure backups against the persistent stores:
 
-- **PostgreSQL**: use Azure Database for PostgreSQL Flexible Server with built-in PITR; disable `neuraltrust-control-plane.infrastructure.postgresql.deploy`.
-- **ClickHouse**: enable `clickhouse.backup.enabled: true` with `azblob` storage, or run ClickHouse Cloud externally.
-- **Kafka**: use Confluent Cloud or Azure Event Hubs (Kafka surface); set `infrastructure.kafka.deploy: false`.
+- **PostgreSQL**: use Azure Database for PostgreSQL Flexible Server with built-in PITR; disable `neuraltrust-control-plane.infrastructure.postgresql.deploy`. This store holds TrustGate admin metadata **and** the raw prompt/response payloads.
+- **Redis**: use Azure Cache for Redis, or run the in-cluster Redis.
+
+ClickHouse and the AlertEngine run on NeuralTrust SaaS — there is nothing to back up for them in your cluster.
 
 External-infra reference: [Configuration scenarios](../configuration#external-infrastructure-only).
 
@@ -228,8 +219,7 @@ curl https://data-plane-api.platform.example.com/health
 ## Next steps
 
 - [Hybrid deployment on AKS](./hybrid) — Data Plane only, Control Plane on SaaS
-- [Self-hosted deployment on AKS](./self-hosted) — full stack including CP
-- [Deployment models](../deployment-models) — hybrid vs self-hosted in depth
-- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis/Kafka/CH, image registry, storage, secrets
+- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
+- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis, image registry, storage, secrets
 - [Image catalog](../images) — what runs where
 - [Firewall deployment](../firewall) — GPU workers on AKS

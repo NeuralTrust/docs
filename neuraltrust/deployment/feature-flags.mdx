@@ -1,11 +1,11 @@
 ---
 title: Feature flags reference
-description: Every toggle that changes what the NeuralTrust Platform Helm chart deploys — PostgreSQL, Redis, Kafka, ClickHouse, image registry, storage class, and secrets. Includes the exact values keys, required databases/users for external services, and the secrets you must pre-create per scenario.
+description: Every toggle that changes what the NeuralTrust Platform Helm chart deploys — PostgreSQL, Redis, image registry, storage class, and secrets. Includes the exact values keys, required databases/users for external services, and the secrets you must pre-create per scenario.
 ---
 
 This page is the single source of truth for the **feature flags** that change what the chart deploys. Use it when you need to decide between in-cluster and external infrastructure, mirror images, customize storage, or pre-create secrets.
 
-For end-to-end install walkthroughs, see the [per-cloud guides](./overview#cloud-specific-guides). For the deployment-model decision (hybrid vs self-hosted), see [Deployment models](./deployment-models).
+For end-to-end install walkthroughs, see the [per-cloud guides](./overview#cloud-specific-guides). For the deployment-model decision (SaaS vs Hybrid), see [Deployment models](./deployment-models).
 
 ## Component on/off toggles
 
@@ -13,8 +13,8 @@ The chart's primary `enabled` flags decide which subcharts are rendered.
 
 | Component | Values key | Default | Notes |
 |---|---|---|---|
-| Data Plane | `neuraltrust-data-plane.dataPlane.enabled` | `true` | API + worker + Kafka Connect |
-| Control Plane | `neuraltrust-control-plane.controlPlane.enabled` | **`false`** | Off = hybrid (CP on SaaS). On = self-hosted. |
+| Data Plane | `neuraltrust-data-plane.dataPlane.enabled` | `true` | API + worker |
+| Control Plane | `neuraltrust-control-plane.controlPlane.enabled` | **`false`** | Leave `false` — the Control Plane runs on NeuralTrust SaaS (Hybrid). |
 | TrustGate | `trustgate.enabled` | `true` | admin + gateway + actions + Redis |
 | Firewall | `neuraltrust-firewall.firewall.enabled` | `true` | gateway + 5 workers — **always on** in supported topologies; the choice is CPU vs GPU workers (see [Firewall deployment](./firewall#cpu-vs-gpu)) |
 | SIEM Connectors | `neuraltrust-siem-connectors.siemConnectors.enabled` | `false` | Off — opt-in |
@@ -29,7 +29,7 @@ PostgreSQL stores:
 
 - **Control Plane** schema (RBAC, integrations, dashboards) — only when CP is enabled
 - **TrustGate** schema (gateways, routes, plugins) — when TrustGate is enabled
-- Customer prompts and responses are **never** stored here — those go to ClickHouse.
+- **Raw prompt/response** bodies — products write raw payloads to a PostgreSQL store (e.g. the Firewall's `trustguard_data` table) so you can view them in the platform. The UI fetches them **on demand** by `(team_id, trace_id)`; in Hybrid this data never leaves your cluster. Only per-request **metadata** is exported over OTLP to the NeuralTrust SaaS collector.
 
 ### In-cluster (default)
 
@@ -148,139 +148,18 @@ trustgate:
 **Current chart caveat**: setting `trustgate.redis.enabled: false` changes the TrustGate env vars to point external, but the in-cluster `trustgate-redis` StatefulSet **still deploys** (the template isn't guarded on the flag). The unused pod is small (~500m / 1 GiB) but it does consume cluster resources. A fix is planned for an upcoming chart release; until then, expect the in-cluster Redis pod to exist even when you target an external one.
 </Warning>
 
-## Kafka — in-cluster or external
+## Telemetry export (OpenTelemetry → NeuralTrust SaaS)
 
-Kafka is the event backbone between TrustGate, Data Plane API, the Data Plane worker, Kafka Connect, and the Control Plane scheduler (audit events).
+There is **no Kafka** and **no in-cluster ClickHouse** to toggle. Products emit per-request **metadata over OTLP** to the NeuralTrust SaaS OpenTelemetry collector, which lands it in SaaS ClickHouse for the AlertEngine and dashboards.
 
-### In-cluster (default)
-
-| Values key | Default |
+| Aspect | Detail |
 |---|---|
-| `infrastructure.kafka.deploy` | `true` |
-| `kafka.replicaCount` | `1` |
-| `kafka.persistence.size` | `10Gi` |
+| Transport | OpenTelemetry (OTLP logs) |
+| Destination | NeuralTrust SaaS OTel collector |
+| Ports | `4317` (gRPC) / `4318` (HTTP), outbound |
+| Payload | Metadata only — verdicts, finding labels, latency, cost, correlation ids. No raw prompt/response text. |
 
-In-cluster Kafka has no auth — ClusterIP-only and never exposed outside the namespace.
-
-### External Kafka
-
-```yaml
-infrastructure:
-  kafka:
-    deploy: false
-    external:
-      bootstrapServers: "kafka.example.com:9092"
-      # 'brokers' (a list) is also accepted and joined with commas
-```
-
-This sets the `bootstrapServers` for components that read from `infrastructure.kafka.external.*`. **Per-component Kafka env vars must also be overridden** for components that use a hardcoded default (see below).
-
-### Authentication for external Kafka
-
-<Warning>
-The chart does **not** wire SASL/SCRAM/mTLS automatically. The `infrastructure.kafka.external.secretName` / `secretKey` keys exist in `values.yaml` but are **not consumed** by templates today. Use `extraEnv` on each Kafka consumer to inject the auth env vars yourself.
-</Warning>
-
-```yaml
-neuraltrust-data-plane:
-  dataPlane:
-    components:
-      api:
-        extraEnv:
-          - name: KAFKA_BOOTSTRAP_SERVERS
-            value: "kafka.example.com:9093"
-          - name: KAFKA_SECURITY_PROTOCOL
-            value: "SASL_SSL"
-          - name: KAFKA_SASL_MECHANISM
-            value: "SCRAM-SHA-512"
-          - name: KAFKA_SASL_USERNAME
-            valueFrom:
-              secretKeyRef: { name: kafka-auth, key: username }
-          - name: KAFKA_SASL_PASSWORD
-            valueFrom:
-              secretKeyRef: { name: kafka-auth, key: password }
-      worker:
-        extraEnv: *kafka-auth-env             # same as api.extraEnv
-      kafka:
-        connect:
-          bootstrapServers: "kafka.example.com:9093"
-```
-
-Pre-create the `kafka-auth` Secret in your release namespace.
-
-### Per-component Kafka overrides
-
-| Component | Hardcoded default | Override path |
-|---|---|---|
-| Data Plane API | `KAFKA_BOOTSTRAP_SERVERS=kafka:9092` | `neuraltrust-data-plane.dataPlane.components.api.extraEnv` |
-| Data Plane Worker | `KAFKA_BOOTSTRAP_SERVERS=kafka:9092` | `neuraltrust-data-plane.dataPlane.components.worker.extraEnv` |
-| Kafka Connect | `bootstrapServers=kafka:9092` | `neuraltrust-data-plane.dataPlane.components.kafka.connect.bootstrapServers` |
-| Control Plane Scheduler | `KAFKA_BROKERS=kafka:9092`, `KAFKA_TOPIC=audit_events` | `neuraltrust-control-plane.controlPlane.components.scheduler.config.kafkaBrokers` / `.kafkaTopic` |
-| Control Plane App | `KAFKA_HOST=kafka`, `KAFKA_PORT=9092` | `neuraltrust-control-plane.controlPlane.components.app.config.kafkaHost` / `.kafkaPort` |
-
-### Cloud-managed Kafka notes
-
-| Provider | Notes |
-|---|---|
-| AWS MSK (IAM) | Use IRSA + `aws-msk-iam-sasl-signer-java` on consumers — currently requires custom image; chart does not bundle it. |
-| Confluent Cloud | SASL/PLAIN over TLS; inject `KAFKA_SECURITY_PROTOCOL=SASL_SSL` and `KAFKA_SASL_MECHANISM=PLAIN` plus API key/secret. |
-| Azure Event Hubs (Kafka surface) | SASL/PLAIN over TLS on port 9093; username `$ConnectionString`, password = Event Hubs connection string. Inject via `extraEnv`. |
-
-## ClickHouse — in-cluster or external
-
-ClickHouse is the analytics database for the Data Plane — prompts, responses, traces, evals, metrics. All customer telemetry lives here.
-
-### In-cluster (default)
-
-| Values key | Default |
-|---|---|
-| `infrastructure.clickhouse.deploy` | `true` |
-| `clickhouse.auth.username` | `neuraltrust` |
-| `clickhouse.auth.password` | `""` → auto-generated 32-char in Secret `clickhouse` / key `admin-password` |
-| `clickhouse.auth.database` | `neuraltrust` |
-| `clickhouse.persistence.size` | `50Gi` |
-
-### External ClickHouse
-
-```yaml
-infrastructure:
-  clickhouse:
-    deploy: false
-    external:
-      host: "<external-host>"
-      port: "8123"                          # HTTP port; "8443" for ClickHouse Cloud
-      user: "neuraltrust"
-      password: ""                          # use --set or pre-created secret
-      database: "neuraltrust"
-      secretName: "clickhouse"
-      secretKey: "admin-password"
-
-neuraltrust-data-plane:
-  dataPlane:
-    components:
-      clickhouse:
-        enabled: true                       # keep true to render clickhouse-secrets + migrations Job
-        host: "<external-host>"
-        port: "8123"
-        user: "neuraltrust"
-        database: "neuraltrust"
-```
-
-### Required ClickHouse Cloud caveat
-
-<Warning>
-The Data Plane API runs an `init` container that connects to ClickHouse on **native port 9000** to apply migrations — this is hardcoded in the chart today. ClickHouse Cloud exposes native on **port 9440 (TLS)** instead, so the migrations init container fails out of the box against Cloud.
-
-Workarounds: (a) pre-provision the schema yourself and disable the init container, (b) run a port-translating proxy that exposes 9000→9440 inside your VPC, or (c) deploy ClickHouse in-cluster instead. A configurable native port is on the chart roadmap.
-</Warning>
-
-### Required databases & users when external
-
-| Database | User | Permissions |
-|---|---|---|
-| `neuraltrust` | `neuraltrust` | `GRANT ALL ON neuraltrust.* TO neuraltrust` |
-
-The `clickhouse-migrations` initContainer applies the schema automatically the first time the Data Plane API starts.
+Raw prompt/response bodies stay in your cluster's PostgreSQL (see [PostgreSQL](#postgresql-in-cluster-or-external) above). The collector, ClickHouse, and the AlertEngine all run on NeuralTrust SaaS — none of them are deployed by the chart in your cluster.
 
 ## Image registry — NeuralTrust GCR or your internal mirror
 
@@ -329,14 +208,11 @@ Per-component override paths:
 |---|---|
 | `neuraltrust-control-plane.controlPlane.components.{api,app,scheduler,postgresql}.image.{repository,tag}` | Control Plane |
 | `neuraltrust-data-plane.dataPlane.components.{api,worker}.image.{repository,tag}` | Data Plane |
-| `neuraltrust-data-plane.dataPlane.components.kafka.connect.image.{repository,tag}` | Kafka Connect |
 | `neuraltrust-firewall.firewall.gateway.image.*` / `workerDefaults.image.*` | Firewall |
 | `trustgate.global.image.{image,tag}` | TrustGate |
 | `trustgate.redis.image.{repository,tag}` | Redis |
-| `clickhouse.image.{repository,tag}` | ClickHouse |
-| `kafka.image.{repository,tag}` | Kafka |
 
-### Mirroring for air-gapped installs
+### Mirroring images to an internal registry
 
 ```bash
 helm template neuraltrust-platform \
@@ -355,7 +231,7 @@ helm template . -f my-values.yaml | grep -E '^\s+image:' | sort -u
 
 ## Storage class — cluster default or explicit
 
-PVCs are created for ClickHouse, Kafka, PostgreSQL, Redis, and the optional OpenTelemetry collector buffer.
+PVCs are created for PostgreSQL, Redis, and the optional OpenTelemetry collector buffer.
 
 ### Cluster default (default behavior)
 
@@ -384,9 +260,7 @@ global:
 
 | Component | Values key | Recommended for prod |
 |---|---|---|
-| ClickHouse | `clickhouse.persistence.storageClass` | SSD-backed (`pd-ssd`, `io2`, `managed-csi-premium`) for high-throughput |
-| Kafka | `kafka.persistence.storageClass` | SSD-backed |
-| PostgreSQL | `neuraltrust-control-plane.controlPlane.components.postgresql.persistence.storageClass` | SSD-backed |
+| PostgreSQL | `neuraltrust-control-plane.controlPlane.components.postgresql.persistence.storageClass` | SSD-backed (`pd-ssd`, `io2`, `managed-csi-premium`) for high-throughput |
 | Redis (TrustGate) | `trustgate.global.storageClass` (inherits umbrella `global.storageClass`) | Default |
 | OTel collector buffer (optional) | `global.observability.collector.bufferPVC.storageClass` | Default |
 
@@ -419,15 +293,12 @@ Auto-generated by default (when `autoGenerateSecrets: true`):
 | | `trustgate-secrets` | `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_NAME`, `DATABASE_SSL_MODE`, `DATABASE_URL`, `SERVER_SECRET_KEY`, `NEURAL_TRUST_FIREWALL_URL`, `NEURAL_TRUST_FIREWALL_SECRET_KEY` |
 | | `firewall-secrets` | `JWT_SECRET` *(optional `HUGGINGFACE_TOKEN`)* |
 | | `postgresql-secrets` | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, `POSTGRES_PORT`, `DATABASE_URL`, `POSTGRES_PRISMA_URL` |
-| | `clickhouse` | `admin-password` |
-| | `clickhouse-secrets` | `CLICKHOUSE_HOST`, `CLICKHOUSE_PORT`, `CLICKHOUSE_USER`, `CLICKHOUSE_DATABASE` |
 | | `neuraltrust-ingress-tls` *(if `global.ingress.tls.autoGenerate: true`)* | `tls.crt`, `tls.key` |
-| **Self-hosted** *(adds CP)* | `control-plane-secrets` | `CONTROL_PLANE_JWT_SECRET`, `TRUSTGATE_JWT_SECRET`, `FIREWALL_API_URL` *(optional Resend / LLM keys)* |
 | **Optional** *(only if non-empty values)* | `openai-secrets`, `google-secrets`, `resend-secrets`, `huggingface-secrets` | provider-specific |
 
 ### Pre-creating secrets (`preserveExistingSecrets: true`)
 
-Required for: production setups with external secret managers, GitOps flows where chart-rendered Secrets cause drift, or air-gapped environments where you bake secrets into your golden state.
+Required for: production setups with external secret managers, GitOps flows where chart-rendered Secrets cause drift, or environments where you bake secrets into your golden state.
 
 ```yaml
 global:
@@ -453,7 +324,7 @@ global:
 
 neuraltrust-control-plane:
   controlPlane:
-    enabled: false                 # true = self-hosted
+    enabled: false                 # Control Plane runs on NeuralTrust SaaS
   infrastructure:
     postgresql:
       deploy: true                 # false = external
@@ -470,17 +341,13 @@ trustgate:
 neuraltrust-firewall:
   firewall:
     enabled: true                  # always on in supported topologies (CPU or GPU workers)
-
-infrastructure:
-  clickhouse:
-    deploy: true                   # false = external
-  kafka:
-    deploy: true                   # false = external
 ```
+
+Telemetry needs no toggles: products export metadata over OTLP to the NeuralTrust SaaS collector (ports 4317 / 4318). There is no in-cluster Kafka or ClickHouse.
 
 ## Related guides
 
-- [Deployment models](./deployment-models) — hybrid vs self-hosted comparison
+- [Deployment models](./deployment-models) — SaaS vs Hybrid comparison
 - [Configuration scenarios](./configuration) — side-by-side values files for common topologies
 - [Secrets management](./secrets) — pre-creation script, External Secrets Operator
 - [Image catalog](./images) — every image deployed in each model
