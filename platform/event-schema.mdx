@@ -1,11 +1,11 @@
 ---
-title: Telemetry Data
-description: "Reference for TrustGuard and TrustGate metadata events — the fields AlertEngine rules match on, how detection normalization works, and what is not stored."
+title: Event Schema
+description: "Schema reference for TrustGuard and TrustGate metadata events — the fields AlertEngine rules match on, how detection normalization works, and what is not stored."
 ---
 
-# Telemetry data reference
+# Event schema
 
-[Alerts](/platform/alerts) and [Use Cases](/platform/use-cases) evaluate rules over **metadata events** stored in ClickHouse. TrustGuard and TrustGate each emit one metadata record per request over **OpenTelemetry (OTLP)**; a collector lands rows in `trustgate_events` and `trustguard_events`.
+[Alerts](/platform/alerts) and [Use Cases](/platform/use-cases) evaluate rules over **metadata events** stored in the NeuralTrust metadata store. TrustGuard and TrustGate each emit one metadata record per request over **OpenTelemetry (OTLP)**; a collector ingests them into separate **TrustGate** and **TrustGuard** event streams.
 
 <Warning>
 **No raw prompt or response text** is in the metadata stream. Identifiers, verdicts, counters, and finding labels only. Raw bodies live in a separate store keyed by `trace_id` for drill-down in the UI.
@@ -19,15 +19,15 @@ description: "Reference for TrustGuard and TrustGate metadata events — the fie
 flowchart LR
   TG[TrustGate] -->|OTLP metadata| COL[NeuralTrust OTel Collector]
   TGU[TrustGuard] -->|OTLP metadata| COL
-  COL --> CH[(ClickHouse)]
-  CH --> AE[AlertEngine]
+  COL --> STORE[(Metadata store)]
+  STORE --> AE[AlertEngine]
   AE --> AL[Alerts UI]
   AE --> SIEM[SIEM Integrations]
 ```
 
 | Stream | Storage | Used for |
 |---|---|---|
-| Metadata + findings | SaaS ClickHouse (`trustgate_events`, `trustguard_events`) | Rules, alerts, logs list |
+| Metadata + findings | NeuralTrust metadata store (TrustGate and TrustGuard streams) | Rules, alerts, logs list |
 | Raw payload | Client-local Postgres (hybrid) or SaaS Postgres | Prompt/response drill-down by `trace_id` |
 
 Correlation keys across streams: `tenant_id`, `trace_id`, `session_id`.
@@ -38,7 +38,7 @@ Correlation keys across streams: `tenant_id`, `trace_id`, `session_id`.
 
 **Entity** is not a stored column. AlertEngine derives it from `consumer_id` — the v1 entity reference for "who" triggered the event.
 
-| Logical group key | ClickHouse column | Notes |
+| Logical group key | Stored as | Notes |
 |---|---|---|
 | `entity` / `consumer` | `consumer_id` | Default alert subject |
 | `session` | `session_id` | Session-scoped bursts |
@@ -51,7 +51,7 @@ There is **no `ip` column**. Rules that previously grouped by IP now use **sessi
 
 ## Common fields (both products)
 
-| Logical field | ClickHouse | Notes |
+| Logical field | Stored as | Notes |
 |---|---|---|
 | `trace_id` | `trace_id` | Correlation to raw payload |
 | `session` | `session_id` | Session grouping |
@@ -69,7 +69,7 @@ There is **no `ip` column**. Rules that previously grouped by IP now use **sessi
 
 ## TrustGate-only fields
 
-| Logical field | ClickHouse / JSON | Notes |
+| Logical field | Stored as / JSON | Notes |
 |---|---|---|
 | `gateway_id` | `gateway_id` | Source gateway |
 | `kind` | `kind` | `llm` \| `mcp` \| `a2a` |
@@ -84,7 +84,7 @@ There is **no `ip` column**. Rules that previously grouped by IP now use **sessi
 
 ## TrustGuard-only fields
 
-| Logical field | ClickHouse | Notes |
+| Logical field | Stored as | Notes |
 |---|---|---|
 | `collector_id` | `collector_id` | Source collector |
 | `collector_name` | `collector_name` | Display name |
@@ -97,7 +97,7 @@ There is **no `ip` column**. Rules that previously grouped by IP now use **sessi
 
 ## Detection matching (TrustGuard)
 
-Rules with a `detection:` block match over the raw **`detector_chain`** JSON array. AlertEngine normalizes each element **in SQL at query time** (not as a stored column).
+Rules with a `detection:` block match over the raw **`detector_chain`** JSON array. AlertEngine normalizes each element **at query time** (not as a stored column).
 
 ### Rule detection fields
 
@@ -128,7 +128,7 @@ Elements that only record detector **execution** (no `detection_type`, `action`,
 
 ---
 
-## Fields in ClickHouse but not in the custom builder
+## Advanced rule fields not in the custom builder
 
 The engine supports additional predicates for advanced YAML rules. These are not yet in the UI field picker:
 
