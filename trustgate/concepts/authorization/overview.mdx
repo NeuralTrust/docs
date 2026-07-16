@@ -1,0 +1,88 @@
+---
+title: "Overview"
+description: "Provider manuals for wiring TrustGate to an external IdP — OIDC role-based identity routing and OAuth2 for MCP — with end-to-end setup for Okta and Microsoft Entra ID."
+---
+
+This section is the practical, provider-by-provider companion to
+[Auth](/trustgate/concepts/auth), [Consumers](/trustgate/concepts/consumers), and
+[Roles](/trustgate/concepts/roles). Those pages define the concepts; the pages here are
+step-by-step manuals for standing up a real identity provider and pasting the exact
+credential payloads TrustGate expects.
+
+## Two credential shapes
+
+Almost every integration is one of two patterns. Both validate an inbound
+`Authorization: Bearer <jwt>` against your IdP's JWKS.
+
+| Pattern | `type` | Consumer | Purpose |
+|---|---|---|---|
+| **OIDC role-based** | `oidc` | `LLM` (`role_based`) | The token's claims (`groups`, `roles`, …) select a [role](/trustgate/concepts/roles) that decides which registries, models, and tools the caller may reach. |
+| **OAuth2 for MCP** | `oauth2` | `MCP` | A machine-to-machine (or user) token whose `required_scopes` gate access to MCP tool endpoints. |
+
+<Note>
+A `role_based` consumer carries **exactly one** identity credential (`oauth2` **or** `oidc`).
+MCP consumers accept `api_key`, `oauth2`, and `mtls` — **not** `oidc`.
+</Note>
+
+## The config blocks at a glance
+
+<CodeGroup>
+```json OIDC (role-based)
+{
+  "name": "okta-idp",
+  "type": "oidc",
+  "enabled": true,
+  "config": {
+    "oidc": {
+      "issuer": "https://<idp-issuer>",
+      "audiences": ["<audience>"],
+      "jwks_url": "https://<idp-issuer>/v1/keys",
+      "subject_claim": "sub"
+    }
+  }
+}
+```
+
+```json OAuth2 (MCP)
+{
+  "name": "okta",
+  "type": "oauth2",
+  "config": {
+    "oauth2": {
+      "issuer": "https://<idp-issuer>",
+      "audiences": ["<audience>"],
+      "jwks_url": "https://<idp-issuer>/v1/keys",
+      "client_id": "<client-id>",
+      "client_secret": "<client-secret>",
+      "required_scopes": ["<scope>"]
+    }
+  }
+}
+```
+</CodeGroup>
+
+## Rules that apply to every provider
+
+- **`audiences` is required** and must match the token's `aud` claim. An entry without
+  audiences accepts any audience of that issuer, so keep it explicit.
+- **`required_scopes` must not contain OIDC protocol scopes** (`openid`, `profile`,
+  `email`) — those are not carried by access tokens and TrustGate rejects them.
+- Scope matching checks the token's `scp`/`scope` claim **and** Auth0/Entra-style
+  `permissions` and `roles` arrays — so a "role" can be expressed as a scope or as a
+  role claim.
+- If you omit `jwks_url` **and** `introspection_url`, TrustGate resolves keys via OIDC
+  discovery, which needs the `issuer` to be a reachable `https://` URL.
+- `client_id` / `client_secret` on an `oauth2` credential are only used for interactive
+  brokering / session mode; pure bearer-token validation needs only `issuer`,
+  `audiences`, `jwks_url`, and `required_scopes`.
+
+## Provider manuals
+
+<CardGroup cols={2}>
+  <Card title="Okta" icon="key" href="/trustgate/concepts/authorization/okta">
+    Custom authorization server, scopes, groups claim, and both credential shapes.
+  </Card>
+  <Card title="Entra ID" icon="microsoft" href="/trustgate/concepts/authorization/entra-id">
+    App registration, exposed API scopes, app roles, and both credential shapes.
+  </Card>
+</CardGroup>

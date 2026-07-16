@@ -1,0 +1,287 @@
+---
+title: "Entra ID"
+description: "End-to-end manual for wiring Microsoft Entra ID (Azure AD) to TrustGate: an app registration with an exposed API scope and app roles feeding OIDC role-based routing and OAuth2 for MCP."
+---
+
+This manual sets up **Microsoft Entra ID** (formerly Azure AD) as the identity provider for
+two TrustGate credentials:
+
+1. **OIDC role-based** — for an `LLM` consumer whose routing is chosen from the token's
+   `roles` (app roles) or `groups` claim ([roles](/trustgate/concepts/roles)).
+2. **OAuth2 for MCP** — for an `MCP` consumer gated by an exposed API scope.
+
+<Note>
+Entra ID issues **v2.0** tokens when the app registration uses the v2 endpoint. TrustGate
+treats an `api://` resource URI and its bare identifier as the same audience, and prefers
+the Entra `oid` claim as the stable subject. Use the values below exactly.
+</Note>
+
+## Prerequisites
+
+- An Entra tenant — note your **Tenant ID** (`Overview → Tenant ID`).
+- Rights to register applications (**App registrations**) and manage
+  **Enterprise applications**.
+- A group or set of users you can assign to an app role.
+
+## The values you will collect
+
+| Placeholder | Where it comes from |
+|---|---|
+| `tenant_id` | **Entra ID → Overview → Tenant ID** |
+| `client_id` | The **Application (client) ID** of your app registration |
+| `client_secret` | **Certificates & secrets → New client secret** |
+| `audience` | The **Application ID URI** — `api://{client_id}` (or the bare `client_id`) |
+| `scope` | A scope you expose under **Expose an API** (e.g. `mcp.access`) |
+
+The endpoints are derived from the tenant:
+
+```text
+issuer   : https://login.microsoftonline.com/{tenant_id}/v2.0
+jwks_url : https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys
+```
+
+<Warning>
+If your app is configured for **v1.0** tokens, the issuer is instead
+`https://sts.windows.net/{tenant_id}/` and the JWKS is
+`https://login.microsoftonline.com/common/discovery/keys`. Prefer v2.0.
+</Warning>
+
+---
+
+## 1. Register the application
+
+<Note>
+Steps use the **Microsoft Entra admin center** at `https://entra.microsoft.com` (the same
+screens exist in the Azure portal under **Microsoft Entra ID**). Paths below are the
+left-hand navigation.
+</Note>
+
+<Steps>
+  <Step title="Create the registration">
+    In the left sidebar go to **Identity → Applications → App registrations** → click
+    **New registration**.
+
+    - **Name**: `trustgate`
+    - **Supported account types**: pick the one that matches your tenant.
+
+    Click **Register**. On the app's **Overview** page copy the **Application (client) ID**
+    and the **Directory (tenant) ID**.
+  </Step>
+  <Step title="Add a client secret">
+    Open the app → left menu **Manage → Certificates & secrets** → **Client secrets** tab →
+    **New client secret**. Set a description and expiry, click **Add**, then copy the secret
+    **Value** immediately (it is shown only once — the *Secret ID* is not the value).
+  </Step>
+</Steps>
+
+## 2. Expose an API scope (for MCP)
+
+<Steps>
+  <Step title="Set the Application ID URI">
+    Open the app → left menu **Manage → Expose an API**. Next to *Application ID URI* click
+    **Add**, accept the default `api://{client_id}`, and **Save**. This URI is your
+    **audience**.
+  </Step>
+  <Step title="Add the scope">
+    Still on **Expose an API**, click **Add a scope**:
+
+    - **Scope name**: `mcp.access`
+    - **Who can consent**: *Admins and users* (or Admins only) as appropriate.
+    - Fill the admin/user consent display name and description.
+    - **State**: Enabled.
+
+    Click **Add scope**. The full scope identifier is `api://{client_id}/mcp.access`.
+  </Step>
+</Steps>
+
+## 3. Define app roles (for role-based routing)
+
+App roles are the cleanest way to drive TrustGate roles; they arrive in the `roles` claim.
+
+<Steps>
+  <Step title="Create the app role">
+    Open the app → left menu **Manage → App roles** → **Create app role**:
+
+    - **Display name**: `Engineering`
+    - **Allowed member types**: *Users/Groups* (and/or *Applications* for M2M).
+    - **Value**: `engineering` — this exact string is what appears in the `roles` claim.
+    - **Description**: anything.
+    - Tick **Do you want to enable this app role?**
+
+    Click **Apply**.
+  </Step>
+  <Step title="Assign users or groups to the role">
+    Assignment happens on the **enterprise application** (the service principal), not the
+    registration. In the left sidebar go to **Identity → Applications → Enterprise
+    applications** → open your `trustgate` app → **Manage → Users and groups** → **Add
+    user/group**. Pick the users/groups, and under **Select a role** choose `Engineering`.
+    Click **Assign**.
+  </Step>
+  <Step title="(Optional) emit a groups claim instead">
+    To route on directory groups instead of app roles, open the **app registration** →
+    **Manage → Token configuration** → **Add groups claim**, pick the group types, and save.
+    The token then carries a `groups` array of group **object IDs** (GUIDs), not names.
+  </Step>
+</Steps>
+
+---
+
+## 4. OIDC role-based credential (LLM)
+
+Attached to a `role_based` `LLM` consumer; the `roles` (or `groups`) claim selects a role.
+
+<Steps>
+  <Step title="Create the auth credential">
+    ```json
+    {
+      "name": "entra-idp-{{$guid}}",
+      "type": "oidc",
+      "enabled": true,
+      "config": {
+        "oidc": {
+          "issuer": "https://login.microsoftonline.com/{{tenant_id}}/v2.0",
+          "audiences": [
+            "api://{{client_id}}"
+          ],
+          "jwks_url": "https://login.microsoftonline.com/{{tenant_id}}/discovery/v2.0/keys",
+          "subject_claim": "oid"
+        }
+      }
+    }
+    ```
+
+    Filled example:
+
+    ```json
+    {
+      "name": "entra-idp",
+      "type": "oidc",
+      "enabled": true,
+      "config": {
+        "oidc": {
+          "issuer": "https://login.microsoftonline.com/8a0e...c9/v2.0",
+          "audiences": ["api://11112222-3333-4444-5555-666677778888"],
+          "jwks_url": "https://login.microsoftonline.com/8a0e...c9/discovery/v2.0/keys",
+          "subject_claim": "oid"
+        }
+      }
+    }
+    ```
+
+    <Note>
+    `subject_claim: "oid"` gives a stable per-tenant user id. `sub` in Entra is pairwise per
+    app and changes across apps.
+    </Note>
+  </Step>
+  <Step title="Attach to a role-based consumer">
+    Create an `LLM` consumer with `routing_mode: role_based`, attach this credential and one
+    or more [roles](/trustgate/concepts/roles). The role's `oidc_mapping` matches the app
+    role value:
+
+    ```json
+    {
+      "name": "engineering",
+      "oidc_mapping": {
+        "match": "any",
+        "rules": [
+          { "claim": "roles", "op": "contains_any", "values": ["engineering"] }
+        ]
+      }
+    }
+    ```
+
+    To match directory groups instead, use `"claim": "groups"` with the group **object
+    IDs** as `values`.
+  </Step>
+</Steps>
+
+## 5. OAuth2 credential (MCP)
+
+Attached to an `MCP` consumer; access is gated by `required_scopes`.
+
+<Steps>
+  <Step title="Choose the token flow">
+    - **Delegated (user) token**: the scope appears in the `scp` claim.
+    - **Application (client credentials) token**: grant an **app role** (application
+      permission) and request `api://{client_id}/.default`; the granted role appears in the
+      `roles` claim.
+
+    TrustGate checks both `scp` and `roles` against `required_scopes`, so either flow works.
+  </Step>
+  <Step title="Grant and consent the permission (client credentials only)">
+    For the application flow, open the **calling** app registration → **Manage → API
+    permissions** → **Add a permission** → **My APIs** → select your `trustgate` API →
+    **Application permissions** → tick the app role → **Add permissions**. Then click
+    **Grant admin consent for your tenant**. Without admin consent the token carries no
+    `roles` and TrustGate rejects it for missing scopes.
+  </Step>
+  <Step title="Create the auth credential">
+    ```json
+    {
+      "name": "entra",
+      "type": "oauth2",
+      "config": {
+        "oauth2": {
+          "issuer": "https://login.microsoftonline.com/{{tenant_id}}/v2.0",
+          "audiences": ["api://{{client_id}}"],
+          "jwks_url": "https://login.microsoftonline.com/{{tenant_id}}/discovery/v2.0/keys",
+          "client_id": "{{client_id}}",
+          "client_secret": "{{client_secret}}",
+          "required_scopes": ["{{scope}}"]
+        }
+      }
+    }
+    ```
+
+    Filled example:
+
+    ```json
+    {
+      "name": "entra",
+      "type": "oauth2",
+      "config": {
+        "oauth2": {
+          "issuer": "https://login.microsoftonline.com/8a0e...c9/v2.0",
+          "audiences": ["api://11112222-3333-4444-5555-666677778888"],
+          "jwks_url": "https://login.microsoftonline.com/8a0e...c9/discovery/v2.0/keys",
+          "client_id": "11112222-3333-4444-5555-666677778888",
+          "client_secret": "••••••••••••",
+          "required_scopes": ["mcp.access"]
+        }
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## 6. Get a test token
+
+Client-credentials (application) flow:
+
+```bash
+curl -s --request POST \
+  "https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=$CLIENT_ID" \
+  -d "client_secret=$CLIENT_SECRET" \
+  -d "scope=api://$CLIENT_ID/.default"
+```
+
+Decode the `access_token` and confirm:
+
+- `iss` = `https://login.microsoftonline.com/{tenant_id}/v2.0`
+- `aud` = `api://{client_id}` (or the bare `client_id`)
+- `roles` (app permissions) or `scp` (delegated) contains your scope/role
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| Audience mismatch | Token `aud` is the bare `client_id` but the credential lists only `api://…` (or vice versa). Add both forms to `audiences` if unsure — TrustGate normalizes the `api://` prefix. |
+| `roles`/`scp` empty | For client credentials you must **grant an app role** and admin-consent it; delegated tokens need the user assigned and consent granted. |
+| Wrong issuer | App is emitting v1.0 tokens (`sts.windows.net`) — switch to v2 or set the v1 issuer/JWKS. |
+| Role never selected | `groups` claim carries object IDs, not names — match on the GUID, or use app-role `roles` values instead. |
+| Config rejected | `required_scopes` contains `openid`/`profile`/`email` — remove them (protocol scopes aren't in access tokens). |
+
+Back to the [Authorization overview](/trustgate/concepts/authorization/overview).
