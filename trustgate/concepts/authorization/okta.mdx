@@ -1,0 +1,283 @@
+---
+title: "Okta"
+description: "End-to-end manual for wiring Okta to TrustGate: a custom authorization server, scopes, and a groups claim feeding OIDC role-based routing and OAuth2 for MCP."
+---
+
+This manual sets up Okta as the identity provider for two TrustGate credentials:
+
+1. **OIDC role-based** — for an `LLM` consumer whose routing is chosen from the token's
+   `groups` claim ([roles](/trustgate/concepts/roles)).
+2. **OAuth2 for MCP** — for an `MCP` consumer gated by a custom scope.
+
+<Note>
+Everything below uses Okta's **custom authorization server** (the `/oauth2/{authServerId}`
+path). The `default` custom auth server ships in every Okta org, including the free
+**Integrator Free Plan** org — ideal for a POC. In production Workforce orgs the custom
+authorization server feature is the **API Access Management** product.
+</Note>
+
+## Prerequisites
+
+- An Okta org — note your domain, e.g. `dev-123456.okta.com`.
+- Admin access to **Security → API** and **Applications**.
+- A group you can route on (e.g. `TrustGate-Engineering`) under **Directory → Groups**.
+
+## The values you will collect
+
+| Placeholder | Where it comes from |
+|---|---|
+| `okta_domain` | Your org host, e.g. `dev-123456.okta.com` |
+| `okta_auth_server_id` | **Security → API → Authorization Servers** (use `default` or a custom id) |
+| `okta_audience` | The *Audience* of that authorization server (default: `api://default`) |
+| `okta_client_id` / `okta_client_secret` | The app integration you create for MCP |
+| `okta_scope` | A custom scope you define on the authorization server |
+
+---
+
+## 1. Authorization server
+
+<Note>
+All steps happen in the **Okta Admin Console** at `https://<your-org>-admin.okta.com`
+(the admin console, not the end-user dashboard). Use the **left sidebar** to navigate.
+</Note>
+
+<Steps>
+  <Step title="Open the authorization servers list">
+    In the left sidebar go to **Security → API**, then open the **Authorization Servers**
+    tab.
+  </Step>
+  <Step title="Pick or create the server">
+    Use the row named **`default`**, or click **Add Authorization Server** (top right) and
+    fill:
+
+    - **Name**: `trustgate`
+    - **Audience**: `api://trustgate`
+    - **Description**: anything.
+
+    Click **Save**.
+  </Step>
+  <Step title="Record the issuer and audience">
+    Open the server and read the **Settings** tab. Copy the **Issuer URI**
+    (`https://{okta_domain}/oauth2/{okta_auth_server_id}`) and the **Audience** — you will
+    paste both into the TrustGate credential. The keys endpoint is the issuer plus
+    `/v1/keys`:
+
+    ```text
+    https://{okta_domain}/oauth2/{okta_auth_server_id}/v1/keys
+    ```
+  </Step>
+</Steps>
+
+## 2. Add a custom scope (for MCP)
+
+Stay in **Security → API → Authorization Servers → your server**; the tabs below are on
+that server's detail page.
+
+<Steps>
+  <Step title="Create the scope">
+    Open the **Scopes** tab → click **Add Scope**:
+
+    - **Name**: `mcp.access`
+    - **Display phrase**: `MCP access`
+    - Tick **Include in public metadata**.
+
+    Click **Create**.
+  </Step>
+  <Step title="Add an access policy">
+    Open the **Access Policies** tab → click **Add Policy**:
+
+    - **Name**: `trustgate`
+    - **Assign to clients**: *All clients* (or select your app once it exists).
+
+    Click **Create Policy**.
+  </Step>
+  <Step title="Add a rule to the policy">
+    On the policy you just created click **Add Rule**:
+
+    - **Rule name**: `m2m`
+    - **Grant type**: tick **Client Credentials** (also tick **Authorization Code** if you
+      want an interactive user flow).
+    - **Scopes requested**: *Any scopes* (or **The following scopes** → `mcp.access`).
+
+    Click **Create Rule**.
+
+    <Warning>
+    A brand-new custom authorization server (including `default` on the free org) has **no
+    access policy** — without a policy **and** a rule, Okta will not mint any token.
+    </Warning>
+  </Step>
+</Steps>
+
+## 3. Add a groups claim (for role-based routing)
+
+For OIDC role-based routing, the token must carry the claim you match roles on.
+
+<Steps>
+  <Step title="Create a group (if you don't have one)">
+    In the left sidebar go to **Directory → Groups** → **Add Group**. Name it
+    `TrustGate-Engineering`, save, then open it and use **Assign people** to add users.
+  </Step>
+  <Step title="Add the claim">
+    Back in **Security → API → Authorization Servers → your server**, open the **Claims**
+    tab → **Add Claim**:
+
+    - **Name**: `groups`
+    - **Include in token type**: `Access Token` → `Always` (repeat for `ID Token` if you
+      also send ID tokens)
+    - **Value type**: `Groups`
+    - **Filter**: `Matches regex` `.*` (or `Starts with` `TrustGate-` to scope it)
+
+    Click **Create**.
+  </Step>
+  <Step title="Verify">
+    After you mint a token (below), decode it and confirm the `groups` array carries the
+    user's group names.
+  </Step>
+</Steps>
+
+---
+
+## 4. OIDC role-based credential (LLM)
+
+This credential is attached to a `role_based` `LLM` consumer. The token's `groups` claim
+is matched against each role's `oidc_mapping`.
+
+<Steps>
+  <Step title="Create the auth credential">
+    ```json
+    {
+      "name": "okta-idp-{{$guid}}",
+      "type": "oidc",
+      "enabled": true,
+      "config": {
+        "oidc": {
+          "issuer": "https://{{okta_domain}}/oauth2/{{okta_auth_server_id}}",
+          "audiences": [
+            "{{okta_audience}}"
+          ],
+          "jwks_url": "https://{{okta_domain}}/oauth2/{{okta_auth_server_id}}/v1/keys",
+          "subject_claim": "sub"
+        }
+      }
+    }
+    ```
+
+    Filled example:
+
+    ```json
+    {
+      "name": "okta-idp",
+      "type": "oidc",
+      "enabled": true,
+      "config": {
+        "oidc": {
+          "issuer": "https://dev-123456.okta.com/oauth2/default",
+          "audiences": ["api://default"],
+          "jwks_url": "https://dev-123456.okta.com/oauth2/default/v1/keys",
+          "subject_claim": "sub"
+        }
+      }
+    }
+    ```
+  </Step>
+  <Step title="Attach to a role-based consumer">
+    Create an `LLM` consumer with `routing_mode: role_based`, then attach this credential
+    and one or more [roles](/trustgate/concepts/roles). A role's `oidc_mapping` matches the
+    `groups` claim:
+
+    ```json
+    {
+      "name": "engineering",
+      "oidc_mapping": {
+        "match": "any",
+        "rules": [
+          { "claim": "groups", "op": "contains_any", "values": ["TrustGate-Engineering"] }
+        ]
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## 5. OAuth2 credential (MCP)
+
+This credential is attached to an `MCP` consumer. Access is gated by `required_scopes`.
+
+<Steps>
+  <Step title="Create the client app">
+    In the left sidebar go to **Applications → Applications** → click **Create App
+    Integration**. Choose **API Services** (this is the client-credentials app type) →
+    **Next**.
+
+    - **App integration name**: `trustgate-mcp`
+
+    Click **Save**, then on the app's **General** tab copy the **Client ID** and the
+    **Client secret** (under *Client Credentials*). Make sure the access-policy rule from
+    step 2 permits this client and the `mcp.access` scope.
+  </Step>
+  <Step title="Create the auth credential">
+    ```json
+    {
+      "name": "okta",
+      "type": "oauth2",
+      "config": {
+        "oauth2": {
+          "issuer": "https://{{okta_domain}}/oauth2/{{okta_auth_server_id}}",
+          "audiences": ["{{okta_audience}}"],
+          "jwks_url": "https://{{okta_domain}}/oauth2/{{okta_auth_server_id}}/v1/keys",
+          "client_id": "{{okta_client_id}}",
+          "client_secret": "{{okta_client_secret}}",
+          "required_scopes": ["{{okta_scope}}"]
+        }
+      }
+    }
+    ```
+
+    Filled example:
+
+    ```json
+    {
+      "name": "okta",
+      "type": "oauth2",
+      "config": {
+        "oauth2": {
+          "issuer": "https://dev-123456.okta.com/oauth2/default",
+          "audiences": ["api://default"],
+          "jwks_url": "https://dev-123456.okta.com/oauth2/default/v1/keys",
+          "client_id": "0oaXXXXXXXXXXXX",
+          "client_secret": "••••••••••••",
+          "required_scopes": ["mcp.access"]
+        }
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## 6. Get a test token
+
+```bash
+curl -s --request POST \
+  "https://dev-123456.okta.com/oauth2/default/v1/token" \
+  -u "$OKTA_CLIENT_ID:$OKTA_CLIENT_SECRET" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials&scope=mcp.access"
+```
+
+Decode the `access_token` and confirm:
+
+- `iss` = `https://dev-123456.okta.com/oauth2/default`
+- `aud` = `api://default`
+- `scp` = `["mcp.access"]`
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| `401` / no token minted | No access policy/rule on the authorization server (step 2). |
+| `missing required scopes` | The client wasn't granted `mcp.access`, or you requested a different `scope`. |
+| Audience mismatch | `audiences` in the credential doesn't equal the token's `aud` (`api://default` on the `default` server). |
+| Role never selected | `groups` claim not added to the token type you send, or filter excludes the group (step 3). |
+| Config rejected | `required_scopes` contains `openid`/`profile`/`email` — remove them (protocol scopes aren't in access tokens). |
+
+Next: [Entra ID](/trustgate/concepts/authorization/entra-id).
