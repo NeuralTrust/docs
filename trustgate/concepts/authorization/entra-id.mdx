@@ -1,14 +1,17 @@
 ---
 title: "Entra ID"
-description: "End-to-end manual for wiring Microsoft Entra ID (Azure AD) to TrustGate: an app registration with an exposed API scope and app roles feeding OIDC role-based routing and OAuth2 for MCP."
+description: "End-to-end manual for wiring Microsoft Entra ID (Azure AD) to TrustGate: an app registration with an exposed API scope and app roles feeding OIDC identity-based routing and OAuth2 for MCP."
 ---
 
 This manual sets up **Microsoft Entra ID** (formerly Azure AD) as the identity provider for
-two TrustGate credentials:
+two TrustGate patterns in the NeuralTrust app (**Agent Gateway → Identity** /
+**Consumers**):
 
-1. **OIDC role-based** — for an `LLM` consumer whose routing is chosen from the token's
-   `roles` (app roles) or `groups` claim ([roles](/trustgate/concepts/roles)).
-2. **OAuth2 for MCP** — for an `MCP` consumer gated by an exposed API scope.
+1. **OIDC · Identity-based LLM** — an LLM consumer whose routing is chosen from the
+   token's `roles` (app roles) or `groups` claim ([roles](/trustgate/concepts/roles)).
+2. **OAuth2 · MCP** — an MCP consumer gated by an exposed API scope. Interactive agents
+   (Cursor, etc.) use TrustGate's authorization-code broker; optional client-credentials
+   tokens are only for curl checks.
 
 <Note>
 Entra ID issues **v2.0** tokens when the app registration uses the v2 endpoint. TrustGate
@@ -22,6 +25,8 @@ the Entra `oid` claim as the stable subject. Use the values below exactly.
 - Rights to register applications (**App registrations**) and manage
   **Enterprise applications**.
 - A group or set of users you can assign to an app role.
+- For Cursor / agent MCP login: the public MCP base URL of your gateway (e.g.
+  `https://{gateway_slug}.mcp.neuraltrust.ai`), so you can register the OAuth redirect URI.
 
 ## The values you will collect
 
@@ -32,6 +37,7 @@ the Entra `oid` claim as the stable subject. Use the values below exactly.
 | `client_secret` | **Certificates & secrets → New client secret** |
 | `audience` | The **Application ID URI** — `api://{client_id}` (or the bare `client_id`) |
 | `scope` | A scope you expose under **Expose an API** (e.g. `mcp.access`) |
+| `mcp_base_url` | Public MCP host for the gateway, with no path |
 
 The endpoints are derived from the tenant:
 
@@ -63,6 +69,9 @@ left-hand navigation.
 
     - **Name**: `trustgate`
     - **Supported account types**: pick the one that matches your tenant.
+    - **Redirect URI** (optional at create time; required for interactive MCP): platform
+      **Web**, URI `{mcp_base_url}/oauth/callback`  
+      (example: `https://default-xxxxxxxx.mcp.neuraltrust.ai/oauth/callback`)
 
     Click **Register**. On the app's **Overview** page copy the **Application (client) ID**
     and the **Directory (tenant) ID**.
@@ -71,6 +80,16 @@ left-hand navigation.
     Open the app → left menu **Manage → Certificates & secrets** → **Client secrets** tab →
     **New client secret**. Set a description and expiry, click **Add**, then copy the secret
     **Value** immediately (it is shown only once — the *Secret ID* is not the value).
+  </Step>
+  <Step title="Confirm the redirect URI (for Cursor / MCP)">
+    If you skipped it at registration, open **Manage → Authentication** → **Add a
+    platform** → **Web**, and add:
+
+    ```text
+    {mcp_base_url}/oauth/callback
+    ```
+
+    Match character-for-character (no trailing slash). Save.
   </Step>
 </Steps>
 
@@ -94,7 +113,7 @@ left-hand navigation.
   </Step>
 </Steps>
 
-## 3. Define app roles (for role-based routing)
+## 3. Define app roles (for identity-based LLM routing)
 
 App roles are the cleanest way to drive TrustGate roles; they arrive in the `roles` claim.
 
@@ -126,137 +145,132 @@ App roles are the cleanest way to drive TrustGate roles; they arrive in the `rol
 
 ---
 
-## 4. OIDC role-based credential (LLM)
+## 4. OIDC identity-based routing (LLM)
 
-Attached to a `role_based` `LLM` consumer; the `roles` (or `groups`) claim selects a role.
+Use this when an LLM consumer should pick registries and models from the caller's Entra
+token (app role `roles`, or directory `groups`). Everything below is done in the
+NeuralTrust app under **Agent Gateway** — no API payloads.
+
+Recommended order: **Auth → Role → Consumer**.
 
 <Steps>
-  <Step title="Create the auth credential">
-    ```json
-    {
-      "name": "entra-idp-{{$guid}}",
-      "type": "oidc",
-      "enabled": true,
-      "config": {
-        "oidc": {
-          "issuer": "https://login.microsoftonline.com/{{tenant_id}}/v2.0",
-          "audiences": [
-            "api://{{client_id}}"
-          ],
-          "jwks_url": "https://login.microsoftonline.com/{{tenant_id}}/discovery/v2.0/keys",
-          "subject_claim": "oid"
-        }
-      }
-    }
-    ```
+  <Step title="Create an OIDC auth">
+    Go to **Agent Gateway → Identity → Auth → New Auth**.
 
-    Filled example:
+    - **Type**: `OIDC`
+    - **Name**: e.g. `entra-idp`
+    - **Status**: Active
+    - **Issuer**: `https://login.microsoftonline.com/{tenant_id}/v2.0`
+    - **JWKS URL**: `https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys`
+    - **Audiences**: `api://{client_id}` (add the bare `{client_id}` as well if your
+      tokens use that form)
+    - **Subject claim**: `oid`  
+      (`oid` is a stable per-tenant user id; Entra `sub` is pairwise per app and changes
+      across apps)
 
-    ```json
-    {
-      "name": "entra-idp",
-      "type": "oidc",
-      "enabled": true,
-      "config": {
-        "oidc": {
-          "issuer": "https://login.microsoftonline.com/8a0e...c9/v2.0",
-          "audiences": ["api://11112222-3333-4444-5555-666677778888"],
-          "jwks_url": "https://login.microsoftonline.com/8a0e...c9/discovery/v2.0/keys",
-          "subject_claim": "oid"
-        }
-      }
-    }
-    ```
-
-    <Note>
-    `subject_claim: "oid"` gives a stable per-tenant user id. `sub` in Entra is pairwise per
-    app and changes across apps.
-    </Note>
+    Click **Create Auth**.
   </Step>
-  <Step title="Attach to a role-based consumer">
-    Create an `LLM` consumer with `routing_mode: role_based`, attach this credential and one
-    or more [roles](/trustgate/concepts/roles). The role's `oidc_mapping` matches the app
-    role value:
+  <Step title="Create a role that matches Entra app roles">
+    Still under **Identity**, open the **Roles** tab → **New Role**.
 
-    ```json
-    {
-      "name": "engineering",
-      "oidc_mapping": {
-        "match": "any",
-        "rules": [
-          { "claim": "roles", "op": "contains_any", "values": ["engineering"] }
-        ]
-      }
-    }
-    ```
+    - **Role name**: e.g. `engineering`
+    - **Claim**: `roles` (or `groups` if you emit directory groups instead)
+    - **Value**: the app role **Value** from step 3, e.g. `engineering`  
+      (for directory groups, use the group **object ID** GUID, not the display name)
+    - **Resources**: **Add resource** and select the LLM registries (and optional models)
+      this role may reach
 
-    To match directory groups instead, use `"claim": "groups"` with the group **object
-    IDs** as `values`.
+    Click **Create Role**.
+  </Step>
+  <Step title="Create an LLM consumer with Identity-based routing">
+    Go to **Agent Gateway → Consumers → Consumer**.
+
+    On **General**:
+
+    - **Name**: e.g. `entra-llm`
+    - **Protocol**: `LLM`
+    - **Authentication → Method**: `OIDC`
+    - **OIDC provider**: select the auth from the first step
+
+    On **Routing**:
+
+    - Switch from **Static** to **Identity-based**
+    - **Roles**: select the role(s) you created (at least one)
+
+    Click **Create Consumer**.
+
+    For an existing consumer, use the **Auth** and **Routing** tabs the same way, then
+    **Save changes**. With Identity-based routing, registries come from the role's
+    resources — not from a static list on the consumer.
   </Step>
 </Steps>
 
-## 5. OAuth2 credential (MCP)
+## 5. OAuth2 for MCP
 
-Attached to an `MCP` consumer; access is gated by `required_scopes`.
+Use this when Cursor (or another MCP client) should log in through Entra. Access is gated
+by the exposed API scope (for example `mcp.access`).
+
+TrustGate accepts either:
+
+- **Delegated (user) tokens** — scope appears in the `scp` claim (what Cursor uses via the
+  authorization-code broker).
+- **Application (client credentials) tokens** — grant an **app role** as an application
+  permission, request `api://{client_id}/.default`; the granted role appears in `roles`.
+  TrustGate matches both `scp` and `roles` against **Required scopes**.
 
 <Steps>
-  <Step title="Choose the token flow">
-    - **Delegated (user) token**: the scope appears in the `scp` claim.
-    - **Application (client credentials) token**: grant an **app role** (application
-      permission) and request `api://{client_id}/.default`; the granted role appears in the
-      `roles` claim.
+  <Step title="Grant API permission (client-credentials / M2M only)">
+    Skip this step for Cursor. For curl M2M tests: open the **calling** app registration →
+    **Manage → API permissions** → **Add a permission** → **My APIs** → select your
+    `trustgate` API → **Application permissions** → tick the app role → **Add
+    permissions**. Then **Grant admin consent for your tenant**. Without admin consent the
+    token carries no `roles` and TrustGate rejects it for missing scopes.
+  </Step>
+  <Step title="Create an OAuth2 auth in the app">
+    Go to **Agent Gateway → Identity → Auth → New Auth**.
 
-    TrustGate checks both `scp` and `roles` against `required_scopes`, so either flow works.
+    - **Type**: `OAuth2`
+    - **Name**: e.g. `entra-mcp`
+    - **Status**: Active
+    - **Setup**: **Interactive login · IdP with discovery (Okta, Entra ID)**
+    - **Issuer**: `https://login.microsoftonline.com/{tenant_id}/v2.0`
+    - **Audiences**: `api://{client_id}`
+    - **Client ID** / **Client secret**: from the app registration
+    - **Session mode**: **Disabled**
+    - **Required scopes**: `mcp.access` (the short scope name — not
+      `openid` / `profile` / `email`)
+
+    Leave **Token validation · advanced** closed unless you want to pin **JWKS URL** to
+    `https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys`.
+
+    Click **Create Auth**.
   </Step>
-  <Step title="Grant and consent the permission (client credentials only)">
-    For the application flow, open the **calling** app registration → **Manage → API
-    permissions** → **Add a permission** → **My APIs** → select your `trustgate` API →
-    **Application permissions** → tick the app role → **Add permissions**. Then click
-    **Grant admin consent for your tenant**. Without admin consent the token carries no
-    `roles` and TrustGate rejects it for missing scopes.
+  <Step title="Create an MCP consumer and attach the auth">
+    Go to **Agent Gateway → Consumers → Consumer**.
+
+    - **Name**: e.g. `entra-mcp`
+    - **Protocol**: `MCP`
+    - **Authentication → Method**: `OAuth2` (MCP does not use OIDC)
+    - **OAuth client**: select the auth from the previous step
+
+    Click **Create Consumer**.
   </Step>
-  <Step title="Create the auth credential">
-    ```json
-    {
-      "name": "entra",
-      "type": "oauth2",
-      "config": {
-        "oauth2": {
-          "issuer": "https://login.microsoftonline.com/{{tenant_id}}/v2.0",
-          "audiences": ["api://{{client_id}}"],
-          "jwks_url": "https://login.microsoftonline.com/{{tenant_id}}/discovery/v2.0/keys",
-          "client_id": "{{client_id}}",
-          "client_secret": "{{client_secret}}",
-          "required_scopes": ["{{scope}}"]
-        }
-      }
-    }
+  <Step title="Connect from Cursor">
+    Open the consumer → **Connect** tab and copy the Cursor URL:
+
+    ```text
+    https://{mcpHost}/{consumer_slug}/mcp
     ```
 
-    Filled example:
-
-    ```json
-    {
-      "name": "entra",
-      "type": "oauth2",
-      "config": {
-        "oauth2": {
-          "issuer": "https://login.microsoftonline.com/8a0e...c9/v2.0",
-          "audiences": ["api://11112222-3333-4444-5555-666677778888"],
-          "jwks_url": "https://login.microsoftonline.com/8a0e...c9/discovery/v2.0/keys",
-          "client_id": "11112222-3333-4444-5555-666677778888",
-          "client_secret": "••••••••••••",
-          "required_scopes": ["mcp.access"]
-        }
-      }
-    }
-    ```
+    Add it as an MCP server in Cursor and complete the Entra login. Confirm the Web
+    redirect URI from step 1 is registered, or Entra will reject the callback.
   </Step>
 </Steps>
 
-## 6. Get a test token
+## 6. Get a test token (optional M2M)
 
-Client-credentials (application) flow:
+Client credentials are **not** what Cursor uses. Use this only to decode a token and
+confirm issuer, audience, and scopes:
 
 ```bash
 curl -s --request POST \
@@ -278,10 +292,11 @@ Decode the `access_token` and confirm:
 
 | Symptom | Likely cause |
 |---|---|
-| Audience mismatch | Token `aud` is the bare `client_id` but the credential lists only `api://…` (or vice versa). Add both forms to `audiences` if unsure — TrustGate normalizes the `api://` prefix. |
+| Audience mismatch | Token `aud` is the bare `client_id` but the auth lists only `api://…` (or vice versa). Add both forms to **Audiences** if unsure — TrustGate normalizes the `api://` prefix. |
 | `roles`/`scp` empty | For client credentials you must **grant an app role** and admin-consent it; delegated tokens need the user assigned and consent granted. |
+| Redirect URI mismatch on login | Add `{mcp_base_url}/oauth/callback` under **Authentication → Web** on the app registration. |
 | Wrong issuer | App is emitting v1.0 tokens (`sts.windows.net`) — switch to v2 or set the v1 issuer/JWKS. |
-| Role never selected | `groups` claim carries object IDs, not names — match on the GUID, or use app-role `roles` values instead. |
-| Config rejected | `required_scopes` contains `openid`/`profile`/`email` — remove them (protocol scopes aren't in access tokens). |
+| Role never selected | `groups` claim carries object IDs, not names — put the GUID in the role **Value**, or match app-role `roles` values instead. |
+| Config rejected | **Required scopes** contains `openid`/`profile`/`email`/`offline_access` — remove them. |
 
 Back to the [Authorization overview](/trustgate/concepts/authorization/overview).
