@@ -1,15 +1,12 @@
 ---
 title: Configuration
-description: Minimal chart values for Hybrid and managed datastores.
+description: Hybrid chart values and customer-managed PostgreSQL and Redis.
 ---
 
-Use the examples shipped with the NeuralTrust Platform chart as canonical inputs:
+Canonical chart inputs:
 
-- `values-required.yaml`: minimal Hybrid contract.
-- `values-openshift.yaml`: Hybrid with native OpenShift Routes.
-- The concise Hybrid and managed-store examples on this page.
-
-Copy the minimal file before editing:
+- `values-required.yaml` — minimal Hybrid
+- `values-openshift.yaml` — Hybrid with OpenShift Routes
 
 ```bash
 cp values-required.yaml values-hybrid.yaml
@@ -17,37 +14,17 @@ cp values-required.yaml values-hybrid.yaml
 
 ## Minimal Hybrid
 
+Set `deploymentMode: hybrid`, point at **your** PostgreSQL and Redis (`deploy: false`), and provide the SaaS OTLP token for metadata export.
+
 ```yaml
 global:
   deploymentMode: hybrid
   platform: kubernetes
   domain: platform.example.com
   clickstack:
-    authToken: "<CLICKSTACK_OTLP_TOKEN>"
-
-dataagent:
-  tenantId: ""
-  enrolmentToken: ""
-```
-
-Hybrid exports metadata over token-authenticated OTLP while raw payloads remain in customer PostgreSQL. Reference the OTLP credential from a Secret in tracked values:
-
-```yaml
-global:
-  clickstack:
     existingSecret:
       name: clickstack-otlp-token
       key: OTEL_EXPORTER_OTLP_HEADERS
-```
-
-DataAgent remains absent until `tenantId` and either `enrolmentToken` or `enrolmentTokenExistingSecret.name` are set.
-
-## Managed stores
-
-Configure `global.postgresql` and `global.redis`; all relevant Hybrid workloads use the shared secrets.
-
-```yaml
-global:
   postgresql:
     deploy: false
     host: postgres.example.com
@@ -64,11 +41,32 @@ global:
     tls: "true"
     existingSecret:
       name: hybrid-redis
+
+dataagent:
+  tenantId: ""
+  enrolmentToken: ""
 ```
 
-Pre-create service databases/roles when using managed PostgreSQL; Helm does not create users on managed PostgreSQL.
+DataAgent stays off until `tenantId` and an enrollment token (or Secret) are set. After install, connect the data-plane endpoint in [Platform settings → Advanced](/platform/advanced).
 
-## Ingress and storage
+## Managed stores
+
+Do not run PostgreSQL or Redis in the cluster. Pre-create one shared database/role and Redis; Helm does not create managed-service users.
+
+| Store | Minimum size |
+| --- | --- |
+| **PostgreSQL** | **2 vCPU**, **4 GiB RAM**, **20 GiB** storage |
+| **Redis** | **1 GiB** memory |
+
+| Provider | PostgreSQL | Redis |
+| --- | --- | --- |
+| AWS | RDS/Aurora `db.t4g.medium`, 20 GiB+ | ElastiCache `cache.t4g.small` |
+| GCP | Cloud SQL `db-custom-2-4096`, 20 GiB+ | Memorystore **1 GiB** |
+| Azure | Flexible Server **2 vCores / 4 GiB**, 20 GiB+ | Cache for Redis **C1** (1 GiB)+ |
+
+Reach both over private networking from the cluster. Secret key contracts: [Secrets](/neuraltrust/deployment/secrets).
+
+## Ingress
 
 ```yaml
 global:
@@ -81,7 +79,7 @@ global:
       certificateArn: arn:aws:acm:region:account:certificate/id
 ```
 
-Generated hosts use `global.domain`. Set component ingress hosts only when generated names do not fit your DNS design. Kubernetes ingress is independent of the [web app custom domain](/platform/custom-domain).
+Hosts are derived from `global.domain`. Cluster storage is only for optional chart components — not for PostgreSQL or Redis.
 
 ## Render before install
 
@@ -92,4 +90,4 @@ helm template neuraltrust-platform \
   -f values-hybrid.yaml
 ```
 
-The chart validates mode names, Hybrid ClickStack credentials, DataAgent enrollment, and the `data-plane-api` backend. See [Feature flags](/neuraltrust/deployment/feature-flags) and [Secrets](/neuraltrust/deployment/secrets).
+See [Feature flags](/neuraltrust/deployment/feature-flags) and [Secrets](/neuraltrust/deployment/secrets).

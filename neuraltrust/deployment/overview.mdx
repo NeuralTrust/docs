@@ -1,39 +1,48 @@
 ---
 title: Overview
-description: NeuralTrust deployment architecture, workloads, and data flows.
+description: NeuralTrust SaaS and Hybrid architecture — how the control plane and data plane connect.
 ---
 
-NeuralTrust supports **SaaS** and **Hybrid** deployments. SaaS is operated by NeuralTrust. Hybrid uses the `neuraltrust-platform` Helm chart with `global.deploymentMode: hybrid`.
+NeuralTrust supports **SaaS** and **Hybrid**. SaaS is fully operated by NeuralTrust. Hybrid runs the request-path **data plane** in your Kubernetes cluster and keeps the **control plane** on NeuralTrust SaaS.
 
-## SaaS and Hybrid architecture
+## Architecture
 
 <img
   src="/images/static/img/platform-architecture.svg"
-  alt="NeuralTrust SaaS and Hybrid architecture showing control and data planes, metadata export to ClickHouse Cloud, raw payload storage in customer PostgreSQL, and authorized retrieval through DataAgent and DataBridge."
+  alt="NeuralTrust SaaS control plane connected to a customer Hybrid data plane: TrustGate and TrustGuard on the request path, metadata export to SaaS, raw payloads in customer PostgreSQL, and optional DataAgent retrieval."
 />
 
-This simplified topology focuses on the primary request, telemetry, and retrieval paths. The Hybrid data-plane API is omitted.
-
-In Hybrid, TrustGate proxy/MCP, TrustGuard runtime, Firewall, the data-plane API, and optionally DataAgent run in the customer cluster. Their control planes, the app/control-plane API, DataBridge, SaaS ClickStack collector, ClickHouse, and AlertEngine remain on NeuralTrust SaaS.
-
-Hybrid exports **metadata only** over OTLP. Raw prompts and responses stay in the customer PostgreSQL, whether deployed in-cluster or provided as a managed service. DataAgent is enrollment-gated and performs authorized outbound retrieval from PostgreSQL through DataBridge when a user requests raw data. TrustGate and TrustGuard configuration sync is optional.
-
-## Workload placement
-
-| Workload | SaaS | Hybrid customer cluster |
+| Plane | Where it runs | What you care about |
 | --- | --- | --- |
-| TrustGate data plane (proxy/MCP), TrustGuard data plane | Hosted | Yes |
-| TrustGate and TrustGuard control planes | Hosted | SaaS |
-| Firewall | Hosted | Optional, default on |
-| Data-plane API | Not deployed | Yes |
-| DataAgent / SaaS DataBridge | N/A | Optional / SaaS |
-| App and control-plane API | Hosted | SaaS |
-| ClickStack collector, ClickHouse, DataCore, AlertEngine | Hosted | SaaS |
-| PostgreSQL and Redis | Hosted | Shared local or managed stores |
+| **Control plane** | NeuralTrust SaaS | Console, configuration, analytics |
+| **Data plane** | Your cluster (Hybrid) | TrustGate, TrustGuard, optional Firewall, data-plane API, optional DataAgent |
 
-## Install the chart
+## How the planes connect
 
-Start from the Hybrid example:
+Hybrid needs a few outbound links from your cluster to SaaS. Raw prompts and responses stay in **your** PostgreSQL.
+
+```text
+ Your cluster (data plane)              NeuralTrust SaaS (control plane)
+ ┌─────────────────────────┐            ┌────────────────────────────┐
+ │ TrustGate  → TrustGuard │  metadata  │                            │
+ │ (+ Firewall, optional)  │ ─────────▶ │  Console / analytics       │
+ │                         │   (OTLP)   │                            │
+ │ Data-plane API ◀───────────────────▶ │  Config / sync             │
+ │ DataAgent (optional) ──────────────▶ │  Authorized retrieval      │
+ └───────────┬─────────────┘            └────────────────────────────┘
+             │
+             ▼
+    Your PostgreSQL + Redis
+```
+
+1. **Traffic path** — Clients hit TrustGate in your cluster; TrustGate calls TrustGuard (and Firewall when enabled) on the request path.
+2. **Metadata** — Runtimes export metadata over OTLP to SaaS. Payloads are not exported.
+3. **Control link** — After install, connect the data-plane API endpoint in [Platform settings → Advanced](/platform/advanced) so SaaS can sync and manage the deployment.
+4. **Optional retrieval** — With DataAgent enrolled, SaaS can request specific raw records from your PostgreSQL through an authorized bridge.
+
+PostgreSQL and Redis are **customer-managed** (not installed in the cluster). See [Configuration](/neuraltrust/deployment/configuration#managed-stores) for sizes.
+
+## Install Hybrid
 
 ```bash
 cp values-required.yaml values-hybrid.yaml
@@ -44,7 +53,7 @@ helm upgrade --install neuraltrust-platform \
   -f values-hybrid.yaml
 ```
 
-Edit the copied file for the target environment. See [Secrets](/neuraltrust/deployment/secrets) and your [provider guide](#provider-guides) before installing.
+Then follow [Configuration](/neuraltrust/deployment/configuration), [Secrets](/neuraltrust/deployment/secrets), and your [provider guide](#provider-guides).
 
 ## Provider guides
 

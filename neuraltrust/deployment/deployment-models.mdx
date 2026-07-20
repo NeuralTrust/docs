@@ -1,37 +1,45 @@
 ---
 title: Deployment models
-description: Choose between SaaS and Hybrid deployment models.
+description: Choose between SaaS and Hybrid.
 ---
 
-## Model comparison
+## Comparison
 
-| Model | Control plane | Runtime | Analytics | Helm setting |
-| --- | --- | --- | --- | --- |
-| **SaaS** | NeuralTrust SaaS | NeuralTrust SaaS | NeuralTrust SaaS | None |
-| **Hybrid** | NeuralTrust SaaS | Your Kubernetes cluster | Metadata in SaaS ClickHouse; raw payloads in customer PostgreSQL | `global.deploymentMode: hybrid` |
+| | **SaaS** | **Hybrid** |
+| --- | --- | --- |
+| Control plane | NeuralTrust | NeuralTrust |
+| Data plane (TrustGate / TrustGuard) | NeuralTrust | Your Kubernetes cluster |
+| Raw payloads | NeuralTrust | Your PostgreSQL |
+| Metadata / analytics | NeuralTrust | Exported to NeuralTrust (OTLP) |
+| Helm | None | `global.deploymentMode: hybrid` |
 
-Only **Hybrid** is a Helm deployment mode. Do not set `global.deploymentMode: saas`.
+Only **Hybrid** uses the Platform chart. Do not set `global.deploymentMode: saas`.
 
 ## SaaS
 
-NeuralTrust operates the app, APIs, TrustGate, TrustGuard, Firewall, databases, collector, and analytics. There is no chart to install.
+NeuralTrust operates both planes. There is nothing to install in your cluster.
 
 ## Hybrid
 
-Hybrid keeps request-path workloads in your cluster while NeuralTrust operates their control planes and analytics services.
+You run the data plane; NeuralTrust runs the control plane.
 
-- TrustGate proxy/MCP and TrustGuard data plane run locally.
-- Firewall is optional and enabled by default.
-- The data-plane API runs locally.
-- PostgreSQL and Redis are shared by the hybrid workloads; the chart can deploy them or connect to managed services.
-- DataAgent renders only after `tenantId` and a SaaS-issued enrollment token are configured.
-- Metadata is exported to SaaS ClickStack over OTLP. Raw prompts and responses remain in customer PostgreSQL.
-- Authorized DataAgent/DataBridge reads can return requested local records to the SaaS application.
+**In your cluster:** TrustGate, TrustGuard, optional Firewall, data-plane API, and optionally DataAgent — plus connectivity to **your** PostgreSQL and Redis.
 
-Raw payloads remain local except for records explicitly requested through authorized DataAgent/DataBridge retrieval.
+**On NeuralTrust SaaS:** the console and control plane that configure and observe that data plane.
 
-## Connectivity
+**Between the planes:**
 
-Hybrid requires outbound HTTPS for image pulls, SaaS configuration/enrollment, the DataBridge connection when DataAgent is enabled, and OTLP export when ClickStack is enabled. It also requires access to configured LLM upstreams.
+- Outbound OTLP for metadata (payloads stay local)
+- Data-plane API linked from the console ([Advanced](/platform/advanced))
+- Optional DataAgent enrollment for authorized raw-record retrieval
 
-See the [architecture overview](/neuraltrust/deployment/overview) for complete workload placement.
+See [Overview](/neuraltrust/deployment/overview) for the connection diagram and [Configuration](/neuraltrust/deployment/configuration) for chart values and store sizes.
+
+## Connectivity checklist
+
+From the Hybrid cluster you need outbound HTTPS to:
+
+- The container registry (or your mirror)
+- NeuralTrust SaaS (metadata export, enrollment / sync)
+- Your LLM upstreams
+- Your managed PostgreSQL and Redis

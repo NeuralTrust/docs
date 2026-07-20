@@ -1,36 +1,34 @@
 ---
 title: Hybrid
-description: Install Hybrid runtime workloads on OpenShift.
+description: Install the Hybrid data plane on OpenShift.
 ---
 
 ## Values
 
-Copy chart `values-openshift.yaml` and add the Hybrid OTLP Secret reference:
+Start from `values-openshift.yaml`:
 
 ```yaml
 global:
   deploymentMode: hybrid
   platform: openshift
   domain: apps.example.com
-  imageRegistry: ""
-  storageClass: ""
-  autoGenerateSecrets: true
-  preserveExistingSecrets: false
-  security:
-    allowInsecureImages: true
   ingress:
     provider: openshift
   clickstack:
     existingSecret:
       name: clickstack-otlp-token
       key: OTEL_EXPORTER_OTLP_HEADERS
+  postgresql:
+    deploy: false
+  redis:
+    deploy: false
 
 dataagent:
   tenantId: ""
   enrolmentToken: ""
 ```
 
-Create `clickstack-otlp-token` and the registry pull Secret before installation. See [Secrets](/neuraltrust/deployment/secrets).
+Create `clickstack-otlp-token`, the registry Secret, and your managed stores ([Configuration](/neuraltrust/deployment/configuration), [Secrets](/neuraltrust/deployment/secrets)).
 
 ## Install
 
@@ -43,26 +41,12 @@ helm upgrade --install neuraltrust-platform \
 oc get pods,route -n neuraltrust
 ```
 
-If component service accounts cannot pull images, link `gcr-secret` to the affected service account with `oc secrets link <service-account> gcr-secret --for=pull`.
+Link `gcr-secret` to service accounts that need pull access if pods fail image pulls.
 
 ## DNS and TLS
 
-Inspect Route hosts:
-
 ```bash
 oc get route -n neuraltrust
-oc describe route -n neuraltrust
 ```
 
-When hosts are under the cluster wildcard, the router DNS and wildcard certificate may already cover them. For custom hosts, configure DNS and Route TLS according to the cluster ingress policy.
-
-## Verify security constraints
-
-```bash
-oc get events -n neuraltrust --sort-by=.lastTimestamp
-oc get scc
-```
-
-Do not grant broad privileged SCC access as a generic fix. GPU workers may need a purpose-built SCC because their example uses `hostIPC`.
-
-After TLS is ready, connect the endpoint in [Advanced](/platform/advanced#connect-to-existing).
+Cluster wildcard DNS/certs may already cover Route hosts. For custom hosts, follow cluster ingress policy. Then connect the data-plane endpoint in [Advanced](/platform/advanced#connect-to-existing).
