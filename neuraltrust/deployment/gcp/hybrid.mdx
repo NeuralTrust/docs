@@ -1,319 +1,62 @@
 ---
-title: GCP — Hybrid deployment
-description: Complete walkthrough for deploying the NeuralTrust Data Plane on Google Kubernetes Engine with the Control Plane running on NeuralTrust SaaS. Covers cluster prep, full values overlay, ingress, certificates, GPU workers, enrollment, and verification.
+title: Hybrid
+description: Install chart 2.0.5 Hybrid runtime workloads on GKE.
 ---
 
-This guide walks you end-to-end through a **hybrid deployment** on GKE — the Data Plane, TrustGate, and Firewall run in your cluster; the Control Plane UI, API, and Scheduler run on NeuralTrust SaaS.
+## Prepare
 
-## What you'll end up with
-
-| Component | Location | Replicas (default) |
-|---|---|---|
-| Data Plane API | Your GKE cluster | 2 |
-| Data Plane worker | Your GKE cluster | 1 |
-| TrustGate admin / gateway / actions | Your GKE cluster | 2 each |
-| Firewall gateway + 5 workers | Your GKE cluster | 2 + 5 |
-| PostgreSQL (admin + raw payloads), Redis | Your GKE cluster (or external) | 1 each |
-| Control Plane API, UI, Scheduler | **NeuralTrust SaaS** | — |
-| OTel collector, ClickHouse, AlertEngine | **NeuralTrust SaaS** | — |
-
-For the full image inventory and resource baseline, see [Image catalog](../images). Products emit per-request **metadata** over OTLP (ports 4317/4318) to the NeuralTrust SaaS collector; no Kafka and no in-cluster ClickHouse run in your cluster.
-
-## Prerequisites
-
-| Resource | Recommended |
-|---|---|
-| GKE version | 1.28+ |
-| CPU pool machine type | `e2-standard-8` (8 vCPU / 32 GiB) |
-| Min CPU nodes | **≥ 4** across 3 zones (regional cluster). Drop to 3 if Firewall workers run on GPU nodes. |
-| GPU pool *(optional, for GPU Firewall)* | `n1-standard-4` + 1 × T4 — 5 nodes (one per default Firewall worker) |
-| Storage | `pd-balanced` (default) or `pd-ssd` for high-IOPS PostgreSQL |
-| Sizing baseline | ~20.5 vCPU / 58.5 GiB requests / 80 GiB PVC (defaults with CPU Firewall) |
-| DNS | A control over a base domain (e.g. `platform.example.com`) |
-| Image pull | `gcr-keys.json` from NeuralTrust |
-| NeuralTrust tenant | A SaaS Control Plane tenant — request from [support@neuraltrust.ai](mailto:support@neuraltrust.ai) if you don't have one |
-
-## Step 1 — Provision the GKE cluster
+Confirm the cluster has a default StorageClass and an ingress path:
 
 ```bash
-gcloud container clusters create neuraltrust \
-  --region <REGION> \
-  --num-nodes 2 \
-  --machine-type e2-standard-8 \
-  --release-channel regular \
-  --addons HorizontalPodAutoscaling,HttpLoadBalancing,GcePersistentDiskCsiDriver
-
-gcloud container clusters get-credentials neuraltrust --region <REGION>
 kubectl get nodes
-```
-
-`--num-nodes 2` is per-zone in a regional cluster → 6 worker nodes across 3 zones. This is sufficient for the hybrid CPU pool with HA. For tighter cost, move Firewall workers to a GPU pool and drop the CPU pool to `--num-nodes 1` (= 3 nodes) plus `--enable-autoscaling --min-nodes 1 --max-nodes 3`.
-
-## Step 2 — Create the namespace and image pull secret
-
-```bash
+kubectl get storageclass
 kubectl create namespace neuraltrust
-
-kubectl create secret docker-registry gcr-secret \
-  --docker-server=europe-west1-docker.pkg.dev \
-  --docker-username=_json_key \
-  --docker-password="$(cat path/to/gcr-keys.json)" \
-  --docker-email=admin@neuraltrust.ai \
-  -n neuraltrust
 ```
 
-## Step 3 — Write your values overlay
+Create the registry pull Secret supplied by NeuralTrust, or configure your mirror as described in [Images](/neuraltrust/deployment/images).
 
-Save as `my-values.yaml`:
+## Values
+
+Copy chart `values-required.yaml`, then set GCP routing:
 
 ```yaml
-# Hybrid deployment on GKE
 global:
-  platform: "gcp"
-  domain: "platform.example.com"
-  storageClass: "pd-balanced"
-  autoGenerateSecrets: true
-
-# Control Plane disabled — runs on NeuralTrust SaaS
-neuraltrust-control-plane:
-  controlPlane:
-    enabled: false
-  infrastructure:
-    postgresql:
-      deploy: true        # for TrustGate admin metadata
-
-# Data Plane in your cluster
-neuraltrust-data-plane:
-  dataPlane:
-    enabled: true
-
-# TrustGate (typical for hybrid)
-trustgate:
-  enabled: true
-  global:
-    env:
-      SERVER_BASE_DOMAIN: "platform.example.com"
-
-# Firewall in-cluster
-neuraltrust-firewall:
-  firewall:
-    enabled: true
+  deploymentMode: hybrid
+  platform: gcp
+  domain: platform.example.com
+  storageClass: premium-rwo
+  clickstack:
+    existingSecret:
+      name: clickstack-otlp-token
+      key: OTEL_EXPORTER_OTLP_HEADERS
+  ingress:
+    gcp:
+      staticIpName: neuraltrust-ip
+      managedCertificates: neuraltrust-cert
 ```
 
-<Tip>
-Most fields above are chart defaults — the only required overrides are `global.platform`, `global.domain`, and `trustgate.global.env.SERVER_BASE_DOMAIN`. Everything else is shown for clarity. The OTel collector, ClickHouse, and AlertEngine run on the NeuralTrust SaaS Control Plane — there is no Kafka and no in-cluster ClickHouse to configure.
-</Tip>
+Pre-create `clickstack-otlp-token`; see [Secrets](/neuraltrust/deployment/secrets). For Cloud SQL or Memorystore, use the shared Hybrid blocks in [Configuration](/neuraltrust/deployment/configuration#managed-stores) and private connectivity.
 
-### External infrastructure (optional)
-
-Bring PostgreSQL and Redis as managed services (Cloud SQL, Memorystore) instead of running them in-cluster:
-
-```yaml
-neuraltrust-control-plane:
-  infrastructure:
-    postgresql:
-      deploy: false
-  controlPlane:
-    components:
-      postgresql:
-        secrets:
-          host: "10.x.x.x"          # Cloud SQL private IP
-          port: "5432"
-          user: "neuraltrust"
-          password: ""
-          database: "neuraltrust"
-```
-
-PostgreSQL holds the TrustGate admin metadata **and** the raw prompt/response store. Full external-infra reference: [Configuration scenarios › External infrastructure](../configuration#external-infrastructure-only).
-
-## Step 4 — Install
+## Install
 
 ```bash
 helm upgrade --install neuraltrust-platform \
   oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version <VERSION> \
+  --version 2.0.5 \
   --namespace neuraltrust \
-  -f my-values.yaml
+  -f values-gke-hybrid.yaml
+
+kubectl get pods,ingress -n neuraltrust
 ```
 
-Replace `<VERSION>` with a chart version from the [release list](https://github.com/NeuralTrust/neuraltrust-platform/releases).
+Create DNS records for the rendered hosts after the GKE load-balancer address is assigned. Wait for managed certificates to become active before connecting the endpoint in [Platform settings → Advanced](/platform/advanced).
 
-Initial install takes 3–5 minutes. Wait for all pods to be ready:
-
-```bash
-kubectl get pods -n neuraltrust -w
-```
-
-## Step 5 — Wire up DNS and certificates
-
-The chart creates GCE Ingresses for each component. Get the assigned IPs:
+## Verify
 
 ```bash
 kubectl get ingress -n neuraltrust -o wide
+kubectl get managedcertificate -n neuraltrust
+kubectl get events -n neuraltrust --sort-by=.lastTimestamp
 ```
 
-You'll see ingresses like:
-
-| Host | Component |
-|---|---|
-| `data-plane-api.platform.example.com` | Data Plane API *(needed for SaaS Control Plane to reach your Data Plane)* |
-| `admin.platform.example.com` | TrustGate admin |
-| `gateway.platform.example.com` | TrustGate proxy |
-| `actions.platform.example.com` | TrustGate actions |
-
-Create A records in Cloud DNS pointing each host at the load balancer's IP.
-
-### Add Managed Certificates
-
-Once DNS resolves, add a `ManagedCertificate` and a `FrontendConfig`, then reference them from the ingress:
-
-```yaml
-apiVersion: networking.gke.io/v1
-kind: ManagedCertificate
-metadata:
-  name: platform-cert
-  namespace: neuraltrust
-spec:
-  domains:
-    - data-plane-api.platform.example.com
-    - admin.platform.example.com
-    - gateway.platform.example.com
-    - actions.platform.example.com
----
-apiVersion: networking.gke.io/v1beta1
-kind: FrontendConfig
-metadata:
-  name: platform-fc
-  namespace: neuraltrust
-spec:
-  redirectToHttps:
-    enabled: true
-```
-
-Then in `my-values.yaml`:
-
-```yaml
-neuraltrust-data-plane:
-  dataPlane:
-    components:
-      api:
-        ingress:
-          annotations:
-            networking.gke.io/managed-certificates: "platform-cert"
-            networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
-
-trustgate:
-  ingress:
-    controlPlane:
-      annotations:
-        networking.gke.io/managed-certificates: "platform-cert"
-        networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
-    dataPlane:
-      annotations:
-        networking.gke.io/managed-certificates: "platform-cert"
-        networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
-    actions:
-      annotations:
-        networking.gke.io/managed-certificates: "platform-cert"
-        networking.gke.io/v1beta1.FrontendConfig: "platform-fc"
-```
-
-Re-run `helm upgrade …` to apply.
-
-## Step 6 — Enroll the Data Plane with NeuralTrust SaaS
-
-This is the **hybrid-specific step** that connects your in-cluster Data Plane to the NeuralTrust SaaS Control Plane.
-
-<Steps>
-  <Step title="Get the Data Plane JWT secret">
-    The chart auto-generated this on first install:
-
-    ```bash
-    kubectl get secret data-plane-jwt-secret -n neuraltrust \
-      -o jsonpath='{.data.DATA_PLANE_JWT_SECRET}' | base64 -d
-    ```
-
-    Save it — you'll paste it into the portal.
-  </Step>
-
-  <Step title="Open the NeuralTrust portal">
-    Log in to your tenant at the URL provided by NeuralTrust (typically `https://app.neuraltrust.ai`).
-  </Step>
-
-  <Step title="Connect the Data Plane">
-    Navigate to **Team Settings → Advanced → Connect Data Plane** (see [Platform › Advanced](/platform/advanced) for the full UI walkthrough).
-
-    Provide:
-
-    | Field | Value |
-    |---|---|
-    | Data Plane API URL | `https://data-plane-api.platform.example.com` |
-    | Data Plane JWT | (the secret you copied above) |
-    | Region | Match the region of your GKE cluster |
-  </Step>
-
-  <Step title="Verify connectivity">
-    The portal will issue a health check against your Data Plane API. On success, you'll see your data plane listed as **Connected** and dashboards start populating within a few minutes of TrustGate traffic.
-  </Step>
-</Steps>
-
-## Step 7 — Send traffic through TrustGate
-
-Point your AI applications at the TrustGate gateway URL (`https://gateway.platform.example.com`). TrustGate and Firewall emit per-request metadata over OTLP (ports 4317/4318) to the NeuralTrust SaaS collector, which lands it in SaaS-side ClickHouse and surfaces in the NeuralTrust dashboards. Raw prompts and responses stay in your in-cluster PostgreSQL and are read on demand for drill-down.
-
-For TrustGate gateway / route / plugin configuration, see [TrustGate › Getting started](/trustgate/overview).
-
-## Verification
-
-```bash
-# Pods
-kubectl get pods -n neuraltrust
-
-# Ingress addresses
-kubectl get ingress -n neuraltrust -o wide
-
-# Data Plane health
-curl https://data-plane-api.platform.example.com/health
-
-# TrustGate gateway health
-curl https://gateway.platform.example.com/__health
-```
-
-In the NeuralTrust portal:
-
-- **Data Plane status**: Connected
-- **TrustGate**: receiving traffic, dashboards populating
-- **Firewall**: classifying prompts (if enabled and routed)
-
-## Upgrading
-
-```bash
-helm upgrade neuraltrust-platform \
-  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version <NEW_VERSION> \
-  --namespace neuraltrust \
-  -f my-values.yaml
-```
-
-Auto-generated secrets and PVCs are preserved. Always check the [release notes](https://github.com/NeuralTrust/neuraltrust-platform/releases) before upgrading.
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Portal says "Data Plane unreachable" | DNS not resolved, certificate provisioning incomplete, or firewall rule blocking the SaaS Control Plane | Confirm `curl https://data-plane-api.<domain>/health` succeeds from outside your VPC |
-| `ManagedCertificate` stays `Provisioning` | DNS not yet pointing at the load balancer | Confirm `dig <host>` returns the LB IP, then wait up to 60 minutes |
-| `ImagePullBackOff` | Missing or wrong `gcr-secret` | Recreate the secret with the JSON key from NeuralTrust |
-| Data Plane API restarts | PostgreSQL or Redis not reachable | Check `kubectl logs` on the API; verify dependency pods are `Running` |
-| No data in SaaS dashboards | Outbound OTLP to the SaaS collector blocked | Confirm egress to the NeuralTrust SaaS collector on ports 4317/4318 |
-| TrustGate can't reach the Firewall | Service name mismatch | Default is `http://firewall:80` — verify `NEURAL_TRUST_FIREWALL_URL` in `trustgate-secrets` |
-
-For deeper troubleshooting, see [Vanilla Kubernetes troubleshooting](../kubernetes/overview#common-issues).
-
-## Related guides
-
-- [GCP overview](./overview) — cluster prerequisites and GCP-specific defaults
-- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
-- [Image catalog](../images) — what runs in hybrid mode
-- [Secrets management](../secrets) — auto-generation, External Secrets Operator
-- [Firewall deployment](../firewall) — GPU workers on GKE
+DataAgent is optional and remains absent unless its tenant and enrollment Secret are configured.

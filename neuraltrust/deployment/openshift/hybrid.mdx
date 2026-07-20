@@ -1,253 +1,69 @@
 ---
-title: OpenShift — Hybrid deployment
-description: Complete walkthrough for deploying the NeuralTrust Data Plane on Red Hat OpenShift with the Control Plane on NeuralTrust SaaS. Covers project setup, SCC, image pull secret linking, full values overlay, Routes, enrollment, and verification.
+title: Hybrid
+description: Install chart 2.0.5 Hybrid runtime workloads on OpenShift.
 ---
 
-This guide walks you end-to-end through a **hybrid deployment** on OpenShift — the Data Plane, TrustGate, and Firewall run in your OpenShift cluster; the Control Plane UI, API, and Scheduler run on NeuralTrust SaaS.
+## Values
 
-## What you'll end up with
-
-| Component | Location | Replicas |
-|---|---|---|
-| Data Plane API, worker | Your OpenShift cluster | 2, 1 |
-| TrustGate admin / gateway / actions | Your OpenShift cluster | 2 each |
-| Firewall gateway + 5 workers | Your OpenShift cluster | 2 + 5 |
-| PostgreSQL, Redis | Your OpenShift cluster (or external) | 1 each |
-| Control Plane API, UI, Scheduler | **NeuralTrust SaaS** | — |
-
-See [Image catalog](../images) for the full inventory.
-
-No Kafka and no in-cluster ClickHouse run in your cluster. TrustGate and Firewall emit per-request metadata over OTLP (ports 4317/4318) to the NeuralTrust SaaS collector, which lands it in SaaS-side ClickHouse for the AlertEngine and dashboards. Raw prompts/responses stay in your in-cluster PostgreSQL and never leave your environment.
-
-## Prerequisites
-
-| Resource | Recommended |
-|---|---|
-| OpenShift version | 4.10+ |
-| CPU pool node spec | 8 vCPU / 32 GiB |
-| Min CPU nodes | **≥ 4** across 3 AZs. Drop to 3 if Firewall workers run on GPU nodes. |
-| GPU pool *(optional, for GPU Firewall)* | 4 vCPU / 16 GiB + 1 × NVIDIA GPU — 5 nodes (one per default Firewall worker). Requires NVIDIA GPU Operator. |
-| Storage | Cluster default; for ROSA, `gp3-csi`; for ARO, `managed-premium`; for ODF, `ocs-storagecluster-ceph-rbd` |
-| DNS | OpenShift wildcard or custom domain (e.g. `platform.example.com`) |
-| Certificates | Router default cert, custom Route TLS, or cert-manager + Routes |
-| Image pull | `gcr-keys.json` from NeuralTrust |
-| NeuralTrust tenant | A SaaS Control Plane tenant — request from [support@neuraltrust.ai](mailto:support@neuraltrust.ai) |
-
-Sizing baseline: see [Deployment models › Sizing baseline](../deployment-models#sizing-baseline) — the default TrustGate + Firewall + Postgres/Redis footprint (with CPU Firewall).
-
-## Step 1 — Create the project
-
-```bash
-oc login -u <user> -p <password> https://api.<cluster>.openshift.com:6443
-oc new-project neuraltrust
-```
-
-## Step 2 — Create and link the image pull secret
-
-```bash
-oc create secret docker-registry gcr-secret \
-  --docker-server=europe-west1-docker.pkg.dev \
-  --docker-username=_json_key \
-  --docker-password="$(cat path/to/gcr-keys.json)" \
-  --docker-email=admin@neuraltrust.ai \
-  -n neuraltrust
-
-# Pre-link to default + builder service accounts
-oc secrets link default gcr-secret --for=pull -n neuraltrust
-oc secrets link builder gcr-secret --for=pull -n neuraltrust
-```
-
-After the chart install, link `gcr-secret` to the component-specific service accounts as well (see [Step 7](#step-7-link-pull-secret-to-component-service-accounts)).
-
-## Step 3 — Write your values overlay
-
-Save as `my-values.yaml`:
+Copy chart `values-openshift.yaml` and add the Hybrid OTLP Secret reference:
 
 ```yaml
-# Hybrid deployment on OpenShift
 global:
-  platform: "openshift"
-  domain: "apps.<cluster>.openshift.com"   # OpenShift wildcard
-  # or domain: "platform.example.com"      # for a custom domain
-  storageClass: ""                          # use cluster default
+  deploymentMode: hybrid
+  platform: openshift
+  domain: apps.example.com
+  imageRegistry: ""
+  storageClass: ""
   autoGenerateSecrets: true
+  preserveExistingSecrets: false
   security:
-    allowInsecureImages: true               # required for some upstream images on OpenShift
+    allowInsecureImages: true
+  ingress:
+    provider: openshift
+  clickstack:
+    existingSecret:
+      name: clickstack-otlp-token
+      key: OTEL_EXPORTER_OTLP_HEADERS
 
-# Control Plane disabled — runs on NeuralTrust SaaS
-neuraltrust-control-plane:
-  controlPlane:
-    enabled: false
-  infrastructure:
-    postgresql:
-      deploy: true        # for TrustGate admin metadata
-
-# Data Plane in your cluster
-neuraltrust-data-plane:
-  dataPlane:
-    enabled: true
-
-# TrustGate
-trustgate:
-  enabled: true
-  global:
-    env:
-      SERVER_BASE_DOMAIN: "apps.<cluster>.openshift.com"
-
-# Firewall in-cluster
-neuraltrust-firewall:
-  firewall:
-    enabled: true
+dataagent:
+  tenantId: ""
+  enrolmentToken: ""
 ```
 
-<Tip>
-For OpenShift, the chart creates **Routes**, not Ingresses, when `global.platform: "openshift"`. Route hostnames follow the long pattern: `data-plane-api.<domain>`, `trustgate-admin.<domain>`, `trustgate-gateway.<domain>`, `trustgate-actions.<domain>`.
-</Tip>
+Create `clickstack-otlp-token` and the registry pull Secret before installation. See [Secrets](/neuraltrust/deployment/secrets).
 
-### Using external managed services
-
-Bring your own Postgres (which holds TrustGate admin metadata **and** the raw prompt/response store):
-
-```yaml
-neuraltrust-control-plane:
-  infrastructure:
-    postgresql:
-      deploy: false
-  controlPlane:
-    components:
-      postgresql:
-        secrets:
-          host: "<rds-or-aro-postgres>.example.com"
-          port: "5432"
-          user: "neuraltrust"
-          password: ""
-          database: "neuraltrust"
-```
-
-For ROSA, RDS or Aurora is the natural choice; for ARO, Azure Database for PostgreSQL Flexible Server fits. Redis can likewise point at a managed offering instead of the in-cluster instance.
-
-## Step 4 — Install
+## Install
 
 ```bash
 helm upgrade --install neuraltrust-platform \
   oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version <VERSION> \
+  --version 2.0.5 \
   --namespace neuraltrust \
-  -f my-values.yaml
+  -f values-openshift-hybrid.yaml
+
+oc get pods,route -n neuraltrust
 ```
 
-## Step 5 — Check Routes and DNS
+If component service accounts cannot pull images, link `gcr-secret` to the affected service account with `oc secrets link <service-account> gcr-secret --for=pull`.
+
+## DNS and TLS
+
+Inspect Route hosts:
 
 ```bash
 oc get route -n neuraltrust
+oc describe route -n neuraltrust
 ```
 
-You should see Routes for:
+When hosts are under the cluster wildcard, the router DNS and wildcard certificate may already cover them. For custom hosts, configure DNS and Route TLS according to the cluster ingress policy.
 
-| Route | Host |
-|---|---|
-| `data-plane-api` | `data-plane-api.<domain>` |
-| `trustgate-admin` | `trustgate-admin.<domain>` |
-| `trustgate-gateway` | `trustgate-gateway.<domain>` |
-| `trustgate-actions` | `trustgate-actions.<domain>` |
-
-If you're using the OpenShift wildcard DNS (`*.apps.<cluster>...`), Routes are reachable immediately. For a custom domain, add CNAME records pointing to your router's canonical hostname.
-
-## Step 6 — Custom TLS for Routes (optional)
-
-By default, Routes use the OpenShift router's wildcard certificate. To bring your own cert, attach it to each Route:
-
-```yaml
-trustgate:
-  ingress:
-    controlPlane:
-      route:
-        tls:
-          termination: edge
-          certificate: |
-            -----BEGIN CERTIFICATE-----
-            ...
-          key: |
-            -----BEGIN PRIVATE KEY-----
-            ...
-```
-
-Prefer storing certs in OpenShift Secrets and templating values from there.
-
-## Step 7 — Link pull secret to component service accounts
-
-After install, ensure every component service account can pull from the private registry:
+## Verify security constraints
 
 ```bash
-for sa in \
-  data-plane-api data-plane-worker \
-  trustgate-control-plane trustgate-data-plane trustgate-actions \
-  firewall ; do
-    oc secrets link "$sa" gcr-secret --for=pull -n neuraltrust
-done
+oc get events -n neuraltrust --sort-by=.lastTimestamp
+oc adm policy who-can use scc/restricted-v2 -n neuraltrust
 ```
 
-(Service-account names may vary slightly — check `oc get sa -n neuraltrust`.)
+Do not grant broad privileged SCC access as a generic fix. GPU workers may need a purpose-built SCC because their example uses `hostIPC`.
 
-## Step 8 — Enroll the Data Plane with NeuralTrust SaaS
-
-<Steps>
-  <Step title="Get the Data Plane JWT secret">
-    ```bash
-    oc get secret data-plane-jwt-secret -n neuraltrust \
-      -o jsonpath='{.data.DATA_PLANE_JWT_SECRET}' | base64 -d
-    ```
-  </Step>
-  <Step title="Open the NeuralTrust portal">
-    Log in at the URL provided by NeuralTrust.
-  </Step>
-  <Step title="Connect the Data Plane">
-    **Team Settings → Advanced → Connect Data Plane**. Provide the Data Plane Route URL (`https://data-plane-api.<domain>`), the JWT secret, and the region. See [Platform › Advanced](/platform/advanced).
-  </Step>
-  <Step title="Verify connectivity">
-    On success, your data plane shows as **Connected** in the portal.
-  </Step>
-</Steps>
-
-## Step 9 — Send traffic through TrustGate
-
-Point your AI applications at the TrustGate Route: `https://trustgate-gateway.<domain>`. For gateway / route / plugin configuration, see [TrustGate › Getting started](/trustgate/overview).
-
-## Verification
-
-```bash
-oc get pods -n neuraltrust
-oc get route -n neuraltrust
-
-curl https://data-plane-api.<domain>/health
-curl https://trustgate-gateway.<domain>/__health
-```
-
-In the NeuralTrust portal: Data Plane status **Connected**, TrustGate receiving traffic, Firewall classifying (if enabled).
-
-## Upgrading
-
-```bash
-helm upgrade neuraltrust-platform \
-  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version <NEW_VERSION> \
-  --namespace neuraltrust \
-  -f my-values.yaml
-```
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Pods stuck `ImagePullBackOff` | `gcr-secret` not linked to the SA | `oc secrets link <sa> gcr-secret --for=pull -n neuraltrust` |
-| Route returns 503 | Backend pods not Ready | `oc get pods` — check readiness probes |
-| Pod SCC error | Custom UID conflicts | Verify you haven't overridden `podSecurityContext` to a fixed UID |
-| TrustGate can't reach Firewall | Service name mismatch | Default is `http://firewall:80` |
-
-## Related guides
-
-- [OpenShift overview](./overview) — cluster prerequisites and OpenShift-specific defaults
-- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
-- [Image catalog](../images) — what runs in hybrid mode
-- [Secrets management](../secrets) — auto-generation, External Secrets Operator
-- [Firewall deployment](../firewall) — GPU workers on OpenShift
+After TLS is ready, connect the endpoint in [Advanced](/platform/advanced#connect-to-existing).

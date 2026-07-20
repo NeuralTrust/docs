@@ -1,174 +1,56 @@
 ---
 title: Image catalog
-description: Complete inventory of container images the NeuralTrust Platform Helm chart deploys, grouped by subchart and by deployment model. Use this when mirroring images, planning private-registry mirroring, or sizing image-pull bandwidth.
+description: Container images pinned by neuraltrust-platform chart 2.0.5.
 ---
 
-All NeuralTrust images live in the private Google Artifact Registry  
-`europe-west1-docker.pkg.dev/neuraltrust-app-prod/nt-docker/<name>`.
+Chart 2.0.5 defaults to `europe-west1-docker.pkg.dev/neuraltrust-app-prod/nt-docker`. The table lists the effective short image name and tag.
 
-To mirror or rebrand the registry, set `global.imageRegistry` once and the chart will rewrite all subchart image paths automatically (the helper strips the default GCP prefix before prepending yours).
-
-All private images are pulled with `gcr-secret` (`docker-registry` type). The Kubernetes Secret name is configurable per subchart via `imagePullSecrets`.
+| Image | Tag | Placement |
+| --- | --- | --- |
+| `agentgateway` | `v0.13.0` | Hybrid and External |
+| `trustguard` | `v0.15.0` | Hybrid and External |
+| `firewall-cpu` | `v2.14.0` | Optional, default on |
+| `data-plane-api` | `v1.42.0` | Hybrid and External |
+| `dataagent` | `v0.3.0` | Enrolled Hybrid only |
+| `control-plane-api` | `v1.23.0` | External only |
+| `app` | `v1.99.1` | External only |
+| `datacore` | `v0.12.1` | External only |
+| `clickstack-otel-collector` | `2.31.0` | External only |
+| `alertengine` | `v0.4.5` | External only |
+| `clickhouse-server` | `26.6` | External when in-cluster ClickHouse is enabled |
+| `postgres` | `17-alpine` | In-cluster PostgreSQL and migration helper |
+| `redis-stack-server` | `7.2.0-v20` | In-cluster Redis |
+| `opentelemetry-collector-contrib` | `0.153.0` | Optional platform observability collector |
+| `watchdog` | `v0.13.1` | Optional |
+| `prometheus` | `v3.12.0` | Optional watchdog-managed Prometheus |
 
 <Note>
-Versions below reflect the current `values.yaml` defaults in the chart. They change with every chart release — always cross-check against the `values.yaml` of the chart version you're installing.
+`trustlens` is disabled and its image tag is empty in chart 2.0.5. Do not enable it without a NeuralTrust-provided release tag.
 </Note>
 
-## Per-subchart inventory
+## Mirror images
 
-<Note>
-Metadata is exported over OTLP to the NeuralTrust SaaS OpenTelemetry collector, which lands it in SaaS ClickHouse. There is **no Kafka** and **no in-cluster ClickHouse** — those images are not deployed in your cluster.
-</Note>
-
-### `neuraltrust-data-plane`
-
-| Image | Default tag | Purpose | Default replicas |
-|---|---|---|---|
-| `…/data-plane-api` | `v1.24.11` | Data Plane API | 2 |
-| `…/workers` | `v1.6.12` | Data Plane worker | 1 |
-| `…/data-plane-api` | `v1.24.11` | Ephemeral Kubernetes Job pods spawned by API for evals (`k8sJobs.enabled: true`, up to `maxConcurrentJobs: 10`) | — |
-
-### `neuraltrust-control-plane` *(only when `controlPlane.enabled: true`)*
-
-| Image | Default tag | Purpose | Default replicas |
-|---|---|---|---|
-| `…/control-plane-api` | `v1.18.3` | Control Plane API | 2 |
-| `…/app` | `v1.65.9` | Control Plane UI (Next.js) | 2 |
-| `…/app` | `v1.65.9` | Init container `init-db` (Prisma migrations) on UI | — |
-| `…/scheduler` | `v1.9.7` | Scheduler | 1 |
-| `…/postgres` | `17-alpine` | Init container `wait-for-postgresql` on API + scheduler | — |
-| `…/postgres` | `17-alpine` | In-cluster PostgreSQL *(when `infrastructure.postgresql.deploy: true`)* | 1 |
-
-### `trustgate`
-
-| Image | Default tag | Purpose | Default replicas |
-|---|---|---|---|
-| `…/trustgate-ee` | `v1.27.5` | TrustGate admin (`trustgate-control-plane`) | 2 |
-| `…/trustgate-ee` | `v1.27.5` | TrustGate gateway (`trustgate-data-plane`) | 2 |
-| `…/trustgate-ee` | `v1.27.5` | TrustGate actions (`trustgate-actions`) | 2 |
-| `…/postgres` | `17-alpine` | Init Job `trustgate-postgresql-init` (creates DB + user) | Job |
-| `…/redis-stack-server` | `7.2.0-v20` | Redis cache | 1 |
-
-### `neuraltrust-firewall` *(default: enabled)*
-
-| Image | Default tag | Purpose | Default replicas |
-|---|---|---|---|
-| `…/firewall-cpu` | `v2.9.6` | Gateway (CPU router) | 2 |
-| `…/firewall-cpu` | `v2.9.6` | Worker — `toxicity` | 1 |
-| `…/firewall-cpu` | `v2.9.6` | Worker — `toolguard` | 1 |
-| `…/firewall-cpu` | `v2.9.6` | Worker — `prompt-jailbreak` | 1 |
-| `…/firewall-cpu` | `v2.9.6` | Worker — `prompt-moderation` | 1 |
-| `…/firewall-cpu` | `v2.9.6` | Worker — `response-jailbreak` | 1 |
-| `…/firewall-gpu` | `v2.9.6` | GPU-accelerated workers *(override `workerDefaults.image`)* | configurable |
-
-### Optional add-on subcharts *(off by default)*
-
-| Subchart | Image(s) | Default tag | Toggle |
-|---|---|---|---|
-| `neuraltrust-siem-connectors` | `siem-connectors` | `v0.2.2` | `neuraltrust-siem-connectors.siemConnectors.enabled` |
-| `neuraltrust-watchdog` | `neuraltrust-watchdog` | Chart `appVersion` | `neuraltrust-watchdog.enabled` |
-| Umbrella OpenTelemetry Collector | `otel/opentelemetry-collector-contrib` | `0.110.0` | `global.observability.enabled` |
-
-## What's deployed in each model
-
-The two main deployment models are documented in [Deployment models](./deployment-models). The image footprint for each:
-
-<Tabs>
-  <Tab title="Hybrid (default install)">
-    Chart default. Control Plane runs on NeuralTrust SaaS — no CP images in your cluster.
-
-    | Subchart | Deployed? | Notes |
-    |---|---|---|
-    | `neuraltrust-data-plane` | ✅ | API ×2 + worker ×1 |
-    | `trustgate` | ✅ *(typical)* | admin ×2, gateway ×2, actions ×2, Redis ×1 |
-    | `neuraltrust-firewall` | ✅ | gateway ×2 + 5 workers (CPU by default, GPU optional) |
-    | `neuraltrust-control-plane` PostgreSQL | ✅ *(TrustGate admin + raw payload store)* | StatefulSet ×1 |
-    | OTel collector + ClickHouse | ❌ | runs on NeuralTrust SaaS — receives OTLP metadata |
-    | AlertEngine | ❌ | runs on NeuralTrust SaaS — rule evaluation, alerts, SIEM forwarding |
-    | `neuraltrust-control-plane` CP API/UI/Scheduler | ❌ | runs on NeuralTrust SaaS |
-
-    **Distinct in-cluster images (defaults):**
-
-    - `data-plane-api`, `workers`
-    - `trustgate-ee`, `redis-stack-server`, `postgres` (init Job)
-    - `firewall-cpu` (gateway + 5 worker pods)
-    - `postgres` (in-cluster PostgreSQL)
-
-    Total: ~7 distinct image repositories, ~16 running pods on chart defaults.
-  </Tab>
-</Tabs>
-
-## Sizing & resource defaults
-
-Per-component requests / limits (from chart `values.yaml`). Multiply by the replica count to get the per-component total contribution to cluster requests.
-
-| Component | Replicas | CPU req / limit | Memory req / limit | GPU |
-|---|---|---|---|---|
-| PostgreSQL | 1 | 1 / 2 | 2 Gi / 4 Gi | — |
-| Data Plane API | 2 | 2 / 4 | 4 Gi / 6 Gi | — |
-| Data Plane worker | 1 | 1 / 2 | 4 Gi / 8 Gi | — |
-| CP scheduler | 1 | 100m / 200m | 256 Mi / 512 Mi | — |
-| CP API | 2 | 1 / 2 | 1 Gi / 2 Gi | — |
-| CP UI (app) | 2 | 250m / 500m | 512 Mi / 1 Gi | — |
-| TrustGate admin | 2 | 500m / 1 | 2 Gi / 4 Gi | — |
-| TrustGate gateway | 2 | 2 / 4 | 4 Gi / 8 Gi | — |
-| TrustGate actions | 2 | 500m / 1 | 2 Gi / 4 Gi | — |
-| Redis | 1 | 500m / 1 | 1 Gi / 2 Gi | — |
-| Firewall gateway | 2 | 250m / 500m | 256 Mi / 512 Mi | — |
-| Firewall worker (×5: toxicity, toolguard, prompt-jailbreak, prompt-moderation, response-jailbreak) | 5 | 1 / 1.5 | 4 Gi / 6 Gi | — |
-| Firewall GPU worker *(replaces CPU worker)* | per pool | same as CPU + `nvidia.com/gpu: 1` | same | 1 GPU |
-| K8s eval Job *(ephemeral, spawned by Data Plane API)* | up to 10 | 100m / 500m | 256 Mi / 1 Gi | — |
-
-### Realistic cluster totals
-
-Firewall is always deployed — the choice is whether its 5 default workers run on the **CPU pool** or move to a **separate GPU pool**.
-
-| Model | CPU pool requests | PVC | Min CPU nodes *(8 vCPU / 32 GiB)* | GPU pool |
-|---|---|---|---|---|
-| **Hybrid + CPU Firewall** *(default)* | ~20.5 vCPU / ~58.5 GiB | ~80 GiB | **≥ 4** | — |
-| **Hybrid + GPU Firewall** | ~15.5 vCPU / ~38.5 GiB | ~80 GiB | **≥ 3** | ≥ 5 GPU pods |
-
-CPU Firewall workers contribute 5 vCPU + 20 GiB to the main pool. Switching to GPU workers moves that load to dedicated GPU nodes (one GPU per worker without CUDA MPS).
-
-For per-cloud node SKUs (e.g. `e2-standard-8`, `m5.2xlarge`, `Standard_D8s_v5`, `g4dn.xlarge` for GPU) and HA layout, see the cloud-specific overview pages and [Deployment models › Sizing baseline](./deployment-models#sizing-baseline).
-
-## Mirroring images to an internal registry
-
-To pre-pull every image the chart would deploy with your overrides:
-
-```bash
-helm template neuraltrust-platform \
-  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version <VERSION> \
-  -f my-values.yaml \
-  | yq '.. | select(has("image")) | .image' \
-  | sort -u
-```
-
-Then mirror each image to your internal registry and set:
+Set one registry prefix when your mirror preserves image names and tags:
 
 ```yaml
 global:
-  imageRegistry: "registry.internal.example.com/neuraltrust"
+  imageRegistry: registry.example.com/neuraltrust
+  imagePullSecrets:
+    - name: neuraltrust-registry
 ```
 
-The chart strips the default `europe-west1-docker.pkg.dev/neuraltrust-app-prod/nt-docker` prefix from subchart image paths and replaces it with your registry. Per-subchart `image.repository` overrides still win if set explicitly.
+Render the exact topology before mirroring because Hybrid and External use different subsets:
 
-## Pull policy
+```bash
+cp values-v2-hybrid.yaml.example values-v2-hybrid.yaml
 
-| Component | Default pull policy |
-|---|---|
-| Data Plane API, worker | `Always` |
-| Control Plane API, UI, Scheduler, Postgres | `Always` |
-| TrustGate admin, gateway, actions | `Always` |
-| TrustGate Redis | `Always` *(parent override)* |
-| Firewall gateway + workers | `IfNotPresent` |
+helm template neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version 2.0.5 \
+  --namespace neuraltrust \
+  -f values-v2-hybrid.yaml
+```
 
-`Always` ensures pinned tags still revalidate on rollouts. Override per component if you mirror to an internal registry that doesn't change tags.
+Per-component `image.repository`, `image.tag`, and `image.pullPolicy` values override defaults. Keep image tags aligned with chart 2.0.5 unless NeuralTrust provides a tested compatibility matrix.
 
-## Related guides
-
-- [Deployment models](./deployment-models) — SaaS vs Hybrid comparison
-- [Configuration scenarios](./configuration) — values files for each topology
-- [Secrets management](./secrets) — secrets each image needs
-- [Firewall deployment](./firewall) — CPU vs GPU, per-worker overrides
+Firewall chart 2.0.5 uses the CPU image for its gateway and workers. GPU scheduling alone does not substitute a GPU image; see [Firewall](/neuraltrust/deployment/firewall).

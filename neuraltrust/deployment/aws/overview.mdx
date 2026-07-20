@@ -1,209 +1,52 @@
 ---
-title: AWS (EKS) overview
-description: Install the NeuralTrust Platform on Amazon EKS. Covers AWS Load Balancer Controller, ACM certificates, EBS / EFS storage, IRSA for IAM, and GPU node groups for Firewall workers.
+title: Overview
+description: EKS prerequisites and AWS-specific choices for NeuralTrust chart 2.0.5.
 ---
 
-NeuralTrust Platform runs on Amazon EKS using AWS-native primitives — Application Load Balancer for ingress, ACM for certificates, EBS for persistent storage, IRSA for IAM, and Route 53 for DNS.
+NeuralTrust supports Amazon EKS for Hybrid and External deployments.
 
-## Pick your path
-
-<CardGroup cols={2}>
-  <Card title="Hybrid (recommended)" icon="cloud" href="./hybrid">
-    Data Plane + TrustGate + Firewall in your EKS cluster. Control Plane runs on NeuralTrust SaaS. Fastest to first dashboard.
-  </Card>
-</CardGroup>
-
-If you're unsure which model fits your environment, see [Deployment models](../deployment-models).
-
-## Cluster prerequisites
-
-| Resource | Recommended starting point |
-|---|---|
-| EKS version | 1.28 or newer |
-| CPU pool node type | `m5.2xlarge` or `m6i.2xlarge` (8 vCPU / 32 GiB) |
-| Min CPU nodes | **≥ 4 (CPU Firewall)**. Subtract one when using GPU Firewall workers. ≥ 3 AZs for HA. |
-| GPU pool *(optional)* | `g4dn.xlarge` (4 vCPU / 16 GiB / 1 × T4) — 5 nodes (one per default Firewall worker) |
-| VPC | At least 3 private subnets across 3 AZs |
-| Storage | EBS CSI driver installed; `gp3` storage class |
-| Ingress | [AWS Load Balancer Controller](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/) v2.6+ |
-| DNS | Route 53 (or any DNS provider) for the platform base domain |
-| Certificates | ACM certificate covering `*.<your-domain>` |
-
-Smaller `m5.xlarge` (4 vCPU / 16 GiB) workers also work but require 7–8 nodes to fit the same workload. See [Deployment models › Sizing baseline](../deployment-models#sizing-baseline) for the math.
-
-For GPU Firewall workers, add a managed node group with `g5.xlarge` / `g6.xlarge` and the NVIDIA device plugin.
-
-### Required cluster add-ons
+## Cluster baseline
 
 ```bash
-# AWS Load Balancer Controller (ingress)
-helm repo add eks https://aws.github.io/eks-charts
-helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system \
-  --set clusterName=<EKS_CLUSTER_NAME> \
-  --set serviceAccount.create=false \
-  --set serviceAccount.name=aws-load-balancer-controller
+eksctl create cluster \
+  --name neuraltrust \
+  --region <REGION> \
+  --managed \
+  --node-type m6i.2xlarge \
+  --nodes 3
 
-# EBS CSI driver (persistent volumes)
-eksctl create addon \
-  --name aws-ebs-csi-driver \
-  --cluster <EKS_CLUSTER_NAME> \
-  --service-account-role-arn arn:aws:iam::<ACCOUNT_ID>:role/AmazonEKS_EBS_CSI_DriverRole
+aws eks update-kubeconfig \
+  --name neuraltrust \
+  --region <REGION>
 ```
 
-The AWS LB Controller and EBS CSI driver each require IAM roles configured for IRSA. See the AWS documentation for the full IAM policy contents.
+Install the AWS Load Balancer Controller when using ALB ingress. Associate an IAM OIDC provider and use IRSA for workloads that access RDS, ElastiCache, Secrets Manager, or other AWS APIs.
 
-## Architecture
+## AWS choices
 
-```mermaid
-flowchart LR
-    subgraph NT[NeuralTrust SaaS Control Plane]
-        Portal[Control Plane API + UI]
-        OTEL[OTel collector]
-        CH[(ClickHouse)]
-        AE[AlertEngine]
-    end
+- **Ingress:** AWS Load Balancer Controller with `global.ingress.className: alb`.
+- **TLS:** ACM certificate through `global.ingress.aws.certificateArn`.
+- **Storage:** EBS CSI `gp3` for single-writer PVCs; EFS only where shared access is required.
+- **Datastores:** private RDS/Aurora PostgreSQL and ElastiCache endpoints.
+- **Identity:** IRSA, including optional chart-supported IAM database/cache authentication.
 
-    subgraph AWS[Your AWS Account]
-        subgraph EKS[Amazon EKS]
-            TG[TrustGate]
-            FW[Firewall]
-            PG[(PostgreSQL admin + raw)]
-            RD[(Redis)]
-        end
-        ALB[Application Load Balancer]
-        ACM[ACM Certificate]
-        KMS[KMS]
-    end
+Configure public or internal ALB behavior with `global.ingress.aws.scheme`, `targetType`, `groupName`, and provider annotations.
 
-    Apps[Your AI apps] --> ALB --> TG
-    TG --> FW
-    TG --> PG
-    TG --> RD
-    TG -. OTLP 4317/4318 .-> OTEL
-    FW -. OTLP 4317/4318 .-> OTEL
-    OTEL --> CH
-    AE --> CH
-    Portal -. policy sync .- TG
-    ALB -. ACM .- ACM
-    EKS -. encryption .- KMS
+## GPU workers
 
-    style AWS fill:#fff3e0
-    style NT fill:#e8f5e8
-```
-
-TrustGate, Firewall, and your data stores run inside your AWS account and VPC. Only per-request **metadata** leaves the cluster over OTLP (ports 4317/4318) to the NeuralTrust SaaS collector, which lands it in SaaS-side ClickHouse for the AlertEngine and dashboards. Raw prompts and responses stay in your in-cluster PostgreSQL and never leave your environment.
-
-## AWS-specific defaults
-
-When `global.platform: "aws"`:
-
-- **Ingress class**: `alb` (AWS Load Balancer Controller v2).
-- **TLS**: prefers ACM via `alb.ingress.kubernetes.io/certificate-arn`. When no ARN is set, the chart provisions a self-signed `kubernetes.io/tls` secret.
-- **Service annotations**: `alb.ingress.kubernetes.io/target-type: ip` for pod-direct routing; configurable scheme, target group, WAF, etc.
-- **Storage class**: `gp3` recommended for cost/perf; `io2` for high-IOPS PostgreSQL.
-
-## Common configuration
-
-### ACM certificates
-
-```yaml
-trustgate:
-  ingress:
-    enabled: true
-    annotations:
-      alb.ingress.kubernetes.io/scheme: internet-facing
-      alb.ingress.kubernetes.io/target-type: ip
-      alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-      alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:<REGION>:<ACCOUNT_ID>:certificate/<CERT_ID>"
-```
-
-Use a wildcard ACM certificate (`*.<your-domain>`) so every platform hostname terminates against the same cert.
-
-### Storage class
-
-```yaml
-global:
-  storageClass: "gp3"                  # default — balanced cost / perf
-```
-
-### Internal-only ingress
-
-For VPC-internal endpoints (no internet exposure):
-
-```yaml
-trustgate:
-  ingress:
-    annotations:
-      alb.ingress.kubernetes.io/scheme: internal
-      alb.ingress.kubernetes.io/subnets: "subnet-aaa,subnet-bbb"
-```
-
-### IRSA for managed services
-
-For managed data services (Amazon RDS / Aurora for PostgreSQL, ElastiCache for Redis), prefer IRSA over static credentials. Annotate the chart service accounts with the IAM role ARN:
-
-```yaml
-trustgate:
-  serviceAccount:
-    create: true
-    annotations:
-      eks.amazonaws.com/role-arn: "arn:aws:iam::<ACCOUNT_ID>:role/neuraltrust-trustgate"
-```
-
-### GPU node group for Firewall workers
+Create a managed GPU node group and label/taint it consistently with your Firewall overlay:
 
 ```bash
 eksctl create nodegroup \
-  --cluster <EKS_CLUSTER_NAME> \
-  --name gpu-pool \
-  --node-type g5.xlarge \
-  --nodes 1 --nodes-min 1 --nodes-max 4 \
-  --node-taints nvidia.com/gpu=true:NoSchedule
+  --cluster neuraltrust \
+  --region <REGION> \
+  --name firewall-gpu \
+  --node-type g4dn.xlarge \
+  --nodes 1 \
+  --node-labels accelerator=nvidia \
+  --node-taints nvidia.com/gpu=present:NoSchedule
 ```
 
-Install the NVIDIA device plugin, then enable the Firewall with GPU workers (see [Firewall deployment](../firewall)).
+Use an EKS GPU-optimized AMI or install the NVIDIA device plugin, then follow [Firewall GPU workers](/neuraltrust/deployment/firewall#gpu-workers).
 
-## Region availability
-
-NeuralTrust runs in any AWS commercial region with EKS support. Choose the region closest to your traffic and target LLM endpoints, or one that meets your data-residency obligations.
-
-For GovCloud or specific compliance regions, contact [support@neuraltrust.ai](mailto:support@neuraltrust.ai).
-
-## Backup and data lifecycle
-
-For production, configure backups against the persistent stores rather than relying on EBS snapshots alone:
-
-- **PostgreSQL** (TrustGate admin metadata **and** the raw prompt/response store): use Amazon RDS for PostgreSQL externally; disable `neuraltrust-control-plane.infrastructure.postgresql.deploy`.
-- **Redis**: use Amazon ElastiCache externally if you don't want to run it in-cluster.
-
-ClickHouse and the AlertEngine run on the NeuralTrust SaaS Control Plane, so metadata storage and its backups are managed by NeuralTrust — nothing to back up in your cluster.
-
-External-infra reference: [Configuration scenarios](../configuration#external-infrastructure-only).
-
-## Verification
-
-```bash
-kubectl get pods -n neuraltrust
-kubectl get ingress -n neuraltrust -o wide
-
-# Health checks (replace hosts with your domain)
-curl https://data-plane-api.platform.example.com/health
-```
-
-## Common issues
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Ingress doesn't get an ALB | AWS LB Controller not installed or wrong IAM | Check `kube-system` logs for the controller |
-| Subnet `kubernetes.io/role/elb` tag missing | ALB Controller can't find target subnets | Tag at least 2 subnets with the correct role label |
-| `PVC` stuck `Pending` | EBS CSI driver missing or wrong IAM | Verify driver installed and IRSA role attached |
-| `ImagePullBackOff` | Missing or wrong `gcr-secret` | Recreate the secret with the JSON key from NeuralTrust |
-
-## Next steps
-
-- [Hybrid deployment on EKS](./hybrid) — Data Plane only, Control Plane on SaaS
-- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
-- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis, image registry, storage, secrets
-- [Image catalog](../images) — what runs where
-- [Firewall deployment](../firewall) — GPU workers on EKS
+Continue with [EKS Hybrid](/neuraltrust/deployment/aws/hybrid), or use [External configuration](/neuraltrust/deployment/configuration#minimal-external).
