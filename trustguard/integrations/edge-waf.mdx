@@ -7,7 +7,7 @@ Edge collectors enforce at the CDN, in front of your AI application — a networ
 control independent of the app and gateway. They run **after** your CDN's WAF (Cloudflare
 WAF, AWS WAF, Fastly Next-Gen WAF, Akamai App & API Protector), so blocked web attacks
 never reach TrustGuard. The pattern is the same everywhere: the edge function reads the
-request body, calls [`/v1/guard`](/trustguard/api/guard), and returns a 403 when content
+request body, calls [`/v1/evaluate`](/trustguard/api/evaluate), and returns a 403 when content
 is flagged — clean traffic forwards to your origin unchanged.
 
 Create an API key on the collector first. WAF rules can't call external
@@ -37,7 +37,7 @@ export default {
   async fetch(request, env) {
     if (request.method === "POST") {
       const text = await request.clone().text();
-      const result = await fetch("{TRUSTGUARD_URL}/v1/guard", {
+      const result = await fetch("{TRUSTGUARD_URL}/v1/evaluate", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${env.TRUSTGUARD_API_KEY}`,
@@ -81,7 +81,7 @@ export const handler = async (event) => {
   if (request.method === "POST" && request.body?.data) {
     // Body is base64-encoded; "Include Body" must be enabled on the trigger
     const text = Buffer.from(request.body.data, "base64").toString();
-    const result = await fetch("{TRUSTGUARD_URL}/v1/guard", {
+    const result = await fetch("{TRUSTGUARD_URL}/v1/evaluate", {
       method: "POST",
       headers: {
         Authorization: "Bearer <collector-api-key>",
@@ -122,7 +122,7 @@ async function handler(event) {
 
   if (req.method === "POST") {
     const text = await req.clone().text();
-    const result = await fetch("{TRUSTGUARD_URL}/v1/guard", {
+    const result = await fetch("{TRUSTGUARD_URL}/v1/evaluate", {
       method: "POST",
       backend: "trustguard",
       headers: {
@@ -168,7 +168,7 @@ export async function responseProvider(request) {
   if (request.method === "POST") {
     const text = await request.text();
     // Path mapped to the TrustGuard origin in Property Manager
-    const guardResponse = await httpRequest("/trustguard/v1/guard", {
+    const guardResponse = await httpRequest("/trustguard/v1/evaluate", {
       method: "POST",
       headers: {
         Authorization: "Bearer <collector-api-key>",
@@ -207,7 +207,7 @@ export async function responseProvider(request) {
 - **Latency** — keep TrustGuard close to the edge region, or use it for input screening
   where the extra hop is acceptable. Your deployment's fail-open / fail-closed setting
   applies on errors.
-- **Both directions** — screen the response by calling `/v1/guard` with
+- **Both directions** — screen the response by calling `/v1/evaluate` with
   `direction:"output"` in the response phase.
 - **Identity** — forward a stable `consumer_id` (and `session_id` for chat) from your
   auth/headers so behavioral and multi-turn detectors work.
