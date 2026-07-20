@@ -1,234 +1,39 @@
 ---
-title: OpenShift overview
-description: Install the NeuralTrust Platform on Red Hat OpenShift 4.10+. Covers Routes (default) vs Ingress, Security Context Constraints (SCC), `oc` workflow, ROSA / ARO / on-prem, image pull secret linking, and GPU workers.
+title: Overview
+description: OpenShift prerequisites and Route-specific choices for NeuralTrust chart 2.0.5.
 ---
 
-NeuralTrust Platform has first-class support for Red Hat OpenShift 4.10 and newer — on ROSA, ARO, OpenShift on bare metal, IPI/UPI, and self-managed OpenShift in any cloud. The chart ships a dedicated `values-openshift.yaml` reference and uses OpenShift Routes by default for external access.
+NeuralTrust supports OpenShift with native Routes or Kubernetes Ingress. Chart 2.0.5 includes `values-openshift.yaml` as the canonical Hybrid starting point.
 
-## Pick your path
-
-<CardGroup cols={2}>
-  <Card title="Hybrid (recommended)" icon="cloud" href="./hybrid">
-    Data Plane + TrustGate + Firewall in your OpenShift cluster. Control Plane on NeuralTrust SaaS. Fastest path.
-  </Card>
-</CardGroup>
-
-If you're unsure which model fits, see [Deployment models](../deployment-models).
-
-## Cluster prerequisites
-
-| Resource | Recommended |
-|---|---|
-| OpenShift version | 4.10 or newer |
-| CPU pool node type | **8 vCPU / 32 GiB recommended** (4 vCPU / 16 GiB also works but doubles the node count) |
-| Min CPU nodes | **≥ 4 (CPU Firewall)**. Subtract one when using GPU Firewall workers. ≥ 3 AZs for HA. |
-| GPU pool *(optional)* | 4 vCPU / 16 GiB + 1 × NVIDIA GPU — 5 nodes (one per default Firewall worker). Requires the NVIDIA GPU Operator. |
-| Storage class | Cluster default (typically `gp3-csi`, `managed-premium`, `pd-balanced`, or `ocs-storagecluster-ceph-rbd`) |
-| External access | OpenShift Routes (default) or Ingress (when integrating with external L7 LB) |
-| DNS | OpenShift wildcard DNS (e.g. `*.apps.<cluster>.openshift.com`) or a custom domain |
-| Certificates | OpenShift router cert (default), custom Route TLS, or Ingress with cert-manager |
-| Image pull | `gcr-secret` (docker-registry) — must be linked to the workload service accounts |
-| Optional | NVIDIA GPU Operator for Firewall GPU workers |
-
-See [Deployment models › Sizing baseline](../deployment-models#sizing-baseline) for the math behind these recommendations.
-
-### Required setup
+## Prepare a project
 
 ```bash
-# Log in
-oc login -u kubeadmin -p <password> https://api.<cluster>.openshift.com:6443
-
-# Create the project
+oc login https://api.<cluster>:6443
 oc new-project neuraltrust
+oc get storageclass
+```
 
-# Create the image pull secret
-oc create secret docker-registry gcr-secret \
-  --docker-server=europe-west1-docker.pkg.dev \
-  --docker-username=_json_key \
-  --docker-password="$(cat path/to/gcr-keys.json)" \
-  --docker-email=admin@neuraltrust.ai \
-  -n neuraltrust
+Create and link the NeuralTrust registry pull Secret:
 
-# Link the pull secret to the default service account (or per-component SAs after install)
+```bash
 oc secrets link default gcr-secret --for=pull -n neuraltrust
 oc secrets link builder gcr-secret --for=pull -n neuraltrust
 ```
 
-For the NVIDIA GPU Operator: follow the [Red Hat documentation](https://docs.nvidia.com/datacenter/cloud-native/openshift/latest/index.html), then enable Firewall GPU workers (see [Firewall deployment](../firewall)).
+Create `gcr-secret` first using credentials provided by NeuralTrust, or configure your internal mirror.
 
-## Architecture
+## OpenShift choices
 
-```mermaid
-flowchart LR
-    subgraph NT[NeuralTrust SaaS Control Plane]
-        Portal[Control Plane API + UI + Scheduler]
-        OTEL[OTel collector]
-        CH[(ClickHouse)]
-        AE[AlertEngine]
-        OTEL --> CH --> AE
-    end
+- `global.platform: openshift`
+- `global.ingress.provider: openshift` for native Routes.
+- `global.domain` should normally match the cluster applications wildcard suffix.
+- `global.storageClass` should reference a ReadWriteOnce-capable class for PostgreSQL.
+- Keep default restricted security behavior; grant additional SCC permissions only to workloads that demonstrably require them.
 
-    subgraph OCP[Your OpenShift Cluster]
-        subgraph WORK[Workloads]
-            TG[TrustGate]
-            DP[Data Plane API + Workers]
-            FW[Firewall]
-            PG[(PostgreSQL admin + raw payloads)]
-            RD[(Redis)]
-        end
-        Router[OpenShift Router]
-    end
+GPU Firewall workers can require `hostIPC` and GPU device access. Review the SCC impact before enabling the [GPU overlay](/neuraltrust/deployment/firewall#gpu-workers).
 
-    Apps[Your AI apps] --> Router --> TG
-    TG --> DP
-    TG --> FW
-    DP --> PG
+## TLS
 
-    TG -. OTLP metadata 4317/4318 .-> OTEL
-    FW -. OTLP metadata 4317/4318 .-> OTEL
-    Portal -. enroll / policy sync .- DP
+Routes can use router-managed edge TLS or a supplied certificate, depending on cluster policy. For Ingress instead, set the provider/resource type and use the installed ingress controller plus cert-manager.
 
-    style OCP fill:#fce4ec
-    style NT fill:#e8f5e8
-```
-
-TrustGate, Firewall, and your Postgres/Redis run inside your OpenShift cluster. Only OTLP metadata and control-plane sync leave the cluster (to the NeuralTrust SaaS collector on 4317/4318); raw prompts and responses stay in your in-cluster PostgreSQL. The OTel collector, ClickHouse, and AlertEngine all run on NeuralTrust SaaS.
-
-## OpenShift-specific defaults
-
-When `global.platform: "openshift"`:
-
-- **External access**: Routes (not Ingress). Hostnames follow the **long service-name pattern**: `<service-name>.<global.domain>`. Example:
-
-  | Service | Route hostname |
-  |---|---|
-  | TrustGate admin | `trustgate-admin.<domain>` |
-  | TrustGate gateway | `trustgate-gateway.<domain>` |
-  | TrustGate actions | `trustgate-actions.<domain>` |
-  | Control Plane API | `control-plane-api.<domain>` |
-  | Control Plane UI | `control-plane-app.<domain>` |
-  | Control Plane scheduler | `control-plane-scheduler.<domain>` |
-  | Data Plane API | `data-plane-api.<domain>` |
-
-  <Note>
-  This is different from the chart's Ingress hostname scheme on other clouds (`admin.<domain>`, `gateway.<domain>`, etc.). It matches the OpenShift convention for Route names.
-  </Note>
-
-- **TLS**: edge-terminated Routes use the OpenShift router cert by default. For custom certs, populate `spec.tls.certificate` on the Route (the chart's per-Route values support this).
-- **Security context**: respects SCC. The chart relaxes hardcoded UID/GID where OpenShift assigns them; PostgreSQL specifically has an OpenShift-aware container security context.
-- **Image pull**: `gcr-secret` must be linked to each component's service account (`oc secrets link <sa> gcr-secret --for=pull`).
-
-### Switching to Ingress
-
-To use Kubernetes Ingress instead of Routes (e.g. when integrating with an external NGINX ingress controller):
-
-```yaml
-trustgate:
-  ingress:
-    controlPlane:
-      enabled: true
-      className: "nginx"
-```
-
-When you enable Ingress on OpenShift, the chart **stops** creating the Route for that component. Hostnames then revert to the short prefix scheme (`admin.<domain>`, `gateway.<domain>`).
-
-## Common configuration
-
-### Reference values file
-
-The chart ships [`values-openshift.yaml`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-openshift.yaml) as a tested baseline for OpenShift installs. Copy it, set your domain, and adjust toggles.
-
-### Custom Route certificates
-
-```yaml
-trustgate:
-  ingress:
-    controlPlane:
-      route:
-        tls:
-          termination: edge
-          certificate: |
-            -----BEGIN CERTIFICATE-----
-            ...
-          key: |
-            -----BEGIN PRIVATE KEY-----
-            ...
-```
-
-For most production deployments, prefer storing certificates in OpenShift Secrets and referencing them, rather than inlining PEM in values.
-
-### Internal-only Routes
-
-```yaml
-trustgate:
-  ingress:
-    controlPlane:
-      route:
-        host: "trustgate-admin.apps-internal.example.com"
-```
-
-Pair with a private router shard or a separate router with internal DNS for cluster-internal exposure.
-
-### Storage class
-
-```yaml
-global:
-  storageClass: "ocs-storagecluster-ceph-rbd"  # for OpenShift Data Foundation
-  # or "managed-premium" on ARO / "gp3-csi" on ROSA
-```
-
-### GPU node pool (NVIDIA GPU Operator)
-
-After installing the GPU Operator from OperatorHub:
-
-```bash
-oc label machineset gpu-pool cluster.x-k8s.io/node-pool=gpu-pool -n openshift-machine-api
-```
-
-Then enable Firewall GPU workers (see [Firewall deployment](../firewall)).
-
-## ROSA / ARO / on-prem differences
-
-| Topic | ROSA (AWS) | ARO (Azure) | OpenShift on-prem |
-|---|---|---|---|
-| Default storage class | `gp3-csi` | `managed-premium` | varies — check `oc get sc` |
-| Default DNS | `*.apps.<cluster>.openshiftapps.com` | `*.apps.<cluster>.<region>.aroapp.io` | your customer DNS |
-| Cluster-bound networking | AWS PrivateLink | Azure Private Link | depends on infra |
-| GPU node groups | AWS-side: `g5`/`g6` ASGs | Azure-side: `Standard_NC*` | depends on infra |
-
-## Backup and data lifecycle
-
-For production OpenShift:
-
-- **PostgreSQL**: use managed databases (RDS, Azure Database for PostgreSQL, Cloud SQL) and set `neuraltrust-control-plane.infrastructure.postgresql.deploy: false`. This store holds TrustGate admin metadata **and** the raw prompt/response payloads.
-- **Redis**: use a managed Redis, or run the in-cluster Redis.
-
-ClickHouse and the AlertEngine run on NeuralTrust SaaS — there is nothing to back up for them in your cluster.
-
-External-infra reference: [Configuration scenarios](../configuration#external-infrastructure-only).
-
-## Verification
-
-```bash
-oc get pods -n neuraltrust
-oc get route -n neuraltrust
-
-curl https://data-plane-api.apps.<cluster>.openshift.com/health
-```
-
-## Common issues
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Pods stuck `CreateContainerConfigError` | `gcr-secret` not linked to the service account | `oc secrets link <component-sa> gcr-secret --for=pull -n neuraltrust` |
-| Route hostname unexpected | Mixing Route vs Ingress | When Ingress is enabled on a component, the chart skips its Route |
-| Pod fails to start with SCC error | Custom UID conflicts with SCC | Use `oc adm policy add-scc-to-user anyuid -z <sa>` only as a last resort; prefer adjusting the chart values |
-| `PVC` stuck `Pending` | Wrong storage class | `oc get sc`; set `global.storageClass` to a valid one |
-
-## Next steps
-
-- [Hybrid deployment on OpenShift](./hybrid) — Data Plane only, Control Plane on SaaS
-- [Deployment models](../deployment-models) — SaaS vs Hybrid comparison
-- [Feature flags reference](../feature-flags) — local vs external Postgres/Redis, image registry, storage, secrets
-- [Image catalog](../images) — what runs where
-- [Firewall deployment](../firewall) — GPU workers on OpenShift
+Continue with [OpenShift Hybrid](/neuraltrust/deployment/openshift/hybrid), or apply [External values](/neuraltrust/deployment/configuration#minimal-external) with OpenShift routing and security overrides.

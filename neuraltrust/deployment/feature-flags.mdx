@@ -1,354 +1,71 @@
 ---
 title: Feature flags reference
-description: Every toggle that changes what the NeuralTrust Platform Helm chart deploys — PostgreSQL, Redis, image registry, storage class, and secrets. Includes the exact values keys, required databases/users for external services, and the secrets you must pre-create per scenario.
+description: Chart 2.0.5 deployment switches and defaults.
 ---
 
-This page is the single source of truth for the **feature flags** that change what the chart deploys. Use it when you need to decide between in-cluster and external infrastructure, mirror images, customize storage, or pre-create secrets.
+These are the chart 2.0.5 switches that materially change the rendered topology.
 
-For end-to-end install walkthroughs, see the [per-cloud guides](./overview#cloud-specific-guides). For the deployment-model decision (SaaS vs Hybrid), see [Deployment models](./deployment-models).
-
-## Component on/off toggles
-
-The chart's primary `enabled` flags decide which subcharts are rendered.
-
-| Component | Values key | Default | Notes |
-|---|---|---|---|
-| Data Plane | `neuraltrust-data-plane.dataPlane.enabled` | `true` | API + worker |
-| Control Plane | `neuraltrust-control-plane.controlPlane.enabled` | **`false`** | Leave `false` — the Control Plane runs on NeuralTrust SaaS (Hybrid). |
-| TrustGate | `trustgate.enabled` | `true` | admin + gateway + actions + Redis |
-| Firewall | `neuraltrust-firewall.firewall.enabled` | `true` | gateway + 5 workers — **always on** in supported topologies; the choice is CPU vs GPU workers (see [Firewall deployment](./firewall#cpu-vs-gpu)) |
-| SIEM Connectors | `neuraltrust-siem-connectors.siemConnectors.enabled` | `false` | Off — opt-in |
-| Watchdog (self-healing) | `neuraltrust-watchdog.enabled` | `false` | Off — opt-in |
-| OpenTelemetry Collector | `global.observability.enabled` | `false` | Off — opt-in |
-
-A zero-config `helm install` deploys Data Plane + TrustGate + Firewall + in-cluster infra, **without** Control Plane — i.e. a hybrid-shaped stack ready for SaaS enrollment.
-
-## PostgreSQL — in-cluster or external
-
-PostgreSQL stores:
-
-- **Control Plane** schema (RBAC, integrations, dashboards) — only when CP is enabled
-- **TrustGate** schema (gateways, routes, plugins) — when TrustGate is enabled
-- **Raw prompt/response** bodies — products write raw payloads to a PostgreSQL store (e.g. the Firewall's `trustguard_data` table) so you can view them in the platform. The UI fetches them **on demand** by `(team_id, trace_id)`; in Hybrid this data never leaves your cluster. Only per-request **metadata** is exported over OTLP to the NeuralTrust SaaS collector.
-
-### In-cluster (default)
-
-| Values key | Default |
-|---|---|
-| `neuraltrust-control-plane.infrastructure.postgresql.deploy` | `true` |
-| `neuraltrust-control-plane.controlPlane.components.postgresql.persistence.storageClass` | `""` (cluster default) |
-| `neuraltrust-control-plane.controlPlane.components.postgresql.secrets.user` | `neuraltrust` |
-| `neuraltrust-control-plane.controlPlane.components.postgresql.secrets.password` | `""` → auto-generated 32-char |
-| `neuraltrust-control-plane.controlPlane.components.postgresql.secrets.database` | `neuraltrust` |
-| `neuraltrust-control-plane.controlPlane.components.postgresql.secrets.host` | `control-plane-postgresql` |
-
-The in-cluster Postgres deploys regardless of `controlPlane.enabled` — TrustGate uses the same instance even in hybrid mode.
-
-### External (managed service)
-
-```yaml
-neuraltrust-control-plane:
-  infrastructure:
-    postgresql:
-      deploy: false
-  controlPlane:
-    components:
-      postgresql:
-        secrets:
-          name: "postgresql-secrets"
-          host: "<external-host>"
-          port: "5432"
-          user: "neuraltrust"
-          password: "<password>"            # or pre-create the secret
-          database: "neuraltrust"
-
-trustgate:
-  global:
-    env:
-      DATABASE_HOST: "<external-host>"
-      DATABASE_PORT: "5432"
-      DATABASE_USER: "trustgate"
-      DATABASE_PASSWORD: "<password>"
-      DATABASE_NAME: "trustgate"
-      DATABASE_SSL_MODE: "require"          # "disable" only for in-cluster
-```
-
-### Required databases & users when external
-
-Create these **before** running `helm upgrade`. Most managed services let you create the cluster admin then run the `CREATE DATABASE` / `CREATE USER` statements below.
-
-| Database | User | Required when | Permissions |
-|---|---|---|---|
-| `neuraltrust` | `neuraltrust` | Always | `ALL PRIVILEGES ON DATABASE neuraltrust` — Prisma migrations need DDL on `public` schema |
-| `trustgate` | `trustgate` | `trustgate.enabled: true` | `ALL PRIVILEGES ON DATABASE trustgate`, schema DDL |
-
-Recommended SQL:
-
-```sql
--- as the cluster admin
-CREATE USER neuraltrust WITH PASSWORD '<strong-password>';
-CREATE DATABASE neuraltrust OWNER neuraltrust;
-GRANT ALL PRIVILEGES ON DATABASE neuraltrust TO neuraltrust;
-
-CREATE USER trustgate WITH PASSWORD '<strong-password>';
-CREATE DATABASE trustgate OWNER trustgate;
-GRANT ALL PRIVILEGES ON DATABASE trustgate TO trustgate;
-
--- connect to each DB and grant on public schema (Postgres 15+)
-\c neuraltrust
-GRANT ALL ON SCHEMA public TO neuraltrust;
-\c trustgate
-GRANT ALL ON SCHEMA public TO trustgate;
-```
-
-<Note>
-The chart's `trustgate-postgresql-init` Job can create the `trustgate` database/user automatically **if** the credentials in `postgresql-secrets` have `CREATE USER` and `CREATE DATABASE` rights on the external instance. Most managed Postgres services restrict these — pre-creating the DB/user is the safer path.
-</Note>
-
-### Cloud-managed Postgres notes
-
-| Provider | Notes |
-|---|---|
-| AWS RDS / Aurora PostgreSQL | Set `DATABASE_SSL_MODE: require`. Use IRSA for password rotation via Secrets Manager if desired. |
-| Azure Database for PostgreSQL Flexible Server | Set `DATABASE_SSL_MODE: require`. Use private endpoint for VNet-internal access. |
-| Cloud SQL for PostgreSQL | Use Private IP. Authorize the GKE subnet. Set `DATABASE_SSL_MODE: require`. |
-| CloudNativePG (on-prem) | Run `CREATE DATABASE … OWNER` from a privileged session; chart-side init Job works if the bootstrap user has CREATE rights. |
-
-## Redis — in-cluster or external
-
-TrustGate uses Redis for caching gateways, plugins, and rate-limit state. Data Plane and Control Plane do **not** use Redis.
-
-### In-cluster (default)
-
-Redis ships bundled with the TrustGate subchart as `trustgate-redis` (single StatefulSet, 10 GiB PVC). No additional configuration needed.
-
-| Values key | Default |
-|---|---|
-| `trustgate.redis.replica.replicaCount` | `1` |
-| `trustgate.redis.image.tag` | `7.2.0-v20` |
-| `trustgate.redis.bind` | `0.0.0.0 -::` (dual-bind) |
-
-### External Redis
-
-Point TrustGate at a managed Redis (ElastiCache, Memorystore, Azure Cache for Redis) by setting env vars:
-
-```yaml
-trustgate:
-  redis:
-    enabled: false                          # config-only flag (see caveat below)
-  global:
-    env:
-      REDIS_HOST: "<external-host>"
-      REDIS_PORT: "6379"
-      REDIS_PASSWORD: "<password>"          # required for managed Redis
-      REDIS_DB: "0"
-```
+| Value | Default | Effect |
+| --- | --- | --- |
+| `global.deploymentMode` | `hybrid` | `hybrid` renders customer runtimes; `external` also renders control planes and local analytics. |
+| `global.postgresql.deploy` | `true` | Deploy shared PostgreSQL, or use `false` with external connection values. |
+| `global.redis.deploy` | `true` | Deploy shared Redis, or use `false` with external connection values. |
+| `global.clickstack.enabled` | `true` | Enables chart 2.0.5's combined raw+metadata SaaS OTLP path. `false` disables that entire path, including metadata. |
+| `infrastructure.clickhouse.deploy` | `true` | External only: deploy ClickHouse. Set `false` for a managed endpoint. |
+| `data-plane-api.dataPlane.enabled` | `true` | Render the compatibility API shim. |
+| `agentgateway.mcp.enabled` | `true` | Render AgentGateway MCP runtime. |
+| `agentgateway.configSync.enabled` | `false` | Switch AgentGateway data plane from PostgreSQL-backed configuration to authenticated config sync. |
+| `trustguard.configSync.enabled` | `false` | Experimental: switch TrustGuard data plane from PostgreSQL-backed configuration to authenticated config sync. The plane split uses placeholder runtime arguments/ports in chart 2.0.5. |
+| `firewall.enabled` | `true` | Include the Firewall subchart. |
+| `firewall.firewall.enabled` | `true` | Render Firewall gateway and workers. Keep this aligned with `trustguard.firewall.enabled`. |
+| `trustguard.firewall.enabled` | `true` | Configure TrustGuard to call Firewall. |
+| `alertengine.enabled` | `true` | Render AlertEngine in External mode. |
+| `trustlens.enabled` | `false` | Opt-in work in progress; a release image tag is not supplied by default. |
+| `watchdog.enabled` | `false` | Enable optional self-monitoring and remediation. |
+| `global.autoGenerateSecrets` | `true` | Generate chart-owned secrets when values are empty. |
+| `global.preserveExistingSecrets` | `false` | Skip chart secret creation/update; the operator must pre-create the complete contract. |
 
 <Warning>
-**Current chart caveat**: setting `trustgate.redis.enabled: false` changes the TrustGate env vars to point external, but the in-cluster `trustgate-redis` StatefulSet **still deploys** (the template isn't guarded on the flag). The unused pod is small (~500m / 1 GiB) but it does consume cluster resources. A fix is planned for an upcoming chart release; until then, expect the in-cluster Redis pod to exist even when you target an external one.
+**Hybrid telemetry compatibility:** intended product behavior exports metadata only and retains raw prompts/responses in customer PostgreSQL, except for authorized DataAgent/DataBridge retrieval. Chart 2.0.5 does not support metadata-only OTLP through values. Either accept its raw+metadata export, set `global.clickstack.enabled: false` to disable all SaaS ClickStack export, or use an approved patched/newer chart that implements metadata-only export.
 </Warning>
 
-## Telemetry export (OpenTelemetry → NeuralTrust SaaS)
+AgentGateway config sync is optional and off by default. TrustGuard config sync and the External TrustGuard control/data-plane split should be treated as experimental until the exact chart and image runtime contract has been validated.
 
-There is **no Kafka** and **no in-cluster ClickHouse** to toggle. Products emit per-request **metadata over OTLP** to the NeuralTrust SaaS OpenTelemetry collector, which lands it in SaaS ClickHouse for the AlertEngine and dashboards.
+## Shared infrastructure
 
-| Aspect | Detail |
-|---|---|
-| Transport | OpenTelemetry (OTLP logs) |
-| Destination | NeuralTrust SaaS OTel collector |
-| Ports | `4317` (gRPC) / `4318` (HTTP), outbound |
-| Payload | Metadata only — verdicts, finding labels, latency, cost, correlation ids. No raw prompt/response text. |
-
-Raw prompt/response bodies stay in your cluster's PostgreSQL (see [PostgreSQL](#postgresql-in-cluster-or-external) above). The collector, ClickHouse, and the AlertEngine all run on NeuralTrust SaaS — none of them are deployed by the chart in your cluster.
-
-## Image registry — NeuralTrust GCR or your internal mirror
-
-By default, every NeuralTrust image is pulled from  
-`europe-west1-docker.pkg.dev/neuraltrust-app-prod/nt-docker/<name>`.
-
-### Default (NeuralTrust GCR)
-
-Pre-create the `gcr-secret` image pull secret in your release namespace. The chart **does not** create this secret — you have to do it yourself with the JSON key NeuralTrust provides:
-
-```bash
-kubectl create secret docker-registry gcr-secret \
-  --docker-server=europe-west1-docker.pkg.dev \
-  --docker-username=_json_key \
-  --docker-password="$(cat path/to/gcr-keys.json)" \
-  --docker-email=admin@neuraltrust.ai \
-  -n neuraltrust
-```
-
-The chart references this secret from every subchart's `imagePullSecrets` (defaults: `["gcr-secret"]`).
-
-### Internal mirror (one override)
+Hybrid resolves AgentGateway, TrustGuard, DataAgent, and `data-plane-api` to one PostgreSQL role/database through `postgresql-secrets`. It similarly resolves Redis through `redis-secrets`.
 
 ```yaml
 global:
-  imageRegistry: "registry.internal.example.com/neuraltrust"
-```
-
-The chart's image helper strips the default GCP prefix and prepends yours — so  
-`europe-west1-docker.pkg.dev/neuraltrust-app-prod/nt-docker/control-plane-api`  
-becomes  
-`registry.internal.example.com/neuraltrust/control-plane-api`  
-with no other override required.
-
-### Three escalating customization levels
-
-| You mirror images with… | What to override |
-|---|---|
-| Same short names, same tags | only `global.imageRegistry` |
-| Same short names, custom tags | `global.imageRegistry` + per-component `image.tag` |
-| Renamed paths (e.g. `my-registry.corp/cp-api`) | `global.imageRegistry` + per-component `image.repository` + `image.tag` |
-
-Per-component override paths:
-
-| Path | Component |
-|---|---|
-| `neuraltrust-control-plane.controlPlane.components.{api,app,scheduler,postgresql}.image.{repository,tag}` | Control Plane |
-| `neuraltrust-data-plane.dataPlane.components.{api,worker}.image.{repository,tag}` | Data Plane |
-| `neuraltrust-firewall.firewall.gateway.image.*` / `workerDefaults.image.*` | Firewall |
-| `trustgate.global.image.{image,tag}` | TrustGate |
-| `trustgate.redis.image.{repository,tag}` | Redis |
-
-### Mirroring images to an internal registry
-
-```bash
-helm template neuraltrust-platform \
-  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version <VERSION> \
-  -f my-values.yaml \
-  | yq '.. | select(has("image")) | .image' \
-  | sort -u
-```
-
-Mirror each image to your internal registry with `crane`, `skopeo`, or `docker pull/push`, then set `global.imageRegistry`. Verify rendered images:
-
-```bash
-helm template . -f my-values.yaml | grep -E '^\s+image:' | sort -u
-```
-
-## Storage class — cluster default or explicit
-
-PVCs are created for PostgreSQL, Redis, and the optional OpenTelemetry collector buffer.
-
-### Cluster default (default behavior)
-
-| Values key | Default |
-|---|---|
-| `global.storageClass` | `""` |
-
-When empty, the chart **omits** `storageClassName` from PVC specs, which falls back to the cluster's default `StorageClass`. Confirm one exists:
-
-```bash
-kubectl get storageclass
-# default class is marked with (default)
-```
-
-### Explicit, cluster-wide
-
-```yaml
-global:
-  storageClass: "pd-balanced"               # GKE example
-  # storageClass: "gp3"                      # AWS EKS
-  # storageClass: "managed-csi-premium"      # Azure AKS
-  # storageClass: "longhorn"                 # bare metal
-```
-
-### Per-component overrides
-
-| Component | Values key | Recommended for prod |
-|---|---|---|
-| PostgreSQL | `neuraltrust-control-plane.controlPlane.components.postgresql.persistence.storageClass` | SSD-backed (`pd-ssd`, `io2`, `managed-csi-premium`) for high-throughput |
-| Redis (TrustGate) | `trustgate.global.storageClass` (inherits umbrella `global.storageClass`) | Default |
-| OTel collector buffer (optional) | `global.observability.collector.bufferPVC.storageClass` | Default |
-
-Per-component override wins over `global.storageClass`. Empty per-component = inherit `global.storageClass` = inherit cluster default.
-
-## Secrets — auto-generated, explicit, or pre-created
-
-Two top-level flags control how the chart manages secrets.
-
-| Values key | Default | Behavior |
-|---|---|---|
-| `global.autoGenerateSecrets` | `true` | Chart generates random secrets on first install; reuses existing on upgrade. |
-| `global.preserveExistingSecrets` | `false` | When `true`, **all** secret templates are skipped (parent + subcharts). You must pre-create everything. |
-
-Use `autoGenerateSecrets: true` for quick installs and dev/test. Use `preserveExistingSecrets: true` when you manage secrets with Vault, Sealed Secrets, External Secrets Operator, SOPS, or any other secret manager.
-
-### Required secrets per scenario
-
-Always required, regardless of mode:
-
-| Secret | Type | Created by |
-|---|---|---|
-| `gcr-secret` | `docker-registry` | **You** (manual, pre-install) |
-
-Auto-generated by default (when `autoGenerateSecrets: true`):
-
-| Scenario | Secret | Keys |
-|---|---|---|
-| **Hybrid** *(CP off)* | `data-plane-jwt-secret` | `DATA_PLANE_JWT_SECRET` |
-| | `trustgate-secrets` | `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_NAME`, `DATABASE_SSL_MODE`, `DATABASE_URL`, `SERVER_SECRET_KEY`, `NEURAL_TRUST_FIREWALL_URL`, `NEURAL_TRUST_FIREWALL_SECRET_KEY` |
-| | `firewall-secrets` | `JWT_SECRET` *(optional `HUGGINGFACE_TOKEN`)* |
-| | `postgresql-secrets` | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_HOST`, `POSTGRES_PORT`, `DATABASE_URL`, `POSTGRES_PRISMA_URL` |
-| | `neuraltrust-ingress-tls` *(if `global.ingress.tls.autoGenerate: true`)* | `tls.crt`, `tls.key` |
-| **Optional** *(only if non-empty values)* | `openai-secrets`, `google-secrets`, `resend-secrets`, `huggingface-secrets` | provider-specific |
-
-### Pre-creating secrets (`preserveExistingSecrets: true`)
-
-Required for: production setups with external secret managers, GitOps flows where chart-rendered Secrets cause drift, or environments where you bake secrets into your golden state.
-
-```yaml
-global:
-  preserveExistingSecrets: true             # chart will not render any secret templates
-```
-
-You must pre-create the secrets above before `helm upgrade --install`. The chart ships [`create-secrets.sh`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/create-secrets.sh) and [`SECRETS.md`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/SECRETS.md) as a starting template.
-
-For per-secret keys and a worked example, see [Secrets management](./secrets).
-
-## Topology cheat sheet
-
-A condensed view of the toggles people set on day one:
-
-```yaml
-global:
-  platform: "gcp"                  # aws | gcp | azure | openshift | kubernetes
-  domain: "platform.example.com"
-  storageClass: ""                 # "" = cluster default
-  imageRegistry: ""                # "" = NeuralTrust GCR
-  autoGenerateSecrets: true        # false + preserveExistingSecrets for prod
-  preserveExistingSecrets: false
-
-neuraltrust-control-plane:
-  controlPlane:
-    enabled: false                 # Control Plane runs on NeuralTrust SaaS
-  infrastructure:
-    postgresql:
-      deploy: true                 # false = external
-
-neuraltrust-data-plane:
-  dataPlane:
-    enabled: true
-
-trustgate:
-  enabled: true
+  deploymentMode: hybrid
+  postgresql:
+    deploy: false
+    host: postgres.example.com
+    port: 5432
+    user: neuraltrust
+    database: neuraltrust
+    sslMode: require
+    existingSecret:
+      name: hybrid-postgresql
   redis:
-    enabled: true                  # false + REDIS_HOST env = external (see Redis caveat)
-
-neuraltrust-firewall:
-  firewall:
-    enabled: true                  # always on in supported topologies (CPU or GPU workers)
+    deploy: false
+    host: redis.example.com
+    port: 6379
+    tls: "true"
+    existingSecret:
+      name: hybrid-redis
 ```
 
-Telemetry needs no toggles: products export metadata over OTLP to the NeuralTrust SaaS collector (ports 4317 / 4318). There is no in-cluster Kafka or ClickHouse.
+External mode keeps per-service database overlays because each control plane owns its migrations. Use `values-v2-managed-datastores.yaml.example` as the source, not the Hybrid shared block alone.
 
-## Related guides
+## Platform and routing
 
-- [Deployment models](./deployment-models) — SaaS vs Hybrid comparison
-- [Configuration scenarios](./configuration) — side-by-side values files for common topologies
-- [Secrets management](./secrets) — pre-creation script, External Secrets Operator
-- [Image catalog](./images) — every image deployed in each model
-- [Firewall deployment](./firewall) — CPU vs GPU workers, TrustGate integration
+`global.platform` accepts `aws`, `gcp`, `azure`, `openshift`, or `kubernetes`. `global.domain` supplies generated hostnames. `global.ingress.provider`, `global.ingress.className`, and provider-specific annotations customize exposure. OpenShift defaults to Routes when `global.ingress.provider: openshift`.
+
+`global.storageClass: ""` uses the cluster default. `global.imageRegistry` replaces the default NeuralTrust registry prefix for mirrored images.
+
+## Optional AWS identity authentication
+
+AgentGateway, TrustGuard, DataCore, and AlertEngine expose service-specific PostgreSQL IAM switches; Redis IAM is also available where documented in the chart. These require matching IRSA permissions and provider values. Start with `values-v2-managed-datastores.yaml.example` and render before applying.
+
+See [Configuration](/neuraltrust/deployment/configuration) for complete minimal overlays and [Secrets](/neuraltrust/deployment/secrets) for key ownership.

@@ -1,210 +1,128 @@
 ---
-title: Configuration scenarios
-description: Side-by-side reference for the values files the NeuralTrust Platform Helm chart ships, and ready-made overrides for common deployment topologies.
+title: Configuration
+description: Minimal chart 2.0.5 values for Hybrid, External, and managed datastores.
 ---
 
-The chart ships a small set of values files that cover the most common deployment topologies. Pick the file closest to your target environment, copy it to `my-values.yaml`, and override only what you need.
+Use the examples shipped with chart 2.0.5 as canonical inputs:
 
-| File | Purpose |
-|---|---|
-| `values-required.yaml` | Minimal starting template — recommended for first-time setup. All other values use chart defaults. |
-| `values.yaml` | Complete reference with every option and inline comments. |
-| `values-openshift.yaml` | Pre-configured for OpenShift with Routes. |
-| `values-openshift-ingress.yaml.example` | OpenShift using Kubernetes Ingress instead of Routes. |
-| `values-external-services.yaml.example` | External PostgreSQL (and Redis). |
-| `values-dataplane-gpu.yaml.example` | Data Plane + GPU firewall workers, no TrustGate. |
-| `values-all-deployed.yaml.example` | Everything enabled — useful as a "what does the full stack look like" reference. |
+- `values-required.yaml`: minimal Hybrid contract.
+- `values-v2-hybrid.yaml.example`: complete Hybrid and managed-store notes.
+- `values-v2-external.yaml.example`: self-hosted control, runtime, and analytics.
+- `values-v2-managed-datastores.yaml.example`: External with managed PostgreSQL, Redis, and ClickHouse.
+- `values-openshift.yaml`: Hybrid with native OpenShift Routes.
 
-All files live in the [chart repository](https://github.com/NeuralTrust/neuraltrust-platform). Fetch any of them with:
+Copy the shipped examples before editing:
 
 ```bash
-curl -sLO https://raw.githubusercontent.com/NeuralTrust/neuraltrust-platform/main/values-required.yaml
+cp values-v2-hybrid.yaml.example values-v2-hybrid.yaml
+cp values-v2-external.yaml.example values-v2-external.yaml
+cp values-v2-managed-datastores.yaml.example values-v2-managed-datastores.yaml
 ```
 
-## Quick reference
+<Warning>
+**External TrustGuard compatibility:** chart 2.0.5 renders the External TrustGuard control plane, but its subchart marks the control/data-plane split arguments and ports as placeholders from an in-progress upstream implementation. Do not infer a functional production runtime from successful Helm rendering. Validate startup, health checks, configuration sync, and API behavior against the exact chart and TrustGuard image release before production use.
+</Warning>
 
-| Scenario | Values file | Platform | Ingress | Routes | Secrets |
-|---|---|---|---|---|---|
-| Zero-config | None (defaults) | Any | No | No | Auto |
-| Kubernetes (cloud) | `values-required.yaml` | `aws` / `gcp` / `azure` / `kubernetes` | Yes | No | Auto |
-| OpenShift (Routes) | `values-openshift.yaml` | `openshift` | No | Yes | Auto |
-| OpenShift (Ingress) | `values-openshift-ingress.yaml.example` | `openshift` | Yes | No | Pre-gen |
-| Everything on | `values-all-deployed.yaml.example` | Configurable | Yes | Configurable | Auto |
-| External infra | `values-external-services.yaml.example` | Configurable | Yes | Configurable | Auto |
-| GPU firewall | `values-dataplane-gpu.yaml.example` | Configurable | Yes | Configurable | Explicit |
-
-## Common scenarios
-
-### Kubernetes with Ingress
+## Minimal Hybrid
 
 ```yaml
 global:
-  platform: "aws"        # or "gcp", "azure", "kubernetes"
-  domain: "platform.example.com"
+  deploymentMode: hybrid
+  platform: kubernetes
+  domain: platform.example.com
+  clickstack:
+    authToken: "<CLICKSTACK_OTLP_TOKEN>"
+
+dataagent:
+  tenantId: ""
+  enrolmentToken: ""
 ```
 
-Use `values-required.yaml` and override `global.platform` + `global.domain`. The chart picks the right ingress flavor for the cloud automatically.
-
-### OpenShift with Routes
+Chart 2.0.5 requires the OTLP token by default because its Hybrid path exports raw payloads and metadata together. It cannot configure metadata-only OTLP through values. Choose one of three behaviors: accept chart 2.0.5's raw+metadata export; set `global.clickstack.enabled: false` to disable the entire SaaS ClickStack path, including metadata; or use an approved patched/newer chart that implements metadata-only export. When using token-authenticated OTLP, reference a Secret in tracked values:
 
 ```yaml
 global:
-  platform: "openshift"
-  domain: "apps.mycluster.example.com"
+  clickstack:
+    existingSecret:
+      name: clickstack-otlp-token
+      key: OTEL_EXPORTER_OTLP_HEADERS
 ```
 
-Start from `values-openshift.yaml`. Routes are created automatically; Ingress is disabled. See [OpenShift overview](./openshift/overview).
+DataAgent remains absent until `tenantId` and either `enrolmentToken` or `enrolmentTokenExistingSecret.name` are set.
 
-### OpenShift with Ingress
+## Minimal External
 
 ```yaml
 global:
-  platform: "openshift"
-  domain: "apps.mycluster.example.com"
-  ingress:
-    provider: "openshift"
+  deploymentMode: external
+  platform: kubernetes
+  domain: platform.example.com
+  observability:
+    hostedExport:
+      enabled: false
 
-trustgate:
-  ingress:
-    enabled: true
+infrastructure:
+  clickhouse:
+    deploy: true
 
-neuraltrust-control-plane:
-  controlPlane:
-    components:
-      api:
-        ingress:
-          enabled: true
-      app:
-        ingress:
-          enabled: true
-```
+alertengine:
+  enabled: true
 
-Start from `values-openshift-ingress.yaml.example`.
-
-### External infrastructure only
-
-NeuralTrust services in-cluster, PostgreSQL provided externally (Redis can be externalized the same way — see [Feature flags › Redis](./feature-flags#redis-in-cluster-or-external)):
-
-```yaml
-neuraltrust-control-plane:
-  infrastructure:
-    postgresql:
-      deploy: false
-  controlPlane:
-    components:
-      postgresql:
-        secrets:
-          host: "postgres.example.com"
-          port: "5432"
-          user: "neuraltrust"
-          password: ""    # inject via --set or pre-created secret
-          database: "neuraltrust"
-```
-
-Start from `values-external-services.yaml.example`. The OpenTelemetry collector and ClickHouse are **not** in-cluster infrastructure — products export metadata over OTLP to the NeuralTrust SaaS collector, so there is nothing external to configure for telemetry.
-
-### Services-only (no TrustGate)
-
-```yaml
-trustgate:
+trustlens:
   enabled: false
-
-neuraltrust-control-plane:
-  controlPlane:
-    enabled: true
-
-neuraltrust-data-plane:
-  dataPlane:
-    enabled: true
 ```
 
-### Pre-generated secrets (CI/CD, Vault)
+External renders the app/control-plane API, AgentGateway and TrustGuard control-plane resources, DataCore, local ClickStack collector, and AlertEngine in addition to runtime workloads. The TrustGuard control-plane runtime remains subject to the compatibility warning above.
+
+## Managed stores
+
+In Hybrid, configure `global.postgresql` and `global.redis`; all relevant workloads use the shared secrets.
 
 ```yaml
 global:
-  autoGenerateSecrets: false
-  preserveExistingSecrets: true
+  postgresql:
+    deploy: false
+    host: postgres.example.com
+    port: 5432
+    user: neuraltrust
+    database: neuraltrust
+    sslMode: require
+    existingSecret:
+      name: hybrid-postgresql
+  redis:
+    deploy: false
+    host: redis.example.com
+    port: 6379
+    tls: "true"
+    existingSecret:
+      name: hybrid-redis
 ```
 
-All required secrets must exist in the namespace before deployment. See [Secrets management › Pre-generated secrets](./secrets#pre-generated-secrets).
+In External, set `global.postgresql.deploy: false`, `global.redis.deploy: false`, and `infrastructure.clickhouse.deploy: false`, then configure each service endpoint and shared ClickHouse Secret as shown in `values-v2-managed-datastores.yaml.example`. Pre-create service databases/roles; Helm does not create users on managed PostgreSQL.
 
-### Zero-config
-
-```bash
-helm upgrade --install neuraltrust-platform \
-  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version <VERSION> \
-  --namespace neuraltrust --create-namespace
-```
-
-Defaults to `global.platform: "gcp"`, in-cluster infrastructure, auto-generated secrets, and self-signed TLS. Useful for rapid evaluation; **not** suitable for production.
-
-## How infrastructure resolves
-
-| Component | In-cluster service name | External config path |
-|---|---|---|
-| PostgreSQL | `control-plane-postgresql` | `neuraltrust-control-plane.controlPlane.components.postgresql.secrets.host` |
-
-The chart's `_helpers.tpl` resolves the right hostname automatically based on `deploy: true` / `false`. You don't typically need to override these directly.
-
-Telemetry is not resolved this way: products emit per-request metadata over OTLP to the **NeuralTrust SaaS OpenTelemetry collector** (ports 4317 / 4318), which lands it in SaaS ClickHouse. There is no in-cluster collector or ClickHouse to point at.
-
-## Component toggles
-
-Every component can be flipped independently:
+## Ingress and storage
 
 ```yaml
-neuraltrust-data-plane:
-  dataPlane:
-    enabled: true       # Data Plane API + workers
-
-neuraltrust-control-plane:
-  controlPlane:
-    enabled: true       # Control Plane API + UI + scheduler
-
-trustgate:
-  enabled: true         # TrustGate AI gateway
-
-neuraltrust-firewall:
-  firewall:
-    enabled: true       # Firewall gateway + workers (CPU image by default)
+global:
+  platform: aws
+  domain: platform.example.com
+  storageClass: gp3
+  ingress:
+    className: alb
+    aws:
+      certificateArn: arn:aws:acm:region:account:certificate/id
 ```
 
-Disabling the Control Plane while keeping the Data Plane is a supported pattern — the Data Plane runs against the NeuralTrust SaaS Control Plane.
+Generated hosts use `global.domain`. Set component ingress hosts only when generated names do not fit your DNS design. Kubernetes ingress is independent of the [web app custom domain](/platform/custom-domain).
 
-## Ingress vs Routes
+## Render before install
 
-| Feature | Ingress | Routes (OpenShift) |
-|---|---|---|
-| Platform | Any Kubernetes | OpenShift only |
-| Controller | Required (NGINX, ALB, GCE, etc.) | Built-in |
-| TLS | `kubernetes.io/tls` secrets or cloud-managed | OpenShift router |
-| Enable | `ingress.enabled: true` per component | Default when `platform: "openshift"` |
+```bash
+helm template neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version 2.0.5 \
+  --namespace neuraltrust \
+  -f values-v2-hybrid.yaml
+```
 
-## Secret management modes
-
-| Mode | Flag | Behavior | Best for |
-|---|---|---|---|
-| Auto-generated | `autoGenerateSecrets: true` | Helm creates and preserves secrets | Dev, staging, quick starts |
-| Explicit values | `autoGenerateSecrets: true` + values set | Your values override auto-generation | Controlled environments |
-| Pre-generated | `preserveExistingSecrets: true` | Helm never touches secrets | Vault, Sealed Secrets, compliance |
-
-Full reference: [Secrets management](./secrets).
-
-## Firewall: CPU and GPU
-
-| Component | Image | Scheduling | CUDA MPS |
-|---|---|---|---|
-| Gateway | `firewall-cpu` | CPU only | N/A |
-| Workers (default) | `firewall-cpu` | CPU only | Omit MPS keys |
-| Workers (GPU) | `firewall-gpu` | GPU nodes with `nvidia.com/gpu`, `nodeSelector`, `tolerations`, `hostIPC` | Set both `cudaMpsActiveThreadPercentage` and `cudaMpsPinnedDeviceMemLimit` |
-
-CUDA MPS env vars are only rendered into the worker ConfigMap when **both** keys are set. Reference files: `values-dataplane-gpu.yaml.example`, `values.yaml`. Detailed setup: [Firewall deployment](./firewall).
-
-## Related guides
-
-- [Feature flags reference](./feature-flags) — every toggle that changes what gets deployed (PG/Redis/registry/storage/secrets)
-- [Install on Kubernetes](./kubernetes/overview) — install workflow that consumes these values files
-- [Secrets management](./secrets) — auto-generation, pre-generated, External Secrets Operator
-- [Firewall deployment](./firewall) — CPU/GPU workers and TrustGate integration
-- [OpenShift](./openshift/overview) — Routes, SCC, and `oc`-specific commands
+The chart validates mode names, Hybrid ClickStack credentials, DataAgent enrollment, and the `data-plane-api` backend. See [Feature flags](/neuraltrust/deployment/feature-flags) and [Secrets](/neuraltrust/deployment/secrets).
