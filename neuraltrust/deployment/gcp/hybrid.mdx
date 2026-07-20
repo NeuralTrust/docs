@@ -1,11 +1,9 @@
 ---
 title: Hybrid
-description: Install Hybrid runtime workloads on GKE.
+description: Install the Hybrid data plane on GKE.
 ---
 
 ## Prepare
-
-Confirm the cluster has a default StorageClass and an ingress path:
 
 ```bash
 kubectl get nodes
@@ -13,11 +11,9 @@ kubectl get storageclass
 kubectl create namespace neuraltrust
 ```
 
-Create the registry pull Secret supplied by NeuralTrust, or configure your mirror as described in [Images](/neuraltrust/deployment/images).
+Create the registry pull Secret ([Images](/neuraltrust/deployment/images)) and your Cloud SQL / Memorystore instances ([sizes](/neuraltrust/deployment/configuration#managed-stores)).
 
 ## Values
-
-Copy chart `values-required.yaml`, then set GCP routing:
 
 ```yaml
 global:
@@ -29,13 +25,18 @@ global:
     existingSecret:
       name: clickstack-otlp-token
       key: OTEL_EXPORTER_OTLP_HEADERS
+  postgresql:
+    deploy: false
+    # host + existingSecret → see Configuration
+  redis:
+    deploy: false
   ingress:
     gcp:
       staticIpName: neuraltrust-ip
       managedCertificates: neuraltrust-cert
 ```
 
-Pre-create `clickstack-otlp-token`; see [Secrets](/neuraltrust/deployment/secrets). For Cloud SQL or Memorystore, use the shared Hybrid blocks in [Configuration](/neuraltrust/deployment/configuration#managed-stores) and private connectivity.
+Complete PostgreSQL/Redis blocks and secrets per [Configuration](/neuraltrust/deployment/configuration) and [Secrets](/neuraltrust/deployment/secrets).
 
 ## Install
 
@@ -48,14 +49,4 @@ helm upgrade --install neuraltrust-platform \
 kubectl get pods,ingress -n neuraltrust
 ```
 
-Create DNS records for the rendered hosts after the GKE load-balancer address is assigned. Wait for managed certificates to become active before connecting the endpoint in [Platform settings → Advanced](/platform/advanced).
-
-## Verify
-
-```bash
-kubectl get ingress -n neuraltrust -o wide
-kubectl get managedcertificate -n neuraltrust
-kubectl get events -n neuraltrust --sort-by=.lastTimestamp
-```
-
-DataAgent is optional and remains absent unless its tenant and enrollment Secret are configured.
+Point DNS at the load balancer, wait for certificates, then connect the data-plane endpoint in [Platform settings → Advanced](/platform/advanced).
