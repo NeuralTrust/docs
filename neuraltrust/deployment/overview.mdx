@@ -1,6 +1,6 @@
 ---
 title: Overview
-description: NeuralTrust v2 deployment architecture, workloads, and data flows.
+description: NeuralTrust deployment architecture, workloads, and data flows.
 ---
 
 NeuralTrust supports **SaaS**, **Hybrid**, and **External** deployments. SaaS is operated by NeuralTrust. Hybrid and External use the `neuraltrust-platform` Helm chart; only those two values map to `global.deploymentMode`.
@@ -8,19 +8,15 @@ NeuralTrust supports **SaaS**, **Hybrid**, and **External** deployments. SaaS is
 ## SaaS and Hybrid architecture
 
 <img
-  src="/images/static/img/platform-v2-architecture.svg"
+  src="/images/static/img/platform-architecture.svg"
   alt="NeuralTrust SaaS and Hybrid architecture showing control and data planes, metadata export to ClickHouse Cloud, raw payload storage in customer PostgreSQL, and authorized retrieval through DataAgent and DataBridge."
 />
 
-This simplified topology focuses on the primary request, telemetry, and retrieval paths. The Hybrid `data-plane-api` compatibility shim is omitted.
+This simplified topology focuses on the primary request, telemetry, and retrieval paths. The Hybrid data-plane API is omitted.
 
-In Hybrid, AgentGateway proxy/MCP, TrustGuard runtime, Firewall, `data-plane-api`, and optionally DataAgent run in the customer cluster. Their control planes, the app/control-plane API, DataBridge, SaaS ClickStack collector, ClickHouse, and AlertEngine remain on NeuralTrust SaaS.
+In Hybrid, TrustGate proxy/MCP, TrustGuard runtime, Firewall, the data-plane API, and optionally DataAgent run in the customer cluster. Their control planes, the app/control-plane API, DataBridge, SaaS ClickStack collector, ClickHouse, and AlertEngine remain on NeuralTrust SaaS.
 
-The intended Hybrid contract exports **metadata only** over OTLP. Raw prompts and responses stay in the customer PostgreSQL, whether deployed in-cluster or provided as a managed service. DataAgent is enrollment-gated and performs authorized outbound retrieval from PostgreSQL through DataBridge when a user requests raw data. AgentGateway and TrustGuard configuration sync is optional and disabled by default in chart 2.0.5.
-
-<Warning>
-**Chart 2.0.5 compatibility deviation:** its Hybrid telemetry configuration exports raw payloads and metadata and requires a ClickStack token by default. Chart 2.0.5 cannot select metadata-only OTLP through values. The accurate choices are to accept its raw+metadata export, set `global.clickstack.enabled: false` to disable the entire SaaS ClickStack export path (both metadata and raw), or deploy an approved patched/newer chart that implements metadata-only export.
-</Warning>
+Hybrid exports **metadata only** over OTLP. Raw prompts and responses stay in the customer PostgreSQL, whether deployed in-cluster or provided as a managed service. DataAgent is enrollment-gated and performs authorized outbound retrieval from PostgreSQL through DataBridge when a user requests raw data. TrustGate and TrustGuard configuration sync is optional.
 
 ## External architecture
 
@@ -28,9 +24,9 @@ The intended Hybrid contract exports **metadata only** over OTLP. Raw prompts an
 flowchart LR
   Client["Users and AI applications"] --> APP["App"]
   APP --> API["Control-plane API"]
-  API --> AGC["AgentGateway control plane"]
-  API --> TGC["TrustGuard control plane<br/>(chart runtime experimental)"]
-  AGC --> AGD["AgentGateway proxy and MCP"]
+  API --> AGC["TrustGate control plane"]
+  API --> TGC["TrustGuard control plane"]
+  AGC --> AGD["TrustGate proxy and MCP"]
   AGD --> TGD["TrustGuard data plane"]
   TGD --> FW["Firewall"]
   AGD --> OTEL["ClickStack OTel Collector"]
@@ -48,39 +44,33 @@ flowchart LR
 
 External is the supported self-hosted model. Both control and data planes run in your environment, along with the app, control-plane API, DataCore, ClickStack OTel Collector, ClickHouse, and AlertEngine. DataAgent/DataBridge are not used. Analytics and payload storage remain local unless you explicitly enable another export or integration.
 
-<Warning>
-Chart 2.0.5 renders External TrustGuard control-plane resources, but the subchart marks their arguments and ports as placeholders for an in-progress split. Validate that runtime against the exact TrustGuard image before production deployment.
-</Warning>
-
 ## Workload placement
 
 | Workload | SaaS | Hybrid customer cluster | External cluster |
 | --- | --- | --- | --- |
-| AgentGateway data plane (proxy/MCP), TrustGuard data plane | Hosted | Yes | Yes |
-| AgentGateway and TrustGuard control planes | Hosted | SaaS | AgentGateway: yes; TrustGuard: rendered, runtime experimental |
+| TrustGate data plane (proxy/MCP), TrustGuard data plane | Hosted | Yes | Yes |
+| TrustGate and TrustGuard control planes | Hosted | SaaS | Yes |
 | Firewall | Hosted | Optional, default on | Optional, default on |
-| `data-plane-api` compatibility shim | N/A / undocumented | Yes | Yes |
+| Data-plane API | Not deployed | Yes | Yes |
 | DataAgent / SaaS DataBridge | N/A | Optional / SaaS | No |
 | App and control-plane API | Hosted | SaaS | Yes |
 | ClickStack collector, ClickHouse, DataCore, AlertEngine | Hosted | SaaS | Yes |
 | PostgreSQL and Redis | Hosted | Shared local or managed stores | Local or managed, with service-specific databases |
 
-## Install chart 2.0.5
+## Install the chart
 
 Start from the example matching your model:
 
 ```bash
-cp values-v2-hybrid.yaml.example values-v2-hybrid.yaml
-cp values-v2-external.yaml.example values-v2-external.yaml
+cp values-required.yaml values-hybrid.yaml
 
 helm upgrade --install neuraltrust-platform \
   oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version 2.0.5 \
   --namespace neuraltrust --create-namespace \
-  -f values-v2-hybrid.yaml
+  -f values-hybrid.yaml
 ```
 
-Edit the copied file for the target environment. Use `values-v2-external.yaml` for External. See [Configuration](/neuraltrust/deployment/configuration), [Secrets](/neuraltrust/deployment/secrets), and your [provider guide](#provider-guides) before installing.
+Edit the copied file for the target environment. For External, create `values-external.yaml` from the concise example in [Configuration](/neuraltrust/deployment/configuration#minimal-external). See [Secrets](/neuraltrust/deployment/secrets) and your [provider guide](#provider-guides) before installing.
 
 ## Provider guides
 
