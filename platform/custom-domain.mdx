@@ -1,83 +1,34 @@
 ---
 title: Custom Domain
-description: Serve the NeuralTrust app on a domain you own via a CNAME — so users reach the platform at a URL on your organization's zone.
+description: Configure a custom hostname for the NeuralTrust web application.
 ---
 
-# Custom Domain
-
-By default, the NeuralTrust console lives at `app.neuraltrust.ai`. **Custom Domain** lets you map a hostname on a zone you own (for example `ai.acme.com` or `trust.example.co`) to your organization's console — so links, emails, and bookmarks all point at an address under your organization.
-
-Open it from the sidebar gear → **Platform settings → Domains → Custom Domain**.
+A custom domain gives users a branded hostname for the NeuralTrust web app, such as `ai.example.com`, instead of the default console URL.
 
 <Note>
-A custom domain changes only the **hostname users see** for the NeuralTrust web app. It does not move data, change where the API is hosted, or affect TrustGate data-plane URLs (those are configured separately in [Advanced](/platform/advanced) or per-integration).
+This setting affects the browser-facing application hostname. It does not configure Kubernetes Ingress or OpenShift Routes for AgentGateway, TrustGuard, APIs, or other chart workloads. Configure those with Helm `global.domain` and ingress values.
 </Note>
 
-## How it works
+## Configure a hostname
 
-The custom domain is a **CNAME** you create in your own DNS zone pointing at a NeuralTrust target. NeuralTrust serves traffic for that hostname, terminates TLS with a certificate it issues automatically, and routes it to your organization's console.
+1. Open **Platform settings → Domains → Custom Domain**.
+2. Add the hostname you control.
+3. Copy the DNS records shown by the application into your DNS provider.
+4. Wait for DNS propagation, then retry verification from the application if needed.
 
-```
-┌──────────────────────┐      DNS CNAME       ┌────────────────────────┐
-│  ai.acme.com         │ ───────────────────▶ │  app.neuraltrust.ai    │
-│  (your zone)         │                      │  (tenant routing)      │
-└──────────────────────┘                      └────────────────────────┘
-```
+Use the exact target and verification records displayed in the UI; they can vary by environment. Choose a subdomain because many DNS providers do not allow a CNAME at the zone apex.
 
-The original `app.neuraltrust.ai` URL keeps working — custom domains are additive, not a replacement. Existing SSO redirect URIs, API keys, and bookmarks tied to the default hostname remain valid.
+NeuralTrust provisions TLS after ownership and routing checks succeed. Do not remove the DNS verification record while the domain is active unless the application instructs you to.
 
-## Prerequisites
+## SSO
 
-- Control of the DNS zone for the domain you want to use (so you can add CNAME / TXT records).
-- **Owner**, **Global Admin**, or **IAM Admin** access on the organization.
-- A hostname that does not already have a conflicting **A**, **AAAA**, or **CNAME** record. The apex of a zone (for example `acme.com`) usually cannot be used as a CNAME — pick a subdomain (for example `ai.acme.com`).
-
-## Add a custom domain
-
-1. Go to **Platform settings → Domains → Custom Domain**.
-2. Enter the hostname you want to use (for example `ai.acme.com`) and submit.
-3. The panel shows two things:
-   - A **verification record** — a TXT record you add to your zone to prove you control the hostname.
-   - A **CNAME target** — the NeuralTrust hostname your CNAME must point at.
-4. Add both records in your DNS provider (Route 53, Cloudflare, Google Cloud DNS, …).
-5. Come back to the panel and click **Verify**.
-
-When verification succeeds:
-
-- NeuralTrust issues a TLS certificate for the hostname.
-- The domain's status flips to **Active**.
-- The organization's console becomes reachable on `https://<your-hostname>`.
-
-Propagation typically takes a few minutes; DNS TTLs on your side determine the upper bound.
-
-## Using the custom domain with SSO
-
-If SSO is configured, update the identity provider to accept the new hostname as a **redirect URI**:
-
-- **Microsoft Entra ID** — add `https://<your-hostname>/auth/callback` alongside the existing NeuralTrust callback.
-- **Generic OIDC** — same idea; add the new callback to the application's allowed redirect URIs.
-
-Leaving the original `app.neuraltrust.ai` callback in place means both hostnames keep working during the rollout.
-
-## Removing a custom domain
-
-1. Go to **Platform settings → Domains → Custom Domain**.
-2. Click **Remove**.
-3. Delete the CNAME and TXT records from your DNS provider.
-
-After removal, the hostname stops serving traffic immediately. Users who had bookmarked it are redirected to `app.neuraltrust.ai`. Rotate any SSO redirect URIs that referenced the old hostname.
+If your identity provider restricts callback or redirect URLs, add the custom hostname using the callback path shown by your NeuralTrust SSO configuration. Keep the existing NeuralTrust callback during migration until sign-in has been tested.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Fix |
-| --- | --- | --- |
-| `Verification failed` after adding the TXT record | DNS hasn't propagated yet. | Wait (5-15 min typical) and retry. Use `dig TXT <host>` to confirm the record is live on public DNS. |
-| `Certificate not issued` after verification | The CNAME is not yet public or points at the wrong target. | Confirm the CNAME resolves to the exact target shown in the panel with `dig CNAME <host>`. |
-| `Invalid hostname` | You tried to bind the zone apex or a name that already has an A record. | Pick a subdomain and remove the conflicting record. |
-| Users get an SSO error after switching | Redirect URI on the IdP still only allows the old hostname. | Add the new callback URL to the IdP application. |
+- Confirm public DNS with `dig CNAME <hostname>` and `dig TXT <verification-name>`.
+- Remove conflicting A, AAAA, or CNAME records.
+- Allow for the record TTL before retrying verification.
+- If DNS verifies but TLS remains pending, confirm the hostname points to the exact target shown in the app.
 
-## Related
-
-- [SSO](/platform/sso) — update redirect URIs after adding a custom domain.
-- [Advanced](/platform/advanced) — the data plane hostname is separate; it's configured per data-plane provisioning.
-- [General](/platform/general) — the organization name (display label) is not the same as the custom domain (hostname).
+For runtime hostnames, see [Deployment configuration](/neuraltrust/deployment/configuration). For connecting an existing Hybrid endpoint to the console, see [Advanced](/platform/advanced).
