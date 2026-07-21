@@ -1,30 +1,37 @@
 ---
 title: Configuration
-description: Hybrid chart values and customer-managed PostgreSQL and Redis.
+description: Generated private TrustGate configuration and customer-managed Hybrid services.
 ---
 
-Canonical chart inputs:
+## Generated setup
 
-- `values-required.yaml` — minimal Hybrid
-- `values-openshift.yaml` — Hybrid with OpenShift Routes
+Start in [TrustGate's private gateway wizard](/neuraltrust/deployment/overview#create-a-private-trustgate-gateway). The visible runtime choices are **Docker** and **Manual**.
 
-```bash
-cp values-required.yaml values-hybrid.yaml
-```
+**Docker** displays a generated Compose command. That command fetches the maintained TrustGate Compose manifest and supplies configuration-sync, DataAgent enrollment, and OTLP settings.
 
-## Minimal Hybrid
+**Manual** displays exactly these generated environment values and does not display a deployment command:
 
-Set `deploymentMode: hybrid`, point at **your** PostgreSQL and Redis (`deploy: false`), and provide the SaaS OTLP token for metadata export.
+- `CONTROL_PLANE_URL`
+- `CONTROL_PLANE_JWT`
+- `COLLECTOR_URL`
+- `COLLECTOR_JWT`
+- `DATA_AGENT_JWT`
+
+Treat these values as secrets except for service URLs. Inject them into your maintained deployment manifests through an approved secret manager; do not commit them.
+
+After deployment, enter its reachable **Dataplane URL** in the wizard. The app stores it as `TeamGateway.endpoint` for this gateway and derives the LLM and MCP connection hosts from it.
+
+## Operator-managed Kubernetes
+
+Kubernetes is not a selectable runtime in the current wizard. Choose **Manual** only to obtain the five environment values above, then inject them as secrets into maintained Kubernetes or OpenShift manifests. The Manual creation path does not generate Kubernetes manifests, values YAML, or a Helm command. After setup, **Settings → Agent Gateway → Deployment** can regenerate `values.yaml` for the gateway.
+
+If your maintained chart uses the following infrastructure values, set `deploymentMode: hybrid` and point it at **your** PostgreSQL and Redis (`deploy: false`). These are operator-managed chart settings, not wizard output.
 
 ```yaml
 global:
   deploymentMode: hybrid
   platform: kubernetes
   domain: platform.example.com
-  clickstack:
-    existingSecret:
-      name: clickstack-otlp-token
-      key: OTEL_EXPORTER_OTLP_HEADERS
   postgresql:
     deploy: false
     host: postgres.example.com
@@ -41,13 +48,9 @@ global:
     tls: "true"
     existingSecret:
       name: hybrid-redis
-
-dataagent:
-  tenantId: ""
-  enrolmentToken: ""
 ```
 
-DataAgent stays off until `tenantId` and an enrollment token (or Secret) are set. After install, connect the data-plane endpoint in [Platform settings → Advanced](/platform/advanced).
+Use the maintained manifests' documented Secret interfaces for the Manual values. Do not infer chart keys from the environment-variable names. See [Credential contracts](/neuraltrust/deployment/secrets#credential-contracts) for configuration-sync, OTLP, and DataAgent credentials.
 
 ## Managed stores
 
@@ -79,15 +82,6 @@ global:
       certificateArn: arn:aws:acm:region:account:certificate/id
 ```
 
-Hosts are derived from `global.domain`. Cluster storage is only for optional chart components — not for PostgreSQL or Redis.
+`global.domain` controls ingress names rendered by the operator-managed chart only. It does not control the hosts displayed in the console; those derive from the finalized Dataplane URL. Cluster storage is only for optional chart components — not for PostgreSQL or Redis.
 
-## Render before install
-
-```bash
-helm template neuraltrust-platform \
-  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --namespace neuraltrust \
-  -f values-hybrid.yaml
-```
-
-See [Feature flags](/neuraltrust/deployment/feature-flags) and [Secrets](/neuraltrust/deployment/secrets).
+Render and install with your maintained deployment manifests. See [Feature flags](/neuraltrust/deployment/feature-flags) and [Secrets](/neuraltrust/deployment/secrets).

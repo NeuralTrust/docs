@@ -1,59 +1,69 @@
 ---
 title: Overview
-description: NeuralTrust SaaS and Hybrid architecture — how the control plane and data plane connect.
+description: Create and operate a private TrustGate data plane from the NeuralTrust console.
 ---
 
-NeuralTrust supports **SaaS** and **Hybrid**. SaaS is fully operated by NeuralTrust. Hybrid runs the request-path **data plane** in your Kubernetes cluster and keeps the **control plane** on NeuralTrust SaaS.
+NeuralTrust supports **SaaS** and **Hybrid**. SaaS is fully operated by NeuralTrust. Hybrid runs the request-path **data plane** in your environment and keeps the **control plane** on NeuralTrust SaaS.
 
 ## Architecture
 
 <img
   src="/images/static/img/platform-architecture.svg"
-  alt="NeuralTrust SaaS control plane connected to a customer Hybrid data plane: TrustGate and TrustGuard on the request path, metadata export to SaaS, raw payloads in customer PostgreSQL, and optional DataAgent retrieval."
+  alt="NeuralTrust SaaS control plane connected to a customer Hybrid data plane: TrustGate and TrustGuard on the request path, outbound configuration sync and metadata export, raw payloads in customer PostgreSQL, and separately enrolled DataAgent retrieval."
 />
 
 | Plane | Where it runs | What you care about |
 | --- | --- | --- |
 | **Control plane** | NeuralTrust SaaS | Console, configuration, analytics |
-| **Data plane** | Your cluster (Hybrid) | TrustGate, TrustGuard, optional Firewall, data-plane API, optional DataAgent |
+| **Data plane** | Your environment (Hybrid) | TrustGate, TrustGuard, optional Firewall, optional DataAgent |
 
 ## How the planes connect
 
-Hybrid needs a few outbound links from your cluster to SaaS. Raw prompts and responses stay in **your** PostgreSQL.
+Hybrid sends configuration requests and metadata outbound while raw prompts and responses stay in **your** PostgreSQL.
 
 ```text
- Your cluster (data plane)              NeuralTrust SaaS (control plane)
+ Your environment (data plane)          NeuralTrust SaaS (control plane)
  ┌─────────────────────────┐            ┌────────────────────────────┐
- │ TrustGate  → TrustGuard │  metadata  │                            │
- │ (+ Firewall, optional)  │ ─────────▶ │  Console / analytics       │
- │                         │   (OTLP)   │                            │
- │ Data-plane API ◀───────────────────▶ │  Config / sync             │
- │ DataAgent (optional) ──────────────▶ │  Authorized retrieval      │
+ │ TrustGate  → TrustGuard │ ─────────▶ │  Config sync               │
+ │ (+ Firewall, optional)  │            │                            │
+ │                         │ ─────────▶ │  OTLP metadata / analytics │
+ │ DataAgent (optional) ──────────────▶ │  Enrolled retrieval        │
  └───────────┬─────────────┘            └────────────────────────────┘
              │
              ▼
     Your PostgreSQL + Redis
 ```
 
-1. **Traffic path** — Clients hit TrustGate in your cluster; TrustGate calls TrustGuard (and Firewall when enabled) on the request path.
+1. **Traffic path** — Clients hit TrustGate in your environment; TrustGate calls TrustGuard (and Firewall when enabled) on the request path.
 2. **Metadata** — Runtimes export metadata over OTLP to SaaS. Payloads are not exported.
-3. **Control link** — After install, connect the data-plane API endpoint in [Platform settings → Advanced](/platform/advanced) so SaaS can sync and manage the deployment.
-4. **Optional retrieval** — With DataAgent enrolled, SaaS can request specific raw records from your PostgreSQL through an authorized bridge.
+3. **Configuration sync** — TrustGate initiates outbound configuration sync to SaaS. TrustGuard does the same when its instance and credential are separately provisioned.
+4. **Retrieval** — DataAgent uses a separate enrollment token for authorized retrieval.
+5. **Gateway traffic** — After setup, the finalized Dataplane URL determines the LLM and MCP connection hosts shown for that gateway.
 
 PostgreSQL and Redis are **customer-managed** (not installed in the cluster). See [Configuration](/neuraltrust/deployment/configuration#managed-stores) for sizes.
 
-## Install Hybrid
+## Create a private TrustGate gateway
 
-```bash
-cp values-required.yaml values-hybrid.yaml
+1. Open **TrustGate** and choose **New Gateway**.
+2. Enter a gateway name and choose **Private**.
+3. Choose **Docker** or **Manual**. Docker is the primary generated path.
+4. Continue. The app creates the gateway and attempts to register its Hybrid deployment in DataCore. Registration is best-effort; issuing the gateway-scoped configuration-sync, OTLP, and DataAgent enrollment credentials is the required prepare step.
+5. Follow the generated deployment instructions outside the app. Docker provides a generated command. Manual provides generated environment values for the deployment.
+6. Configure ingress, DNS, and TLS so the deployment has a reachable URL.
+7. Enter that **Dataplane URL** in the wizard and choose **Save and Finish**.
 
-helm upgrade --install neuraltrust-platform \
-  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --namespace neuraltrust --create-namespace \
-  -f values-hybrid.yaml
-```
+The app stores the complete URL on this gateway as `TeamGateway.endpoint`. For the displayed connection details, it strips the scheme and path and uses the same resulting `host[:port]` as both the LLM and MCP host. It does not create a global data-plane connection.
 
-Then follow [Configuration](/neuraltrust/deployment/configuration), [Secrets](/neuraltrust/deployment/secrets), and your [provider guide](#provider-guides).
+Generated values contain credentials. Copy them only to the target deployment or an approved secret manager; do not print, share, or commit them. See [Configuration](/neuraltrust/deployment/configuration) and [Secrets](/neuraltrust/deployment/secrets).
+
+## Manage the gateway
+
+Open **Settings → Agent Gateway**:
+
+- **General** shows the gateway name, gateway ID, and LLM/MCP hosts derived from the Dataplane URL.
+- **Deployment** can regenerate private install configuration and credentials.
+
+The Dataplane URL is finalized in the creation wizard and is not editable in these settings.
 
 ## Provider guides
 
