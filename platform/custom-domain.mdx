@@ -1,34 +1,52 @@
 ---
-title: Custom Domain
-description: Configure a custom hostname for the NeuralTrust web application.
+title: Custom domain
+description: Configure the NeuralTrust application hostname and distinguish it from runtime ingress domains.
 ---
 
-A custom domain gives users a branded hostname for the NeuralTrust web app, such as `ai.example.com`, instead of the default console URL.
+NeuralTrust uses two separate kinds of custom hostname:
 
-<Note>
-This setting affects the browser-facing application hostname. It does not configure Kubernetes Ingress or OpenShift Routes for TrustGate, TrustGuard, APIs, or other chart workloads. Configure those with Helm `global.domain` and ingress values.
-</Note>
+- **Application hostname** — the browser-facing NeuralTrust web application, such as `ai.example.com`.
+- **Runtime hostnames** — TrustGate, TrustGuard, data-plane APIs, and other Hybrid workloads exposed through Kubernetes Ingress or OpenShift Routes.
 
-## Configure a hostname
+Changing one does not change the other.
 
-1. Open **Platform settings → Domains → Custom Domain**.
-2. Add the hostname you control.
-3. Copy the DNS records shown by the application into your DNS provider.
-4. Wait for DNS propagation, then retry verification from the application if needed.
+## Application hostname
 
-Use the exact target and verification records displayed in the UI; they can vary by environment. Choose a subdomain because many DNS providers do not allow a CNAME at the zone apex.
+### Set up
 
-NeuralTrust provisions TLS after ownership and routing checks succeed. Do not remove the DNS verification record while the domain is active unless the application instructs you to.
+1. Open **Platform settings → Domains → Custom domain**.
+2. Enter a subdomain you control, such as `ai.example.com`. Apex or root domains such as `example.com` are not supported.
+3. Copy the single CNAME record shown by NeuralTrust and create that exact CNAME in your DNS provider.
+4. Wait for the CNAME to resolve, then return to NeuralTrust to complete setup.
 
-## SSO
+### DNS and TLS
 
-If your identity provider restricts callback or redirect URLs, add the custom hostname using the callback path shown by your NeuralTrust SSO configuration. Keep the existing NeuralTrust callback until sign-in has been tested.
+The custom hostname must remain a CNAME to the exact target shown in the application. NeuralTrust provisions TLS after that CNAME resolves. Keep the CNAME in place while the hostname is active.
+
+### SSO callback
+
+If your identity provider restricts callback or redirect URLs, add the custom hostname with the callback path shown in your [SSO configuration](/platform/sso). Keep the default NeuralTrust callback allowed until sign-in through the custom hostname succeeds.
+
+### Remove or roll back
+
+1. Confirm that users can still reach and sign in through the default NeuralTrust URL.
+2. Remove the custom hostname in NeuralTrust and wait for the application to confirm the change.
+3. Remove its CNAME only after the hostname is no longer active.
+4. Remove the custom callback from your identity provider after the default callback has been tested.
+
+If activation fails, keep using the default URL, correct or restore the exact CNAME shown in NeuralTrust, and retry after its TTL expires.
+
+## Runtime ingress hostnames
+
+Hybrid runtime hostnames are generated from Helm `global.domain`. Configure the provider-specific `global.ingress` values for Kubernetes Ingress, or Route values for OpenShift, to control routing and TLS.
+
+These settings cover TrustGate, TrustGuard, data-plane APIs, and other chart workloads. They do not change the browser-facing application hostname. See [Deployment configuration](/neuraltrust/deployment/configuration#ingress) and the relevant [provider guide](/neuraltrust/deployment/overview#provider-guides).
 
 ## Troubleshooting
 
-- Confirm public DNS with `dig CNAME <hostname>` and `dig TXT <verification-name>`.
-- Remove conflicting A, AAAA, or CNAME records.
-- Allow for the record TTL before retrying verification.
-- If DNS verifies but TLS remains pending, confirm the hostname points to the exact target shown in the app.
-
-For runtime hostnames, see [Deployment configuration](/neuraltrust/deployment/configuration). For connecting an existing Hybrid endpoint to the console, see [Advanced](/platform/advanced).
+- **Application DNS does not resolve:** Check the CNAME with `dig CNAME <hostname>`, confirm that it matches the target shown in NeuralTrust, remove conflicting records, and wait for the DNS TTL.
+- **Application TLS remains pending:** Confirm that the CNAME resolves to the exact target shown in NeuralTrust.
+- **Hostname is rejected:** Use a subdomain; apex and root domains are unsupported.
+- **SSO redirects to the default URL or fails:** Confirm that the identity provider allows the exact custom callback URL shown in the SSO configuration.
+- **Runtime hostname does not resolve:** Check `global.domain`, the rendered Ingress or Route hosts, and the corresponding public or private DNS records.
+- **Runtime TLS fails:** Check the provider ingress or Route settings, certificate status, and TLS Secret or managed-certificate reference.
