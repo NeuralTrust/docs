@@ -8,12 +8,12 @@ description: Choose between SaaS and Hybrid.
 | | **SaaS** | **Hybrid** |
 | --- | --- | --- |
 | Control plane | NeuralTrust | NeuralTrust |
-| Data plane (TrustGate / TrustGuard) | NeuralTrust | Your Kubernetes cluster |
+| Data plane (TrustGate / TrustGuard) | NeuralTrust | Your environment |
 | Raw payloads | NeuralTrust | Your PostgreSQL |
 | Metadata / analytics | NeuralTrust | Exported to NeuralTrust (OTLP) |
-| Helm | None | `global.deploymentMode: hybrid` |
+| Setup | Nothing to install | Private TrustGate wizard |
 
-Only **Hybrid** uses the Platform chart. Do not set `global.deploymentMode: saas`.
+The private TrustGate wizard is the starting point for Hybrid. It creates a gateway-scoped deployment and generates its runtime configuration before you install anything.
 
 ## SaaS
 
@@ -23,23 +23,29 @@ NeuralTrust operates both planes. There is nothing to install in your cluster.
 
 You run the data plane; NeuralTrust runs the control plane.
 
-**In your cluster:** TrustGate, TrustGuard, optional Firewall, data-plane API, and optionally DataAgent — plus connectivity to **your** PostgreSQL and Redis.
+**In your environment:** TrustGate, TrustGuard, optional Firewall, and optionally DataAgent — plus connectivity to **your** PostgreSQL and Redis.
 
 **On NeuralTrust SaaS:** the console and control plane that configure and observe that data plane.
 
 **Between the planes:**
 
 - Outbound OTLP for metadata (payloads stay local)
-- Data-plane API linked from the console ([Advanced](/platform/advanced))
-- Optional DataAgent enrollment for authorized raw-record retrieval
+- The generated Docker command enables outbound TrustGate configuration sync and supplies its token and endpoint
+- TrustGuard configuration sync requires a separately provisioned TrustGuard instance and credential
+- DataAgent and DataBridge retrieval, authorized by a separate DataAgent enrollment token
+- LLM and MCP traffic through hosts derived from the gateway's finalized Dataplane URL
 
-See [Overview](/neuraltrust/deployment/overview) for the connection diagram and [Configuration](/neuraltrust/deployment/configuration) for chart values and store sizes.
+For an operator-managed deployment, you must inject the Manual values and configure the maintained manifests yourself. The wizard does not generate Kubernetes manifests or chart values.
+
+See [Create a private TrustGate gateway](/neuraltrust/deployment/overview#create-a-private-trustgate-gateway) for the current setup flow, [Configuration](/neuraltrust/deployment/configuration) for generated setup and store sizes, and [Secrets](/neuraltrust/deployment/secrets) for credential handling.
 
 ## Connectivity checklist
 
-From the Hybrid cluster you need outbound HTTPS to:
+From the Hybrid environment you need outbound HTTPS to:
 
 - The container registry (or your mirror)
-- NeuralTrust SaaS (metadata export, enrollment / sync)
+- NeuralTrust SaaS (metadata export, TrustGate configuration sync, and DataAgent enrollment / retrieval)
 - Your LLM upstreams
 - Your managed PostgreSQL and Redis
+
+Clients must be able to reach the Dataplane URL you finalize in the wizard. The app saves that URL on the gateway and derives its LLM and MCP connection hosts from it.
