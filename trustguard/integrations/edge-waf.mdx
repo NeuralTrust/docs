@@ -10,7 +10,7 @@ never reach TrustGuard. The pattern is the same everywhere: the edge function re
 request body, calls [`/v1/evaluate`](/trustguard/api/evaluate), and returns a 403 when content
 is flagged — clean traffic forwards to your origin unchanged.
 
-Create an API key on the collector first. WAF rules can't call external
+Create an API key on the collector first. Store it in the edge secret store — never hardcode it in the worker. WAF rules can't call external
 services themselves, so the worker/function is the integration point.
 
 ## Cloudflare Workers
@@ -54,6 +54,15 @@ export default {
       if (result.status === "block") {
         return new Response("Blocked by TrustGuard", { status: 403 });
       }
+      if (result.status === "transform" && result.transformed_payload) {
+        // Forward the masked/transformed body to origin (adjust field mapping as needed)
+        return fetch(new Request(request, {
+          body: typeof result.transformed_payload === "string"
+            ? result.transformed_payload
+            : JSON.stringify(result.transformed_payload),
+        }));
+      }
+      // report / allow → forward unchanged
     }
     return fetch(request);
   },
