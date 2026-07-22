@@ -7,7 +7,7 @@ description: "TrustGate is NeuralTrust's open-source, high-performance data-plan
 Apache-2.0) is a purpose-built reverse proxy for **LLM and agent traffic**. Point any
 OpenAI-, Anthropic-, or Responses-API client at it and TrustGate normalizes, routes,
 load-balances, governs, and observes every call — without changing your application code
-beyond a base URL and two headers.
+beyond its base URL and consumer credentials.
 
 It is built from scratch in **Go** on top of [Fiber](https://gofiber.io), tuned for low
 latency and high concurrency, and ships as a single static binary, a Docker image, and
@@ -32,8 +32,8 @@ Putting TrustGate between your apps and your model providers gives you one contr
 - **Multi-tenancy & auth** — per-gateway consumers authenticated by API key, OAuth2, OIDC,
   or mTLS, with policies scoped globally or per consumer.
 - **Observability** — rich per-request telemetry (model, tokens, cost, latency breakdown,
-  routing attempts, policy chain) streamed to Kafka by default, with an opt-in per-gateway
-  OpenTelemetry (OTLP) exporter and TrustLens forwarding, where it powers
+  routing attempts, policy chain) exported through OpenTelemetry (OTLP) and forwarded to
+  TrustLens, where it powers
   [detection alerts](/platform/alerts).
 - **Agent tooling** — a dedicated MCP plane exposes [MCP](/trustgate/mcp/overview) servers
   and tools to agents with full OAuth2 support.
@@ -55,13 +55,14 @@ then send traffic to the proxy. Six objects make up a gateway:
 ## How a request flows
 
 ```text
-client ──▶ Proxy :8081  /{consumer_slug}/v1/chat/completions
-              │  X-AG-Gateway-Slug, X-AG-API-Key
+client ──▶ /{consumer_slug}/v1/chat/completions
+              │  X-AG-API-Key
+              │  X-AG-Gateway-Slug (Private only)
               ├─ resolve gateway + consumer + policies
               ├─ apply policies (rate limit, cache, CORS, …)
               ├─ load-balance across the consumer's registries (+ fallback)
               ├─ forward to the provider adapter (stream when supported)
-              └─ emit telemetry → Kafka
+              └─ export telemetry → OTLP
 ```
 
 A client never names a provider URL or key — it names a **model**, and the gateway
@@ -72,7 +73,7 @@ resolves the registry, applies policies, and forwards. See
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/trustgate/getting-started/quickstart">
-    Zero to a forwarded completion in six API calls.
+    Create a gateway, connect a provider, and send your first request from the console.
   </Card>
   <Card title="Architecture" icon="workflow" href="/trustgate/architecture">
     Planes, the request lifecycle, and infrastructure.

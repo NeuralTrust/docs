@@ -1,124 +1,124 @@
 ---
 title: "Quickstart"
-description: "From zero to a forwarded completion: create a gateway, register a provider, add a consumer and key, and call the OpenAI-compatible proxy."
+description: "Create a TrustGate gateway, connect a provider, send a request, and inspect its trace from the NeuralTrust console."
 ---
 
-This walks the full path from an empty install to a forwarded completion. The **Admin**
-plane (`:8080`) configures everything; the **Proxy** plane (`:8081`) serves traffic.
+The NeuralTrust SaaS control plane configures TrustGate in both deployment modes:
+
+- **SaaS** — NeuralTrust hosts the data plane. This is the fastest path and requires no
+  infrastructure installation.
+- **Private (Hybrid)** — you run the data plane in your environment for data residency,
+  private networking, deterministic capacity, or production SLA requirements while
+  continuing to manage it from the NeuralTrust SaaS console.
+
+<Note>
+Choose **SaaS** for the fastest setup. Choose **Private** for data residency, private
+networking, deterministic capacity, or production SLA requirements.
+</Note>
 
 <Steps>
-<Step title="Bring up the stack">
-```bash
-make up   # admin :8080, proxy :8081 + Postgres / Redis / Kafka
-```
-See [Installation](/trustgate/getting-started/install) for other options.
+<Step title="Open Getting started">
+In the NeuralTrust console, open **TrustGate** → **Getting started**.
 </Step>
 
-<Step title="Mint an admin token">
-The Admin API expects a JWT (HS256) signed with `SERVER_SECRET_KEY` from your `.env`:
+<Step title="Add a gateway">
+If you do not have a gateway, **Add new Gateway** opens automatically. Otherwise, open
+the gateway selector and choose **New Gateway**. Enter a **Name** and choose **SaaS**.
 
-```bash
-export SERVER_SECRET_KEY="$(grep ^SERVER_SECRET_KEY .env | cut -d= -f2-)"
-export ADMIN_TOKEN=$(python3 - <<'PY'
-import jwt, os, time
-secret = os.environ["SERVER_SECRET_KEY"]
-print(jwt.encode({"sub": "admin", "iat": int(time.time()), "exp": int(time.time()) + 3600}, secret, algorithm="HS256"))
-PY
-)
-```
+For a Private data plane, choose **Private**, then select **Docker**, **Kubernetes**, or
+**Manual**. Deploy using the generated instructions, enter one bootstrap
+**Dataplane URL**, and select **Save and Finish**. Then open
+**Settings** → **Agent Gateway** → **General** to set or verify the separate **LLM URL**
+and **MCP URL**.
+
+<Note>
+The generated Docker quick path exposes the LLM/proxy service only. Use Kubernetes or a
+full deployment when you need MCP.
+</Note>
+
+See [Private deployment](/neuraltrust/deployment/overview) for infrastructure details.
 </Step>
 
-<Step title="Create a gateway">
-The `slug` becomes the gateway's identifier.
-
-```bash
-ADMIN="http://localhost:8080"
-GW=$(curl -s -X POST "$ADMIN/v1/gateways" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"My Gateway","slug":"demo"}')
-GW_ID=$(echo "$GW" | jq -r .id); GW_SLUG=$(echo "$GW" | jq -r .slug)
-```
+<Step title="Step 1 · Connect a provider">
+Choose a provider and enter its credentials. Select **Test connection** to verify them,
+then select **Connect**.
 </Step>
 
-<Step title="Register an upstream provider">
-A [registry](/trustgate/concepts/registries) is an upstream backend. Here, OpenAI:
-
-```bash
-REG=$(curl -s -X POST "$ADMIN/v1/gateways/$GW_ID/registries" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"openai-primary","provider":"openai",
-       "auth":{"type":"api_key","api_key":{"api_key":"'"$OPENAI_API_KEY"'"}}}')
-REG_ID=$(echo "$REG" | jq -r .id)
-```
+<Step title="Step 2 · Send request">
+Choose one of the provider's models, enter a question, and select **Send request**. The
+console sends the request through the selected gateway.
 </Step>
 
-<Step title="Create a consumer and bind the registry">
-A [consumer](/trustgate/concepts/consumers) is your app's identity; its `slug` is the URL
-path segment.
-
-```bash
-CON=$(curl -s -X POST "$ADMIN/v1/gateways/$GW_ID/consumers" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"my-app","registries":[{"id":"'"$REG_ID"'"}]}')
-CON_ID=$(echo "$CON" | jq -r .id); CON_SLUG=$(echo "$CON" | jq -r .slug)
-```
-</Step>
-
-<Step title="Mint and attach a consumer API key">
-The raw key is returned **once**.
-
-```bash
-AUTH=$(curl -s -X POST "$ADMIN/v1/gateways/$GW_ID/auths" \
-  -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"my-app-key","type":"api_key"}')
-AUTH_ID=$(echo "$AUTH" | jq -r .id); API_KEY=$(echo "$AUTH" | jq -r .api_key)
-
-curl -s -X POST "$ADMIN/v1/gateways/$GW_ID/consumers/$CON_ID/auths/$AUTH_ID" \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-```
-</Step>
-
-<Step title="Call the proxy">
-```bash
-curl -s -X POST "http://localhost:8081/$CON_SLUG/v1/chat/completions" \
-  -H "X-AG-Gateway-Slug: $GW_SLUG" -H "X-AG-API-Key: $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello!"}]}'
-```
+<Step title="Step 3 · Traces">
+Review the first trace, including its status, model, latency, token count, trace ID, and
+response. Continue to **Playground**, **Consumer**, or **Security** from the next-step
+cards.
 </Step>
 </Steps>
 
-## From an application
+## Call from your application
 
-Point any OpenAI SDK at the proxy — only the base URL and two headers change. The provider
-key stays in the gateway.
+<Warning>
+The request in **Getting started** uses an internal playground token. It does not create
+a reusable API key for your application.
+</Warning>
 
-```python
-from openai import OpenAI
+For production traffic:
 
-client = OpenAI(
-    base_url="http://localhost:8081/my-app",  # /{consumer_slug}
-    api_key="unused",                           # the provider key lives in the gateway
-    default_headers={
-        "X-AG-Gateway-Slug": "demo",
-        "X-AG-API-Key": "<consumer api key>",
-    },
-)
+1. Open **Consumers**.
+2. Select **Consumer**; the **New Consumer** panel opens. You can also open an existing
+   consumer.
+3. For a new consumer, select **API Key** under **Authentication** and copy the generated
+   key when it is shown—it appears only once. For an existing consumer, manage
+   credentials under **Auth**.
+4. Open **Connect** and use a snippet under **Connection details**.
 
-resp = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(resp.choices[0].message.content)
+The provider credential remains in TrustGate. Keep the consumer API key secret and use
+placeholders in shared examples.
+
+### SaaS
+
+Use the SaaS gateway URL from **Connection details**. Do not add
+`X-AG-Gateway-Slug`.
+
+```bash
+curl -X POST "https://<gateway-host>/<consumer-slug>/v1/chat/completions" \
+  -H "X-AG-API-Key: <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<model>",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
 ```
 
-Anthropic clients use `/{consumer_slug}/v1/messages`; the OpenAI Responses API uses
-`/{consumer_slug}/v1/responses`.
+### Private (Hybrid)
+
+Use the configured LLM URL and include the gateway slug:
+
+```bash
+curl -X POST "<configured-llm-url>/<consumer-slug>/v1/chat/completions" \
+  -H "X-AG-Gateway-Slug: <gateway-slug>" \
+  -H "X-AG-API-Key: <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<model>",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
 
 ## Next steps
 
-- Route across several providers with [load balancing](/trustgate/routing/load-balancing)
-  and [fallback](/trustgate/routing/fallback).
-- Add [rate limiting](/trustgate/policies/rate-limiting) and
-  [semantic caching](/trustgate/policies/semantic-cache).
-- Inspect traffic for security threats with [TrustGuard](/trustguard/integrations/gateway).
+<CardGroup cols={2}>
+  <Card title="Consumers" icon="users" href="/trustgate/concepts/consumers">
+    Configure application identities, routes, and authentication.
+  </Card>
+  <Card title="Routing" icon="route" href="/trustgate/routing/load-balancing">
+    Add load balancing and fallback across providers.
+  </Card>
+  <Card title="Policies" icon="shield" href="/trustgate/policies/overview">
+    Apply limits, caching, guardrails, and governance.
+  </Card>
+  <Card title="Private deployment" icon="server" href="/neuraltrust/deployment/overview">
+    Deploy and configure a Private data plane.
+  </Card>
+</CardGroup>
