@@ -5,27 +5,48 @@ description: Generated private TrustGate configuration and customer-managed Hybr
 
 ## Generated setup
 
-Start in [TrustGate's private gateway wizard](/neuraltrust/deployment/overview#create-a-private-trustgate-gateway). The visible runtime choices are **Docker** and **Manual**.
+Start in [TrustGate's private gateway wizard](/neuraltrust/deployment/overview#create-a-private-trustgate-gateway). The runtime choices are **Docker**, **Kubernetes**, and **Manual**.
 
-**Docker** displays a generated Compose command. That command fetches the maintained TrustGate Compose manifest and supplies configuration-sync, DataAgent enrollment, and OTLP settings.
+**Docker** displays a generated Compose command. It fetches the maintained TrustGate Compose manifest and injects:
+
+- A generated `CONFIG_SYNC_LKG_KEY`
+- The wizard-issued `CONFIG_SYNC_TOKEN`
+- The wizard-issued `ENROLMENT_TOKEN`
+
+Before running it, provide these additional values required by the Compose manifest:
+
+- `SERVER_SECRET_KEY` — a random value of at least 32 bytes
+- `CONFIG_SYNC_GRPC_ENDPOINT` — the SaaS config-sync endpoint as `host:port`
+- `DATABRIDGE_ADDR` — the DataBridge endpoint as `host:port`
+
+The generated Compose path starts the TrustGate LLM/proxy process and publishes port `8081`. It does **not** start or expose the MCP process on `8082`. Use Kubernetes for production MCP support, or run the full local TrustGate stack when you need both processes locally.
+
+**Kubernetes** displays generated `values.yaml` and a Helm command. Kubernetes is recommended for production-grade deployments, but this output is setup and credential input rather than an install-ready chart contract. Use the maintained `neuraltrust-platform` chart or manifests as the deployment source, and map the generated credentials and settings into its current values and Secret interfaces before applying.
 
 **Manual** displays exactly these generated environment values and does not display a deployment command:
 
-- `CONTROL_PLANE_URL`
 - `CONTROL_PLANE_JWT`
-- `COLLECTOR_URL`
-- `COLLECTOR_JWT`
 - `DATA_AGENT_JWT`
 
 Treat these values as secrets except for service URLs. Inject them into your maintained deployment manifests through an approved secret manager; do not commit them.
 
-After deployment, enter its reachable **Dataplane URL** in the wizard. The app stores it as `TeamGateway.endpoint` for this gateway and derives the LLM and MCP connection hosts from it.
+After deployment, expose separate LLM/proxy and MCP entry points. Enter the LLM/proxy URL as the wizard's bootstrap **Dataplane URL**, then select **Save and Finish**. The wizard initially seeds both URLs with that value. Open **Settings → Agent Gateway → General** and set the final **LLM URL** and **MCP URL** independently.
 
-## Operator-managed Kubernetes
+TrustGate listens on these ports by default:
 
-Kubernetes is not a selectable runtime in the current wizard. Choose **Manual** only to obtain the five environment values above, then inject them as secrets into maintained Kubernetes or OpenShift manifests. The Manual creation path does not generate Kubernetes manifests, values YAML, or a Helm command. After setup, **Settings → Agent Gateway → Deployment** can regenerate `values.yaml` for the gateway.
+| Entry point | Port |
+| --- | --- |
+| Admin | `8080` |
+| LLM/proxy | `8081` |
+| MCP | `8082` |
 
-If your maintained chart uses the following infrastructure values, set `deploymentMode: hybrid` and point it at **your** PostgreSQL and Redis (`deploy: false`). These are operator-managed chart settings, not wizard output.
+When the full local TrustGate stack runs both processes, use the same hostname with different ports, such as `http://gateway.example:8081` and `http://gateway.example:8082`. Do not configure an MCP URL for the generated Compose path unless you separately run and expose the MCP process.
+
+## Kubernetes
+
+Choose **Kubernetes** in the wizard to obtain setup and credential input. Do not apply its generated values or local-chart Helm command unchanged. Platform operators must review and map that input into the current maintained `neuraltrust-platform` chart or manifests. Use **Manual** when you maintain a fully custom deployment.
+
+For production, set `deploymentMode: hybrid` and point the maintained chart at managed PostgreSQL and Redis (`deploy: false`):
 
 ```yaml
 global:
@@ -50,11 +71,11 @@ global:
       name: hybrid-redis
 ```
 
-Use the maintained manifests' documented Secret interfaces for the Manual values. Do not infer chart keys from the environment-variable names. See [Credential contracts](/neuraltrust/deployment/secrets#credential-contracts) for configuration-sync, OTLP, and DataAgent credentials.
+The wizard-generated Kubernetes file contains credentials directly. Do not commit or use it as a production values file. Move its credentials into pre-created Kubernetes Secrets or an approved secret manager, then use the maintained chart's documented Secret interfaces. For custom manifests, inject the two Manual JWT values through an approved secret manager. See [Credential contracts](/neuraltrust/deployment/secrets#credential-contracts).
 
 ## Managed stores
 
-Do not run PostgreSQL or Redis in the cluster. Pre-create one shared database/role and Redis; Helm does not create managed-service users.
+Managed PostgreSQL and Redis are recommended for production. Pre-create the database, role, and Redis credentials; Helm does not create users in managed services. The maintained chart supports in-cluster PostgreSQL and Redis with `deploy: true` for evaluation and non-production environments.
 
 | Store | Minimum size |
 | --- | --- |
@@ -82,6 +103,11 @@ global:
       certificateArn: arn:aws:acm:region:account:certificate/id
 ```
 
-`global.domain` controls ingress names rendered by the operator-managed chart only. It does not control the hosts displayed in the console; those derive from the finalized Dataplane URL. Cluster storage is only for optional chart components — not for PostgreSQL or Redis.
+`global.domain` is used with the default host prefixes to render two public names:
+
+- `gateway.<global.domain>` for the LLM/proxy Ingress
+- `mcp.<global.domain>` for the MCP Ingress
+
+The maintained chart creates separate `agentgateway-gateway` and `agentgateway-mcp` Ingress resources backed by separate Services. Each Service exposes port `80`: the proxy Service targets TrustGate container port `8081`, and the MCP Service targets container port `8082`. Set the corresponding full URLs, including `https://`, in **Settings → Agent Gateway → General**. `global.domain` does not update those console settings.
 
 Render and install with your maintained deployment manifests. See [Feature flags](/neuraltrust/deployment/feature-flags) and [Secrets](/neuraltrust/deployment/secrets).
