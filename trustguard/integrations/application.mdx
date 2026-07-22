@@ -97,6 +97,8 @@ curl -X POST "{TRUSTGUARD_URL}/v1/evaluate" \
 Guard inbound user traffic in-process with a middleware in front of your AI routes.
 
 ```python
+import json
+
 from fastapi import FastAPI, Request
 from starlette.responses import JSONResponse
 from trustguard import AsyncTrustGuard
@@ -115,6 +117,9 @@ async def trustguard_middleware(request: Request, call_next):
         )
         if response.is_blocked:
             return JSONResponse({"detail": "Blocked by TrustGuard"}, status_code=403)
+        if response.transformed_payload:
+            # Masked/rewritten content — forward it instead of the original body
+            request._body = json.dumps(response.transformed_payload).encode()
     return await call_next(request)
 ```
 
@@ -141,6 +146,10 @@ app.use(async (req, res, next) => {
   });
   if (response.isBlocked) {
     return res.status(403).json({ detail: "Blocked by TrustGuard" });
+  }
+  if (response.transformedPayload) {
+    // Masked/rewritten content — forward it instead of the original body
+    req.body = response.transformedPayload;
   }
   next();
 });

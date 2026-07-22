@@ -110,6 +110,9 @@ plugins:
       functions:
         check_response: |
           return function(resp)
+            -- resp.transformed_payload holds masked content when status == "transform";
+            -- this plugin's response mapping only supports block/block_message, so
+            -- rewriting the body for Transform rules needs a downstream plugin.
             return {
               block = resp.status == "block",
               block_message = "Blocked by TrustGuard"
@@ -139,7 +142,8 @@ they reach your backend.
 2. Open your API in the Azure portal.
 3. Add a `send-request` policy in the **inbound** section posting the prompt to the guard
    endpoint.
-4. Return 403 when the response `status` is `"block"`; repeat in **outbound** for
+4. Return 403 when the response `status` is `"block"`; rewrite the body with
+   `transformed_payload` when `status` is `"transform"`; repeat in **outbound** for
    completions.
 
 ```xml
@@ -164,6 +168,11 @@ they reach your backend.
         <set-status code="403" reason="Blocked by TrustGuard" />
       </return-response>
     </when>
+    <when condition="@(((IResponse)context.Variables["guard"]).Body.As<JObject>()["status"].Value<string>() == "transform")">
+      <!-- Masked/rewritten content — forward transformed_payload instead of the original body -->
+      <set-body>@(((IResponse)context.Variables["guard"]).Body.As<JObject>()["transformed_payload"]["input"].Value<string>())</set-body>
+    </when>
+    <!-- "report" / "allow" fall through and forward the original request unchanged -->
   </choose>
 </inbound>
 ```
