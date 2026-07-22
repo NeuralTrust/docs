@@ -7,7 +7,7 @@ description: "TrustGate is NeuralTrust's open-source, high-performance data-plan
 Apache-2.0) is a purpose-built reverse proxy for **LLM and agent traffic**. Point any
 OpenAI-, Anthropic-, or Responses-API client at it and TrustGate normalizes, routes,
 load-balances, governs, and observes every call — without changing your application code
-beyond its base URL and consumer credentials.
+beyond its base URL and consumer credentials. SaaS gateways are reached by subdomain; Private/Hybrid also accepts `X-AG-Gateway-Slug`.
 
 It is built from scratch in **Go** on top of [Fiber](https://gofiber.io), tuned for low
 latency and high concurrency, and ships as a single static binary, a Docker image, and
@@ -30,7 +30,7 @@ Putting TrustGate between your apps and your model providers gives you one contr
 - **Guardrails** — built-in [TrustGuard](/trustguard/overview), OpenAI Moderation, Azure
   Content Safety, and AWS Bedrock guardrail policies to inspect prompts and responses inline.
 - **Multi-tenancy & auth** — per-gateway consumers authenticated by API key, OAuth2, OIDC,
-  or mTLS, with policies scoped globally or per consumer.
+  or mTLS (see Auth). LLM consumers use API key, OAuth2, or OIDC; MCP consumers use OAuth2.
 - **Observability** — rich per-request telemetry (model, tokens, cost, latency breakdown,
   routing attempts, policy chain) exported through OpenTelemetry (OTLP) and forwarded to
   TrustLens, where it powers
@@ -48,7 +48,7 @@ then send traffic to the proxy. Six objects make up a gateway:
 | **[Gateway](/trustgate/concepts/gateways)** | The top-level tenant, addressed by a `slug`. Owns everything below. |
 | **[Registry](/trustgate/concepts/registries)** | An upstream backend — an LLM provider endpoint or an MCP server. |
 | **[Consumer](/trustgate/concepts/consumers)** | The calling application's identity. Owns routing and credentials, addressed by a `slug` in the URL. |
-| **[Auth](/trustgate/concepts/auth)** | A credential (API key, OAuth2, OIDC, mTLS) that authenticates as a consumer. |
+| **[Auth](/trustgate/concepts/auth)** | A credential that authenticates as a consumer — LLM: API key / OAuth2 / OIDC; MCP: OAuth2. |
 | **[Policy](/trustgate/policies/overview)** | A governance rule that runs at request/response stages — rate limiting, budgets, caching, tool governance, guardrails, CORS, and more. |
 | **[Role](/trustgate/concepts/roles)** | Routing config selected from OIDC token claims, for identity-based routing. |
 
@@ -56,8 +56,8 @@ then send traffic to the proxy. Six objects make up a gateway:
 
 ```text
 client ──▶ /{consumer_slug}/v1/chat/completions
-              │  X-AG-API-Key
-              │  X-AG-Gateway-Slug (Private only)
+              │  X-AG-API-Key  or  Authorization: Bearer (OAuth2/OIDC)
+              │  X-AG-Gateway-Slug (Private only; SaaS uses subdomain)
               ├─ resolve gateway + consumer + policies
               ├─ apply policies (rate limit, cache, CORS, …)
               ├─ load-balance across the consumer's registries (+ fallback)
