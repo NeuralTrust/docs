@@ -24,7 +24,7 @@ Hybrid sends configuration requests and metadata outbound while raw prompts and 
 ```text
  Your environment (data plane)          NeuralTrust SaaS (control plane)
  ┌─────────────────────────┐            ┌────────────────────────────┐
- │ TrustGate  → TrustGuard │ ─────────▶ │  Config sync               │
+ │ TrustGate  → TrustGuard │ ─────────▶ │  Configuration service     │
  │ (+ Firewall, optional)  │            │                            │
  │                         │ ─────────▶ │  OTLP metadata / analytics │
  │ DataAgent (optional) ──────────────▶ │  Enrolled retrieval        │
@@ -36,34 +36,65 @@ Hybrid sends configuration requests and metadata outbound while raw prompts and 
 
 1. **Traffic path** — Clients hit TrustGate in your environment; TrustGate calls TrustGuard (and Firewall when enabled) on the request path.
 2. **Metadata** — Runtimes export metadata over OTLP to SaaS. Payloads are not exported.
-3. **Configuration sync** — TrustGate initiates outbound configuration sync to SaaS. TrustGuard does the same when its instance and credential are separately provisioned.
+3. **Configuration sync** — TrustGate and TrustGuard pull configuration from the SaaS control plane. The data plane initiates this outbound connection; config sync does not require an inbound control-plane connection into your network.
 4. **Retrieval** — DataAgent uses a separate enrollment token for authorized retrieval.
-5. **Gateway traffic** — After setup, the finalized Dataplane URL determines the LLM and MCP connection hosts shown for that gateway.
+5. **Gateway traffic** — Clients use separate LLM/proxy and MCP entry points.
 
-PostgreSQL and Redis are **customer-managed** (not installed in the cluster). See [Configuration](/neuraltrust/deployment/configuration#managed-stores) for sizes.
+Managed PostgreSQL and Redis are recommended for production. The chart can run in-cluster stores for evaluation and non-production use. See [Configuration](/neuraltrust/deployment/configuration#managed-stores) for guidance.
+
+## Choose a deployment method
+
+The private gateway wizard offers three deployment methods:
+
+| Method | Use it for | Wizard output |
+| --- | --- | --- |
+| **Kubernetes** | **Recommended for production-grade deployments** | Generated credential and setup input to map into the maintained chart or manifests |
+| **Docker** | Local development and evaluation of the LLM/proxy path | Generated Docker Compose command |
+| **Manual** | Custom or operator-managed deployments | `CONTROL_PLANE_JWT` and `DATA_AGENT_JWT` |
 
 ## Create a private TrustGate gateway
 
 1. Open **TrustGate** and choose **New Gateway**.
 2. Enter a gateway name and choose **Private**.
-3. Choose **Docker** or **Manual**. Docker is the primary generated path.
-4. Continue. The app creates the gateway and attempts to register its Hybrid deployment in DataCore. Registration is best-effort; issuing the gateway-scoped configuration-sync, OTLP, and DataAgent enrollment credentials is the required prepare step.
-5. Follow the generated deployment instructions outside the app. Docker provides a generated command. Manual provides generated environment values for the deployment.
-6. Configure ingress, DNS, and TLS so the deployment has a reachable URL.
-7. Enter that **Dataplane URL** in the wizard and choose **Save and Finish**.
+3. Choose **Kubernetes**, **Docker**, or **Manual**.
+4. Follow the deployment guidance outside the app:
+   - For Kubernetes, use the maintained `neuraltrust-platform` chart or manifests as the deployment source. Review and map the wizard-generated credentials and settings into the current chart interfaces before applying anything.
+   - For Docker, the generated Compose path starts the LLM/proxy entry point on `8081`. It does not currently start or expose the MCP process.
+   - Manual provides the two JWT values needed by a custom deployment.
+5. Expose both TrustGate entry points:
+   - **LLM/proxy** — TrustGate port `8081`
+   - **MCP** — TrustGate port `8082`
+6. Enter the LLM/proxy URL as the wizard's bootstrap **Dataplane URL**, then choose **Save and Finish**. The wizard initially uses this URL for both entry points.
+7. Open **Settings → Agent Gateway → General** and set or verify the separate **LLM URL** and **MCP URL**.
 
-The app stores the complete URL on this gateway as `TeamGateway.endpoint`. For the displayed connection details, it strips the scheme and path and uses the same resulting `host[:port]` as both the LLM and MCP host. It does not create a global data-plane connection.
+For production MCP support, use Kubernetes. For local MCP testing, run the full local TrustGate stack that includes the MCP process. When both entry points run locally, use one hostname with separate ports:
 
-Generated values contain credentials. Copy them only to the target deployment or an approved secret manager; do not print, share, or commit them. See [Configuration](/neuraltrust/deployment/configuration) and [Secrets](/neuraltrust/deployment/secrets).
+- LLM URL: `http://gateway.example:8081`
+- MCP URL: `http://gateway.example:8082`
+
+For Kubernetes, expose two ingress hosts:
+
+- LLM URL: `https://gateway.example.com`
+- MCP URL: `https://mcp.example.com`
+
+Both URLs must be reachable by their intended clients. The maintained Kubernetes chart creates separate gateway and MCP Services and Ingress resources.
+
+The wizard-generated Kubernetes `values.yaml` contains credentials directly. Treat the file as a secret, do not commit it, and move credentials into pre-created Kubernetes Secrets or an approved secret manager for production. See [Configuration](/neuraltrust/deployment/configuration) and [Secrets](/neuraltrust/deployment/secrets).
 
 ## Manage the gateway
 
 Open **Settings → Agent Gateway**:
 
-- **General** shows the gateway name, gateway ID, and LLM/MCP hosts derived from the Dataplane URL.
+- **General** lets you edit the Hybrid gateway's **LLM URL** and **MCP URL** independently.
 - **Deployment** can regenerate private install configuration and credentials.
 
-The Dataplane URL is finalized in the creation wizard and is not editable in these settings.
+Consumer connection snippets use the two configured URLs separately.
+
+## Network requirements
+
+Allow outbound connections from the Hybrid data plane to NeuralTrust SaaS for configuration pulls, metadata export, and DataAgent enrollment or retrieval. TrustGate and TrustGuard initiate config-sync connections and pull their configuration from the SaaS control plane. You do **not** need to allow an inbound control-plane connection into the customer network for configuration sync.
+
+Also allow the data plane to reach your LLM providers, PostgreSQL, Redis, and container registry. Allow clients to reach the configured LLM and MCP URLs.
 
 ## Provider guides
 
