@@ -1,0 +1,145 @@
+---
+title: External (self-hosted)
+description: Run the full NeuralTrust platform — control plane, data plane, and analytics — inside your own cluster.
+---
+
+**External** is the fully self-hosted topology. Unlike [Hybrid](/neuraltrust/deployment/deployment-models#hybrid),
+which keeps the control plane on NeuralTrust SaaS, External runs **every** plane
+in your environment: control planes, data planes, the product console, and the
+analytics stack. Nothing leaves your network unless you explicitly enable hosted
+export.
+
+Choose External for air-gapped environments, strict data-residency mandates, or
+when policy forbids any outbound dependency on NeuralTrust SaaS.
+
+## What runs in your cluster
+
+External deploys the components Hybrid leaves in SaaS, plus a self-hosted
+analytics pipeline:
+
+| Component | Purpose |
+| --- | --- |
+| AgentGateway admin, proxy, MCP | Gateway administration and the AI request path |
+| TrustGuard control + data planes | Policy administration and runtime safety evaluation |
+| Control-plane API + web app | The product console and its API |
+| ClickStack OTel Collector | Receives product OTLP and writes it to ClickHouse |
+| ClickHouse | Self-hosted analytics store (External only) |
+| DataCore | Residency query API over ClickHouse + PostgreSQL metadata |
+| AlertEngine (API + worker) | Evaluates alert rules and forwards to SIEM/integrations |
+| Firewall | Optional prompt/response safety, deployed with TrustGuard |
+
+<Note>
+**DataAgent does not run in External mode**, and there are **no console-issued
+config-sync or enrollment tokens** to collect. Because the control planes are
+in-cluster, the platform is its own configuration source — you do not create a
+Private gateway in [app.neuraltrust.ai](https://app.neuraltrust.ai/en/v2/) as you
+do for [Hybrid](/neuraltrust/deployment/console-setup).
+</Note>
+
+## Select the topology
+
+One global value switches the whole platform to self-hosted:
+
+```yaml
+global:
+  deploymentMode: external
+  platform: kubernetes      # aws | gcp | azure | openshift | kubernetes
+  domain: platform.example.com
+```
+
+### First administrator
+
+External seeds an initial super-admin for the console. Prefer a pre-created
+Secret over inline credentials so they never enter Helm release history:
+
+```yaml
+global:
+  superadmin:
+    existingSecret:
+      name: onprem-superadmin   # ONPREM_SUPERADMIN_EMAIL / ONPREM_SUPERADMIN_PASSWORD
+```
+
+## Datastores
+
+PostgreSQL and Redis deploy in-cluster by default in both modes. ClickHouse
+deploys in-cluster **only** in External mode — Hybrid keeps analytics in SaaS.
+
+In External mode, control-plane services use **per-service** databases, and
+AlertEngine owns its own PostgreSQL database. The data-plane API shim reads from
+ClickHouse. The shared `global.postgresql` / `global.redis` connection contract
+used by Hybrid is ignored here; configure datastores through the per-service
+overlays instead.
+
+To use managed datastores, disable the in-cluster components and point each
+service at its endpoint:
+
+```yaml
+global:
+  postgresql:
+    deploy: false
+  redis:
+    deploy: false
+
+infrastructure:
+  clickhouse:
+    deploy: false
+```
+
+Pre-create external PostgreSQL roles and databases before install — the chart
+does not create users in managed services. See
+[Configuration](/neuraltrust/deployment/configuration#managed-stores) for minimum
+sizes and the chart repository's `values-v2-managed-datastores.yaml.example`.
+
+## Telemetry egress
+
+External keeps product telemetry in your in-cluster ClickHouse. To run with **no**
+outbound NeuralTrust SaaS telemetry — the air-gapped default — disable hosted
+export:
+
+```yaml
+global:
+  observability:
+    hostedExport:
+      enabled: false
+```
+
+Disabling hosted export does not disable the in-cluster ClickStack pipeline; it
+only stops optional egress to NeuralTrust.
+
+## Public routing
+
+AgentGateway exposes three surfaces in External mode: **admin** (External only),
+**proxy**, and **MCP**. `global.domain` combines with default prefixes to render
+hostnames, and the chart can auto-add wildcard hosts (`*.llm.<domain>` /
+`*.mcp.<domain>`) for slug-based discovery. DNS, certificates, and cloud
+controller settings remain operator prerequisites. See
+[Configuration](/neuraltrust/deployment/configuration#ingress).
+
+## Install
+
+Start from the maintained `neuraltrust-platform` chart and the tracked
+`values-v2-external.yaml.example`, then layer your platform, domain, ingress, and
+datastore choices:
+
+```bash
+helm upgrade --install neuraltrust-platform <chart> \
+  --namespace neuraltrust --create-namespace \
+  -f values-v2-external.yaml
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Deployment models" icon="diagram-project" href="/neuraltrust/deployment/deployment-models">
+    Compare SaaS, Hybrid, and External responsibilities.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/neuraltrust/deployment/configuration">
+    Datastores, ingress, and TLS.
+  </Card>
+  <Card title="Secrets" icon="key" href="/neuraltrust/deployment/secrets">
+    Credential handling for a self-hosted install.
+  </Card>
+  <Card title="Firewall" icon="shield" href="/neuraltrust/deployment/firewall">
+    Size the optional Firewall deployed with TrustGuard.
+  </Card>
+</CardGroup>

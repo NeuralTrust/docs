@@ -1,0 +1,130 @@
+---
+title: Console setup
+description: Before installing, create TrustGate and TrustGuard in the console and collect the tokens the Hybrid data plane needs.
+---
+
+A Hybrid data plane runs in **your** cluster but is configured and observed by the
+NeuralTrust SaaS control plane. To connect the two, each runtime authenticates to
+SaaS with **tokens issued by the console** at [app.neuraltrust.ai](https://app.neuraltrust.ai/en/v2/).
+
+<Note>
+Tokens are issued **per product instance**. TrustGate and TrustGuard are separate
+console objects, so a Hybrid install that runs both must create **both** and
+collect **two token sets** — one per product.
+</Note>
+
+## What the console issues
+
+When you create a **Private** TrustGate or TrustGuard, the console generates two
+credentials for that instance:
+
+| Token | Purpose | Chart key (`CONFIG_SYNC_TOKEN` / `ENROLMENT_TOKEN`) |
+| --- | --- | --- |
+| **Config-sync token** | Authenticates the runtime's outbound pull of compiled configuration from SaaS. | `CONFIG_SYNC_TOKEN` |
+| **DataAgent enrollment token** | Authorizes the co-located DataAgent for OTLP metadata egress and DataBridge retrieval. | `ENROLMENT_TOKEN` |
+
+Both are JWTs scoped to the specific gateway or TrustGuard instance. The enrollment
+JWT already carries the tenant and instance identifiers — you do not set them
+separately.
+
+## Create a private TrustGate
+
+1. Open [app.neuraltrust.ai](https://app.neuraltrust.ai/en/v2/) and go to **TrustGate → Agent Gateway → Getting started**.
+2. Choose **New Gateway**, enter a name, and select **Private** (*High stakes* — fixed capacity, no cold starts).
+3. Under **Where do you want to run your gateway?** choose **Kubernetes** (recommended for production). Creating the gateway issues its **config-sync token** and **DataAgent enrollment token**.
+4. Copy the two tokens from the generated `values.yaml`. Treat the whole file as a secret — see [Secrets](/neuraltrust/deployment/secrets).
+5. Leave the wizard open. After the data plane is running you return here to set the **Dataplane URL** (see [Overview](/neuraltrust/deployment/overview#create-a-private-trustgate-gateway)).
+
+<Tip>
+**Docker** and **Manual** are also offered. Docker is for local evaluation of the
+LLM/proxy path only (no MCP). Manual returns `CONTROL_PLANE_JWT` and
+`DATA_AGENT_JWT` for fully custom manifests. Use **Kubernetes** for production.
+</Tip>
+
+## Create a private TrustGuard
+
+1. Go to **TrustGuard → Agent Runtime → Getting started**.
+2. Choose **New TrustGuard**, enter a name, and select **Private**.
+3. Choose **Kubernetes**. Creating the TrustGuard issues **its own** config-sync token and DataAgent enrollment token — distinct from TrustGate's.
+4. Copy both tokens.
+
+<Note>
+The TrustGuard wizard offers **Kubernetes** and **Manual** only (no Docker). In a
+combined install, TrustGate and TrustGuard each keep independent tokens; never
+reuse one product's token for the other.
+</Note>
+
+## Map tokens to chart Secrets
+
+For a production Kubernetes install, pre-create the Secrets below and reference
+them from values — keep the raw tokens out of `values.yaml` and source control.
+The config-sync Secret also needs a `CONFIG_SYNC_LKG_KEY`: an operator-generated
+base64 32-byte key that encrypts the last-known-good configuration snapshot
+(`openssl rand -base64 32`).
+
+| Kubernetes Secret | Keys | From |
+| --- | --- | --- |
+| `agentgateway-config-sync` | `CONFIG_SYNC_TOKEN`, `CONFIG_SYNC_LKG_KEY` | TrustGate config-sync token + generated LKG key |
+| `dataagent-enrolment-trustgate` | `ENROLMENT_TOKEN` | TrustGate enrollment token |
+| `trustguard-config-sync` | `CONFIG_SYNC_TOKEN`, `CONFIG_SYNC_LKG_KEY` | TrustGuard config-sync token + generated LKG key |
+| `dataagent-enrolment-trustguard` | `ENROLMENT_TOKEN` | TrustGuard enrollment token |
+
+Reference them from the maintained `neuraltrust-platform` chart. Select the
+products you run with `global.products`, then point each config-sync and
+enrollment block at its Secret:
+
+```yaml
+global:
+  deploymentMode: hybrid
+  products:
+    trustgate: true
+    trustguard: true
+
+agentgateway:
+  configSync:
+    existingSecret:
+      name: agentgateway-config-sync
+  dataagent:
+    enrolment:
+      existingSecret:
+        name: dataagent-enrolment-trustgate
+
+trustguard:
+  configSync:
+    existingSecret:
+      name: trustguard-config-sync
+  dataagent:
+    enrolment:
+      existingSecret:
+        name: dataagent-enrolment-trustguard
+```
+
+Config-sync is **on by default** in Hybrid (mode-derived) — set only
+`existingSecret`; do not restate `enabled: true`. For local or evaluation
+installs you may inline the raw values with `configSync.token` and
+`dataagent.enrolment.token` instead of an `existingSecret`, but those values
+enter Helm release history.
+
+## Regenerate tokens
+
+Issue fresh tokens any time from **Settings → Agent Gateway → Deployment** (TrustGate)
+or the equivalent TrustGuard deployment settings. Regenerating invalidates the
+previous install credentials, so update the corresponding Secret and roll the
+runtime pods.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Overview" icon="compass" href="/neuraltrust/deployment/overview">
+    See the full private-gateway setup flow and network requirements.
+  </Card>
+  <Card title="Secrets" icon="key" href="/neuraltrust/deployment/secrets">
+    Handle config-sync, enrollment, and LKG credentials safely.
+  </Card>
+  <Card title="Feature flags" icon="toggle-right" href="/neuraltrust/deployment/feature-flags">
+    Chart switches that shape the Hybrid data plane.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/neuraltrust/deployment/configuration">
+    Managed stores, ingress, and generated setup.
+  </Card>
+</CardGroup>
