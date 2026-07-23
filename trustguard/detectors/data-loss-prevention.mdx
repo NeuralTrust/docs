@@ -1,112 +1,98 @@
 ---
 title: "Data loss prevention"
-description: "Detect and mask 43 PII entities and 4 secret types in AI traffic in flight, on input and output. The only transform-capable detector."
+description: "Detect and mask PII and secrets in AI traffic on input and output. Configure data categories and custom rules in the console — the only transform-capable detector."
 ---
 
-The **Data Loss Prevention** detector (`data_loss_prevention`) finds sensitive
-data — PII and secrets — in prompts and model output, and can **mask it in
-flight**. It is the only **mutable** detector: the only one that can be used with
-the **Transform** action and the only one that populates `transformed_payload`.
+The **Data Loss Prevention** detector finds sensitive data — PII and secrets — in
+prompts and model output, and can **mask it in flight**. Create and configure it in
+the console under **Detectors**; attach it from a [policy](/trustguard/concepts/policies)
+to choose what happens when it matches.
+
+It is the only **mutable** detector: the only one that supports the **Transform**
+action (mask matched values before the payload continues).
 
 | Property | Value |
 |---|---|
-| Slug | `data_loss_prevention` |
-| Category | data_loss_prevention |
-| Sides | input, output |
-| Protocols | all |
+| Catalog type | Data Loss Prevention |
+| Sides | Input, Output |
+| Protocols | All |
 | Mutable | ✅ |
 
 JSON bodies are masked **structurally** (string values only — keys are never
-touched); text bodies are masked directly. Detected secrets (API keys, access
-tokens, JWTs, Stripe keys) are reported with `signal.type: "secret"`; all other
-entities as `"pii"`.
+touched); plain-text bodies are masked directly. Matches that are secrets (API
+keys, access tokens, JWTs, Stripe keys) are reported as secret findings; other
+entities as PII.
 
-## Actions
+## Configure in the console
 
-As a detector, DLP only detects. What happens is set on the
-[policy](/trustguard/concepts/policies) rule:
+1. Open **Detectors** → create a detector and pick **Data Loss Prevention**.
+2. Under **Data Categories**, choose what to detect (or use **Enable all**).
+3. Optionally add **Custom rules** for keywords or regex patterns that are not in
+   the built-in catalog.
+4. Save the detector, then add it to a [policy](/trustguard/concepts/policies) rule
+   (Input and/or Output) with an action.
 
-- **Monitor** — report what was found, change nothing.
-- **Block** — report and flag the request for the caller to block.
-- **Transform** — report and return a `transformed_payload` with matches masked;
-  forward the masked payload instead of the original. (Only DLP supports
-  Transform.)
+You must configure at least one of: **Enable all**, one or more data categories, or
+one or more custom rules.
 
-## Settings
+## Actions (on the policy)
 
-Provide at least one of `apply_all`, `predefined_entities`, or `rules`.
+The detector only finds and (when Transform is selected) masks. The action is set
+on the policy rule that references it:
 
-| Field | Type | Notes |
-|---|---|---|
-| `apply_all` | boolean | Detect/mask every catalog entity. |
-| `predefined_entities` | array&lt;`{ entity, enabled, mask_with, preserve_len }`&gt; | Select specific PII entities and how to mask them. |
-| `rules` | array&lt;`{ type, pattern, mask_with, preserve_len }`&gt; | Custom rules; `type` is `keyword` or `regex` (`pattern` required for `regex`). |
+| Console label | Effect |
+|---|---|
+| **Monitor** | Record a finding; leave the payload unchanged. |
+| **Block** | Record a finding and flag the request to be blocked. |
+| **Transform** | Record a finding and forward a masked payload. Only DLP supports this. |
 
-- `mask_with` — the replacement token. Defaults to an entity‑specific token
-  (e.g. `[MASKED_EMAIL]`) for predefined entities, or `***` for custom rules.
-- `preserve_len` — keep the original length when masking.
+## Data Categories
 
-```json
-{
-  "name": "Mask PII (in & out)",
-  "plugin_slug": "data_loss_prevention",
-  "settings": {
-    "predefined_entities": [
-      { "entity": "email", "enabled": true, "mask_with": "[EMAIL]" },
-      { "entity": "credit_card", "enabled": true, "preserve_len": true },
-      { "entity": "api_key", "enabled": true }
-    ],
-    "rules": [
-      { "type": "regex", "pattern": "ACME-\\d{6}", "mask_with": "[ACCOUNT]" }
-    ]
-  }
-}
-```
+The form groups **43** built-in entities into searchable categories. Toggle
+individual entities on or off, or use the **Enable all** control to mask every
+catalog entity at once.
 
-With a **Transform** rule, the response carries the masked body:
+| Group | Examples |
+|---|---|
+| **Personal information** | Email, phone, passport, driver's license, VIN |
+| **Financial data** | Credit card, CVV, IBAN, bank account, crypto wallet |
+| **Secrets & credentials** | API key, access token, JWT, Stripe key, UUID |
+| **Device & network** | IP / IPv6, MAC, IMEI |
+| **National & government IDs** | SSN, tax IDs, and national ID formats (ES, FR, IT, DE, BR, MX, …) |
 
-```json
-{
-  "status": "transform",
-  "transformed_payload": { "answer": "Email us at [EMAIL]" },
-  "findings": [
-    {
-      "source": { "kind": "detector", "plugin": "data_loss_prevention", "detector_name": "Mask PII (in & out)" },
-      "signal": { "type": "pii", "confidence": 1.0 },
-      "outcome": { "action": "transform" },
-      "evidence": { "masked": 1, "entities": ["email"] }
-    }
-  ]
-}
-```
+**Secrets** — these four are reported as secret findings (the rest as PII): API
+key, access token, JWT token, Stripe key. (UUID appears in the Secrets group in
+the console for convenience; it is not classified as a secret finding.)
 
-## Entity catalog
+When Transform runs, predefined entities are replaced with an entity-specific
+token (for example `[MASKED_EMAIL]`) unless you rely only on custom rules.
 
-**43 built‑in entities**, grouped by false‑positive risk. Pick the tier
-appropriate to your tolerance — Tier 1 is safe to enable broadly; Tier 3 benefits
-from the **Monitor** action first.
+## Custom rules
 
-**Tier 1 — near‑zero false positives (15):** `api_key`, `access_token`, `email`,
-`uuid`, `jwt_token`, `crypto_wallet`, `stripe_key`, `ip_address`, `ip6_address`,
-`mac_address`, `device_mac`, `italian_cf`, `mexican_curp`, `french_nir`, `cvv`.
+Use **Custom rules** when you need patterns that are not in the built-in catalog
+— internal account IDs, project codes, product-specific tokens, and so on.
 
-**Tier 2 — structural markers, some ambiguity (16):** `spanish_iban`, `iban`,
-`us_medicare`, `ssn`, `brazilian_cnpj`, `brazilian_cpf`, `credit_card`,
-`spanish_dni`, `spanish_nie`, `spanish_cif`, `spanish_nss`, `spanish_phone`,
-`german_id`, `mexican_rfc`, `chilean_rut`, `swift_bic`.
+1. In the detector form, open **Custom rules**.
+2. Click **Add custom rule**.
+3. Set **Type**:
+   - **Keyword** — exact substring match (e.g. `confidential`).
+   - **Regex** — a regular-expression pattern (e.g. `ACME-\d{6}`).
+4. Enter the keyword or pattern (required).
+5. Optionally set **Mask with** (default `***`) and **Preserve length** (replace
+   with `*` repeated to the original length).
+6. Add more rules as needed; each rule is evaluated in order along with the
+   selected data categories.
 
-**Tier 3 — pure format patterns, higher false positives (12):** `device_imei`,
-`bank_account`, `colombian_cc`, `tax_id`, `routing_number`, `peruvian_dni`,
-`argentine_dni`, `phone_number`, `vehicle_vin`, `drivers_license`, `passport`,
-`isin`.
-
-**Secrets** — the four entities reported as `signal.type: "secret"` (the rest are
-`"pii"`): `api_key`, `access_token`, `jwt_token`, `stripe_key`.
+Empty patterns are invalid — the console blocks save until every custom rule has
+a non-empty keyword or regex.
 
 ## When to use
 
-- **Output + Transform** to strip PII the model regurgitates before it reaches
-  the user.
-- **Input + Transform** to keep PII out of third‑party model providers entirely.
-- **Block secrets** (`api_key`, `access_token`, `jwt_token`, `stripe_key`) to
-  stop credential leakage.
+- **Output + Transform** — strip PII the model regurgitates before it reaches the
+  user.
+- **Input + Transform** — keep PII out of third-party model providers.
+- **Block** on secret categories (API key, access token, JWT, Stripe key) — stop
+  credential leakage.
+- Start with **Monitor** (and policy **Report** mode) when enabling broad
+  categories, then switch to **Enforce** + Block/Transform once the signal looks
+  right.
