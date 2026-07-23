@@ -1,6 +1,6 @@
 ---
 title: "Guardrails"
-description: "Inspect prompts and responses inline at the gateway with TrustGuard, OpenAI Moderation, Azure Content Safety, or AWS Bedrock guardrail policies."
+description: "Inspect or rewrite prompts and responses inline at the gateway with TrustGuard, OpenAI Moderation, Azure Content Safety, AWS Bedrock, or Regex Replace policies."
 ---
 
 Beyond routing and cost controls, TrustGate ships **guardrail policies** that inspect request
@@ -13,6 +13,7 @@ a [policy](/trustgate/policies/overview), global or per consumer.
 | [`openai_moderation`](#openai-moderation) | OpenAI Moderations API | `pre_request` · `pre_response` |
 | [`azure_content_safety`](#azure-content-safety) | Azure AI Content Safety | `pre_request` |
 | [`bedrock_guardrail`](#aws-bedrock-guardrail) | AWS Bedrock Guardrails | `pre_request` · `pre_response` |
+| [`regex_replace`](#regex-replace) | Built-in RE2 rewrite | `pre_request` or `pre_response` |
 
 <Note>
 Streaming responses cannot be inspected or blocked in realtime by these policies. Apply
@@ -125,6 +126,34 @@ through untouched.
 }
 ```
 
+## Regex Replace
+
+The **`regex_replace`** policy rewrites the request prompt **or** the LLM response with
+ordered [RE2](https://github.com/google/re2/wiki/Syntax) regular expressions. Rules chain:
+each rule sees the previous rule's output. A single policy instance targets one leg
+(`request` or `response`), not both. Streaming responses pass through untouched.
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `target` | enum | — | `request` or `response`. **Required.** |
+| `rules` | array | — | Ordered `[{ pattern, replacement, case_insensitive, multiline }]`. **Required.** |
+| `rules[].pattern` | string | — | RE2 pattern (no backreferences or lookaround). **Required.** |
+| `rules[].replacement` | string | — | Replacement text; `$1` / `${name}` for capture groups. Empty removes the match. |
+| `rules[].case_insensitive` | bool | `false` | Match without regard to letter case (`(?i)`). |
+| `rules[].multiline` | bool | `false` | `^` and `$` match at line boundaries (`(?m)`). |
+
+```json
+{
+  "slug": "regex_replace",
+  "settings": {
+    "target": "request",
+    "rules": [
+      { "pattern": "\\b(ssn|social)\\b", "replacement": "[REDACTED]", "case_insensitive": true }
+    ]
+  }
+}
+```
+
 ---
 
 ## Choosing a guardrail
@@ -135,6 +164,8 @@ through untouched.
   already use those providers.
 - **`bedrock_guardrail`** — reuse guardrails you've already defined in AWS Bedrock, including
   in-place PII anonymization.
+- **`regex_replace`** — deterministic string rewrite when you need simple pattern-based
+  redaction or rewriting without an external moderator.
 
 Guardrails compose: run several in one policy chain (e.g. TrustGuard on the request plus a
 Bedrock guardrail for PII anonymization on the response).

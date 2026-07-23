@@ -1,65 +1,49 @@
 ---
 title: "Tool governance"
-description: "Govern agent tool use at the gateway: allow-list tools, reshape tool definitions, rate-limit individual tool calls, and validate the tool calls a model returns."
+description: "Govern agent tool use at the gateway: inject operator-authored tools and rate-limit individual tool calls observed in model responses."
 ---
 
-For agent and function-calling traffic, TrustGate can govern the **tools** in flight — both
-the `tools[]` definitions a client sends and the tool *calls* a model returns — with four
-policies. All are configured like any other [policy](/trustgate/policies/overview) and scoped
-global or per consumer.
+For agent and function-calling traffic, TrustGate can govern the **tools** in flight with two
+catalog policies. Both are configured like any other [policy](/trustgate/policies/overview)
+and scoped global or per consumer.
 
 | Policy (`slug`) | Stage | Acts on |
 |---|---|---|
-| [`tool_allowlist`](#tool-allowlist) | `pre_request` | The request `tools[]` array |
-| [`tool_definition_transformation`](#tool-definition-transformation) | `pre_request` | The request `tools[]` definitions |
+| [`tool_injection`](#tool-injection) | `pre_request` | The request `tools[]` array |
 | [`per_tool_rate_limiter`](#per-tool-rate-limiter) | `pre_request` · `pre_response` · `post_response` | Observed tool calls |
-| [`tool_call_validation`](#tool-call-validation) | `pre_response` | Tool calls in the model response |
 
 ---
 
-## Tool allowlist
+## Tool injection
 
-The **`tool_allowlist`** policy is glob-based access control for the request `tools[]` array:
-`allow_tools` whitelists patterns
-and `deny_tools` removes patterns (**deny overrides allow**) before the model ever sees the
-tools.
-
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `allow_tools` | string[] | — | Glob patterns; if set, only matching tools pass. |
-| `deny_tools` | string[] | — | Glob patterns removed after `allow_tools`. |
-| `on_empty_after_filter` | enum | `reject` | When filtering removes every tool: `reject`, `pass_through_empty`, or `strip_tools_field`. |
-
-```json
-{
-  "slug": "tool_allowlist",
-  "settings": {
-    "allow_tools": ["search_*", "get_*"],
-    "deny_tools": ["*_admin"],
-    "on_empty_after_filter": "strip_tools_field"
-  }
-}
-```
-
-## Tool definition transformation
-
-The **`tool_definition_transformation`** policy reshapes tool definitions on the request leg
-before they reach the model — a governance and
-steering layer, **not** an access gate. Patch a matched tool's JSON schema, override its
-description, and inject operator-authored tools.
+The **`tool_injection`** policy appends operator-authored function tools to the request
+before they reach the model — a governance and steering layer, **not** an access gate. Name
+collisions with tools already on the request are resolved by `on_conflict`.
 
 | Setting | Type | Default | Notes |
 |---|---|---|---|
-| `transform_tools` | array | — | `[{ tool, schema_patch, description_override }]` — `tool` is a glob; `schema_patch` is an RFC 7386 merge patch. |
-| `inject_tools` | array | — | Operator-authored function tools appended to the request. |
+| `inject_tools` | array | — | Operator-authored function tools appended to the request. **Required.** |
+| `inject_tools[].type` | enum | `function` | Only `function` tools are supported. |
+| `inject_tools[].function` | object | — | `{ name, description, parameters }` — `name` required; `parameters` is a free-form JSON schema. |
 | `on_conflict` | enum | `gateway_wins` | Name collision resolution: `gateway_wins`, `client_wins`, or `reject`. |
 
 ```json
 {
-  "slug": "tool_definition_transformation",
+  "slug": "tool_injection",
   "settings": {
-    "transform_tools": [
-      { "tool": "search_*", "description_override": "Use only for internal knowledge-base search." }
+    "inject_tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "search_kb",
+          "description": "Search the internal knowledge base.",
+          "parameters": {
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"]
+          }
+        }
+      }
     ],
     "on_conflict": "gateway_wins"
   }
@@ -70,7 +54,7 @@ description, and inject operator-authored tools.
 
 The **`per_tool_rate_limiter`** policy counts and enforces limits **per observed tool call** in
 model responses. The limit applies gateway-wide when the policy is global, otherwise per
-consumer.
+consumer. (In the Admin Console catalog it is listed under Traffic Control.)
 
 | Setting | Type | Default | Notes |
 |---|---|---|---|
@@ -89,34 +73,6 @@ Per-rule / default `behavior` is one of `reject_response`, `inject_error_result`
       { "tool": "execute_code*", "windows": [{ "duration": "1m", "max": 5 }] }
     ],
     "behavior_default": "inject_error_result"
-  }
-}
-```
-
-## Tool call validation
-
-The **`tool_call_validation`** policy validates the tool calls an LLM returns against per-tool
-rules, rejecting or redacting responses that violate them.
-
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `rules` | array | — | Ordered validation rules. **Required (≥1).** |
-| `rules[].validator` | enum | — | `not_in_allowed_list`, `json_schema`, `semantic`, `regex`, or `denylist`. |
-| `rules[].behavior` | enum | `reject_response` | `reject_response`, `redact`, `mask`, or `replace_with`. |
-| `semantic` | object | — | `{ provider, api_key, model }` — required when any rule uses the `semantic` validator. |
-
-`regex` and `denylist` validators use `argument_path` (a JSONPath into the tool call
-arguments) plus `pattern` / `denylist`; `redact`/`mask`/`replace_with` apply only to those two
-validators.
-
-```json
-{
-  "slug": "tool_call_validation",
-  "settings": {
-    "rules": [
-      { "tool": "run_sql", "validator": "denylist", "argument_path": "$.query",
-        "denylist": ["DROP", "DELETE"], "behavior": "reject_response" }
-    ]
   }
 }
 ```
