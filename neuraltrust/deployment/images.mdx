@@ -1,27 +1,152 @@
 ---
-title: Image catalog
-description: Container images for the Hybrid data plane.
+title: Container images
+description: Pull NeuralTrust images directly with the key we send you, or mirror them into your own registry.
 ---
 
-Hybrid pulls runtime images into **your** environment. The control plane stays on NeuralTrust SaaS.
+NeuralTrust images are private. When your account is provisioned, NeuralTrust
+sends you a **registry key** — a JSON service-account key — plus the registry
+server to use it against. Keep it with your other production credentials; it is
+the only thing standing between your cluster and the images.
 
-Managed PostgreSQL and Redis are recommended for production. The chart can deploy in-cluster stores for evaluation and non-production use ([sizes](/neuraltrust/deployment/configuration#managed-stores)).
+From there you have two supported paths:
 
-The visible wizard does not show image paths or tags:
+| | **Pull directly** | **Mirror to your own registry** |
+| :-- | --- | --- |
+| Best for | Clusters with outbound internet access | Air-gapped clusters, or policy that requires an internal registry |
+| You manage | One Kubernetes Secret | A registry, a copy of every image, and re-syncing on upgrade |
+| Values changes | None | `global.imageRegistry` and two collector overrides |
 
-- **Docker** fetches the maintained TrustGate Compose manifest, which selects the runtime images.
-- **Kubernetes** wizard output provides setup and credential input. The maintained `neuraltrust-platform` chart or manifests select the runtime images and remain the deployment source.
-- **Manual** deployments use your maintained manifests, which are the source of image repositories and versions.
+Both modes pull the same images. Hybrid pulls the data path; External additionally
+pulls the console and analytics stack.
 
-Mirror every image referenced by your maintained manifest, including enabled TrustGuard, Firewall, DataAgent, and telemetry components.
+## Pull directly from NeuralTrust
 
-## Mirror images
+Create a `docker-registry` Secret from the key. The chart repository ships
+`create-image-pull-secret.sh`, which fills in the registry server and username
+for you:
+
+```bash
+GCR_KEY_FILE=./neuraltrust-registry-key.json \
+  ./create-image-pull-secret.sh --namespace neuraltrust
+```
+
+The equivalent by hand — the username is the literal string `_json_key`, and the
+password is the **entire contents** of the key file, not a path to it:
+
+```bash
+kubectl create secret docker-registry gcr-secret -n neuraltrust \
+  --docker-server='<registry-server-from-neuraltrust>' \
+  --docker-username='_json_key' \
+  --docker-password="$(cat ./neuraltrust-registry-key.json)" \
+  --docker-email='<your-email>'
+```
+
+<Note>
+Name the Secret **`gcr-secret`**. Every component defaults to that name, so no
+values changes are needed. If you must use a different name, see
+[Renaming the pull Secret](#renaming-the-pull-secret).
+</Note>
+
+That is the whole setup. Continue with the
+[Quick start](/neuraltrust/deployment/quickstart).
+
+## Mirror to your own registry
+
+Copy every image your deployment uses into your registry, preserving the
+repository names and tags — change only the registry host.
+
+### Which images to copy
+
+Render your own values file to get the exact list, including the tags pinned by
+your chart version:
+
+```bash
+helm template neuraltrust-platform <chart> -f <your-values.yaml> \
+  | grep -o 'image: .*' | sort -u
+```
+
+A Hybrid install with all products enabled pulls `agentgateway`, `trustguard`,
+`firewall-cpu`, `data-plane-api`, `dataagent`,
+`opentelemetry-collector-contrib`, and — unless you use managed stores —
+`postgres` and `redis-stack-server`. External adds `control-plane-api`, `app`,
+`datacore`, `alertengine`, `clickstack-otel-collector`, and `clickhouse-server`.
+GPU Firewall uses a separate image — see
+[Firewall](/neuraltrust/deployment/firewall).
+
+### Point the chart at your registry
 
 ```yaml
 global:
   imageRegistry: registry.example.com/neuraltrust
-  imagePullSecrets:
-    - name: neuraltrust-registry
 ```
 
-If you mirror images, rewrite only the registry location and preserve the repository names and tags pinned by your maintained manifest. GPU Firewall needs a separate image — see [Firewall](/neuraltrust/deployment/firewall).
+<Warning>
+**`global.imageRegistry` does not rewrite the OTel collector images.** Their
+repositories are pinned in full, so they keep pointing at the NeuralTrust
+registry and their pods fail to pull in an air-gapped cluster. Override them
+explicitly:
+
+```yaml
+global:
+  clickstack:
+    egress:
+      image:
+        repository: registry.example.com/neuraltrust/opentelemetry-collector-contrib
+  observability:
+    collector:
+      image:
+        repository: registry.example.com/neuraltrust/opentelemetry-collector-contrib
+```
+
+Set only the ones you render. The first is the DataAgent egress sidecar, which
+every Hybrid install runs and External never deploys. The second applies to
+either mode, but only when `global.observability.enabled` is `true`. An External
+install with observability off needs neither, and `global.imageRegistry` covers
+it completely.
+
+Either way, re-run the `helm template | grep image:` command above afterwards and
+confirm no image still points at the NeuralTrust registry.
+</Warning>
+
+Then create a pull Secret for **your** registry, named `gcr-secret`, in the
+release namespace:
+
+```bash
+kubectl create secret docker-registry gcr-secret -n neuraltrust \
+  --docker-server='registry.example.com' \
+  --docker-username='<user>' \
+  --docker-password='<password>'
+```
+
+Re-mirror when you upgrade the chart — tags are pinned per chart version, so a
+new version pulls images your registry does not have yet.
+
+## Renaming the pull Secret
+
+Every component defaults to a Secret named `gcr-secret`, and
+`global.imagePullSecrets` **does not override that default** — it only applies to
+the chart's own in-cluster PostgreSQL and Redis. Setting it alone leaves the
+product workloads still asking for `gcr-secret`.
+
+Reusing the name `gcr-secret` for your own registry credential is by far the
+simplest option. If your policy forbids it, set the pull secret on each component
+instead, and verify with:
+
+```bash
+helm template neuraltrust-platform <chart> -f <your-values.yaml> \
+  | grep -A2 imagePullSecrets
+```
+
+## Clusters that pull without a Secret
+
+Where node or workload identity already authorizes registry pulls — GKE Workload
+Identity, an EKS instance profile, ACR attached to AKS — you do not need to
+create anything. Leave the defaults alone: pods keep a reference to a
+`gcr-secret` that does not exist, and the kubelet falls back to the node
+credentials.
+
+<Warning>
+Do not try to suppress the references with `global.imagePullSecrets: ["none"]`.
+It does not clear them from the product workloads, and it makes the Redis
+Deployment reference a Secret literally named `none`.
+</Warning>

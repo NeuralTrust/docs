@@ -59,6 +59,29 @@ global:
       name: onprem-superadmin   # ONPREM_SUPERADMIN_EMAIL / ONPREM_SUPERADMIN_PASSWORD
 ```
 
+<Warning>
+**Set a CAPTCHA secret key, or three failed logins will lock the console.** The
+published console image carries a Cloudflare Turnstile *site* key, so the login
+page presents a CAPTCHA after three failed attempts. Verifying it needs the
+matching *secret* key, which is a runtime value the chart does not set — without
+it the check fails and the sign-in is refused. Supply it from your own Secret:
+
+```yaml
+control-plane-app:
+  controlPlane:
+    components:
+      app:
+        extraEnv:
+          - name: TURNSTILE_SECRET_KEY
+            valueFrom:
+              secretKeyRef: { name: my-turnstile-secret, key: TURNSTILE_SECRET_KEY }
+```
+
+Verification calls `challenges.cloudflare.com`, so the console pod needs egress
+to it. In an air-gapped environment the challenge cannot be satisfied at all —
+build the console image without a site key.
+</Warning>
+
 ## Cluster sizing
 
 External adds the console and analytics stack on top of the data path. Plan on
@@ -96,7 +119,7 @@ infrastructure:
 Pre-create external PostgreSQL roles and databases before install — the chart
 does not create users in managed services. See
 [Configuration](/neuraltrust/deployment/configuration#managed-stores) for minimum
-sizes and the chart repository's `values-v2-managed-datastores.yaml.example`.
+sizes and the chart repository's `values-managed-datastores.yaml.example`.
 
 ## Telemetry egress
 
@@ -126,14 +149,18 @@ controller settings remain operator prerequisites. See
 ## Install
 
 Start from the maintained `neuraltrust-platform` chart and the tracked
-`values-v2-external.yaml.example`, then layer your platform, domain, ingress, and
+`values-external.yaml.example`, then layer your platform, domain, ingress, and
 datastore choices:
 
 ```bash
 helm upgrade --install neuraltrust-platform <chart> \
   --namespace neuraltrust --create-namespace \
-  -f values-v2-external.yaml
+  -f values-external.yaml.example
 ```
+
+For the full sequence — prerequisites, namespace, pull secret, bootstrap
+administrator, and verification — follow the
+[External quick start](/neuraltrust/deployment/quickstart).
 
 ## Next steps
 

@@ -15,7 +15,7 @@ NeuralTrust supports **SaaS**, **Hybrid**, and **External**. SaaS is fully opera
 | Plane | Where it runs | What you care about |
 | --- | --- | --- |
 | **Control plane** | NeuralTrust SaaS | Console, configuration, analytics |
-| **Data plane** | Your environment (Hybrid) | TrustGate, TrustGuard, optional Firewall, optional DataAgent |
+| **Data plane** | Your environment (Hybrid) | TrustGate, TrustGuard, Firewall (with TrustGuard), DataAgent (one per product) |
 
 ## How the planes connect
 
@@ -25,9 +25,11 @@ Hybrid sends configuration requests and metadata outbound while raw prompts and 
  Your environment (data plane)          NeuralTrust SaaS (control plane)
  ┌─────────────────────────┐            ┌────────────────────────────┐
  │ TrustGate  → TrustGuard │ ─────────▶ │  Configuration service     │
- │ (+ Firewall, optional)  │            │                            │
- │                         │ ─────────▶ │  OTLP metadata / analytics │
- │ DataAgent (optional) ──────────────▶ │  Enrolled retrieval        │
+ │ (+ Firewall with Guard) │            │                            │
+ │        │ OTLP           │            │                            │
+ │        ▼                │            │                            │
+ │ DataAgent + egress ─────────────────▶│  OTLP metadata / analytics │
+ │ collector           ────────────────▶│  Enrolled retrieval        │
  └───────────┬─────────────┘            └────────────────────────────┘
              │
              ▼
@@ -35,12 +37,25 @@ Hybrid sends configuration requests and metadata outbound while raw prompts and 
 ```
 
 1. **Traffic path** — Clients hit TrustGate in your environment; TrustGate calls TrustGuard (and Firewall when enabled) on the request path.
-2. **Metadata** — Runtimes export metadata over OTLP to SaaS. Payloads are not exported.
+2. **Metadata** — TrustGate and TrustGuard send metadata over OTLP to a collector inside your cluster, which forwards it to SaaS. Payloads are not exported.
 3. **Configuration sync** — TrustGate and TrustGuard pull configuration from the SaaS control plane. The data plane initiates this outbound connection; config sync does not require an inbound control-plane connection into your network.
-4. **Retrieval** — DataAgent uses a separate enrollment token for authorized retrieval.
+4. **Retrieval** — DataAgent uses the same enrollment token for authorized retrieval over DataBridge.
 5. **Gateway traffic** — Clients use separate LLM/proxy and MCP entry points.
 
+Every connection above is initiated from your environment. Nothing dials in.
+
+DataAgent is not optional once you run TrustGate or TrustGuard. Each of those
+products needs its own enrolled DataAgent, because the metadata path in step 2
+runs through the collector co-located with it. Only a red-teaming-only
+deployment — `global.products.dataPlane` alone — runs without one.
+
 Managed PostgreSQL and Redis are recommended for production. The chart can run in-cluster stores for evaluation and non-production use. See [Configuration](/neuraltrust/deployment/configuration#managed-stores) for guidance. For regional resilience, see [High availability](/neuraltrust/deployment/high-availability).
+
+<Note>
+Ready to install? The [Quick start](/neuraltrust/deployment/quickstart) is the
+shortest working path for both Hybrid and External, with the prerequisites,
+Secrets, and Helm commands in order.
+</Note>
 
 ## Choose a deployment method
 
