@@ -1,6 +1,6 @@
 ---
 title: Break the Glass
-description: "Configure up to five emergency Break the Glass accounts in User & Roles. A single-organization account signs in with password only."
+description: "Configure emergency Break the Glass accounts in User & Roles. They sign in with password only — including when the account belongs to multiple organizations."
 ---
 
 # Break the Glass (Emergency Access)
@@ -31,110 +31,48 @@ enabled. Otherwise an IdP outage can lock out your entire organization.
 
 ## Organization membership
 
-Treat Break the Glass as an **emergency-only** account, and assign it to
+Treat Break the Glass as an **emergency-only** account. Prefer assigning it to
 **exactly one organization**.
 
 | Membership | Sign-in behavior |
 |---|---|
-| **One organization (required)** | **Password only** — always. Skips SSO and magic link. |
-| **Multiple organizations (avoid)** | Sign-in requires a **magic link first**, then shows the organizations the account can access. Selecting an organization that uses SSO continues with that org's IdP (for example Okta, Entra ID, or another OIDC provider). After IdP authentication succeeds, the user is signed in. |
-
-The magic-link step for multi-org accounts exists so organization membership is
-not disclosed before the email is verified.
+| **One organization (recommended)** | **Password only** — always. Skips SSO and magic link. |
+| **Multiple organizations** | Still **password only** for Break the Glass. The account does **not** take the magic-link / IdP path used by normal multi-org users. Prefer a dedicated single-org emergency account. |
 
 ---
 
 ## How It Works
 
-1. An Owner or Admin creates a Break the Glass account in **User & Roles**
-   (password ≥ 30 characters).
-2. With **exactly one** organization membership, that account always
-   authenticates with **password only** — it does not use SSO or magic link.
-3. When **Enforce SSO** is on, everyone else must use the configured IdP; the
-   Break the Glass account still uses password.
+1. An Owner, Global Admin, or IAM Admin creates a Break the Glass account in
+   **Platform settings → User & Roles** (password ≥ 30 characters).
+2. Break the Glass always authenticates with **password only** — it does not use
+   SSO or magic link (single- or multi-organization).
+3. When **Enforce SSO** is on, members on a **verified** email domain must use the
+   configured IdP. External-domain guests still use magic link. The Break the Glass
+   account still uses password.
 4. Maximum **five** Break the Glass accounts per organization (recommended: 2–3).
 5. All Break the Glass logins are recorded in Audit Logs.
 
 ### Normal user vs Break the Glass
 
-| Scenario | Normal user | Break the Glass (single org) |
-|----------|-------------|------------------------------|
+| Scenario | Normal user | Break the Glass |
+|---|---|---|
 | Sign-in | Magic link or SSO (passwordless) | **Password only** (skips SSO and magic link) |
-| SSO Enforcement ON | Must use the configured IdP SSO | **Password only** |
-| IdP is down | Cannot use SSO | Can log in with password |
+| MFA | Via IdP when using SSO | No MFA on the password |
+| Enforce SSO | Verified-domain members → IdP; external guests → magic link | Password escape hatch |
 
 ---
 
-## Hardening (recommended)
+## Setup
 
-- Keep **2–3** accounts (max **5** per organization) — not everyone.
-- Rotate BtG passwords periodically; store them in your secret manager.
-- Treat every BtG sign-in as an incident (audit alerts fire for organization admins).
-- Disable or remove BtG access when the emergency is over.
-
----
-
-## Creating a Break the Glass Account
-
-1. Log in to <a href="https://app.neuraltrust.ai" target="_blank">NeuralTrust</a> as Owner or Admin.
-2. Go to **User & Roles**.
-3. Invite a user or edit a member and apply the **Break the glass** role
-   template (or mark the user as Break the Glass). The console provisions a long
-   password (≥ 30 characters) — store it in your secret manager.
-4. Confirm the account belongs to **only this** organization.
+1. Log in to <a href="https://app.neuraltrust.ai" target="_blank">NeuralTrust</a>
+   with IAM Admin access (Owner / Global Admin include it).
+2. Open the sidebar gear → **Platform settings → User & Roles**.
+3. **Add User** (or edit) → apply the **Break the glass** template → set a password
+   (≥ 30 characters).
+4. Keep the account in a single organization when possible.
 5. Configure your **Email Domain**, then enable **Enforce SSO** when ready —
-   see [Microsoft Entra ID SSO](/platform/sso) or
-   [Generic OIDC SSO](/platform/generic-oidc-sso).
-
----
-
-## Validation Errors
-
-| Error | Cause | Solution |
-|-------|-------|----------|
-| Password too short | Below the 30-character minimum | Set a longer password |
-| Cannot use password sign-in | User is not Break the Glass | Promote the user in [User & Roles](/platform/users) |
-| Magic link required / org picker shown | Account is in more than one organization | Remove extra memberships so only one remains |
-| Maximum accounts reached | Already have five Break the Glass accounts | Remove or demote an existing account first |
-
----
-
-## Removing Break the Glass Access
-
-1. Go to **User & Roles**.
-2. Edit the user and remove the Break the Glass role (or delete the account).
-3. The user then follows normal passwordless sign-in (magic link or SSO).
-
----
-
-## Audit Logging
-
-All break-glass activity is logged for compliance and security monitoring.
-
-| Event | Description |
-|-------|-------------|
-| `auth.login.success` | Break-glass user logged in successfully (metadata includes `isBreakGlassAccess: true`) |
-| `auth.login.failure` | Break-glass login attempt failed |
-
-### Viewing Break-Glass Events
-
-1. Open **Audit Logs** in the console (location is moving; look under Telemetry / Logs when available).
-2. Filter by Event Type: **Login Success**.
-3. Look for break-glass sign-in events in the description.
-
----
-
-## Security Best Practices
-
-| Recommendation | Why |
-|----------------|-----|
-| Add 2–3 users (max **5** per organization) | Redundancy in case one is unavailable |
-| Use owner/admin–capable accounts | They have permissions to fix SSO issues |
-| Use strong passwords (≥ 30 characters) | Break-glass accounts are high-value targets |
-| One organization per account | Keeps the password-only sign-in path |
-| Test quarterly | Ensure break-glass users remember passwords |
-| Document the process | Include in your incident response runbook |
-| Monitor audit logs | Review break-glass usage regularly |
+   see [Microsoft Entra ID SSO](/platform/sso) or [Generic OIDC SSO](/platform/generic-oidc-sso).
 
 ---
 
@@ -145,17 +83,16 @@ All break-glass activity is logged for compliance and security monitoring.
 You won't be able to log in until the IdP is restored. Configure Break the Glass
 accounts proactively before enabling Enforce SSO.
 
-**Q: Can a Break the Glass account (single org) also use SSO or magic link?**
+**Q: Can a Break the Glass account also use SSO or magic link?**
 
-No. With a single organization membership it signs in with **password only** —
-it always skips SSO and magic link.
+No. Break the Glass always signs in with **password only** — it skips SSO and
+magic link, including if the account belongs to several organizations.
 
-**Q: What if my account belongs to several organizations?**
+**Q: What if a normal (non–Break the Glass) account belongs to several organizations?**
 
-You receive a **magic link** before any organizations are shown. After you open
-it, pick an organization. If that organization enforces SSO, you complete
-authentication with its IdP (Okta, Entra ID, and so on) and then enter the
-product. Prefer a dedicated single-org Break the Glass account for emergencies.
+That user receives a **magic link** first, then picks an organization. If that
+organization enforces SSO, they complete authentication with its IdP. This path
+does **not** apply to Break the Glass accounts.
 
 **Q: Is there a way to know when Break the Glass was used?**
 
@@ -168,11 +105,11 @@ Enforce SSO is enabled.
 
 **Q: Where do I create Break the Glass accounts?**
 
-In **User & Roles**.
+**Platform settings → User & Roles**.
 
-**Q: Can Members be Break the Glass users?**
+**Q: Who can be a Break the Glass user?**
 
-Yes — apply the Break the Glass role in [User & Roles](/platform/users). Accounts
+Apply the **Break the glass** role in [User & Roles](/platform/users). Accounts
 without that role are passwordless.
 
 ---
