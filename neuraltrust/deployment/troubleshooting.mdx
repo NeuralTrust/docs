@@ -1,0 +1,143 @@
+---
+title: Troubleshooting
+description: Symptoms you will actually see, and what causes them.
+---
+
+Organised by what you observe, not by component. Most entries come from real first-install failures.
+
+## Install fails before anything reaches the cluster
+
+The chart validates values while rendering, so these surface in your terminal.
+
+### `global.products supports only trustgate, trustguard, and dataPlane (got "agentgateway")`
+
+The console wizard used to emit `global.products.agentgateway: true`. The chart keys `global.products` by product id, so this must be `trustgate`. Rename that one key and leave the `agentgateway:` values block below it unchanged — the two are different namespaces, as set out in the [naming map](/neuraltrust/deployment/console-setup#one-product-four-names). TrustGuard is spelled the same in both places and is unaffected.
+
+### `hybrid requires at least one product`
+
+No `global.products.*` is `true`. Frequently the same root cause as above: the key was set, but under a name the chart does not recognise.
+
+## Pods
+
+### Running but never Ready (data planes)
+
+A hybrid TrustGate or TrustGuard data plane includes a **snapshot check** in its readiness probe. It reports Ready only once it holds a configuration snapshot, so this state means config-sync has not succeeded. See [Config sync](#config-sync) below.
+
+### CreateContainerConfigError
+
+The pod references a Secret key that does not exist. Find which one:
+
+```bash
+kubectl -n neuraltrust describe pod <pod> | grep -A3 'Error:'
+```
+
+Most common cause: you turned off secret generation (`global.autoGenerateSecrets: false` or `global.preserveExistingSecrets: true`) and the chart therefore generated nothing, but your own Secret is missing a key the chart would have created. `CONFIG_SYNC_LKG_KEY` is the usual one — under those two modes it becomes your responsibility.
+
+### CrashLoopBackOff with a config validation message
+
+The Go services validate their whole configuration at boot and exit rather than start degraded. The log line names the variable. Frequent ones:
+
+| Message contains | Meaning |
+| --- | --- |
+| `must be base64 that decodes to exactly 32 bytes` | `CONFIG_SYNC_LKG_KEY` is missing or malformed |
+| `REDIS_HOST` | Redis is not configured. Required even on DB-less data planes |
+| `DB_HOST` empty, or Postgres connection refused on a managed instance | A Secret supplied through `global.postgresql.existingSecret` holds `POSTGRES_*` keys. It is consumed with `envFrom` and never renamed, so it must use `DB_*` — see [Bringing your own Postgres Secret](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret) |
+
+### ImagePullBackOff despite setting a pull secret
+
+Only `control-plane-app.imagePullSecrets` is honoured for the console. Both `controlPlane.imagePullSecrets` and `global.imagePullSecrets` are silently ignored on that workload, so a value you can see in your values file may be doing nothing. Set `control-plane-app.imagePullSecrets` explicitly. This is a known defect and a fix is in progress.
+
+## Config sync
+
+### Symptom: data planes never become Ready
+
+Check what the gateway says:
+
+```bash
+kubectl -n neuraltrust logs deploy/agentgateway-proxy | grep -i 'config.sync\|snapshot'
+```
+
+| Cause | Fix |
+| --- | --- |
+| Token wrong or has trailing whitespace | Recreate the Secret. `--from-literal` preserves whatever you paste |
+| Egress to `*.neuraltrust.ai:443` blocked | Allow it; the data plane always initiates |
+| TLS-intercepting proxy | Set `configSync.tlsCa` to your CA |
+| `configSync.enabled: true` restated in values | Remove it; hybrid derives it |
+
+Do not use `configSync.tlsInsecure` to work around a certificate problem. The runtimes reject cleartext under a deployed `APP_ENV`, so it will not help and it removes the guarantee you are deploying for.
+
+### Symptom: warning about a stale snapshot
+
+The data plane serves its last-known-good configuration when SaaS is unreachable, and warns once it is more than 24 hours old. Traffic keeps flowing on the cached configuration. Treat it as a connectivity alert, not an outage.
+
+Note that this cache lives on an `emptyDir`, so it does not survive a pod restart. A restarted pod with no SaaS connectivity has nothing to fall back on and will not become Ready.
+
+## Login and console (external mode)
+
+### Locked out after three failed password attempts
+
+The login page shows a Turnstile challenge after three failures whenever the image was built with a Turnstile site key. Verifying it requires `TURNSTILE_SECRET_KEY` and outbound access to `challenges.cloudflare.com`. A self-hosted install usually has neither, and the challenge fails closed.
+
+Workarounds: set `TURNSTILE_SECRET_KEY` via `extraEnv`, or clear browser state.
+
+There is a second, independent limit: after **four** failed passwords the account is locked in the database. Clearing browser state does not help with that one — the lock is on the user record and has to be cleared through recovery. The two limits are easy to confuse because the first fires one attempt earlier.
+
+### SCIM or SSO setup screens show `app.neuraltrust.ai`
+
+`NEXT_PUBLIC_APP_URL` is inlined into the JavaScript bundle at image build time and cannot be set at runtime. The SSO screens resolve the origin from the browser and are correct; the **SCIM tenant URL** and the `meta.location` returned to your IdP are not. Until the build accepts a runtime origin, enter the SCIM tenant URL in your IdP by hand rather than copying it from the screen.
+
+### Console starts but every dashboard is empty
+
+Check DataCore, which serves dashboard metrics in external mode:
+
+```bash
+kubectl -n neuraltrust logs deploy/datacore
+```
+
+DataCore needs ClickHouse **and** its own `datacore` PostgreSQL database. It runs its migrations at process startup, so a failure there leaves it unable to serve.
+
+## Telemetry
+
+### Trace export returns 404
+
+```text
+traces export: failed to send to http://.../v1/logs/v1/traces: 404 Not Found
+```
+
+Note the doubled path. The generic OTLP endpoint is set to a logs-specific URL, and the traces exporter appends `/v1/traces` to it. Logged at INFO, so it is invisible in normal monitoring while every trace is lost. Point the generic OTLP endpoint at the collector's base URL, not at a signal-specific path — each exporter appends its own suffix.
+
+### Firewall logs `Redis unavailable`, then continues
+
+```text
+Redis unavailable at redis://localhost:6379/0; complexity state disabled
+```
+
+The firewall is not given a Redis URL and falls back to `localhost`. Startup then completes normally, so the pod is Ready with a feature switched off. Set the firewall's Redis URL explicitly rather than relying on the default.
+
+### AlertEngine fails every 45 seconds
+
+```text
+worker pass failed ... Unknown table expression identifier 'trustguard_events'
+```
+
+AlertEngine is pointed at the `otel` database, but its event tables live elsewhere, so alert evaluation does not currently run. This is a known defect and a fix is in progress; the failing worker is contained and does not affect request handling.
+
+## Upgrades
+
+### A values change had no effect
+
+Workloads that take configuration through `envFrom` carry no checksum of the ConfigMap, so a ConfigMap-only change updates the ConfigMap without restarting anything. The change activates at the next unrelated restart — a node drain, an image bump, an eviction — which decouples "deployed" from "in effect".
+
+Restart the affected workload explicitly:
+
+```bash
+kubectl -n neuraltrust rollout restart deploy/<name>
+```
+
+### Upgrade fails on an IPv6 single-stack cluster
+
+Fixed in chart 2.6.0. The MCP OAuth signing-key hook built the API server URL from `KUBERNETES_SERVICE_HOST`, which on IPv6 is a bare literal that is neither a parsable URL host nor a certificate SAN match. The Job exhausted its retries and, under Flux remediation or `helm upgrade --atomic`, rolled the whole release back. Upgrade the chart.
+
+### `helm diff` shows a Secret key disappearing
+
+`helm diff upgrade` and client-side `--dry-run` can show the managed config-sync Secret vanishing when `configSync.existingSecret.name` is set. This is a rendering artefact — the live upgrade finds the Secret and `resource-policy: keep` preserves it. Nothing is actually removed.

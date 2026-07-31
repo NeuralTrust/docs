@@ -78,8 +78,9 @@ ClickHouse. The shared `global.postgresql` / `global.redis` connection contract
 used by Hybrid is ignored here; configure datastores through the per-service
 overlays instead.
 
-To use managed datastores, disable the in-cluster components and point each
-service at its endpoint:
+The usual production shape is **managed PostgreSQL and Redis with in-cluster
+ClickHouse**. Disable the two in-cluster stores you are replacing and leave
+ClickHouse alone:
 
 ```yaml
 global:
@@ -87,16 +88,28 @@ global:
     deploy: false
   redis:
     deploy: false
+```
 
+Pre-create external PostgreSQL roles and databases before install — the chart
+does not create users in managed services. If you reference a pre-created Secret
+instead of putting credentials in values, note that its keys must be `DB_*`, not
+`POSTGRES_*` — see
+[Bringing your own Postgres Secret](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret).
+For minimum sizes see
+[Configuration](/neuraltrust/deployment/configuration#managed-stores) and the
+chart repository's `values-managed-datastores.yaml.example`.
+
+<Note>
+Running ClickHouse outside the cluster is supported but uncommon — it is the
+platform's own telemetry store, and most deployments let the chart run it. Only
+if your policy requires it, add:
+
+```yaml
 infrastructure:
   clickhouse:
     deploy: false
 ```
-
-Pre-create external PostgreSQL roles and databases before install — the chart
-does not create users in managed services. See
-[Configuration](/neuraltrust/deployment/configuration#managed-stores) for minimum
-sizes and the chart repository's `values-managed-datastores.yaml.example`.
+</Note>
 
 ## Telemetry egress
 
@@ -130,7 +143,9 @@ Start from the maintained `neuraltrust-platform` chart and the tracked
 datastore choices:
 
 ```bash
-helm upgrade --install neuraltrust-platform <chart> \
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
   --namespace neuraltrust --create-namespace \
   -f values-external.yaml.example
 ```
