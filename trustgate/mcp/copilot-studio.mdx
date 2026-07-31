@@ -1,0 +1,177 @@
+---
+title: "Microsoft Copilot Studio"
+description: "Connect Microsoft Copilot Studio to a TrustGate MCP consumer using NeuralTrust as the OAuth identity provider (no Entra ID or Okta setup)."
+---
+
+This guide wires **Microsoft Copilot Studio** to a TrustGate [MCP consumer](/trustgate/concepts/consumers)
+when authentication is handled by **NeuralTrust** (the platform as the default MCP IdP) —
+not by an external identity provider such as Microsoft Entra ID or Okta.
+
+You will:
+
+1. Create an MCP consumer that uses NeuralTrust for OAuth (no external client id/secret).
+2. Register that consumer as an MCP server tool in Copilot Studio (OAuth + dynamic discovery).
+3. Build an agent that calls an upstream MCP (for example Notion) through TrustGate.
+
+For Entra ID or Okta as the IdP instead, see the [Authorization](/trustgate/concepts/authorization/overview)
+manuals.
+
+## Prerequisites
+
+- Access to the NeuralTrust app (**Agent Gateway → Consumers** / **Registries**).
+- A gateway with a public MCP base URL (SaaS: `https://{gateway_slug}.mcp.neuraltrust.ai`).
+- At least one [MCP registry](/trustgate/concepts/registries) connected (e.g. Notion) and
+  granted to the consumer via its toolkit.
+- A Microsoft Copilot Studio environment where you can create agents and tools.
+- Browser pop-ups enabled for the NeuralTrust consent / connect flow.
+
+| Placeholder | Meaning |
+|---|---|
+| `mcp_base_url` | Public MCP host for the gateway, no path — e.g. `https://gw-xxxxxxxx.mcp.neuraltrust.ai` |
+| `consumer_slug` | Slug of the MCP consumer (from the consumer **Connect** tab) |
+| Consumer MCP URL | `https://{mcpHost}/{consumer_slug}/mcp` — the value you paste into Copilot Studio |
+
+<Note>
+**SaaS vs Private:** SaaS uses `{slug}.mcp.neuraltrust.ai`. Private/Hybrid uses the Dataplane
+MCP URL from **Settings → Agent Gateway → General**. Copilot Studio must reach that URL
+from the internet (or your allowed network path).
+</Note>
+
+---
+
+## 1. Create the MCP consumer (NeuralTrust auth)
+
+In the NeuralTrust app go to **Agent Gateway → Consumers → Consumer**.
+
+<Steps>
+  <Step title="Create an MCP consumer with OAuth2">
+    - **Protocol**: `MCP`
+    - **Authentication → Method**: `OAuth2`
+
+    For the OAuth client / identity provider:
+
+    - Leave the external IdP **Client** blank, **or**
+    - Select **Use NeuralTrust** (wording may vary in the UI)
+
+    That choice means you are **not** wiring Entra ID or Okta. TrustGate falls back to the
+    platform as the default MCP identity provider: interactive login uses NeuralTrust
+    (your existing platform session), then TrustGate mints the MCP session token for the
+    agent.
+  </Step>
+  <Step title="Bind registries and toolkit">
+    Attach the MCP [registries](/trustgate/concepts/registries) the agent should see
+    (e.g. Notion) and scope the [toolkit](/trustgate/mcp/overview#toolkits--scoping-what-an-agent-can-use)
+    so the consumer can call the tools you need (e.g. Notion search).
+  </Step>
+  <Step title="Copy the consumer MCP URL">
+    Open the consumer → **Connect** tab and copy the MCP server URL:
+
+    ```text
+    https://{mcpHost}/{consumer_slug}/mcp
+    ```
+
+    Example shape (do not copy this literally — use your own gateway and slug):
+
+    ```text
+    https://gw-sablgc054539.mcp.neuraltrust.ai/2ZLGuh0Z/mcp
+    ```
+  </Step>
+</Steps>
+
+---
+
+## 2. Add the MCP server in Copilot Studio
+
+In **Microsoft Copilot Studio**:
+
+<Steps>
+  <Step title="Create an MCP tool">
+    Go to **Tools** (or the equivalent MCP / connectors area) → add a new **MCP** tool.
+  </Step>
+  <Step title="Choose OAuth with dynamic discovery">
+    Set authentication to **OAuth** and select **Dynamic discovery**.
+
+    Copilot Studio should **not** ask for Client ID or Client secret. Discovery uses
+    TrustGate's OAuth metadata (`/.well-known/oauth-authorization-server` and related
+    endpoints on the MCP plane); with NeuralTrust as the IdP there is no external app
+    registration to paste in.
+  </Step>
+  <Step title="Paste the consumer URL">
+    In **Server URL**, enter the consumer MCP URL from step 1:
+
+    ```text
+    https://{mcpHost}/{consumer_slug}/mcp
+    ```
+
+    Leave other fields at their defaults. When Power Automate opens as part of the
+    connection flow, you typically do **not** need to change anything there.
+  </Step>
+</Steps>
+
+---
+
+## 3. Create an agent and attach the tool
+
+<Steps>
+  <Step title="Create an agent that uses MCP">
+    In Copilot Studio, create an agent that should call tools through your TrustGate
+    consumer — for example a **Notion search** agent. Ensure the upstream server
+    (Notion) is registered under **Registries** and connected to that consumer's toolkit.
+  </Step>
+  <Step title="Add the MCP Server tool">
+    Add the MCP tool you created in step 2 to the agent.
+  </Step>
+  <Step title="Allow pop-ups and complete NeuralTrust consent">
+    Enable pop-ups in the browser. On first use, NeuralTrust may ask you to approve the
+    connection (for example to connect Notion via TrustGate's
+    [forwarded / connect](/trustgate/mcp/overview#forwarded-per-user-oauth) flow).
+  </Step>
+  <Step title="Activate connections">
+    The first run may also prompt you to **activate connections** for the agent tools,
+    including the MCP Server. Complete those prompts so Copilot Studio can obtain and
+    store the OAuth session.
+  </Step>
+</Steps>
+
+---
+
+## How the login flow works
+
+```text
+Copilot Studio ── OAuth (PKCE / DCR) ──▶ TrustGate MCP plane
+                                              │
+                                              ▼ (no external IdP on consumer)
+                                         NeuralTrust platform login
+                                              │
+                                              ▼
+                                         MCP session token → Copilot Studio
+                                              │
+                                              ▼ (optional, per upstream)
+                                         Connect your accounts (e.g. Notion)
+```
+
+1. Copilot Studio discovers TrustGate as the authorization server from the consumer MCP URL.
+2. Because the consumer has no Entra/Okta client configured, TrustGate uses **NeuralTrust**
+   as the default IdP.
+3. After platform login, TrustGate issues the MCP session token used on subsequent calls.
+4. If an upstream registry uses per-user OAuth (`forwarded`), you may see **Connect your
+   accounts** for that provider (e.g. Notion) before tools work end-to-end.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| Copilot asks for Client ID / Secret | Auth mode is not **Dynamic discovery**, or the Server URL is wrong (must be the consumer `…/mcp` URL, not the bare `mcp_base_url`). |
+| Pop-up blocked / consent never finishes | Allow pop-ups for NeuralTrust and Copilot Studio domains; retry activation. |
+| Tools listed but Notion (or other) calls fail | Registry not bound to the consumer, toolkit too narrow, or upstream **Connect your accounts** not completed. |
+| `401` / unauthorized from MCP | Session not completed; re-run connection activation for the MCP Server tool. |
+| Works in Cursor but not Copilot Studio | Confirm the same consumer URL and that Copilot can reach the MCP host from its network path. |
+
+## Related
+
+- [MCP plane overview](/trustgate/mcp/overview)
+- [Consumers](/trustgate/concepts/consumers)
+- [Authorization overview](/trustgate/concepts/authorization/overview) (Entra ID / Okta when you need an external IdP)
+- [Okta](/trustgate/concepts/authorization/okta) · [Entra ID](/trustgate/concepts/authorization/entra-id)
