@@ -15,28 +15,26 @@ The same auth (API key or IdP credential) can be attached to several consumers. 
 This is distinct from a registry's [target auth](/trustgate/concepts/registries#target-auth),
 which is how TrustGate authenticates to the **upstream provider**.
 
-## Auth types × routing mode
+## Auth types
 
-| `type` | How the client authenticates | LLM routing mode |
+| `type` | How the client authenticates | Routing mode |
 |---|---|---|
-| **`api_key`** | `X-AG-API-Key: ag_…` header | **inline** only |
-| **`oauth2`** | `Authorization: Bearer …` (interactive broker and/or JWT validation) | **inline** only |
-| **`oidc`** | `Authorization: Bearer <jwt>` from your IdP; claims select a [role](/trustgate/concepts/roles) | **role_based** only |
-| **`mtls`** | Client certificate (MCP identity chain) | MCP plane |
+| **`api_key`** | `X-AG-API-Key: ag_…` header | inline |
+| **`oauth2`** | `Authorization: Bearer <jwt>` (or opaque token + introspection) validated against an OAuth2 provider | inline or role_based |
+| **`oidc`** | `Authorization: Bearer <jwt>` from your IdP; claims select a [role](/trustgate/concepts/roles) | inline or role_based |
+| **`mtls`** | Client certificate (or a trusted `X-Forwarded-Client-Cert` header) | inline |
 
-| Plane | Consumer auth |
+| Plane | Consumer auth types |
 |---|---|
-| **LLM · inline** | `api_key` or `oauth2` |
-| **LLM · role_based** | `oidc` (exactly one) |
-| **MCP** | `oauth2` — IdP client **or** NeuralTrust as identity provider (see below) |
+| **LLM** | `api_key`, `oauth2`, `oidc` |
+| **MCP** | `oauth2` |
 
-A `role_based` LLM consumer does **not** accept `oauth2` or `api_key` on the proxy.
-An `inline` LLM consumer does **not** accept `oidc` for Bearer auth.
+A `role_based` LLM consumer carries exactly one identity credential — `oauth2` or `oidc`.
 
 ## MCP: OAuth2 with your IdP or NeuralTrust
 
-MCP consumers always use the **OAuth2** auth type (interactive agents discover TrustGate
-and run authorization-code + PKCE). Who issues the login:
+MCP consumers use the **OAuth2** auth type (interactive agents discover TrustGate and run
+authorization-code + PKCE). Who issues the login:
 
 | Option | Consumer setup |
 |---|---|
@@ -70,11 +68,13 @@ JWT- and certificate-based credentials carry a `config` block:
 | `oidc` | `issuer`, `audiences`, `jwks_url`, `public_keys`, `required_scopes`, `allowed_algorithms`, `subject_claim`. |
 | `mtls` | `ca_cert`, `allowed_common_names`, `allowed_dns_names`, `allowed_fingerprints`. |
 
-For **`oidc`** on a `role_based` LLM consumer, the validated token's claims are matched
-against role [OIDC mappings](/trustgate/concepts/roles) to select routing.
+For **`oidc`** credentials on a `role_based` consumer, the validated token's claims are
+matched against role [OIDC mappings](/trustgate/concepts/roles) to select the consumer's
+routing — this is how identity-based routing works.
 
-For provider-specific setup, see
-[Authorization](/trustgate/concepts/authorization/overview) —
+For end-to-end, provider-specific setup (custom authorization servers, scopes, group/role
+claims, and the exact credential payloads), see the
+[Authorization](/trustgate/concepts/authorization/overview) manuals for
 [Okta](/trustgate/concepts/authorization/okta) and
 [Entra ID](/trustgate/concepts/authorization/entra-id).
 
