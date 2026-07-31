@@ -72,29 +72,63 @@ PostgreSQL and Redis deploy in-cluster by default in both modes. ClickHouse
 deploys in-cluster **only** in External mode — Hybrid keeps analytics on the
 hosted path.
 
-In External mode, control-plane services use **per-service** databases, and
-AlertEngine owns its own PostgreSQL database. The data-plane API shim reads from
-ClickHouse. The shared `global.postgresql` / `global.redis` connection contract
-used by Hybrid is ignored here; configure datastores through the per-service
-overlays instead.
+In External mode each service owns its **own** PostgreSQL database and migrations
+(`agentgateway`, `trustguard`, `alertengine`, `datacore`, plus `neuraltrust` for
+the console). The data-plane API shim reads analytics from ClickHouse.
+
+The **endpoint** is shared. Since chart 2.6.0 an empty per-service `host`, `port`,
+or `sslMode` (and Redis `host` / `port` / `username` / `tls`) inherits from
+`global.postgresql` / `global.redis` before falling back to the in-cluster Service
+names. Declare a managed datastore once on the global blocks; add a per-service
+`database:` / `redis:` block only to send one service somewhere else.
+
+### In-cluster PostgreSQL (default)
+
+Leave `global.postgresql.deploy: true`. From chart **2.7.0** a
+`control-plane-postgresql-bootstrap` Job creates each service role and database
+using the password already in that service's Secret. You do not run SQL by hand
+for evaluation or demos. Expect a few restarts on the Postgres-backed workloads
+while the Job waits for PostgreSQL, then they become Ready.
+
+### Managed PostgreSQL and Redis (production)
 
 The usual production shape is **managed PostgreSQL and Redis with in-cluster
-ClickHouse**. Disable the two in-cluster stores you are replacing and leave
-ClickHouse alone:
+ClickHouse**. Name the endpoints once, disable the in-cluster stores you are
+replacing, and leave ClickHouse alone:
 
 ```yaml
 global:
   postgresql:
     deploy: false
+    host: "postgres.example.com"
+    sslMode: "require"
+    password: "<pw-control-plane>"   # neuraltrust role — needed at render time for DSNs
   redis:
     deploy: false
+    host: "redis.example.com"
+    username: "<redis-user>"
+    tls: "true"
 ```
 
-Pre-create external PostgreSQL roles and databases before install — the chart
-does not create users in managed services. If you reference a pre-created Secret
-instead of putting credentials in values, note that its keys must be `DB_*`, not
-`POSTGRES_*` — see
-[Bringing your own Postgres Secret](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret).
+Pre-create every PostgreSQL role and database yourself — the bootstrap Job does
+**not** run against a managed instance (`deploy: false`, a named `host`, or IAM
+auth all stop it rendering). Required pairs:
+
+| Role | Database | Used by |
+| --- | --- | --- |
+| `neuraltrust` | `neuraltrust` | control-plane-api, control-plane-app |
+| `agentgateway` | `agentgateway` | agentgateway-admin, -proxy, -mcp |
+| `trustguard` | `trustguard` | trustguard-control-plane, -data-plane |
+| `alertengine` | `alertengine` | alertengine-api, -worker |
+| `datacore` | `datacore` | datacore |
+
+Runtime role passwords can stay out of the values file. Point each service at a
+Secret you created — see
+[External per-service datastore credentials](/neuraltrust/deployment/secrets#external-per-service-datastore-credentials).
+`global.postgresql.password` is the one credential that still belongs in values
+(or `--set`): the chart bakes it into the console connection strings at render
+time.
+
 For minimum sizes see
 [Configuration](/neuraltrust/deployment/configuration#managed-stores) and
 [`values-managed-datastores.yaml.example`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-managed-datastores.yaml.example),

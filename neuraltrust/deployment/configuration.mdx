@@ -90,9 +90,14 @@ same class. Right-size and fine-tune for your traffic — see
 
 ## Managed stores
 
-Managed PostgreSQL and Redis are the usual production choice in both Hybrid and External, and are what most deployments run. Pre-create the database, role, and Redis credentials; Helm does not create users in managed services. The maintained chart supports in-cluster PostgreSQL and Redis with `deploy: true` for evaluation and non-production environments.
+Managed PostgreSQL and Redis are the usual production choice in both Hybrid and External. Pre-create the database, role, and Redis credentials on the managed instance — Helm never issues `CREATE USER` against a store it does not own. The chart can still run in-cluster PostgreSQL and Redis with `deploy: true` for evaluation; in External mode from chart **2.7.0** that path also bootstraps the per-service roles automatically — see [External datastores](/neuraltrust/deployment/external#datastores).
 
-Two ways to give the chart the connection details. Put the non-secret facts in values (`host`, `port`, `user`, `database`, `sslMode`) and let the chart build its own Secret around the password, or pre-create a Secret and reference it with `existingSecret` — in which case mind the [`DB_*` key contract](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret).
+How you point the chart at a managed store depends on the topology:
+
+| Topology | Endpoints | Credentials |
+| --- | --- | --- |
+| **Hybrid** | `global.postgresql` / `global.redis` (one shared role) | Chart-built `postgresql-secrets`, or `global.postgresql.existingSecret` with the [`DB_*` key contract](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret) |
+| **External** | Same global blocks — per-service hosts inherit since chart 2.6.0 | Control-plane password in `global.postgresql.password`; runtime roles via per-service [`existingSecret` hooks](/neuraltrust/deployment/secrets#external-per-service-datastore-credentials) |
 
 For regional active/passive deployments, each region uses independent stores; runtime and historical data are not replicated between regions. See [High availability](/neuraltrust/deployment/high-availability#no-cross-region-data-replication).
 

@@ -35,13 +35,15 @@ External mode needs three, and unlike hybrid, ClickHouse is mandatory.
 
 | Store | Usual choice | Used for | Notes |
 | --- | --- | --- | --- |
-| PostgreSQL | **Managed** | Control-plane schema, plus a separate `datacore` database and one per product | Pre-create the databases and roles; Helm does not create users in managed services |
+| PostgreSQL | **Managed** in production; in-cluster for demos | Control-plane schema plus one database per service | Managed: pre-create roles yourself. In-cluster (chart 2.7.0+): the bootstrap Job creates them |
 | ClickHouse | **In-cluster** | Telemetry and every dashboard metric | DataCore migrates its own tables at startup |
-| Redis | **Managed** | Gateway state | Required at boot |
+| Redis | **Managed** in production; in-cluster for demos | Gateway state | Required at boot |
 
-That split is deliberate. Postgres and Redis are almost always managed services in production, so the usual external values file sets `deploy: false` for both and points at your endpoints. ClickHouse is the opposite: nearly everyone runs the in-cluster subchart, because it is telemetry storage the platform owns end to end. Connecting an external ClickHouse is supported but rare — treat it as the exception, not the starting point.
+That split is deliberate. Postgres and Redis are almost always managed services in production, so the usual external values file sets `deploy: false` for both and names the endpoints once on `global.postgresql` / `global.redis` (per-service hosts inherit since chart 2.6.0). ClickHouse is the opposite: nearly everyone runs the in-cluster subchart, because it is telemetry storage the platform owns end to end. Connecting an external ClickHouse is supported but rare — treat it as the exception, not the starting point.
 
-If you supply your own Postgres Secret rather than letting the chart build one, mind the [`DB_*` key contract](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret) — the keys differ from the ones the chart writes itself.
+For managed Postgres, keep runtime role passwords in a Secret you create and reference with per-service `existingSecret` hooks — see
+[External per-service datastore credentials](/neuraltrust/deployment/secrets#external-per-service-datastore-credentials).
+Only the control-plane `neuraltrust` password still needs to be readable at render time (`global.postgresql.password`). Replacing `postgresql-secrets` wholesale with `global.postgresql.existingSecret` is a different contract (Hybrid / full Secret takeover) and is usually the worse path for External.
 
 On AWS you can use RDS IAM authentication. Set `global.postgresql.authMode: iam`. Be aware of a current gap: that umbrella setting does not reach the Go gateways in external mode, so also set `agentgateway.database.iamAuth: true` and `trustguard.database.iamAuth: true`. Without them the gateways attempt password authentication against an IAM-only database and fail at connection time with nothing pointing at the cause.
 
