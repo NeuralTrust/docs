@@ -1,10 +1,15 @@
 ---
 title: "Prompt management"
-description: "Inject and version system prompts with prompt_template so instructions live in the gateway rather than in every client."
+description: "Shape prompts at the gateway with prompt_template (inject and version system prompts) and prompt_compression (shrink request text before the model)."
 ---
 
-The **`prompt_template`** policy shapes the request before it is forwarded. It runs at
-`pre_request` and is scoped like any other [policy](/trustgate/policies/overview).
+Prompt-management policies reshape the request **before** it is forwarded. They run at
+`pre_request` and are scoped like any other [policy](/trustgate/policies/overview).
+
+| Policy (`slug`) | Purpose |
+|---|---|
+| [`prompt_template`](#prompt-template) | Inject and version system prompts server-side. |
+| [`prompt_compression`](#prompt-compression) | Shrink prompt text (minify JSON, strip ANSI, collapse whitespace). |
 
 To restrict which models a consumer may call, use
 [`model_policies`](/trustgate/routing/model-resolution) on the consumer — not a catalog policy.
@@ -45,3 +50,59 @@ than in every client. It supports two modes, which can be combined:
 
 Injected content is placed in the `system` role; `on_existing_system` chooses whether to
 `merge` with or `replace` an existing system prompt.
+
+## `prompt_compression`
+
+Shrink the request prompt **before** it reaches the model. The plugin applies deterministic,
+near-lossless transforms so the same input always compresses to the same bytes — which keeps
+provider prompt-cache prefixes stable across turns.
+
+It runs at **`pre_request`**, supports **LLM** traffic only, and always **fails open**: any
+decode, transform, or encode problem leaves the original request untouched.
+
+### Transforms (all enabled by default)
+
+| Transform | Setting | What it does |
+|---|---|---|
+| Minify JSON | `compress_json` | Compacts standalone JSON message content, fenced JSON code blocks, and tool-call arguments (whitespace-only; lossless for the decoded value). |
+| Strip ANSI | `strip_ansi` | Removes ANSI escape sequences (colors, cursor movement) common in terminal / CI logs. |
+| Collapse whitespace | `normalize_whitespace` | Trims trailing spaces/tabs per line and caps runs of blank lines. Preserves leading indentation and Markdown two-space hard line breaks. |
+
+### Settings
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `compress_json` | bool | `true` | Minify JSON content and fenced JSON blocks. |
+| `normalize_whitespace` | bool | `true` | Trim trailing whitespace and collapse blank-line runs. |
+| `strip_ansi` | bool | `true` | Strip ANSI escape sequences. |
+| `max_consecutive_blank_lines` | int | `1` | Cap on blank-line runs when whitespace normalization is on (`1`–`1000`). |
+| `min_length` | int | `256` | Skip messages shorter than this many bytes (avoids rewriting tiny stable prefixes). `0` compresses everything. |
+| `max_body_bytes` | int | `1048576` (1 MiB) | Skip the whole pipeline for larger request bodies. `0` disables the cap. |
+| `target_roles` | string[] | — | Restrict compression to these roles (`system`, `user`, `assistant`, `tool`). Empty = all roles. |
+
+At least one of `compress_json`, `normalize_whitespace`, or `strip_ansi` must be enabled.
+
+```json
+{
+  "slug": "prompt_compression",
+  "settings": {
+    "target_roles": ["user", "tool"],
+    "min_length": 256,
+    "max_consecutive_blank_lines": 1
+  }
+}
+```
+
+### Behavior
+
+- **Enforce vs observe.** In `enforce`, a successful shrink replaces the request body. In
+  `observe`, the plugin reports the same decision metrics but does not mutate the request.
+- **Only when smaller.** If nothing changed, or the re-encoded body is not strictly smaller,
+  the original request is forwarded (avoids inflating payloads or churning caches).
+- **Skip lossy shapes.** Multimodal parts, `cache_control` annotations, and other fields the
+  canonical request model does not round-trip safely are left untouched.
+- **Telemetry.** Outcomes and byte savings are exposed on the policy event / response headers
+  for operators watching compression ratio.
+
+> This is mechanical cleanup, not semantic summarization. It does not call another model and
+> does not rewrite meaning — only JSON whitespace, ANSI noise, and redundant blank lines.
