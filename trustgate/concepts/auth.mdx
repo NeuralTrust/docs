@@ -8,6 +8,10 @@ An **auth** credential is how a client proves it may act as a
 **attached** to one or more consumers, so you can rotate or share them independently of the
 consumer itself.
 
+<Note>
+The same auth (API key or IdP credential) can be attached to several consumers. The request still targets a consumer by **`/{consumer_slug}/…`** — the credential proves access; the slug selects which consumer. Prefer one auth per consumer when you can; sharing is supported but weaker for audit and rotation.
+</Note>
+
 This is distinct from a registry's [target auth](/trustgate/concepts/registries#target-auth),
 which is how TrustGate authenticates to the **upstream provider**.
 
@@ -15,19 +19,34 @@ which is how TrustGate authenticates to the **upstream provider**.
 
 | `type` | How the client authenticates | Routing mode |
 |---|---|---|
-| **`api_key`** | `X-AG-API-Key: ag_…` header | inline |
+| **`api_key`** | `X-AG-API-Key`, `x-api-key`, or `Authorization: Bearer ag_…` | inline |
 | **`oauth2`** | `Authorization: Bearer <jwt>` (or opaque token + introspection) validated against an OAuth2 provider | inline or role_based |
 | **`oidc`** | `Authorization: Bearer <jwt>` from your IdP; claims select a [role](/trustgate/concepts/roles) | inline or role_based |
 | **`mtls`** | Client certificate (or a trusted `X-Forwarded-Client-Cert` header) | inline |
 
-MCP consumers accept `api_key`, `oauth2`, and `mtls` (not `oidc`). A `role_based` consumer
-carries exactly one identity credential — `oauth2` or `oidc`.
+| Plane | Consumer auth types |
+|---|---|
+| **LLM** | `api_key`, `oauth2`, `oidc` |
+| **MCP** | `oauth2` |
+
+A `role_based` LLM consumer carries exactly one identity credential — `oauth2` or `oidc`.
 
 ## API keys
 
 API keys are prefixed **`ag_`**. The raw secret is returned **once**, at creation — store
 it then. TrustGate only persists a SHA-256 hash; at request time it hashes the inbound key
 and compares, so the secret is never recoverable from the gateway.
+
+On the **proxy** plane, send the key in any of these headers (first match wins):
+
+| Header | Example | Typical clients |
+|---|---|---|
+| `X-AG-API-Key` | `X-AG-API-Key: ag_…` | TrustGate snippets, custom apps |
+| `x-api-key` | `x-api-key: ag_…` | Anthropic-compatible SDKs |
+| `Authorization` | `Authorization: Bearer ag_…` | OpenAI-compatible clients that only set an API key (e.g. Cursor, Claude Desktop-style base URL + key) |
+
+`Authorization: Bearer` with a value that does **not** start with `ag_` is treated as an
+OAuth2/OIDC JWT, not an API key. Prefer `X-AG-API-Key` when you control both headers.
 
 ```bash
 # create → returns api_key (cleartext) once

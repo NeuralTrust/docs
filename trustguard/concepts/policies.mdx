@@ -69,6 +69,26 @@ phase**:
 - **Input** — evaluate the prompt/request.
 - **Output** — evaluate the completion/response.
 
+At runtime TrustGuard only runs the rules for the phase that matches the
+request's **`direction`** (`input` or `output`). The phase you configure here
+and the `direction` on each `/v1/evaluate` call must line up — otherwise those
+detectors never fire.
+
+<Note>
+**Who sets `direction`?**
+
+- **[TrustGate](/trustguard/integrations/gateway)** sets it for you (`input` on
+  the request path, `output` on the response path).
+- **Any other collector** (SDK, REST, browser, edge/WAF) must send `direction`
+  explicitly on each call — typically **two** evaluates per turn (prompt then
+  completion). Omitting it defaults to `input`, so Output-phase rules never run.
+
+See [Application integrations](/trustguard/integrations/application) for SDK/REST
+examples, [Integrations overview](/trustguard/integrations/overview) for the
+shared call shape, and [How it works](/trustguard/how-it-works) for how rules are
+filtered by direction.
+</Note>
+
 Each rule references one [detector](/trustguard/concepts/detectors), an
 **action**, and optional **conditions** (same attribute model as gates):
 
@@ -78,8 +98,10 @@ Each rule references one [detector](/trustguard/concepts/detectors), an
 | `block` | **Block** | Flag the request for blocking; stops the remaining detector chain. | — |
 | `transform` | **Transform** | Mask/rewrite the payload. Only valid for a **mutable** detector (`data_loss_prevention`). | ✅ |
 
-All matching rules for the phase are evaluated and the **most restrictive**
-action wins.
+All matching rules for the phase are evaluated. A **`block`** finding **cuts
+the detection chain** — the remaining detector rules in that phase are
+skipped. Otherwise, the completed rules reduce to the **most restrictive**
+action.
 
 ## Verdict precedence
 
@@ -112,4 +134,4 @@ mode:
   consumer, letting one collector send different consumers to different policies.
 
 If a collector has no policy for a request, that request is **unguarded** (no
-gates, no detectors).
+gates, no detectors) and returns `status: "allow"` with no findings.
