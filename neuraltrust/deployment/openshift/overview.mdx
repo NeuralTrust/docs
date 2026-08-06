@@ -1,9 +1,23 @@
 ---
 title: Overview
-description: OpenShift prerequisites for Hybrid.
+description: OpenShift prerequisites, Routes, and SecurityContextConstraints for the NeuralTrust chart.
 ---
 
-Use OpenShift Routes (or Kubernetes Ingress) for the Hybrid **data plane**. The control plane stays on NeuralTrust SaaS — see [Overview](/neuraltrust/deployment/overview). Start from the chart's tracked [`values-openshift.yaml`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-openshift.yaml), which you get by unpacking the chart or from the [chart repository](https://github.com/NeuralTrust/neuraltrust-platform). There is also an [OpenShift guide](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/README-OPENSHIFT.md) maintained next to the chart.
+The same [`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform) chart installs on OpenShift as on any other Kubernetes distribution. Three things differ: the chart renders native **Routes** instead of Ingress, wildcard Routes need cluster-level admission, and one workload needs an SCC decision. Everything else — Secrets, values, `helm upgrade --install` — is identical.
+
+Both topologies are supported. Hybrid runs the **data plane** in your cluster with the control plane on NeuralTrust SaaS; [External](/neuraltrust/deployment/external) runs everything in-cluster. See [Architecture and dependencies](/neuraltrust/deployment/architecture) for what each one deploys.
+
+## Requirements
+
+| Requirement | Detail |
+| --- | --- |
+| OpenShift | **4.10+** · 4.17+ to attach your own Route certificates via `externalCertificate` |
+| Helm | 3.8+ (OCI installs) |
+| Access | `oc` access to the target project, cluster-admin for the SCC and IngressController steps |
+| Domain | A wildcard apps domain such as `apps.example.com` |
+| Datastores | Reachable PostgreSQL and Redis — [minimum sizes](/neuraltrust/deployment/configuration#managed-stores) |
+
+Start from the chart's tracked [`values-openshift.yaml`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-openshift.yaml), which you get by unpacking the chart or from the [chart repository](https://github.com/NeuralTrust/neuraltrust-platform). A companion [OpenShift guide](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/README-OPENSHIFT.md) is maintained next to the chart.
 
 ## Prepare a project
 
@@ -20,13 +34,77 @@ oc secrets link default gcr-secret --for=pull -n neuraltrust
 oc secrets link builder gcr-secret --for=pull -n neuraltrust
 ```
 
-## OpenShift choices
+## Select the platform
+
+Two values switch the chart to OpenShift behaviour:
+
+```yaml
+global:
+  platform: openshift
+  domain: apps.example.com   # usually the cluster's apps wildcard suffix
+  ingress:
+    provider: openshift
+```
+
+`values-openshift.yaml` is a **platform overlay, not a complete install** — it selects the topology only. Layer it over a values file that selects products, with the OpenShift file last so its `platform` wins:
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust \
+  -f values-required.yaml \
+  -f values-openshift.yaml \
+  --set global.domain=apps.example.com
+```
+
+Render before you install, declaring the Route API so the OpenShift objects appear:
+
+```bash
+helm template neuraltrust-platform <chart> \
+  -f values-required.yaml -f values-openshift.yaml \
+  --api-versions route.openshift.io/v1
+```
+
+## Routes
+
+With `global.platform: openshift`, the chart renders native Routes for the gateway, MCP, and — in External mode — the console and APIs. To standardise on Kubernetes Ingress instead, set `agentgateway.ingress.resourceType: ingress`.
+
+Dynamic gateway subdomains (`*.llm.<domain>`, `*.mcp.<domain>`) render as Routes with `wildcardPolicy: Subdomain`. The chart cannot configure the IngressController, so a cluster administrator has to admit wildcards first:
+
+```yaml
+# IngressController spec.routeAdmission
+routeAdmission:
+  wildcardPolicy: WildcardsAllowed
+```
+
+The router certificate must also cover those wildcard hosts. If you would rather not enable wildcards at all, set `agentgateway.config.autoWildcardHosts: false` and use exact hosts, where callers pass the gateway slug as a header instead.
+
+### Route certificates
+
+A Route is readable by anyone holding `route/get`, so the chart never copies private keys into one. Setting an ingress `tls.secretName` renders `spec.tls.externalCertificate` pointing at your Secret, which requires **OpenShift 4.17+** and read access for the router service account. On older clusters, rely on the router's default wildcard certificate.
+
+## SecurityContextConstraints
+
+Most workloads run non-root with all capabilities dropped and are compatible with `restricted-v2` as-is. The chart also drops its fixed `runAsUser`/`fsGroup` from in-cluster PostgreSQL when `global.platform: openshift`, so the platform-assigned UID applies. Two workloads need a decision:
+
+| Workload | Why | Options |
+| --- | --- | --- |
+| **Firewall** gateway and workers | Default `firewall.securityContext` is `runAsUser: 0`, and the model cache path is `/root/.cache/huggingface` | Grant `anyuid` to the `firewall` ServiceAccount, or override `firewall.securityContext` **and** `firewall.config.hfHome` to a path writable by an arbitrary UID |
+| **GPU Firewall** workers | Use `hostIPC` for CUDA MPS plus GPU device resources | Requires a dedicated SCC; only relevant if you opt into GPU workers |
+
+Granting `anyuid` to the one ServiceAccount, rather than relaxing the namespace default, is the narrower change:
+
+```bash
+oc adm policy add-scc-to-user anyuid -z firewall -n neuraltrust
+```
+
+Keep `restricted-v2` for everything else. If your policy forbids `anyuid` outright, raise it before install — the Firewall is deployed with TrustGuard and is not separately optional.
+
+## Also plan for
 
 - Worker capacity for your topology — [Cluster sizing](/neuraltrust/deployment/sizing) (Hybrid ~**3–4** × 8 vCPU / 16–32 GiB; External ~**4–5**; right-size later)
-- [Hybrid network allowlist](/neuraltrust/deployment/network) for config-sync / DataBridge egress and the NeuralTrust inbound source IP
-- `global.platform: openshift` and `global.ingress.provider: openshift` for Routes
-- `global.domain` usually matches the apps wildcard suffix
-- Customer-managed PostgreSQL and Redis — [minimum sizes](/neuraltrust/deployment/configuration#managed-stores)
-- Keep restricted SCCs; grant extras only when a workload requires them (for example GPU Firewall)
+- Hybrid only: the [network allowlist](/neuraltrust/deployment/network) for config-sync and DataBridge egress, plus the NeuralTrust inbound source IP
+- Disconnected clusters: mirror every image and set `global.imageRegistry` — see [Images](/neuraltrust/deployment/images). Hybrid cannot be air-gapped, because product telemetry egress is mandatory; a fully disconnected install must use [External](/neuraltrust/deployment/external)
 
-Continue with [OpenShift Hybrid](/neuraltrust/deployment/openshift/hybrid).
+Continue with [OpenShift Hybrid](/neuraltrust/deployment/openshift/hybrid), or the [External guide](/neuraltrust/deployment/external) for a self-hosted install.
