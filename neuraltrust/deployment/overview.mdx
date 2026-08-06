@@ -17,37 +17,41 @@ NeuralTrust supports **SaaS**, **Hybrid**, and **External**. SaaS is fully opera
 | **Control plane** | NeuralTrust SaaS | Console, configuration, analytics |
 | **Data plane** | Your environment (Hybrid) | TrustGate, TrustGuard, Firewall (with TrustGuard), DataAgent (one per product) |
 
+For the full component list, the datastores you have to provide, and the ports
+between them, see
+[Architecture and dependencies](/neuraltrust/deployment/architecture).
+
 ## How the planes connect
 
-Hybrid sends configuration requests and metadata outbound while raw prompts and responses stay in **your** PostgreSQL.
+Raw prompts and responses stay in **your** PostgreSQL. Only configuration
+requests and metadata reach NeuralTrust, and your cluster opens every one of
+those connections.
 
-```text
- Your environment (data plane)          NeuralTrust SaaS (control plane)
- ┌─────────────────────────┐            ┌────────────────────────────┐
- │ TrustGate  → TrustGuard │ ─────────▶ │  Configuration service     │
- │ (+ Firewall with Guard) │            │                            │
- │        │ OTLP           │            │                            │
- │        ▼                │            │                            │
- │ DataAgent + egress ─────────────────▶│  OTLP metadata / analytics │
- │ collector           ────────────────▶│  Enrolled retrieval        │
- └───────────┬─────────────┘            └────────────────────────────┘
-             │
-             ▼
-    Your PostgreSQL + Redis
-```
+| Flow | From | To | Direction | Carries |
+| --- | --- | --- | --- | --- |
+| **Gateway traffic** | Your clients | TrustGate — LLM/proxy `8081`, MCP `8082` | Inbound to your edge | Prompts and responses |
+| **Request path** | TrustGate | TrustGuard, then Firewall | In-cluster | Evaluation and classification |
+| **Storage** | TrustGate, TrustGuard | Your PostgreSQL and Redis | In-cluster | Raw payloads, cache, rate-limit state |
+| **Upstream models** | TrustGate | Your LLM providers | Outbound `443` | The proxied model call |
+| **Config sync** | TrustGate, TrustGuard | NeuralTrust configuration service | Outbound `443` | Policy and gateway configuration, pulled |
+| **Metadata** | DataAgent egress collector | NeuralTrust telemetry | Outbound `443` | OTLP metadata — payloads are not exported |
+| **Retrieval** | DataAgent | DataBridge | Outbound `443` | Authorized retrieval, scoped by the enrollment token |
 
-1. **Traffic path** — Clients hit TrustGate in your environment; TrustGate calls TrustGuard, which calls Firewall, on the request path.
-2. **Metadata** — TrustGate and TrustGuard send metadata over OTLP to a collector inside your cluster, which forwards it to SaaS. Payloads are not exported.
-3. **Configuration sync** — TrustGate and TrustGuard pull configuration from the SaaS control plane. The data plane initiates this outbound connection; config sync does not require an inbound control-plane connection into your network.
-4. **Retrieval** — DataAgent uses the same enrollment token for authorized retrieval over DataBridge.
-5. **Gateway traffic** — Clients use separate LLM/proxy and MCP entry points.
+TrustGate and TrustGuard do not talk to SaaS directly for metadata; they emit
+OTLP to a collector co-located with DataAgent inside your cluster, and that
+collector is what egresses.
 
-Every connection above is initiated from your environment. Nothing dials in.
+Nothing in the SaaS control plane dials into your cluster to reach TrustGuard,
+Firewall, DataAgent, or your datastores. The one inbound connection Hybrid does
+need is the **Dataplane URL** you register in the console: NeuralTrust calls it,
+so your edge must accept HTTPS from a single NeuralTrust source IP. That IP and
+the outbound hostnames are in
+[Hybrid network allowlist](/neuraltrust/deployment/network).
 
 DataAgent is not optional once you run TrustGate or TrustGuard. Each of those
-products needs its own enrolled DataAgent, because the metadata path in step 2
-runs through the collector co-located with it. Only a red-teaming-only
-deployment — `global.products.dataPlane` alone — runs without one.
+products needs its own enrolled DataAgent, because the metadata flow above runs
+through the collector co-located with it. Only a red-teaming-only deployment —
+`global.products.dataPlane` alone — runs without one.
 
 Managed PostgreSQL and Redis are recommended for production. The chart can run in-cluster stores for evaluation and non-production use. See [Configuration](/neuraltrust/deployment/configuration#managed-stores) for guidance. For regional resilience, see [High availability](/neuraltrust/deployment/high-availability).
 
