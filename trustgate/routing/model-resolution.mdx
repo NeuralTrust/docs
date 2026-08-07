@@ -1,18 +1,69 @@
 ---
 title: "Model resolution"
-description: "How the model field in a request selects a registry — short pass-through, provider-qualified, or pool reference — and how model policies constrain it."
+description: "How the model field in a request selects a registry — auto, short pass-through, provider-qualified, or pool reference — and how model policies constrain it."
 ---
 
 A client never names a provider URL — it names a **model**, and TrustGate resolves which
-[registry](/trustgate/concepts/registries) to use. The `model` field accepts three forms.
+[registry](/trustgate/concepts/registries) to use. The `model` field accepts four forms.
 
 ## Model reference syntax
 
 | Form | Example | Meaning |
 |---|---|---|
-| **Short** (pass-through) | `gpt-4o-mini` | Sent as-is to the selected registry. The [load balancer](/trustgate/routing/load-balancing) picks among the consumer's registries. |
-| **Provider-qualified** | `@openai/gpt-4o` | Restrict routing to registries of provider `openai`, then pick. |
-| **Pool reference** | `pool:my-pool` | Route via the consumer's enabled load-balancing pool whose `pool_alias` matches (case-insensitive), across the pool's members. Inline routing only. |
+| **Auto** | `auto` | Let TrustGate choose. The [load balancer](/trustgate/routing/load-balancing) picks among the registries that have a default model, and each registry receives its own default. |
+| **Short** (pass-through) | `gpt-4o-mini` | Pins the **first** registry whose policy allows that model, and sends the name as-is. |
+| **Provider-qualified** | `@openai/gpt-4o` | Pins the **first** registry of provider `openai` whose policy allows that model. |
+| **Pool reference** | `pool:my-pool` | Route via the consumer's enabled load-balancing pool whose `pool_alias` matches, across the pool's members. Inline routing only. |
+
+`auto` and the `pool:` prefix are case-insensitive; the provider in a qualified reference is
+lowercased and must consist of `a-z`, `0-9`, `_`, or `-`.
+
+A bare `provider/model` **without** the `@` (for example `anthropic/claude-sonnet-4`) is not
+routing syntax. It is treated as a short reference and forwarded verbatim as a native model
+identifier — useful for providers like OpenRouter whose model ids contain a slash.
+
+> Gemini-format clients carry the model in the URL path rather than the body; TrustGate reads
+> it from the path and applies the same rules. The `modelId` field is not supported — use
+> `model`.
+
+## Choosing a form
+
+| You want | Use |
+|---|---|
+| One consumer, one obvious model per registry, balanced traffic | `auto` |
+| A specific model, wherever it lives | `gpt-4o-mini` |
+| A specific model on a specific provider (multi-registry consumers) | `@openai/gpt-4o` |
+| A named group of registries with its own algorithm | `pool:my-pool` |
+
+## Pinning: which forms load-balance
+
+This is the part that most often surprises people:
+
+| Form | Load balanced | Falls back on failure |
+|---|---|---|
+| `auto` | Yes | Yes |
+| `pool:<alias>` | Yes (pool algorithm) | Yes |
+| `gpt-4o-mini` | **No** — pinned to the first matching registry | **No** |
+| `@openai/gpt-4o` | **No** — pinned to the first matching registry | **No** |
+
+Naming a concrete model is an explicit instruction, so TrustGate honours it literally: the
+request is pinned to that registry and is **not** retried elsewhere, even when
+[fallback](/trustgate/routing/fallback) is enabled. If you want resilience, use `auto` or a
+pool.
+
+"First matching registry" follows the consumer's `registry_ids` order, then its fallback
+backends. For `role_based` consumers it follows the order of the matched roles and each
+role's `registry_ids`.
+
+## Auto
+
+With `model: "auto"`, TrustGate keeps only the registries that have a `default` model in
+their policy, removes the `model` field from the request body, and lets the load balancer
+pick. The selected registry then applies its own default — so the same request can run on
+`gpt-4o-mini` on one registry and `claude-sonnet-4` on another.
+
+If no registry reachable by the consumer defines a default model, the request is rejected
+with `auto routing requires at least one registry with a default model`.
 
 ## Model policies
 
@@ -30,16 +81,39 @@ constrain which models are reachable per registry with `model_policies`:
 
 - **`allowed`** — the allow-list of models for that registry. Empty/omitted means all
   models are permitted.
-- **`default`** — used when the request names no model; it must be a member of `allowed`.
+- **`default`** — used by `auto` and when the request names no model; it must be a member of
+  `allowed`.
 
 A request for a model outside the allow-list is rejected before it reaches the provider.
 
+Inside a pool, a member's `models` list overrides the registry's `allowed` list. The member's
+effective default is the policy `default` when that model is one of the member's `models`,
+otherwise the first entry of `models`.
+
 ## Resolution order
 
-1. Parse the `model` reference (short / qualified / pool).
-2. Narrow the candidate registries (the consumer's `registry_ids` or the pool members,
-   filtered by provider for qualified refs).
-3. Apply `model_policies` — reject disallowed models; fill in the `default` when none was
-   given.
-4. Hand the candidates to the [load balancer](/trustgate/routing/load-balancing) to pick
-   one, with [fallback](/trustgate/routing/fallback) on failure.
+1. Parse the `model` reference (auto / short / qualified / pool).
+2. Build the candidate registries — the consumer's `registry_ids` plus fallback backends, the
+   pool's members, or the matched roles' `registry_ids`.
+3. Narrow them: by default model for `auto`, by provider and allow-list for qualified refs, by
+   allow-list for short refs.
+4. Pin the first candidate (short, qualified) or hand the candidates to the
+   [load balancer](/trustgate/routing/load-balancing) (`auto`, pool), with
+   [fallback](/trustgate/routing/fallback) on failure where the form allows it.
+
+## Rejections
+
+TrustGate rejects these **before** calling any provider:
+
+| Message | Cause |
+|---|---|
+| `model "x" is not allowed for this consumer` | Short reference outside every reachable allow-list. |
+| `model "x" is not allowed for provider "p"` | The provider is reachable, but the model is not in its allow-list. |
+| `provider "p" is not available for this consumer` | No registry of that provider is reachable. |
+| `auto routing requires at least one registry with a default model` | `auto` with no default configured anywhere. |
+| `pool "p" is not configured for this consumer` | Unknown or disabled `pool_alias` — also returned for `role_based` consumers, which cannot use pools. |
+| `"@x" must use the @provider/model syntax` | Malformed qualified reference (missing `/`, empty provider, or empty model). |
+
+Anything else comes from the upstream. If the model name is allowed by policy but does not
+exist at the provider, TrustGate forwards the provider's own error response verbatim — it does
+not rewrite provider errors.
