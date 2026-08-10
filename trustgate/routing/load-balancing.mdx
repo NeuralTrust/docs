@@ -1,12 +1,17 @@
 ---
 title: "Load balancing"
-description: "Distribute traffic across a consumer's registries with round-robin, weighted, least-connections, random, or semantic strategies — with health checks and weights."
+description: "Distribute traffic across a consumer's routes — one registry and model pair per member — with round-robin, weighted, least-connections, random, semantic, or smart-routing strategies."
 ---
 
 When a [consumer](/trustgate/concepts/consumers) can reach more than one
 [registry](/trustgate/concepts/registries), the load balancer picks which one serves each
 request. List the registries on the consumer with `registry_ids`, then choose how traffic is
 distributed with `lb_config`.
+
+What the balancer distributes over is a **route**: the pair of a registry and the model that
+route serves. A member without a `model` is the registry's single route and uses the default
+from `model_policies`; a member with a `model` pins that route, which is what lets the same
+registry appear several times in one pool with different models.
 
 The load balancer only runs when the request leaves the choice open — `model: "auto"`. A
 request naming a concrete model (`gpt-4o-mini` or `@openai/gpt-4o`) is pinned to the first
@@ -17,43 +22,93 @@ registry that allows it and bypasses the balancer entirely; see
 
 | Algorithm | How it picks |
 |---|---|
-| `round-robin` | Rotates through registries in order. |
-| `weighted-round-robin` | Interlaces picks by per-registry weight (`1..100`). |
-| `least-connections` | Picks the registry with the fewest in-flight requests. |
+| `round-robin` | Rotates through routes in order. |
+| `weighted-round-robin` | Interlaces picks by route weight (`1..100`). |
+| `least-connections` | Picks the route with the fewest in-flight requests. |
 | `random` | Uniform random pick. |
 | `semantic` | Embeds the prompt and routes to the registry whose description is the closest cosine match — requires an embedding config. |
-
-## Weights
-
-For weighted round-robin, each registry carries a weight from **1 to 100**, set when you
-attach it to the consumer:
-
-```bash
-POST /v1/gateways/{gateway_id}/consumers/{id}/registries/{registry_id}
-{ "weight": 70 }
-```
-
-A registry at weight 70 receives roughly 70% of the share of one at weight 30.
+| `smart-routing` | Scores the prompt's complexity and sends it to the route configured for that score — see [Smart routing](#smart-routing). |
 
 ## Configuration (`lb_config`)
 
-Enable the balancer and pick its algorithm on the consumer:
+Enable the balancer, pick its algorithm, and declare one member per route:
 
 ```json
 "lb_config": {
   "enabled": true,
   "algorithm": "weighted-round-robin",
   "members": [
-    { "registry_id": "<openai>",    "models": ["gpt-4o"] },
-    { "registry_id": "<anthropic>", "models": ["claude-3-5-sonnet"] }
+    { "registry_id": "<openai>", "model": "gpt-4o",      "weight": 70 },
+    { "registry_id": "<openai>", "model": "gpt-4o-mini", "weight": 30 },
+    { "registry_id": "<anthropic>" }
   ]
 }
 ```
 
-- `members` must already be attached to the consumer, and each one needs an entry in
-  `model_policies`.
-- A member's `models` scopes which models that registry serves.
-- The `semantic` algorithm additionally needs an `embedding_config`.
+That pool has three routes: two on the OpenAI registry — one per model, with 70/30 of the
+share between them — and one on the Anthropic registry serving its policy default.
+
+| Field | Meaning |
+|---|---|
+| `registry_id` | The registry this route sends to. Must already be attached to the consumer and have an entry in `model_policies`. |
+| `model` | Pins the route to one model. Required on **every** member that shares a registry with another member. |
+| `models` | Scopes which models this member serves, narrowing the registry's `allowed` list. |
+| `weight` | Relative share for `weighted-round-robin`, `1..100`. Defaults to the registry's weight on the consumer. |
+
+Rules enforced when you save the consumer:
+
+- Every `(registry_id, model)` pair must be unique — two members cannot describe the same route.
+- A registry that appears more than once requires a `model` on each of its members.
+- `model` must be in that member's `models` when it lists any, and allowed by `model_policies`.
+- The `semantic` algorithm additionally needs an `embedding_config`, and `smart-routing` a
+  `smart_routing` block. Neither is valid for the other algorithms.
+
+## Weights
+
+For weighted round-robin, each route carries a weight from **1 to 100** in `lb_config`. A
+route at weight 70 receives roughly 70% of the share of one at weight 30.
+
+When a member omits `weight`, the route inherits the weight of its registry on the consumer,
+set when you attach it:
+
+```bash
+POST /v1/gateways/{gateway_id}/consumers/{id}/registries/{registry_id}
+{ "weight": 70 }
+```
+
+Use the attach weight for one route per registry; when a registry serves several routes, give
+each member its own `weight`, since a per-registry weight cannot tell them apart.
+
+## Smart routing
+
+Smart routing asks the firewall to score the prompt's complexity between `0` and `1`, then
+sends the request to the route whose tier covers that score. Each tier declares the lowest
+score it accepts, and the highest matching tier wins:
+
+```json
+"lb_config": {
+  "enabled": true,
+  "algorithm": "smart-routing",
+  "members": [
+    { "registry_id": "<openai>", "model": "gpt-4o-mini" },
+    { "registry_id": "<openai>", "model": "gpt-4o" }
+  ],
+  "smart_routing": {
+    "tiers": [
+      { "min_score": 0,   "registry_id": "<openai>", "model": "gpt-4o-mini" },
+      { "min_score": 0.5, "registry_id": "<openai>", "model": "gpt-4o" }
+    ]
+  }
+}
+```
+
+Cheap prompts go to `gpt-4o-mini`; anything scoring `0.5` or above goes to `gpt-4o` on the
+same registry.
+
+- Each tier must target a registry that is a pool member.
+- `model` selects which route of that registry the tier means. It is **required** when the
+  pool declares that registry more than once, and must match one of its routes.
+- Cover the bottom of the range with a `min_score: 0` tier so every request has a route.
 
 ## Health checks
 
@@ -66,5 +121,10 @@ When the gateway has [session affinity](/trustgate/concepts/gateways#session-aff
 enabled, requests carrying a session id are pinned to the same selection across a
 conversation.
 
+## Observability
+
+Every attempt records the model of the route that served it (`route_model`), so activity data
+distinguishes two routes of the same registry.
+
 Pair load balancing with [fallback](/trustgate/routing/fallback) so a failed pick retries
-the next registry instead of erroring.
+the next route instead of erroring.
