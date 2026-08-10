@@ -5,7 +5,8 @@ description: Every component the chart deploys, every dependency you provide, an
 
 This is the page to hand to a platform or infrastructure team before an install.
 It answers three questions: what runs, what it depends on, and what has to be
-reachable. For the topology *decision* — SaaS, Hybrid, or External — start with
+reachable. For the topology *decision* — SaaS, Hybrid, External, or a Central
+control plane — start with
 [Deployment models](/neuraltrust/deployment/deployment-models).
 
 Everything below ships as a **single umbrella Helm chart**,
@@ -14,7 +15,7 @@ with one value selecting the topology:
 
 ```yaml
 global:
-  deploymentMode: hybrid # hybrid | external
+  deploymentMode: hybrid # hybrid | external | saas
 ```
 
 ## Hybrid
@@ -104,6 +105,51 @@ flowchart LR
   AE --> SIEM["SIEM / integrations"]
 ```
 
+## Central control plane (`saas`)
+
+A superset of External, spread across clusters. The central cluster runs
+everything External runs, plus three components that let data planes in **other**
+clusters enrol into it. Each of those data planes is an ordinary Hybrid install
+pointed at your domain rather than at NeuralTrust.
+
+```mermaid
+flowchart TB
+  subgraph CEN["Central cluster — deploymentMode: saas"]
+    direction TB
+    CP["Console · control-plane-api · AlertEngine<br/>TrustGate + TrustGuard config-sync"]
+    DC["DataCore<br/>mints enrolment + OTLP tokens<br/>serves JWKS"]
+    DB["DataBridge<br/>northbound 50051 in-cluster<br/>southbound 443 public"]
+    GW["ClickStack ingest gateway<br/>verifies OTLP tokens"]
+    COL["ClickStack collector"] --> CH[("ClickHouse")]
+    DC --> DB
+    GW --> COL
+    DB -.->|introspect| DC
+    GW -.->|JWKS| DC
+  end
+  subgraph REM["Data-plane cluster N — deploymentMode: hybrid"]
+    direction TB
+    PR["TrustGate / TrustGuard"]
+    DA["DataAgent<br/>unique instance ID"]
+    EG["egress collector"]
+  end
+  DA -->|"gRPC 443 + enrolment token"| DB
+  EG -->|"OTLP 443 + bearer token"| GW
+  PR -.->|"config-sync gRPC 443"| CP
+```
+
+| Addition | Deployed when | Purpose |
+| --- | --- | --- |
+| DataBridge | `deploymentMode: saas` | Holds a bidirectional gRPC stream per remote DataAgent; DataCore queries across them |
+| ClickStack ingest gateway | `deploymentMode: saas` | Public OTLP edge that verifies tokens and stamps the tenant from the verified claim |
+| Published config-sync Services | `deploymentMode: saas` | Lets remote products reach the central control planes |
+
+DataCore also switches to a hybrid residency backend, so entitled reads for a
+remote data plane go out through DataBridge instead of to the local ClickHouse.
+Raw payloads never move: they stay in the cluster that produced them.
+
+See [Central control plane](/neuraltrust/deployment/central) for endpoints, TLS,
+and authentication.
+
 The full per-mode component matrix, including which values gate each one, lives
 in the chart's
 [`docs/architecture.md`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/docs/architecture.md).
@@ -167,9 +213,13 @@ Hybrid requires outbound HTTPS to NeuralTrust for config-sync, telemetry, and
 DataBridge, plus one inbound source IP for console health checks of your
 Dataplane URL. External requires none of it.
 
+A Central control plane inverts the ingress side: each data-plane cluster needs
+the same outbound set as Hybrid but against **your** domain, and the central
+cluster has to **accept** those connections on four published endpoints.
+
 The authoritative hostname and IP list, which you should use rather than copying
-values from this page, is
-[Hybrid network allowlist](/neuraltrust/deployment/network).
+values from this page, is the
+[network allowlist](/neuraltrust/deployment/network).
 
 ## Where each interface is documented
 

@@ -1,18 +1,23 @@
 ---
-title: Hybrid network allowlist
-description: Hostnames and IPs your Hybrid cluster must allow for config-sync, DataBridge, and NeuralTrust inbound traffic.
+title: Network allowlist
+description: Hostnames and IPs a data plane must allow for config-sync, DataBridge, and inbound traffic.
 ---
 
-Hybrid data planes open **outbound** connections to NeuralTrust for
+Data planes open **outbound** connections to their control plane for
 configuration sync and DataBridge. Your firewall or security-group rules must
 allow the destinations below from cluster worker nodes (and from any egress
 NAT or proxy in front of them).
+
+This page covers Hybrid against NeuralTrust SaaS. If you run your own
+[Central control plane](/neuraltrust/deployment/central), the same shape applies
+against your own domain — skip to
+[Central control plane endpoints](#central-control-plane-endpoints).
 
 Prefer **hostname** rules when your firewall supports DNS-based allowlists.
 The IPs below are for static ACLs. If DNS resolves differently in your region,
 trust DNS and contact NeuralTrust support to refresh the IP list.
 
-## Outbound (egress)
+## NeuralTrust SaaS: outbound (egress)
 
 Allow **TCP 443** from your cluster egress to:
 
@@ -32,7 +37,7 @@ the region your tenant is provisioned in.
 Also allow outbound HTTPS to your container registry (or mirror), LLM
 upstreams, and managed PostgreSQL / Redis.
 
-## Inbound (ingress)
+## NeuralTrust SaaS: inbound (ingress)
 
 Hybrid is not egress-only. The **Dataplane URL** you register in the console is
 a URL NeuralTrust calls, so your published TrustGate LLM and MCP entry points
@@ -46,6 +51,68 @@ Scope the rule to your edge or ingress for those two hosts. Config-sync and
 DataBridge are **outbound-only** — you do not open inbound ports for those
 services, and nothing needs to reach TrustGuard, Firewall or DataAgent from
 outside the cluster.
+
+## Central control plane endpoints
+
+When you run your own [Central control plane](/neuraltrust/deployment/central),
+data planes dial your `global.controlPlane.domain` instead of `neuraltrust.ai`.
+There are no NeuralTrust hostnames or IPs to allow, and no NeuralTrust inbound
+source IP — you own both ends.
+
+### From each data-plane cluster (egress)
+
+Allow **TCP 443** to all four, substituting your own domain:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `agentgateway-configsync.<domain>` | TrustGate config-sync |
+| `trustguard-configsync.<domain>` | TrustGuard config-sync |
+| `databridge.<domain>` | DataAgent entitled retrieval |
+| `telemetry.<domain>` | Product metadata OTLP export |
+
+Plus your container registry (or mirror), LLM upstreams, and managed PostgreSQL
+and Redis, exactly as in Hybrid.
+
+<Warning>
+A data plane that cannot reach these does not crash. It starts cleanly, serves
+its last-known-good configuration, and quietly stops receiving updates or
+shipping telemetry. Verify reachability from inside each cluster before go-live
+rather than discovering it afterwards.
+</Warning>
+
+Nothing here has to traverse the internet. VPC peering, a Transit Gateway or
+Direct Connect all work, and a private path is what makes the chart's own
+certificates a sound choice — see
+[TLS](/neuraltrust/deployment/central#tls).
+
+Two of these carry long-lived streams. If an egress proxy or middlebox in the
+path reaps idle connections, config-sync and DataBridge will drop and reconnect
+on that interval — check its idle timeout. A TLS-intercepting proxy breaks
+certificate verification unless its CA reaches the client: put it in the same
+bundle you point `dataagent.databridge.tlsCa`, `<product>.configSync.tlsCa` and
+`global.clickstack.egress.tlsCaSecretName` at, since each of those replaces the
+system roots rather than adding to them.
+
+### Into the central cluster (ingress)
+
+The central cluster publishes those four endpoints, so it accepts inbound
+**TCP 443** on each. Restrict them to the egress ranges of your data-plane
+clusters rather than leaving them open, and prefer an internal load-balancer
+scheme when the callers are on a private network:
+
+```yaml
+databridge:
+  service:
+    southbound:
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      loadBalancerSourceRanges: ["10.20.0.0/16"]
+```
+
+Do the same for `agentgateway.configSync.expose` and
+`trustguard.configSync.expose`. Where a link is private — VPC peering or a
+Transit Gateway — set `<product>.configSync.expose.enabled: false` and route to
+the ClusterIP Service instead of publishing it at all.
 
 ## Related
 

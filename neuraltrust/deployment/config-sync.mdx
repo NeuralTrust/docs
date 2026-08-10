@@ -13,15 +13,17 @@ Config sync is how TrustGate and TrustGuard data planes learn their configuratio
 
 The control plane compiles a configuration snapshot and serves it over gRPC. The data plane dials **outward**, authenticates with a bearer token, fetches the snapshot, then holds a watch stream open with a periodic poll as a backstop.
 
-| | Hybrid | External |
-| --- | --- | --- |
-| Enabled by default | **Yes**, derived from the mode | **No** |
-| Configuration source | Snapshots from SaaS | Each product's PostgreSQL |
-| Server | `{product}-configsync.neuraltrust.ai:443` | In-cluster product control plane, if enabled |
-| Transport | gRPC over TLS, system roots | gRPC over TLS, chart-generated CA |
-| Auth | `CONFIG_SYNC_TOKEN` issued by the console | Chart-generated shared token |
+| | Hybrid | External | Central control plane |
+| --- | --- | --- | --- |
+| Enabled by default | **Yes**, derived from the mode | **No** | **Yes**, on each data plane |
+| Configuration source | Snapshots from SaaS | Each product's PostgreSQL | Snapshots from your central control plane |
+| Server | `{product}-configsync.neuraltrust.ai:443` | In-cluster product control plane, if enabled | `{product}-configsync.<controlPlane.domain>:443` |
+| Transport | gRPC over TLS, system roots | gRPC over TLS, chart-generated CA | gRPC over TLS, system roots |
+| Auth | `CONFIG_SYNC_TOKEN` issued by the console | Chart-generated shared token | `CONFIG_SYNC_TOKEN` issued by **your** console |
 
-The direction never reverses. Nothing at NeuralTrust connects into your network for configuration, which is why hybrid needs egress rules only.
+The direction never reverses. Nothing connects into a data plane's network for configuration, which is why it needs egress rules only.
+
+A [Central control plane](/neuraltrust/deployment/central) is Hybrid's column with a different server. Each data plane still dials outward with a bearer token and caches the snapshot the same way; only the hostname and the console that issued the token change. Because the listener is now dialled from other clusters, the central side must present a certificate those clusters can verify against their system trust store — the chart-generated CA is not enough there.
 
 ## Running without a database
 
@@ -73,7 +75,7 @@ kubectl -n neuraltrust logs deploy/agentgateway-proxy | grep -i 'config.sync\|sn
 | Cause | Signal | Fix |
 | --- | --- | --- |
 | Wrong or whitespace-padded token | Authentication rejected | Recreate the Secret; `--from-literal` preserves what you paste |
-| Egress blocked | Connection timeout, backoff retries | Allow `*.neuraltrust.ai:443` |
+| Egress blocked | Connection timeout, backoff retries | Allow `*.neuraltrust.ai:443`, or your own `controlPlane.domain` under a Central control plane |
 | TLS interception | Certificate verification failure | Set `configSync.tlsCa` to your CA bundle |
 | `enabled: true` restated in values | Render error | Remove it; hybrid derives it from the mode |
 
