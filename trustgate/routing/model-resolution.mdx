@@ -10,7 +10,7 @@ A client never names a provider URL — it names a **model**, and TrustGate reso
 
 | Form | Example | Meaning |
 |---|---|---|
-| **Auto** | `auto` | Let TrustGate choose. The [load balancer](/trustgate/routing/load-balancing) picks among the registries that have a default model, and each registry receives its own default. |
+| **Auto** | `auto` | Let TrustGate choose. The [load balancer](/trustgate/routing/load-balancing) picks among the routes that have a model, and each route sends its own. |
 | **Short** (pass-through) | `gpt-4o-mini` | Pins the **first** registry whose policy allows that model, and sends the name as-is. |
 | **Provider-qualified** | `@openai/gpt-4o` | Pins the **first** registry of provider `openai` whose policy allows that model. |
 
@@ -53,13 +53,18 @@ role's `registry_ids`.
 
 ## Auto
 
-With `model: "auto"`, TrustGate keeps only the registries that have a `default` model in
-their policy, removes the `model` field from the request body, and lets the load balancer
-pick. The selected registry then applies its own default — so the same request can run on
-`gpt-4o-mini` on one registry and `claude-sonnet-4` on another.
+With `model: "auto"`, TrustGate keeps only the candidates that resolve to a model, removes the
+`model` field from the request body, and lets the load balancer pick. The selected route then
+applies its own model — so the same request can run on `gpt-4o-mini` on one route and
+`claude-sonnet-4` on another.
 
-If no registry reachable by the consumer defines a default model, the request is rejected
-with `auto routing requires at least one registry with a default model`.
+A candidate resolves to a model through its policy `default`, or through the `model` pinned by
+its [load-balancing member](/trustgate/routing/load-balancing#configuration-lb_config) — a
+pinned member model is enough on its own, so a registry with no policy default still
+participates in `auto` when the pool pins one.
+
+If nothing reachable by the consumer resolves to a model, the request is rejected with
+`auto routing requires at least one registry with a default model`.
 
 ## Model policies
 
@@ -83,9 +88,9 @@ constrain which models are reachable per registry with `model_policies`:
 A request for a model outside the allow-list is rejected before it reaches the provider.
 
 When [load balancing](/trustgate/routing/load-balancing) is enabled, a member's `models` list
-overrides the registry's `allowed` list. The member's effective default is the policy
-`default` when that model is one of the member's `models`, otherwise the first entry of
-`models`.
+overrides the registry's `allowed` list, and a member's `model` pins the route outright. A
+member without `model` uses the policy `default` when that model is one of the member's
+`models`, otherwise the first entry of `models`.
 
 ## Resolution order
 
