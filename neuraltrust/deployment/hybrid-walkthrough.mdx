@@ -1,0 +1,158 @@
+---
+title: Hybrid walkthrough
+description: The same install as the quick start, with the reasoning behind each step and what to check when it goes wrong.
+---
+
+This page assumes nothing. If you have installed a Helm chart before and just want the commands, use the [Quick start](/neuraltrust/deployment/quickstart).
+
+## What you are actually deploying
+
+Hybrid splits the platform across two environments. The **request path** runs in your cluster; the **console and configuration** stay on NeuralTrust SaaS.
+
+```text
+ Your cluster                              NeuralTrust SaaS
+ ┌──────────────────────────────┐          ┌──────────────────────┐
+ │ client → TrustGate :8081     │ ◀────────┤  Console             │
+ │             ↓         :8082  │   HTTPS  │  (reaches your       │
+ │          TrustGuard :8081    │          │   published URLs)    │
+ │             ↓                │          │                      │
+ │          Firewall :8000      │ ──gRPC─▶ │  Config-sync server  │
+ │                              │          │  (configuration)     │
+ │ DataAgent ───────────────────┼──gRPC──▶ │  DataBridge          │
+ └──────────┬───────────────────┘          │  (residency reads)   │
+            ▼                              └──────────────────────┘
+   your PostgreSQL, Redis
+```
+
+**Configuration and telemetry are outbound only.** Config-sync and DataBridge are dialled from your cluster; nothing at NeuralTrust initiates those. You open egress for them, never ingress.
+
+The console is the exception. The Dataplane URL you paste into the wizard is a URL NeuralTrust calls, so your published TrustGate LLM and MCP endpoints must accept **inbound** HTTPS from one NeuralTrust source IP. Get that rule agreed with your network team early — it is the requirement security reviews most often push back on, and the exact address is in the [network allowlist](/neuraltrust/deployment/network).
+
+### The five workloads and what each one does
+
+| Workload | Port | Job | If it stops |
+| --- | --- | --- | --- |
+| `agentgateway-proxy` (TrustGate) | 8081 | Terminates LLM traffic, applies policies, routes upstream | LLM API traffic fails |
+| `agentgateway-mcp` (TrustGate) | 8082 | Same, for MCP tool traffic | MCP tool calls fail |
+| `trustguard` data plane | 8081 | Evaluates prompts and responses against detectors | Protection checks fail |
+| `firewall` | 8000 | ML inference workers behind a gateway API | ML-backed detectors fail |
+| `dataagent` | 8080 (health only) | Answers residency queries from SaaS over an outbound stream | Dashboards that read your data go blank |
+
+DataAgent is worth understanding because it is unusual: it exposes **no inbound service**. It dials out to DataBridge and holds the stream open, and queries arrive over that stream. There is nothing to expose and nothing to firewall inbound. It also runs single-replica by design — two would register duplicate streams.
+
+## Step 1: check your datastores first
+
+Do this before installing anything. The two most common first-install failures are a datastore that is not actually reachable and one that is reachable but silently wrong.
+
+**Redis is not optional.** Both gateways validate `REDIS_HOST` at boot and refuse to start without it, even though hybrid data planes do not use PostgreSQL for their own configuration.
+
+**PostgreSQL is where your raw payloads live.** Prompts and responses are written here and never leave your cluster; only metadata is exported.
+
+The failure pattern to watch for generally is not "unreachable", which fails loudly. It is a component whose default quietly points at `localhost`: it comes up healthy and appears fine until you use the feature that needs it. Set every host explicitly.
+
+## Step 2: create the gateway in the console
+
+Open **TrustGate → New Gateway**, name it, choose **Private**, then **Kubernetes**. [Console setup](/neuraltrust/deployment/console-setup) covers the wizard screen by screen, including the TrustGuard equivalent.
+
+The wizard produces a `values.yaml` containing credentials inline. Treat that file as a secret and do not commit it. You want exactly two values out of it:
+
+- **`CONFIG_SYNC_TOKEN`** — proves to the SaaS control plane that this data plane is yours
+- **the DataAgent enrolment token** — a JWT carrying your tenant identity
+
+Everything else in the wizard output is superseded by the chart's own interfaces.
+
+One key needs renaming as you transcribe it. Older consoles write `global.products.agentgateway: true`, which the chart rejects — `global.products` is keyed by product id, so TrustGate is `trustgate` there even though its values block is `agentgateway:`. The [naming map](/neuraltrust/deployment/console-setup#one-product-four-names) has the full correspondence.
+
+## Step 3: understand which secrets are yours
+
+This is where most time gets lost, so it is worth being precise. The chart maintains a registry of credentials it generates on first install and reuses on every upgrade. You are responsible for a much shorter list:
+
+| You create | Why the chart cannot |
+| --- | --- |
+| Registry pull secret | It is your registry account |
+| `CONFIG_SYNC_TOKEN` | Issued by the console; the SaaS side verifies it |
+| DataAgent `ENROLMENT_TOKEN` | Same — signed by NeuralTrust, carries your tenant |
+| External datastore credentials | They are your databases |
+| Email provider credentials | Your provider account |
+
+Everything else — JWT signing secrets on both sides of every internal call, database passwords for in-cluster stores, the config-sync cache key, the MCP OAuth signing key — is generated.
+
+<Note>
+[`create-secrets.sh`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/create-secrets.sh) in the chart repository has drifted behind this list. It prompts for many credentials the chart now generates, and does not prompt for either of the two that are genuinely mandatory. Create the Secrets by hand as shown in [Console setup](/neuraltrust/deployment/console-setup) instead.
+</Note>
+
+## Step 4: install, and read the validation errors
+
+The chart validates before it renders. That is deliberate: a missing credential should fail in your terminal, not as a pod in `CreateContainerConfigError` twenty minutes later.
+
+If you see something like:
+
+```text
+agentgateway config-sync requires CONFIG_SYNC_TOKEN, the token issued to you
+by the NeuralTrust UI: set agentgateway.configSync.existingSecret.name ...
+```
+
+it means exactly what it says. The message names the value to set.
+
+One thing not to do: **do not set `configSync.enabled: true`**. Hybrid derives it from the deployment mode. Restating it is a frequent cause of confusing errors.
+
+## Step 5: verify config-sync, not just pod status
+
+Running is not the same as working. A hybrid data plane's readiness probe includes a snapshot check, so it reports Ready only after it has pulled configuration from SaaS.
+
+```bash
+kubectl -n neuraltrust get pods
+```
+
+A pod that is `Running` but never `Ready` is the signature of config-sync failing. Three causes, in order of likelihood:
+
+1. The token is wrong or was pasted with trailing whitespace
+2. Egress to `*.neuraltrust.ai:443` is blocked — see the [network allowlist](/neuraltrust/deployment/network) for the exact hostnames
+3. A TLS-intercepting proxy is present and its CA is not trusted
+
+For the last case, set `configSync.tlsCa`. Do not reach for `configSync.tlsInsecure` — the runtimes refuse it under a deployed `APP_ENV`.
+
+## Step 6: expose both entry points
+
+TrustGate listens on two ports for two different protocols, and they need separate hostnames in production:
+
+```yaml
+# LLM URL: https://gateway.example.com   → port 8081
+# MCP URL: https://mcp.example.com       → port 8082
+```
+
+Set both in **Settings → Agent Gateway → General**. The wizard bootstraps both from a single URL, which works for the proxy and quietly breaks MCP — the failure appears as tool calls that never resolve rather than as an error.
+
+## What "metadata only" means concretely
+
+Worth being exact, because it is usually the question a security reviewer asks.
+
+Raw prompts and responses are written to **your** PostgreSQL. What leaves your cluster is telemetry: request metadata, timings, detector verdicts, and counts.
+
+The egress path itself is worth knowing. A `clickstack-egress-collector` runs alongside your primary DataAgent. It exchanges the DataAgent enrolment JWT for a short-lived OTLP access token through a loopback broker on `127.0.0.1:9465`, then exports over OTLP with that token. There is no long-lived bearer token on the application pods, and the broker only listens on loopback.
+
+This is also why the chart refuses to install with a product enabled but no DataAgent enrolment configured: without it the egress collector has nothing to exchange, so telemetry would silently never leave.
+
+## Upgrades
+
+```bash
+helm upgrade neuraltrust neuraltrust/neuraltrust-platform \
+  --namespace neuraltrust --values values.yaml
+```
+
+Generated credentials are looked up and reused, so an upgrade does not rotate secrets or invalidate sessions.
+
+One caveat worth knowing: workloads that read configuration through `envFrom` carry no checksum of the ConfigMap, so a values change that only touches a ConfigMap updates the ConfigMap without restarting the pods. The change then takes effect at the next unrelated restart. If you changed something behavioural, restart the affected deployment yourself:
+
+```bash
+kubectl -n neuraltrust rollout restart deploy/agentgateway-proxy
+```
+
+## Next
+
+- [Console setup](/neuraltrust/deployment/console-setup) — creating the gateways and mapping their tokens to Secrets
+- [Config sync](/neuraltrust/deployment/config-sync) — the mechanism in detail
+- [Secrets](/neuraltrust/deployment/secrets) — the full registry
+- [Network allowlist](/neuraltrust/deployment/network) — the egress rules to open
+- [Cluster sizing](/neuraltrust/deployment/sizing) — capacity to start from
+- [Troubleshooting](/neuraltrust/deployment/troubleshooting)
