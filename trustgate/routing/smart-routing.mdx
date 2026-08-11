@@ -1,0 +1,95 @@
+---
+title: "Smart routing"
+description: "Route each request by prompt complexity across tiers — pick cheaper models for simple prompts and stronger models for hard ones, configured on the consumer Routing tab."
+---
+
+**Smart routing** is a [load balancing](/trustgate/routing/load-balancing) strategy that
+scores each prompt's complexity and sends the request to the matching **tier** (registry +
+model). Use it when you want cost-efficient defaults for easy traffic and stronger models
+only when the prompt needs them.
+
+In the console it is the first option under **Strategy** → **Load balancing**.
+
+## When to use it
+
+| Use smart routing when… | Prefer another strategy when… |
+|---|---|
+| You have two or more model strengths (e.g. mini vs flagship) for the same app. | Traffic should split evenly or by fixed weight regardless of prompt content. |
+| You want clients to send `"model": "auto"` and let the gateway choose. | Every request must hit one fixed model (use **Simple routing**). |
+| Different complexity bands may share a registry but need **different models**. | You only need ordered failover (use **Fallback**). |
+
+## How it works
+
+1. The client calls the consumer (typically with `"model": "auto"` — see
+   [Model resolution](/trustgate/routing/model-resolution)).
+2. TrustGate estimates **prompt complexity** as a score in **0–1**.
+3. It selects the tier whose **minimum score** is the highest value still ≤ that score.
+4. The request is forwarded to that tier's **registry** and **model**.
+5. If the pick fails and [fallback](/trustgate/routing/fallback) is configured, TrustGate
+   can retry another path.
+
+Tiers are ordered by rising complexity. Example:
+
+| Complexity (UI) | Min score | Registry | Model |
+|---|---|---|---|
+| Simple | `0` | OpenAI prod | `gpt-4o-mini` |
+| Medium | `0.3` | OpenAI prod | `gpt-4o` |
+| Hard | `0.8` | Anthropic | `claude-sonnet-…` |
+
+A score of `0.45` lands on **Medium**; `0.9` lands on **Hard**.
+
+## Configure in the console
+
+1. Open **Consumers** → select a consumer → **Routing**.
+2. Set **Routing mode** to **Static**.
+3. Open **Strategy** → **Load balancing** → **Smart routing**.
+4. Open **Complexity tiers**.
+5. Add **at least two tiers** (the UI blocks save with fewer).
+6. For each tier set:
+   - **Complexity** — Simple / Medium / Hard (unique labels per consumer).
+   - **Registry** — upstream provider connection.
+   - **Model** — model used when that band is selected.
+7. Save. Open **Connect** — snippets use `"model": "auto"`.
+
+### Rules the UI enforces
+
+| Rule | Why |
+|---|---|
+| **≥ 2 tiers** | A single tier is not meaningful routing; use Simple routing instead. |
+| **Unique complexity labels** | Each band must be distinct. |
+| **Valid scores (0–1)** | Scores must be numbers in range with no duplicates. |
+| **Registry + model required** | Every tier must resolve to a concrete upstream model. |
+
+You can point several tiers at the **same registry** with **different models** — that is
+supported and common (one OpenAI connection, mini vs full model per band).
+
+## Clients and `auto`
+
+With smart routing enabled, applications should send:
+
+```json
+{ "model": "auto", "messages": [ … ] }
+```
+
+The consumer **Connect** tab and [Playground](/trustgate/console/playground) already use
+**Auto** for this strategy. Do not hard-code a single model id unless you intentionally
+want to bypass complexity selection (and the model is allowed by policy).
+
+## Tips
+
+- Put the cheapest capable model on **Simple** (`min_score` `0`) so most traffic stays cheap.
+- Reserve **Hard** for models that justify the cost on difficult prompts.
+- Pair with [LLM Budget](/trustgate/policies/rate-limiting) or
+  [Cost cap](/trustgate/policies/cost-cap) if you need hard spend ceilings on top of routing.
+- Watch [Analytics](/trustgate/console/analytics) (Cost / LLM) after rollout to confirm tier
+  mix matches expectations.
+- Use [Fallback](/trustgate/routing/fallback) if an upstream outage should retry another
+  registry instead of failing the request.
+
+## Related
+
+- [Load balancing](/trustgate/routing/load-balancing) — other algorithms (round-robin,
+  weighted, least-connections, random).
+- [Model resolution](/trustgate/routing/model-resolution) — `auto`, short names, and model
+  policies.
+- [Consumers](/trustgate/concepts/consumers) — Routing tab overview.

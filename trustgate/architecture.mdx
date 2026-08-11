@@ -1,6 +1,6 @@
 ---
 title: "Architecture"
-description: "TrustGate is one Go binary that boots one of three independent planes — Admin, Proxy, MCP — backed by Postgres, Redis, and Kafka. How a request flows end to end."
+description: "TrustGate is one Go binary that boots one of three independent planes — Admin, Proxy, MCP — backed by Postgres and Redis. How a request flows end to end."
 ---
 
 TrustGate ships a **single binary** (`trustgate`) that boots **one** HTTP server, chosen
@@ -37,7 +37,8 @@ traffic flows through.
    weighted, least-connections, random, or smart routing), with fallback.
 5. The request is forwarded to the selected **provider adapter** (OpenAI, Anthropic,
    Bedrock, …), streaming when the client asked for it.
-6. The response returns and a **telemetry** event is emitted to Kafka.
+6. The response returns and a **telemetry** event is exported with OpenTelemetry
+   (background worker — off the request path).
 
 ```text
 Client ─▶ Proxy :8081
@@ -47,7 +48,7 @@ Client ─▶ Proxy :8081
    ├─ policies run at their stages (parallel or sequential)
    ├─ load balancer → registry (+ fallback chain)
    ├─ provider adapter → upstream (stream or full)
-   └─ response ─▶ client          telemetry ─▶ Kafka
+   └─ response ─▶ client          telemetry ─▶ OpenTelemetry collector
 ```
 
 ### Gateway discovery
@@ -64,7 +65,7 @@ Client ─▶ Proxy :8081
 |---|---|
 | **PostgreSQL** | Source of truth for all configuration (gateways, registries, consumers, …). The Admin plane runs migrations on boot. |
 | **Redis** | Rate-limit counters, session store, and a pub/sub channel for cache invalidation. |
-| **Kafka** | Asynchronous telemetry export (`TELEMETRY_KAFKA_TOPIC`). Off the request critical path. |
+| **OpenTelemetry collector** | Receives per-request telemetry export (metadata for analytics and alerts). Off the request critical path. |
 
 ### Caching & invalidation
 

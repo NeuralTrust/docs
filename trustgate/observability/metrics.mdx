@@ -9,10 +9,9 @@ through an **asynchronous worker** so measurement never blocks request handling.
 
 <Note>
 There is **no Prometheus `/metrics` scrape endpoint**. TrustGate is a data-plane proxy: it
-*emits* a rich event per request to your sinks (Kafka by default, OpenTelemetry/OTLP
-optionally) rather than exposing scrape-style counters. Point your analytics or a Kafka
-consumer at the stream — see [Telemetry](/trustgate/observability/telemetry) for the event
-shape.
+*emits* a rich event per request over **OpenTelemetry** rather than exposing scrape-style
+counters. See [Telemetry](/trustgate/observability/telemetry) for export configuration and
+event shape.
 </Note>
 
 ## How it works
@@ -21,11 +20,11 @@ shape.
    timings, routing attempts, and per-policy decisions as the request flows.
 2. When the response finishes (including after a fully-streamed SSE response), the trace is
    handed to an in-memory **worker queue** — never inline on the response path.
-3. Worker goroutines drain the queue, build the event, and **publish it to the configured
-   exporters** (and, for playground requests, a short-lived trace store).
+3. Worker goroutines drain the queue, build the event, and **export it** to the configured
+   OpenTelemetry collectors (and, for playground requests, a short-lived trace store).
 
-Because the build-and-publish step runs on background workers, a slow or unavailable sink
-(e.g. Kafka) never adds latency to or fails a user request.
+Because the build-and-export step runs on background workers, a slow or unavailable
+collector never adds latency to or fails a user request.
 
 ## Configuration
 
@@ -44,7 +43,7 @@ Trace depth is tuned with `TELEMETRY_ENABLE_REQUEST_TRACES` and
 
 Each event is a single record with identity, request, response, usage, **cost**, a
 **latency breakdown** (total / provider / policies / routing / gateway), per-registry
-routing **attempts**, and the **policy chain**. The exact schema and how to consume it are
+routing **attempts**, and the **policy chain**. The exact schema and how to export it are
 documented in [Telemetry](/trustgate/observability/telemetry).
 
 For interactive inspection in the product UI:

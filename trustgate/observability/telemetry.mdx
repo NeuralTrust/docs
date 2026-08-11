@@ -1,64 +1,95 @@
 ---
 title: "Telemetry"
-description: "TrustGate streams a rich per-request event to Kafka — model, tokens, cost, latency breakdown, policy chain, and routing attempts — with optional OTLP export."
+description: "TrustGate exports one OpenTelemetry log record per request — model, tokens, cost, latency breakdown, policy chain, and routing attempts — off the critical path."
 ---
 
 **Telemetry** is the per-request event that the [metrics worker](/trustgate/observability/metrics)
 builds and ships off the critical path. Each event captures everything needed to analyze
-cost, latency, routing, and policy decisions. The default sink is **Kafka**; a per-gateway
-**OpenTelemetry (OTLP)** exporter is opt-in.
+cost, latency, routing, and policy decisions. TrustGate exports events with
+**OpenTelemetry** to your collector (NeuralTrust SaaS or your own).
+
+On NeuralTrust, those records feed [Activity](/trustgate/console/activity),
+[Analytics](/trustgate/console/analytics), and [Telemetry Alerts](/platform/alerts). The
+field-level contract used by AlertEngine is documented in the
+[Event schema](/platform/event-schema).
+
+## How export works
+
+1. The proxy finishes the request (including streamed responses).
+2. A background worker builds a structured event (metadata; bodies are not in the default
+   metadata stream).
+3. The event is exported as an OpenTelemetry **log record** to the configured collector
+   endpoint.
+4. Downstream systems (NeuralTrust metadata store, your SIEM, billing pipelines) consume
+   the collector output.
+
+Export never blocks the client response path — see
+[Metrics worker](/trustgate/observability/metrics).
 
 ## Configuration
 
-Telemetry is configured globally by environment and refined per gateway.
+Telemetry is configured globally by environment and can be refined per gateway.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `TELEMETRY_ENABLED` | `true` | Toggle telemetry. |
-| `TELEMETRY_KAFKA_TOPIC` | `agentgateway.requests` | Destination topic. |
 | `TELEMETRY_ENABLE_REQUEST_TRACES` | `true` | Include request traces. |
 | `TELEMETRY_ENABLE_PLUGIN_TRACES` | `true` | Include per-policy traces. |
+| `TELEMETRY_EXPORTERS_FILE` | — | Optional path to an exporters YAML file. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OpenTelemetry collector endpoint (e.g. `https://collector.example:4318`). |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | — | Transport, typically `http/protobuf` or `grpc`. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | — | Extra headers (auth tokens, tenant keys). |
+| `OTEL_EXPORTER_OTLP_INSECURE` | — | Allow non-TLS (local/dev only). |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` | — | e.g. `gzip`. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | — | Export timeout (ms). |
 
-Per [gateway](/trustgate/concepts/gateways), `telemetry` can define its own exporters,
-static `extra_params` appended to every event, trace toggles, and a `header_mapping` that
-copies inbound headers into event fields.
+Per [gateway](/trustgate/concepts/gateways), `telemetry` can define exporters, static
+`extra_params` appended to every event, trace toggles, and a `header_mapping` that copies
+inbound headers into event fields. Process-level `OTEL_EXPORTER_OTLP_*` values supply
+defaults when a gateway opts into OpenTelemetry export.
 
 ### Exporters
 
-A gateway's `telemetry.exporters[]` selects where its events go. Per-gateway exporters are
-**merged with** (not a replacement for) the process-level Kafka default:
+A gateway's `telemetry.exporters[]` selects where its events go:
 
 | `name` | Settings | Notes |
 |---|---|---|
-| `kafka` | `{ host, port, topic }` | Stream events to a Kafka topic. |
-| `otlp` | OTLP endpoint / headers | Export each request as an OpenTelemetry **log record** (`event.name = "gateway.request"`). Only the `logs` signal is supported. |
+| `otlp` | endpoint, headers, protocol, … | Export each request as an OpenTelemetry **log record**. Metadata class uses event name `trustgate.<version>.metadata`. |
 
-Process-level OTLP defaults come from the standard `OTEL_EXPORTER_OTLP_*` environment
-variables; a gateway opts in by adding an `otlp` exporter.
+On NeuralTrust Hybrid / SaaS, the control plane wires the collector endpoint for you
+(see [Deployment models](/neuraltrust/deployment/deployment-models)). For self-managed
+collectors, set `OTEL_EXPORTER_OTLP_ENDPOINT` (and headers) to your OpenTelemetry Collector.
 
-## The event
+## What the event carries
 
-Events are versioned (`schema_version`, currently **3**) and carry a `kind` of `llm` or
-`mcp`. Each includes, among others:
+Events are versioned (`schema_version`) and carry a `kind` of `llm` or `mcp`. Each includes,
+among others:
 
 | Group | Fields |
 |---|---|
-| Identity | `trace_id`, `gateway_id`, `team_id`, `consumer`, `session_id`, `turn_id`, `ip`. |
-| Request | method, path, provider, registry id, requested vs resolved model, temperature, max tokens, stream flag, prompt tokens. |
-| Response | status code, latency, completion tokens, finish reason, streaming. |
+| Identity | `trace_id`, `gateway_id`, `tenant_id`, `consumer`, `session_id`, `turn_id`. |
+| Request | method, path, provider, registry id, requested vs resolved model, temperature, max tokens, stream flag. |
+| Response | status code, latency, finish reason, streaming. |
 | Usage | prompt / completion / total tokens, cached input, reasoning output. |
 | Cost | prompt / completion / total USD. |
 | Latency | total, provider, policies, routing, gateway (ms). |
 | Attempts | per-registry attempts with fallback/pinned/route/outcome. |
 | Policy chain | per-policy decision, stage, latency, score, flagged. |
 
-## Using the stream
+Attributes follow OpenTelemetry HTTP and GenAI conventions where applicable
+(`http.request.method`, `gen_ai.request.model`, `gen_ai.usage.*`, …), plus `trustgate.*`
+extensions for gateway-specific fields. **Prompt and response bodies are not included** in
+the default metadata export used by alerts and analytics.
 
-Point any Kafka consumer at the topic to build dashboards, billing, or anomaly detection.
-The `attempts` and `policy_chain` arrays make it possible to reconstruct exactly how each
-request was routed and which policies fired.
+## Using the data
 
-Once events reach NeuralTrust Telemetry, they also power
-[Telemetry Alerts](/platform/alerts) — predefined and custom detection rules (elevated
-error rate, latency degradation, authentication anomalies, rate-limit abuse,
-upstream-provider errors) that raise deduplicated alerts and forward them to your SIEM.
+| Surface | Use |
+|---|---|
+| [Activity](/trustgate/console/activity) | Per-request forensics. |
+| [Analytics](/trustgate/console/analytics) | Volume, cost, latency, policy actions. |
+| [Telemetry Alerts](/platform/alerts) | Detection rules (error rate, latency, auth anomalies, …). |
+| [Event schema](/platform/event-schema) | Fields AlertEngine rules match on. |
+| Your collector / SIEM | Forward from the OpenTelemetry Collector pipeline. |
+
+The `attempts` and `policy_chain` data make it possible to reconstruct how each request was
+routed and which policies fired.
