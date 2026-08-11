@@ -1,79 +1,170 @@
 ---
 title: "Rate limiting & budgets"
-description: "Limit request volume with rate_limiter and cap LLM spend with token_rate_limiter (LLM Budget) — token or dollar budgets, aggregate or per-model, scoped per consumer or gateway."
+description: "Limit request volume with Rate Limiter, and cap LLM spend over time with LLM Budget (token_rate_limiter) — tokens or dollars, aggregate or per-model."
 ---
 
-TrustGate ships two Redis-backed quota policies: **`rate_limiter`** for request volume and
-**`token_rate_limiter`** (**LLM Budget**) for token or dollar spend. Both follow their
-[policy](/trustgate/policies/overview) scope — per consumer, or gateway-wide — and accept a
-group-by header to sub-partition the counter (e.g. per end-user or tenant).
+Two catalog policies control volume and spend:
+
+| Catalog name | Slug | Group | What it does |
+|---|---|---|---|
+| **[Rate Limiter](#rate-limiter)** | `rate_limiter` | Traffic control | Max requests per sliding window. |
+| **[LLM Budget](#llm-budget)** | `token_rate_limiter` | Quota | Token or dollar budget over a time window; reject or downgrade when exceeded. |
+
+Both respect [policy](/trustgate/policies/overview) scope (**Gateway-wide** or **Targeted** consumers) and support **Enforce** / **Observe** (and throttle where the plugin allows).
+
+---
 
 ## Configure in the console
 
 1. Open **Policies** → **Catalog**.
-2. Choose **Rate limiter** or **LLM Budget**.
+2. Choose **Rate Limiter** or **LLM Budget**.
 3. Set **Scope** (mode + gateway-wide / targeted consumers).
-4. Fill limits, windows, and on-exceed behavior in the form.
+4. Fill the form (details below).
 5. Save. Verify with [Playground](/trustgate/console/playground) or
-   [Analytics → Policy](/trustgate/console/analytics).
+   [Analytics → Policy](/trustgate/console/analytics) / **Cost**.
 
-For a **per-request** price ceiling (not a running budget), see
-[Cost cap](/trustgate/policies/cost-cap).
+---
 
-## `rate_limiter` — request rate limiting
+## Rate Limiter
 
-Counts requests in a sliding window. Runs at `pre_request`.
+**`rate_limiter`** counts requests in a sliding window at `pre_request`.
 
-| Setting | Type | Notes |
+### Settings
+
+| Setting | Backend | Notes |
 |---|---|---|
-| `limit` | int | Max requests per window. **Required.** |
-| `window` | duration | Go duration string: `30s`, `1m`, `1h`. **Required.** |
-| `retry_after` | string | `Retry-After` value in seconds when limited (default `60`). |
-| `group_by_header` | string | Optional sub-partition key (e.g. `X-User-Id`). |
+| **Limit** | `limit` | Max requests per window. **Required.** |
+| **Window** | `window` | Duration string: `30s`, `1m`, `1h`. **Required.** |
+| **Retry-After** | `retry_after` | Seconds returned when limited (default `60`). |
+| **Group by header** | `group_by_header` | Optional sub-partition (e.g. `X-User-Id`). |
 
 ```json
 { "slug": "rate_limiter", "settings": { "limit": 100, "window": "1m" } }
 ```
 
-Responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and
-(when limited) `Retry-After`.
+Limited responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`,
+and `Retry-After`.
 
-## `token_rate_limiter` — LLM Budget
+---
 
-Caps LLM usage by **provider tokens or USD cost** over time windows — the right control for
-LLM cost, since a few large requests can cost more than many small ones. It checks the budget
-at `pre_request` and accrues usage at `post_response`.
+## LLM Budget
 
-| Setting | Type | Default | Notes |
+**`token_rate_limiter`**, labeled **LLM Budget** in the catalog, caps LLM usage by
+**provider tokens or USD** over a time window. It checks the budget at `pre_request` and
+accrues usage at `post_response`.
+
+This is the catalog quota policy for spend over time. Use **tokens** for raw usage or
+**dollars** for estimated cost against the pricing table.
+
+### Configure in the console
+
+1. **Policies** → **Catalog** → **LLM Budget**.
+2. Under **Budget**, set unit, max, and time window.
+3. Under **When limit is exceeded**, choose behaviour (and downgrade target if needed).
+4. Optionally add **Per model limits**.
+5. Optionally open **Advanced Settings** (group-by header, counting).
+6. Set mode and scope, then save.
+
+The console uses a dedicated form (not the generic schema renderer).
+
+### Settings (UI ↔ backend)
+
+#### Budget
+
+| UI | Backend | Default | Meaning |
 |---|---|---|---|
-| `unit` | enum | `tokens` | `tokens` or `dollars`. |
-| `counting` | enum | `total` | Which usage accrues: `total`, `input`, or `output`. |
-| `aggregate` | object | — | Single budget for the whole scope: `{ max, time_window }`. |
-| `rules` | array | — | Per-model budgets: `[{ model, max, time_window }]` (most specific pattern wins). |
-| `behavior_on_exceeded` | enum | `reject` | `reject`, `throttle`, `downgrade_model`, or `alert_only`. |
-| `downgrade_to` | string | — | Target model for `downgrade_model` (same provider). |
-| `stream_usage_injection` | bool | `false` | Request + inject usage on streams so accrual works on streaming responses. |
-| `count_cache_reads` | bool | `false` | Include Anthropic cache-read input tokens in counted/costed usage. |
-| `custom_pricing` | map | — | Per-token USD rates by model pattern, consulted before the built-in table (for dollar budgets). |
-| `group_by_header` | string | — | Optional sub-partition key. |
+| **Unit** | `unit` | Tokens | **Tokens** or **Dollars**. |
+| **Max** | `aggregate.max` | — | Ceiling for the window. Tokens must be whole numbers; dollars may be fractional. **Required** (> 0). |
+| **Time window** | `aggregate.time_window` | e.g. `1h` | Value + unit (**Seconds** / **Minutes** / **Hours** / **Days**). Backend raises windows below `60s` to `60s`. |
 
-Use **either** `aggregate` (one counter for the scope) **or** `rules` (per-model). Window
-values below `60s` are raised to `60s`.
+The form shows a live summary, e.g. “Allow **1000** tokens **per hour**.”
+
+#### When limit is exceeded
+
+| UI | Backend | Meaning |
+|---|---|---|
+| **Reject request** | `behavior_on_exceeded: reject` | Block the call (default). |
+| **Downgrade model** | `behavior_on_exceeded: downgrade_model` | Rewrite `model` to a cheaper target. |
+| **Downgrade to** | `downgrade_to` | Required when downgrading. Same provider as the requested model. |
+
+#### Per model limits (optional)
+
+Tighter budgets for specific models. Match by slug or wildcard (e.g. `claude-opus-*`).
+Most specific pattern wins.
+
+| UI | Backend |
+|---|---|
+| **Model** | `rules[].model` |
+| **Max** | `rules[].max` |
+| **Time window** | `rules[].time_window` |
+
+#### Advanced
+
+| UI | Backend | Default | Meaning |
+|---|---|---|---|
+| **Group by header** | `group_by_header` | empty | Separate counter per header value (e.g. `X-User-Id` for per-end-user budgets). |
+| **Counting** | `counting` | Total (input+output) | **Total**, **Input only**, or **Output only**. |
+
+Fields present in the plugin but not edited in the console (left at defaults / API-only)
+include stream usage injection, count cache reads, and custom pricing.
+
+### Runtime
+
+1. At **pre_request**, estimate whether the request would exceed the remaining budget for the
+   scope (and matching per-model rule, if any).
+2. If over limit under **Enforce**:
+   - **Reject** → stop upstream with a budget error.
+   - **Downgrade** → rewrite the request model to **Downgrade to** and continue.
+3. At **post_response**, accrue actual tokens (or estimated dollars) against the counter.
+4. Under **Observe**, over-limit traffic is not blocked; decisions still appear on policy
+   events for Activity / Analytics.
+
+### Example
 
 ```json
 {
   "slug": "token_rate_limiter",
   "settings": {
     "unit": "dollars",
+    "counting": "total",
     "aggregate": { "max": 50, "time_window": "1d" },
     "behavior_on_exceeded": "downgrade_model",
-    "downgrade_to": "gpt-4o-mini"
+    "downgrade_to": "gpt-4o-mini",
+    "rules": [
+      { "model": "gpt-4o*", "max": 20, "time_window": "1d" }
+    ],
+    "group_by_header": "X-User-Id"
   }
 }
 ```
 
-## Choosing a scope
+Token pool example:
 
-- **Global policy** → a gateway-wide ceiling protecting your upstream spend.
-- **Consumer-scoped policy** → per-tenant quotas.
-- **`group_by_header`** → fairness within a tenant (per end-user), without a policy per user.
+```json
+{
+  "slug": "token_rate_limiter",
+  "settings": {
+    "unit": "tokens",
+    "counting": "total",
+    "aggregate": { "max": 1000000, "time_window": "1h" },
+    "behavior_on_exceeded": "reject"
+  }
+}
+```
+
+### Choosing a scope
+
+| Scope | Typical use |
+|---|---|
+| **Gateway-wide** | Org-level spend ceiling. |
+| **Targeted consumers** | Per-tenant or per-app quotas. |
+| **Group by header** | Fairness inside one consumer (per end-user) without a policy per user. |
+
+---
+
+## Related
+
+- [Policies overview](/trustgate/policies/overview)
+- [Request size](/trustgate/policies/request-size) — payload size limits
+- [Analytics](/trustgate/console/analytics) — Cost and Policy tabs
+- [Smart routing](/trustgate/routing/smart-routing) — route by complexity; pair with LLM Budget for spend ceilings
