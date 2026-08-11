@@ -1,0 +1,98 @@
+---
+title: Config sync
+description: How a data plane gets its configuration, what it caches, and how it behaves when the control plane is unreachable.
+---
+
+Config sync is how TrustGate and TrustGuard data planes learn their configuration without holding a database connection to the control plane. It matters operationally because it is the most common reason a hybrid pod runs without ever becoming Ready.
+
+<Note>
+**It is on by default in hybrid and off by default in external.** External installs read configuration from each product's PostgreSQL database instead, so most of this page applies to hybrid only. The external section is at the bottom.
+</Note>
+
+## The shape
+
+The control plane compiles a configuration snapshot and serves it over gRPC. The data plane dials **outward**, authenticates with a bearer token, fetches the snapshot, then holds a watch stream open with a periodic poll as a backstop.
+
+| | Hybrid | External | Central control plane |
+| --- | --- | --- | --- |
+| Enabled by default | **Yes**, derived from the mode | **No** | **Yes**, on each data plane |
+| Configuration source | Snapshots from SaaS | Each product's PostgreSQL | Snapshots from your central control plane |
+| Server | `{product}-configsync.neuraltrust.ai:443` | In-cluster product control plane, if enabled | `{product}-configsync.<controlPlane.domain>:443` |
+| Transport | gRPC over TLS, system roots | gRPC over TLS, chart-generated CA | gRPC over TLS, system roots |
+| Auth | `CONFIG_SYNC_TOKEN` issued by the console | Chart-generated shared token | `CONFIG_SYNC_TOKEN` issued by **your** console |
+
+The direction never reverses. Nothing connects into a data plane's network for configuration, which is why it needs egress rules only.
+
+A [Central control plane](/neuraltrust/deployment/central) is Hybrid's column with a different server. Each data plane still dials outward with a bearer token and caches the snapshot the same way; only the hostname and the console that issued the token change. Because the listener is now dialled from other clusters, the central side must present a certificate those clusters can verify against their system trust store — the chart-generated CA is not enough there.
+
+## Running without a database
+
+When config sync is enabled, the data plane runs **DB-less**: it skips database migrations entirely and serves from a snapshot-backed in-memory store rather than PostgreSQL.
+
+This is worth knowing because it changes which datastores matter. The data plane still requires **Redis** at boot and will refuse to start without it, but it does not need PostgreSQL for its own configuration.
+
+## The two credentials, and why only one is yours
+
+| Credential | Who owns it | What it does |
+| --- | --- | --- |
+| `CONFIG_SYNC_TOKEN` | **You** (hybrid) | Bearer token on every call. The control plane verifies it |
+| `CONFIG_SYNC_LKG_KEY` | **The chart** | AES-256-GCM key encrypting the local snapshot cache |
+
+These get conflated because they sit next to each other in configuration, but they are not comparable. The token is a shared credential that must match a value the control plane knows. The cache key encrypts one local file and is never transmitted anywhere — the control plane neither knows nor needs it.
+
+So the chart generates the cache key, reuses it across upgrades, and delivers it through `envFrom`. You do not create it.
+
+<Warning>
+One exception. Under `global.autoGenerateSecrets: false` or `global.preserveExistingSecrets: true` the chart owns no Secret to generate into, so `CONFIG_SYNC_LKG_KEY` becomes yours to supply alongside the token — base64, decoding to exactly 32 bytes. The data planes refuse to start without it. This is the mode used with Vault, Sealed Secrets, and External Secrets Operator.
+</Warning>
+
+### Rotating the cache key is safe
+
+If the key changes, the data plane cannot decrypt the existing cache file. It logs a warning, discards the file, and refetches from the control plane. It does not crash. Since the file lives on an `emptyDir` and is discarded on every pod restart anyway, the cost is one extra fetch.
+
+## The last-known-good cache
+
+The data plane writes an encrypted snapshot to `/var/lib/trustgate/snapshot.lkg` (or `/var/lib/trustguard/`), written atomically via a temporary file and rename.
+
+On boot it restores this cache first, then converges against the control plane. That ordering is what lets a data plane come up during a control-plane outage — but only if the file survived, and on an `emptyDir` it does not survive a pod restart.
+
+The practical consequence: **a restarted pod with no control-plane connectivity will not become Ready.** The cache protects against the control plane going away while pods keep running, not against a restart during an outage.
+
+After 24 hours the data plane warns that the snapshot is stale but keeps serving it.
+
+## Readiness
+
+Data-plane readiness includes a snapshot check. The pod is live as soon as the process is up, but not Ready until it holds a snapshot.
+
+This is deliberate — it keeps a gateway with no configuration out of the load balancer — and it is why `Running` without `Ready` is the classic config-sync symptom rather than a crash.
+
+## Diagnosing a failure
+
+```bash
+kubectl -n neuraltrust logs deploy/agentgateway-proxy | grep -i 'config.sync\|snapshot'
+```
+
+| Cause | Signal | Fix |
+| --- | --- | --- |
+| Wrong or whitespace-padded token | Authentication rejected | Recreate the Secret; `--from-literal` preserves what you paste |
+| Egress blocked | Connection timeout, backoff retries | Allow `*.neuraltrust.ai:443`, or your own `controlPlane.domain` under a Central control plane |
+| TLS interception | Certificate verification failure | Set `configSync.tlsCa` to your CA bundle |
+| `enabled: true` restated in values | Render error | Remove it; hybrid derives it from the mode |
+
+`configSync.tlsInsecure` exists for local development and is rejected under a deployed `APP_ENV`. It is not a workaround for a certificate problem.
+
+## Authentication modes
+
+The runtimes support three: `shared` (bearer token only), `signed` (JWT), and `composite` (both).
+
+**`shared` is the supported contract today** and the only one the chart configures. Hybrid works because SaaS runs composite on its side and accepts the shared bearer; external works because everything is in one cluster.
+
+Do not switch modes by hand. `signed` and `composite` fail validation at boot when any of the three JWT variables is missing, so a partial rollout takes both gateways down.
+
+## External mode
+
+Everything above describes hybrid. In external mode config sync is **off**, and each product's data plane reads configuration from that product's PostgreSQL database, which its own in-cluster control plane owns and migrates. There is no token, no snapshot cache, and no snapshot gate in the readiness probe.
+
+The chart still generates gRPC TLS material for the product control planes — `agentgateway-admin` and `trustguard-control-plane` — under a deployed `APP_ENV`. Nothing consumes it while config sync is off. It exists so that enabling config sync later needs no certificate work from you.
+
+If you do turn it on with `configSync.enabled: true`, the endpoint defaults to the in-cluster control-plane Service rather than any SaaS host, and the data planes verify against the generated CA. Reach for this only if you have a specific reason; the Postgres-backed default is the supported external path.

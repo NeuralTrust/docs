@@ -1,0 +1,404 @@
+---
+title: Central control plane
+description: Run your own control plane for NeuralTrust data planes spread across several clusters.
+---
+
+**Central control plane** is the topology for organisations that need more than
+one data-plane cluster but only one place to administer them. You run the control
+plane, the console, and the analytics stack; data planes in other clusters enrol
+into your control plane instead of into NeuralTrust SaaS. Select it with
+`global.deploymentMode: saas`.
+
+<Note>
+Do not confuse this with the hosted **SaaS** model, where NeuralTrust operates
+both planes and there is nothing to install. Here the chart renders a control
+plane that behaves like the hosted one, but it is yours and it runs in your
+environment.
+</Note>
+
+Choose it when a single [External](/neuraltrust/deployment/external) install
+cannot work because data has to stay where it was produced — separate business
+units, jurisdictions, or environments — but the console, alerting, and
+cross-cluster reporting have to be in one place. If every workload fits in one
+cluster, External is simpler. If NeuralTrust hosts the control plane, use
+[Hybrid](/neuraltrust/deployment/deployment-models#hybrid).
+
+## What runs in your central cluster
+
+This mode is a superset of External: everything External deploys, plus three
+components and one behaviour change.
+
+| Addition | Purpose |
+| --- | --- |
+| DataBridge | Remote DataAgents hold a long-lived bidirectional gRPC stream here; DataCore queries across them from the cluster-internal side. Stores nothing. |
+| ClickStack ingest gateway | The public OTLP edge. Verifies DataCore-issued RS256 JWTs and stamps the tenant from the verified claim, so an untrusted sender cannot write another tenant's telemetry. |
+| Published config-sync Services | Products in the remote clusters pull their configuration from your central control planes. |
+
+The behaviour change is in DataCore: it runs with a hybrid residency backend
+rather than reading the local ClickHouse for everything, so entitled reads go
+out through DataBridge to the cluster that holds the data.
+
+Everything in [External](/neuraltrust/deployment/external) — the console,
+ClickHouse, AlertEngine, the first administrator, datastore choices — applies
+here unchanged.
+
+## Select the topology
+
+Two values, on the central cluster:
+
+```yaml
+global:
+  deploymentMode: saas
+  platform: kubernetes      # aws | gcp | azure | openshift | kubernetes
+  domain: platform.example.com
+  controlPlane:
+    domain: nt.example.com  # bare DNS suffix — no scheme, port, or path
+```
+
+`global.controlPlane.domain` is what remote clusters dial. Leave it empty to keep
+using NeuralTrust SaaS through `global.saasRegion`.
+
+## Cross-cluster endpoints
+
+The chart derives all four endpoints from that one suffix:
+
+| Endpoint | Served by | Dialled by |
+| --- | --- | --- |
+| `databridge.<domain>:443` | DataBridge southbound Service | DataAgent |
+| `https://telemetry.<domain>` | ClickStack ingest gateway Ingress | ClickStack egress sidecar |
+| `agentgateway-configsync.<domain>:443` | AgentGateway config-sync Service | TrustGate data plane |
+| `trustguard-configsync.<domain>:443` | TrustGuard config-sync Service | TrustGuard data plane |
+
+One value drives all four deliberately. A remote cluster that reached DataBridge
+on your domain but still dialled NeuralTrust for config-sync would half-work, and
+the half that broke would be silent.
+
+Set the same `global.controlPlane.domain` on the central cluster **and** on every
+remote cluster. DNS, certificates, and load-balancer provisioning for these names
+are operator prerequisites.
+
+## Prerequisites
+
+Have these ready before installing. Everything else the chart does for you.
+
+| | What | Notes |
+| --- | --- | --- |
+| 1 | Four DNS records, from the table above, pointing at the central cluster's load balancers | Create them after the first install, once the load balancers have addresses. A private zone is fine. |
+| 2 | A decision on certificates | See [TLS](#tls). The chart-generated option needs nothing from you up front. |
+| 3 | Network reachability from every remote cluster to all four endpoints | VPC peering, Transit Gateway, Direct Connect or the public internet — the chart does not care which. |
+| 4 | An ingress controller in the central cluster | Only the telemetry endpoint uses one. The other three are layer-4 Services. |
+| 5 | One enrolment token per remote data plane, issued from your console | See [Telling data planes apart](#telling-data-planes-apart). |
+
+### Images
+
+A central cluster pulls two images beyond the External set, both from the
+NeuralTrust registry and both covered by the `gcr-secret` pull secret you already
+have — `databridge`, and `opentelemetry-collector-contrib` for the ingest
+gateway. The collector is the same image and tag your Hybrid clusters run as
+their egress sidecar, so a mirror that already carries it needs nothing new.
+
+Mirroring for an air-gapped install works the same as everywhere else, and
+`global.imageRegistry` covers both of these. See
+[Images and registries](/neuraltrust/deployment/images).
+
+## TLS
+
+All four endpoints are dialled from other clusters, and each terminates TLS
+itself. So each needs a certificate covering its hostname, and each remote cluster
+needs to accept it. There are three ways to get there, and you can mix them per
+endpoint.
+
+| Endpoint | Bring your own | cert-manager | Chart-generated |
+| --- | --- | --- | --- |
+| `databridge.<domain>` | `databridge.tls.existingSecret` | `databridge.tls.certManager.enabled` | `databridge.tls.autoGenerate` |
+| `agentgateway-configsync.<domain>` | `agentgateway.configSync.grpcTls.existingSecret` | — | `agentgateway.configSync.expose.selfSignedTls` |
+| `trustguard-configsync.<domain>` | `trustguard.configSync.grpcTls.existingSecret` | — | `trustguard.configSync.expose.selfSignedTls` |
+| `telemetry.<domain>` | `clickstack-ingest-gateway.ingress.tls.secretName` | via `ingress.annotations` | `clickstack-ingest-gateway.ingress.tls.autoGenerate` |
+
+<Warning>
+The chart refuses to render an endpoint with no certificate at all, rather than
+publishing one that nothing outside the cluster can verify. If you see a
+validation error naming DataBridge or one of the config-sync listeners, this is
+why, and the message lists the options above.
+</Warning>
+
+Which option fits depends on how your remote clusters reach the control plane.
+
+### A certificate the data planes already trust
+
+If the data planes traverse the public internet, or you run an internal PKI whose
+root is already in their trust stores, supply the certificates:
+
+```yaml
+databridge:
+  tls:
+    existingSecret: databridge-southbound-tls   # or tls.certManager.enabled: true
+agentgateway:
+  configSync:
+    grpcTls:
+      existingSecret: agentgateway-configsync-tls
+trustguard:
+  configSync:
+    grpcTls:
+      existingSecret: trustguard-configsync-tls
+clickstack-ingest-gateway:
+  ingress:
+    tls:
+      secretName: telemetry-tls
+```
+
+Each certificate must cover its own hostname from the table above. Nothing further
+is needed on the remote side — the default trust store already accepts them.
+
+On AWS, an ACM certificate cannot serve the first three: TLS terminates inside the
+pod and ACM does not export private keys. It can serve the telemetry endpoint,
+which terminates at the ALB. Use cert-manager or your own PKI for the rest.
+
+### Chart-generated, for a control plane on a private network
+
+When remote clusters arrive over VPC peering, Direct Connect or a private link, no
+public trust store is involved and there is nothing to buy. Let the chart mint
+every certificate and distribute the CA as configuration:
+
+```yaml
+databridge:
+  tls:
+    autoGenerate: true
+agentgateway:
+  configSync:
+    expose:
+      selfSignedTls: true
+trustguard:
+  configSync:
+    expose:
+      selfSignedTls: true
+clickstack-ingest-gateway:
+  ingress:
+    enabled: true
+    tls:
+      autoGenerate: true
+```
+
+Each component mints its own CA, so a remote cluster needs all four. Export them
+as a single bundle from the central cluster:
+
+```bash
+./scripts/export-controlplane-ca.sh -n neuraltrust -o controlplane-ca.yaml
+```
+
+Apply that Secret in every remote cluster and point the dialling legs at it, as in
+[Remote data planes](#remote-data-planes).
+
+<Warning>
+Minting a certificate does not make anyone trust it. Until the CA bundle is
+installed on a remote cluster, every handshake from it fails.
+</Warning>
+
+Keypairs survive upgrades, because agents hold long-lived streams that a reissue
+would drop, and are reissued only when the names they cover change — which is how
+retargeting `global.controlPlane.domain` reaches the certificates. Rerun the export
+script after any such change.
+
+### Keeping an endpoint off a load balancer
+
+To reach a config-sync listener over peering without publishing a Service at all,
+set `<product>.configSync.expose.enabled: false` and route to the ClusterIP
+yourself.
+
+For endpoints that do get a load balancer, prefer an internal scheme when the
+callers are on a private network — see [Cloud notes](#cloud-notes).
+
+## Telling data planes apart
+
+DataBridge has to know which data plane is which. Two authentication modes do
+that:
+
+| `databridge.auth.mode` | How it works |
+| --- | --- |
+| `introspect` (default) | DataBridge asks your in-cluster DataCore about each enrolment token |
+| `jwt` | DataBridge verifies DataCore-signed enrolment JWTs locally, with no round trip |
+
+<Warning>
+`token` and `dev` are rejected in this mode. Both authenticate every data plane
+with one shared credential and then trust whichever tenant an agent claims for
+itself, which would let any enrolled data plane read another's data.
+</Warning>
+
+Mint one enrolment token per remote data plane, each with its own instance ID.
+Reusing a single token across clusters collapses them into one identity in every
+query result and audit trail, and nothing later signals that it happened.
+
+## Secrets
+
+Four credentials come from the shared platform Secret and are generated for you
+when the chart owns secrets:
+
+| Key | Used by |
+| --- | --- |
+| `ENROLMENT_INTROSPECTION_TOKEN` | DataCore — compares what DataBridge presents |
+| `DATACORE_SERVICE_TOKEN` | DataBridge — alias of the above, must hold the identical value |
+| `ENROLMENT_SIGNING_SECRET` | DataCore — signs enrolment tokens |
+| `TELEMETRY_JWT_PRIVATE_KEY_PEM` | DataCore — RS256 key for the OTLP tokens the ingest gateway verifies |
+
+If you pre-provision secrets yourself — `global.preserveExistingSecrets`,
+`global.autoGenerateSecrets: false`, or `global.platformSecret.existingSecret` —
+all four must be present, and the two token keys must hold one identical value.
+When they drift, every agent connection returns 401 with nothing visibly wrong on
+either side. Running `./create-secrets.sh` with `DEPLOYMENT_MODE=saas` writes all
+four correctly, including the alias.
+
+See [Secrets](/neuraltrust/deployment/secrets) for how the shared platform Secret
+works generally.
+
+## Remote data planes
+
+Each remote cluster is an ordinary Hybrid install pointed at your domain instead
+of at NeuralTrust:
+
+```yaml
+global:
+  deploymentMode: hybrid
+  controlPlane:
+    domain: nt.example.com
+  products:
+    trustgate: true
+    trustguard: true
+```
+
+Its enrolment and config-sync tokens are issued by **your** console, not by
+[app.neuraltrust.ai](https://app.neuraltrust.ai/en/v2/). Everything else in the
+[Hybrid quick start](/neuraltrust/deployment/quickstart) applies unchanged.
+
+### Trusting a chart-generated control plane
+
+Only needed when the central cluster serves chart-generated certificates. Apply the
+bundle produced by `scripts/export-controlplane-ca.sh`, then point all three
+dialling legs at it:
+
+```yaml
+global:
+  customCaCert:
+    enabled: true
+    secretName: controlplane-ca      # mounts ca.crt at /etc/ssl/certs/custom-ca.crt
+  clickstack:
+    egress:
+      tlsCaSecretName: controlplane-ca
+dataagent:
+  databridge:
+    tlsCa: /etc/ssl/certs/custom-ca.crt
+agentgateway:
+  configSync:
+    tlsCa: /etc/ssl/certs/custom-ca.crt
+trustguard:
+  configSync:
+    tlsCa: /etc/ssl/certs/custom-ca.crt
+```
+
+Three separate settings because the clients read their trust store differently.
+DataAgent and the config-sync clients take a file path, so they use the mount that
+`global.customCaCert` provides. The telemetry collector configures TLS from its own
+config file and ignores that mount, so it takes a Secret name instead.
+
+<Warning>
+`tlsCa` **replaces** the system roots on that connection rather than adding to
+them. If a leg also has to trust something else — a TLS-intercepting corporate
+proxy, for instance — put every CA in one bundle.
+</Warning>
+
+<Note>
+Before rolling out, confirm from inside each remote cluster that it can reach all
+four central endpoints. A data plane whose egress is blocked does not crash — it
+starts cleanly, serves its last-known-good configuration, and quietly stops
+receiving updates. See the
+[network allowlist](/neuraltrust/deployment/network#central-control-plane-endpoints).
+</Note>
+
+## Cloud notes
+
+Nothing in the chart is cloud-specific; the LoadBalancer Services take free-form
+annotations. On EKS with the AWS Load Balancer Controller:
+
+```yaml
+databridge:
+  service:
+    southbound:
+      type: LoadBalancer
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: nlb
+        # internal for peered or Direct Connect callers; internet-facing only
+        # when the data planes genuinely traverse the internet.
+        service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      # NAT egress ranges of your remote clusters. Without this the endpoint
+      # accepts connections from anywhere the load balancer is reachable.
+      loadBalancerSourceRanges: ["10.20.0.0/16"]
+
+agentgateway:
+  configSync:
+    expose:
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: nlb
+        service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+      loadBalancerSourceRanges: ["10.20.0.0/16"]
+
+clickstack-ingest-gateway:
+  ingress:
+    enabled: true
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internal
+```
+
+Use the same shape for `trustguard.configSync.expose`. GKE already gives a layer 4
+passthrough load balancer for a plain `LoadBalancer` Service; its private
+equivalent is `networking.gke.io/load-balancer-type: "Internal"`, and on AKS it is
+`service.beta.kubernetes.io/azure-load-balancer-internal: "true"`.
+
+Three things worth knowing on any cloud:
+
+- **Use a layer 4 load balancer for DataBridge and config-sync.** Both carry
+  long-lived gRPC streams with TLS terminated in the pod. A layer 7 load balancer
+  would have to re-terminate, and its idle timeout will cut streams that are
+  healthy but quiet.
+- **The ingest gateway is plain HTTP**, so it goes through an Ingress and a layer 7
+  load balancer is fine. It is the only one of the four that is not layer 4.
+- **An internal scheme keeps the whole topology off the public internet**, which is
+  what makes chart-generated certificates a sound production choice rather than a
+  shortcut.
+
+Central datastores — managed PostgreSQL, Redis, and ClickHouse — follow the normal
+[External guidance](/neuraltrust/deployment/external#datastores).
+
+## Install
+
+Start from the maintained
+[`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform)
+chart, then layer your platform, domain, ingress, TLS, and datastore choices:
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust --create-namespace \
+  --set global.deploymentMode=saas \
+  --set global.controlPlane.domain=nt.example.com \
+  -f your-values.yaml
+```
+
+Install and verify the central cluster first, then bring up one remote cluster as
+a canary before the rest.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Deployment models" icon="diagram-project" href="/neuraltrust/deployment/deployment-models">
+    Compare SaaS, Hybrid, External, and Central responsibilities.
+  </Card>
+  <Card title="Network allowlist" icon="network-wired" href="/neuraltrust/deployment/network">
+    Endpoints a remote data plane must reach.
+  </Card>
+  <Card title="Config sync" icon="arrows-rotate" href="/neuraltrust/deployment/config-sync">
+    How remote products pull configuration from your control plane.
+  </Card>
+  <Card title="Secrets" icon="key" href="/neuraltrust/deployment/secrets">
+    Credential handling, including the four cross-cluster keys.
+  </Card>
+</CardGroup>
