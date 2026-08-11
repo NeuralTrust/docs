@@ -1,25 +1,21 @@
 ---
 title: "Fallback"
-description: "Retry across registries when an upstream fails — configurable triggers, an attempt/latency budget, and an ordered fallback chain."
+description: "Retry across registries when an upstream fails — configure the ordered chain and triggers on the consumer Routing tab."
 ---
 
 **Fallback** turns a single upstream failure into a retry on the next registry instead of
-an error to the client. It is configured per [consumer](/trustgate/concepts/consumers)
-(inline routing) and engages when a forward fails with a matching trigger.
+an error to the client. Configure it per [consumer](/trustgate/concepts/consumers) on the
+**Routing** tab when **Strategy** is **Fallback** (or when fallback is enabled alongside
+your routing setup).
 
-Requests that name a concrete model (`gpt-4o-mini` or `@openai/gpt-4o`) are pinned to one
-registry and are **not** retried elsewhere, even with fallback enabled — use `model: "auto"`
-to get failover. See
-[Model resolution](/trustgate/routing/model-resolution#pinning-which-forms-load-balance).
+## Configure fallback in the UI
 
-```json
-"fallback": {
-  "enabled": true,
-  "triggers": ["http_5xx", "http_429", "timeout", "provider_error"],
-  "budget": { "max_attempts": 3, "max_total_latency": "20s" },
-  "chain": ["<primary_registry>", "<secondary_registry>", "<tertiary_registry>"]
-}
-```
+1. Open **Consumers** → select a consumer → **Routing**.
+2. Set **Strategy** to **Fallback** (under **Direct**).
+3. Build the **chain** — the ordered list of registries to try.
+4. Choose **triggers** (which failures start a retry) and optional **budget** (max attempts
+   / total latency).
+5. Save.
 
 ## Triggers
 
@@ -27,27 +23,28 @@ A retry only happens when the failure matches a configured trigger:
 
 | Trigger | Fires on |
 |---|---|
-| `http_5xx` | Upstream 5xx responses. |
-| `http_429` | Upstream rate-limit responses. |
-| `timeout` | Upstream timeouts. |
-| `provider_error` | Provider-reported errors. |
-| `plugin_rejection` | A policy rejected the request (the trigger value is `plugin_rejection`). |
+| HTTP 5xx | Upstream 5xx responses. |
+| HTTP 429 | Upstream rate-limit responses. |
+| Timeout | Upstream timeouts. |
+| Provider error | Provider-reported errors. |
+| Plugin rejection | A policy rejected the request. |
 
 ## Budget
 
-The `budget` caps how hard TrustGate tries:
+The budget caps how hard TrustGate tries:
 
-- **`max_attempts`** — total forward attempts (including the first).
-- **`max_total_latency`** — wall-clock ceiling across all attempts.
+- **Max attempts** — total forward attempts (including the first).
+- **Max total latency** — wall-clock ceiling across all attempts.
 
 When either limit is reached, the last error is returned to the client.
 
 ## The chain
 
-`chain` is the ordered list of registries to try. On each failure TrustGate moves to the
-next entry and adds the failed registry to an **exclude set**, so the
-[load balancer](/trustgate/routing/load-balancing) never re-picks an already-failed
-registry within the same request.
+The chain is the ordered list of registries to try. On each failure TrustGate moves to the
+next entry and does not re-pick an already-failed registry within the same request.
 
-> Use fallback to span providers (e.g. OpenAI → Azure OpenAI → Bedrock) for resilience, or
-> to degrade from a premium model to a cheaper one under load.
+> Use fallback to span providers (for example OpenAI → Azure OpenAI → Bedrock) for
+> resilience, or to degrade from a premium model to a cheaper one under load.
+
+See also [Load balancing](/trustgate/routing/load-balancing) and
+[Model resolution](/trustgate/routing/model-resolution).

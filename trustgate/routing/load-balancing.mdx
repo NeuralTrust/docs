@@ -1,149 +1,60 @@
 ---
 title: "Load balancing"
-description: "Distribute traffic across a consumer's routes — one registry and model pair per member — with round-robin, weighted, least-connections, random, semantic, or smart-routing strategies."
+description: "Distribute traffic across a consumer's registries from the console — round-robin, weighted, least-connections, random, or smart routing by prompt complexity."
 ---
 
 When a [consumer](/trustgate/concepts/consumers) can reach more than one
-[registry](/trustgate/concepts/registries), the load balancer picks which one serves each
-request. List the registries on the consumer with `registry_ids`, then choose how traffic is
-distributed with `lb_config`.
-
-What the balancer distributes over is a **route**: the pair of a registry and the model that
-route serves. A member without a `model` is the registry's single route and uses the default
-from `model_policies`; a member with a `model` pins that route, which is what lets the same
-registry appear several times in one pool with different models.
-
-The load balancer only runs when the request leaves the choice open — `model: "auto"`. A
-request naming a concrete model (`gpt-4o-mini` or `@openai/gpt-4o`) is pinned to the first
-registry that allows it and bypasses the balancer entirely; see
-[Model resolution](/trustgate/routing/model-resolution#pinning-which-forms-load-balance).
+[registry](/trustgate/concepts/registries), load balancing picks which one serves each
+request. Configure it on the consumer under **Routing** → **Strategy** → **Load balancing**.
 
 ## Strategies
 
-| Algorithm | How it picks |
+| Strategy in the UI | How it picks |
 |---|---|
-| `round-robin` | Rotates through routes in order. |
-| `weighted-round-robin` | Interlaces picks by route weight (`1..100`). |
-| `least-connections` | Picks the route with the fewest in-flight requests. |
-| `random` | Uniform random pick. |
-| `semantic` | Embeds the prompt and routes to the registry whose description is the closest cosine match — requires an embedding config. |
-| `smart-routing` | Scores the prompt's complexity and sends it to the route configured for that score — see [Smart routing](#smart-routing). |
+| **Smart routing** | Routes by prompt complexity across **tiers** (each tier = complexity label + registry + model). Recommended multi-model path. Requires **at least two tiers**. |
+| **Round robin** | Cycles evenly across pool members. |
+| **Weighted** | Sends more traffic to members with higher weights. |
+| **Least connections** | Prefers the member with the fewest in-flight requests. |
+| **Random** | Uniform random pick. |
 
-## Configuration (`lb_config`)
+**Simple routing** and **Fallback** live under the **Direct** group in the same Strategy
+dropdown — they are not load-balancing algorithms.
 
-Enable the balancer, pick its algorithm, and declare one member per route:
+## Configure load balancing
 
-```json
-"lb_config": {
-  "enabled": true,
-  "algorithm": "weighted-round-robin",
-  "members": [
-    { "registry_id": "<openai>", "model": "gpt-4o",      "weight": 70 },
-    { "registry_id": "<openai>", "model": "gpt-4o-mini", "weight": 30 },
-    { "registry_id": "<anthropic>" }
-  ]
-}
-```
+1. Open **Consumers** → select a consumer → **Routing**.
+2. Set **Routing mode** to **Static**.
+3. Open **Strategy** and choose an algorithm under **Load balancing**.
+4. Add pool members (registries / models). For **Weighted**, set each member's weight.
+5. For **Smart routing**, open **Complexity tiers** and add at least two tiers (for example
+   Simple → cheaper model, Hard → stronger model). Each tier can use a different model even
+   when registries are the same.
+6. Save.
 
-That pool has three routes: two on the OpenAI registry — one per model, with 70/30 of the
-share between them — and one on the Anthropic registry serving its policy default.
-
-| Field | Meaning |
-|---|---|
-| `registry_id` | The registry this route sends to. Must already be attached to the consumer and have an entry in `model_policies`. |
-| `model` | Pins the route to one model. Required on **every** member that shares a registry with another member. |
-| `models` | Scopes which models this member serves, narrowing the registry's `allowed` list. |
-| `weight` | Relative share for `weighted-round-robin`, `1..100`. Defaults to the registry's weight on the consumer. |
-
-Rules enforced when you save the consumer:
-
-- Every `(registry_id, model)` pair must be unique — two members cannot describe the same route.
-- A registry that appears more than once requires a `model` on each of its members.
-- `model` must be in that member's `models` when it lists any, and allowed by `model_policies`.
-- The `semantic` algorithm additionally needs an `embedding_config`, and `smart-routing` a
-  `smart_routing` block. Neither is valid for the other algorithms.
+Connect snippets for load-balanced consumers use `"model": "auto"` so clients do not need
+to name a model — see [Model resolution](/trustgate/routing/model-resolution).
 
 ## Weights
 
-For weighted round-robin, each route carries a weight from **1 to 100** in `lb_config`. A
-route at weight 70 receives roughly 70% of the share of one at weight 30.
+For **Weighted**, each pool member carries a weight from **1 to 100**. A member at 70
+receives roughly 70% of the share of one at 30. Set weights in the registry / member rows
+in the Routing editor.
 
-When a member omits `weight`, the route inherits the weight of its registry on the consumer,
-set when you attach it:
+## Smart routing tiers
 
-```bash
-POST /v1/gateways/{gateway_id}/consumers/{id}/registries/{registry_id}
-{ "weight": 70 }
-```
+| Column | Meaning |
+|---|---|
+| **Complexity** | Simple / Medium / Hard (unique labels per consumer). |
+| **Registry** | Upstream provider connection. |
+| **Model** | Model used when that complexity band is selected. |
 
-Use the attach weight for one route per registry; when a registry serves several routes, give
-each member its own `weight`, since a per-registry weight cannot tell them apart.
-
-## Smart routing
-
-Smart routing asks the firewall to score the prompt's complexity between `0` and `1`, then
-sends the request to the route whose tier covers that score. Each tier declares the lowest
-score it accepts, and the highest matching tier wins:
-
-```json
-"lb_config": {
-  "enabled": true,
-  "algorithm": "smart-routing",
-  "members": [
-    { "registry_id": "<openai>", "model": "gpt-4o-mini" },
-    { "registry_id": "<openai>", "model": "gpt-4o" }
-  ],
-  "smart_routing": {
-    "tiers": [
-      { "min_score": 0,   "registry_id": "<openai>", "model": "gpt-4o-mini" },
-      { "min_score": 0.5, "registry_id": "<openai>", "model": "gpt-4o" }
-    ]
-  }
-}
-```
-
-Cheap prompts go to `gpt-4o-mini`; anything scoring `0.5` or above goes to `gpt-4o` on the
-same registry.
-
-- Each tier must target a registry that is a pool member.
-- `model` selects which route of that registry the tier means. It is **required** when the
-  pool declares that registry more than once, and must match one of its routes.
-- Cover the bottom of the range with a `min_score: 0` tier so every request has a route.
+Tiers map prompt complexity scores to the registry and model for that band. Add tiers with
+**Add tier**; the UI blocks save until at least two valid tiers exist.
 
 ## Health checks
 
-LLM registries can define `health_checks`; unhealthy registries are skipped by the load
-balancer until they recover, so traffic shifts to healthy upstreams automatically.
+LLM registries can define health checks in the Registry editor. Unhealthy registries are
+skipped by the load balancer until they recover.
 
-## Session affinity
-
-When the gateway has [session affinity](/trustgate/concepts/gateways#session-affinity)
-enabled, requests carrying a session id are pinned to the same selection across a
-conversation.
-
-## Which route served a request
-
-Every proxied response advertises the route that answered, so callers never have to infer it:
-
-| Header | Value |
-| --- | --- |
-| `X-Selected-Provider` | Provider of the registry that served the request (`openai`, `anthropic`, …). |
-| `X-Selected-Registry` | Id of that registry, which tells apart two registries of the same provider. |
-| `X-Selected-Model` | Model the gateway sent upstream, after `auto` and pool resolution. |
-
-They are also set on streamed responses, before the first chunk, and on upstream errors, so a
-failing route is identifiable from the response alone.
-
-<Note>
-  Read the served model from `X-Selected-Model` rather than from the response body: some
-  providers echo no model at all, and with `model: "auto"` the client never sent the name the
-  pool resolved to.
-</Note>
-
-## Observability
-
-Every attempt records the model of the route that served it (`route_model`), so activity data
-distinguishes two routes of the same registry.
-
-Pair load balancing with [fallback](/trustgate/routing/fallback) so a failed pick retries
-the next route instead of erroring.
+Pair load balancing with [fallback](/trustgate/routing/fallback) so a failed pick can retry
+another path instead of erroring immediately.

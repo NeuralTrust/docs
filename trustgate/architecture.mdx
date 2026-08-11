@@ -18,31 +18,31 @@ argument, so the planes scale independently.
 
 | Plane | Port | Responsibility |
 |---|---|---|
-| **Admin** | `8080` | REST CRUD for gateways, registries, consumers, auth, policies, roles, and catalogs. Applies DB migrations on boot. |
+| **Admin** | `8080` | Control plane REST API for gateways, registries, consumers, auth, policies, roles, and catalogs. Used by the NeuralTrust console and direct [Admin API](/trustgate/api/overview) callers. Applies DB migrations on boot. |
 | **Proxy** | `8081` | Request routing, auth validation, policy execution, load balancing, provider forwarding, streaming, telemetry. |
 | **MCP** | `8082` | Model Context Protocol server: exposes registered [MCP](/trustgate/mcp/overview) servers and tools to agents, with an OAuth2 authorization server. |
 
-The Admin plane is the **control plane** (you configure it); the Proxy and MCP planes are
-the **data plane** (your traffic flows through them).
+Most teams configure TrustGate from the **NeuralTrust console**. The Admin plane is the
+control surface (console + REST); the Proxy and MCP planes are the **data plane** your
+traffic flows through.
 
 ## Request lifecycle (proxy)
 
-1. A client calls the proxy with a consumer API key (or OAuth2/OIDC token, or client cert).
+1. A client calls the proxy with a consumer API key or OAuth2/OIDC token.
 2. TrustGate resolves the **gateway** (from `X-AG-Gateway-Slug` or the host), the
    **consumer** (from the URL `slug`), and the applicable **policies**.
 3. The applicable **policies** run at their **stages** — rate limit, LLM budget,
-   request size, semantic cache, guardrails — sequentially or in parallel.
-4. The **load balancer** picks a healthy registry from the consumer's registries (round-robin,
-   weighted, least-connections, random, or semantic), with fallback.
+   request size, guardrails, and other attached policies — sequentially or in parallel.
+4. The **load balancer** picks a healthy registry from the consumer's pool (round-robin,
+   weighted, least-connections, random, or smart routing), with fallback.
 5. The request is forwarded to the selected **provider adapter** (OpenAI, Anthropic,
    Bedrock, …), streaming when the client asked for it.
-6. The response returns, the semantic cache is populated, and a **telemetry** event is
-   exported over OTLP.
+6. The response returns and a **telemetry** event is emitted to Kafka.
 
 ```text
 Client ─▶ Proxy :8081
    │  middleware: request-id · CORS · access-log · metrics · recover · security-headers
-   │  auth: API-key hash compare · OAuth2 / OIDC JWT · mTLS
+   │  auth: API-key hash compare · OAuth2 / OIDC JWT
    ├─ resolve gateway (header/subdomain) → consumer (slug) → policies
    ├─ policies run at their stages (parallel or sequential)
    ├─ load balancer → registry (+ fallback chain)

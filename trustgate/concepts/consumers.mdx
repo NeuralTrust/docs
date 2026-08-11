@@ -1,68 +1,113 @@
 ---
 title: "Consumers"
-description: "A consumer is the calling application's identity — it owns routing, credentials, and model policies, and its slug is the proxy URL path segment."
+description: "A consumer is the calling application's identity — create it in the console to set routing, credentials, and model policies, then copy Connect snippets for your apps."
 ---
 
-A **consumer** is the runtime identity of a calling application. It is what holds
-credentials and routing configuration, and its **`slug`** (a short, URL-safe random
-string) is the first path segment on the proxy:
+A **consumer** is the runtime identity of a calling application. It holds credentials and
+routing configuration. Its **slug** is the first path segment on the proxy URL shown in the
+**Connect** tab.
 
-```text
-POST /{consumer_slug}/v1/chat/completions
-```
+Each consumer belongs to one gateway and has a type:
 
-Each consumer belongs to one gateway and has a `type`:
-
-| `type` | Traffic |
+| Type | Traffic |
 |---|---|
-| `LLM` | Chat / Responses / Messages (default). |
-| `MCP` | MCP tool endpoints. |
-| `A2A` | Agent-to-agent (planned). |
+| **LLM** | Chat / Responses / Messages (default). |
+| **MCP** | MCP tool endpoints. |
 
-## Routing modes
+## Consumers list
 
-A consumer routes in one of two modes:
+Open **Agent Gateway** → **Consumers**.
 
-| Mode | Routing config lives on | Auth |
+| Capability | Notes |
+|---|---|
+| Search / filter | By name; protocol filter **LLM** / **MCP**. |
+| Columns | Name, Protocol, Auth method, Policies, Status (**Active** / **Paused**), Created. |
+| Row actions | Open detail, edit, delete. |
+| **Pause** / **Resume** | Temporarily stop authentication without deleting. |
+
+## Create a consumer
+
+1. Open **Consumers** → **New Consumer**.
+2. Work through the create tabs:
+   - **General** — **Name**, **Protocol** (**LLM** or **MCP**), optional initial target registry.
+   - **Auth** — method + entity (see below). Copy API keys when shown (once only).
+   - **Routing** — mode + strategy + registries/models (or MCP target).
+   - **Policies** — optional **Add Policy** or **Clone policies** from another consumer.
+3. Save. The success step and the detail **Connect** tab show ready-to-use snippets.
+
+### Detail tabs
+
+| Tab | Purpose |
+|---|---|
+| **General** | Name, protocol, slug / route metadata. |
+| **Auth** | Link Identity auth entities; create/regenerate API keys (LLM). |
+| **Routing** | Routing mode, strategy, registries, smart tiers, fallback, roles. |
+| **Policies** | Attach, detach, clone targeted policies (globals still apply). |
+| **Connect** | Base URL, headers, model hints (`auto` vs explicit), client snippets. |
+
+## Routing mode
+
+| Mode | UI label | Behavior |
 |---|---|---|
-| **`inline`** (default) | The consumer directly — `registry_ids`, `lb_config`, `fallback`, `model_policies`. | LLM: `api_key`, `oauth2`, or `oidc`. MCP: `oauth2`. |
-| **`role_based`** | The consumer's [roles](/trustgate/concepts/roles); roles are selected from OIDC token claims. | A single `oauth2` or `oidc` credential. |
+| `inline` | **Static** | Strategy, registries, fallback, and model policies live on the consumer. |
+| `role_based` | **Identity-based** | [Roles](/trustgate/concepts/roles) selected from OIDC/OAuth claims decide registries and models. Attach roles under Routing; manage role definitions under [Identity](/trustgate/concepts/identity). |
 
-### Inline routing
+## Strategies (Static routing)
 
-Inline consumers own their routing directly:
-
-| Field | Meaning |
+| Strategy | When to use |
 |---|---|
-| `registry_ids` | The [registries](/trustgate/concepts/registries) this consumer may use. |
-| `registry_weights` | Per-registry weight (`1..100`) for weighted load balancing, used when a pool member declares none. |
-| `lb_config` | Load-balancing algorithm and members — one member per `(registry, model)` route, so a registry can appear several times. See [Load balancing](/trustgate/routing/load-balancing). |
-| `fallback` | Ordered retry chain across registries — see [Fallback](/trustgate/routing/fallback). |
-| `model_policies` | Per-registry allow-list and default model — see [Model resolution](/trustgate/routing/model-resolution). |
+| **Simple routing** | Send traffic to one or more registries without load balancing. |
+| **Fallback** | Try registries in order until one succeeds. |
+| **Smart routing** | Route by prompt complexity across tiers and models (recommended multi-model path). |
+| **Round robin** | Cycle evenly across pool members. |
+| **Weighted** | Send more traffic to members with higher weights. |
+| **Least connections** | Prefer the member with the fewest in-flight requests. |
+| **Random** | Pick a pool member at random. |
 
-### Model policies
+Load-balancing strategies (including smart routing) are grouped under **Load balancing** in
+the Strategy dropdown; **Simple routing** and **Fallback** under **Direct**.
 
-`model_policies` maps a registry to `{ allowed: string[], default: string }`. `allowed`
-restricts which models a consumer may request from that registry (empty = all); `default`
-is used when the request names no model and must be in `allowed`.
+**MCP consumers** always bind registries/tools directly — they do not show the Strategy
+selector or load-balancing algorithms.
 
-## Credentials, headers, and MCP
+### Providers editor
 
-| Field | Meaning |
-|---|---|
-| `auth_ids` | The [auth credentials](/trustgate/concepts/auth) that can authenticate as this consumer. |
-| `headers` | Static headers injected on forwarded requests. |
-| `mcp` | For MCP consumers: `{ toolkit, fail_mode }`. |
-| `active` | Whether the consumer can authenticate at all. |
+For simple routing and non-smart load balancing, use **Add Registry**, set optional
+**weight** (weighted strategy), choose **all models/tools** or **restrict** via the model
+browser, and set a **default model** when needed.
 
-## Managing consumers
+### Smart routing
 
-CRUD lives under `/v1/gateways/{gateway_id}/consumers`, plus attach/detach sub-resources:
+Use **Complexity tiers** (at least two): **Simple** / **Medium** / **Hard**, each with a
+registry and model. Same registry can appear on multiple tiers with different models.
 
-- `…/{id}/registries/{registry_id}` — attach a registry (body `{ "weight": 1..100 }`).
-- `…/{id}/roles/{role_id}` — attach a role (role-based mode).
-- `…/{id}/auths/{auth_id}` — attach an auth credential.
-- `…/{id}/policies/{policy_id}` — attach a [policy](/trustgate/policies/overview).
+Details: [Load balancing](/trustgate/routing/load-balancing),
+[Fallback](/trustgate/routing/fallback),
+[Model resolution](/trustgate/routing/model-resolution).
 
-See the [Consumers API](/trustgate/api/overview).
+## Model policies
 
+For each bound registry you can:
+
+- Allow **all models**, or **filter** to a subset.
+- Set a **default model** used when the client does not name one.
+
+When the consumer uses load balancing or smart routing, Connect snippets use
+`"model": "auto"` so the gateway picks the registry and model. With multiple registries
+and no load balancing, clients must specify the model themselves.
+
+## Connect tab
+
+Open a consumer → **Connect** for:
+
+- Gateway host (SaaS or your Private LLM URL)
+- Consumer slug
+- Auth header examples (`X-AG-API-Key`, and `X-AG-Gateway-Slug` on Private)
+- Language snippets (cURL, Python, Node, …)
+
+The provider credential remains in TrustGate. Keep the consumer API key secret.
+
+## Edit routing later
+
+Open the consumer → **Routing** to change strategy, registries, smart-routing tiers,
+fallback chain, or identity-based roles without recreating the consumer.
