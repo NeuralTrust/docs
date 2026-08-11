@@ -1,78 +1,133 @@
 ---
 title: "Tool governance"
-description: "Control agent tools at the gateway — allowlists, call validation, schema transforms, injection, and per-tool rate limits from the Policies catalog."
+description: "Govern LLM function tools at the gateway — inject operator-authored tools, and rate-limit tool executions. Distinct from MCP toolkit grants on consumers and roles."
 ---
 
-For agent and function-calling traffic, TrustGate can govern **tools** with several catalog
-policies. Create them under **Policies** → **Catalog**, or attach them from a consumer
-**Policies** tab. Scope each policy **gateway-wide** or **targeted**.
+For **LLM** function-calling traffic, TrustGate can shape which tools the model sees and
+how often they run. Create policies under **Policies** → **Catalog**, or attach them from a
+consumer **Policies** tab.
 
-| Policy (`slug`) | What it does |
+| Policy in the catalog | Slug | Catalog group | What it does |
+|---|---|---|---|
+| **[Tool Injection](#tool-injection)** | `tool_injection` | Tool Governance | Append operator-authored function tools to the request before the model runs. |
+| **[Per-Tool Rate Limiter](#per-tool-rate-limiter)** | `per_tool_rate_limiter` | Traffic Control | Limit how often a tool name/pattern may execute (LLM and MCP). |
+
+These policies apply to the **LLM request `tools[]` / tool-call path** (and, for the rate
+limiter, to **MCP tool executions**). They are **not** the same as MCP **toolkit** grants
+on a consumer or [role](/trustgate/concepts/roles), which control which MCP server tools an
+agent may list and call — see [MCP](/trustgate/mcp/overview).
+
+---
+
+## Tool Injection
+
+**`tool_injection`** injects operator-authored **function** tools into the outbound request
+so the model can call them. It does **not** filter or deny client-supplied tools — it only
+adds gateway tools (and resolves name collisions).
+
+### Configure in the console
+
+1. **Policies** → **Catalog** → **Tool Injection** (Tool Governance group).
+2. Under **Inject tools**, add one or more functions:
+   - **Name** (required)
+   - **Description** (optional — helps the model choose when to call it)
+   - **Parameters** (optional JSON Schema object for arguments)
+3. Set **On conflict** when an injected name collides with a client tool.
+4. Set mode and scope (**gateway-wide** or **targeted** consumers), then save.
+
+### Settings
+
+| Setting | Meaning |
 |---|---|
-| [`tool_allowlist`](#tool-allowlist) | Allow or deny tools in the request `tools[]` array. |
-| [`tool_call_validation`](#tool-call-validation) | Validate / redact tool calls the model returns. |
-| [`tool_definition_transformation`](#tool-definition-transformation) | Patch schemas, override descriptions, inject tools. |
-| [`per_tool_rate_limiter`](#per-tool-rate-limiter) | Rate-limit individual tool names/patterns. |
+| **Inject tools** | At least one function tool. Each entry is a `function` with `name`, optional `description`, optional `parameters` schema. |
+| **On conflict** | When an injected name already exists on the request: **Gateway tool wins** (`gateway_wins`, default), **Client tool wins** (`client_wins`), or **Reject the request** (`reject`). |
 
-MCP tool **grants** on consumers/roles (which MCP tools an agent may see) are separate —
-configure those on the consumer or [role](/trustgate/concepts/roles), and see
-[MCP](/trustgate/mcp/overview).
+Stage: `pre_request`. Protocol: **LLM** only.
+
+```json
+{
+  "slug": "tool_injection",
+  "settings": {
+    "inject_tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_internal_status",
+          "description": "Return internal service health",
+          "parameters": {
+            "type": "object",
+            "properties": { "service": { "type": "string" } }
+          }
+        }
+      }
+    ],
+    "on_conflict": "gateway_wins"
+  }
+}
+```
 
 ---
 
-## Tool allowlist
+## Per-Tool Rate Limiter
 
-**`tool_allowlist`** — allow or deny patterns for tools the client sends.
+**`per_tool_rate_limiter`** counts **real tool executions** (not generic HTTP requests) and
+enforces one or more time windows per tool pattern. It works for **LLM** tool calls and
+**native MCP** tool traffic.
 
-Configure in the UI: allow/deny lists, empty-list behavior (reject all vs allow all), and
-match patterns for tool names.
+In the catalog it lives under **Traffic Control** (not Tool Governance), next to the
+request rate limiter.
 
----
+### Configure in the console
 
-## Tool call validation
+1. **Policies** → **Catalog** → **Per-Tool Rate Limiter**.
+2. Add **rules**. The **first rule whose tool pattern matches** a tool call wins.
+3. For each rule set:
+   - **Tool** — glob against the tool name (e.g. `execute_code*`, `search_*`)
+   - **Windows** — one or more `{ duration, max }` pairs (e.g. `1m` / 60, `1h` / 500)
+   - Optional per-rule **behavior** (otherwise the policy default applies)
+4. Set the **default behavior** when a window is exceeded.
+5. Save.
 
-**`tool_call_validation`** — inspect tool calls in the model response.
+### On exceed (behavior)
 
-UI validators can include:
-
-| Validator | Use |
+| Behavior | Effect |
 |---|---|
-| Allowlist | Only named tools may be called. |
-| JSON schema | Arguments must match a schema. |
-| Semantic | Embedding/similarity checks on arguments. |
-| Regex | Pattern match on name or arguments. |
-| Denylist | Block specific tools or argument shapes. |
+| **Reject response** (`reject_response`) | Fail the call (default). On **MCP**, this is the only behavior that can be attached — the gateway is the tool caller, so the request cannot be rewritten. |
+| **Inject error result** (`inject_error_result`) | Rewrite the response with an error tool result (**LLM**, response path). |
+| **Strip tool from request** (`strip_tool_from_request`) | Remove the tool from the next request (**LLM**, request path). |
 
-Choose enforce vs observe on the policy **Scope** section.
+Counters follow policy scope: **gateway-wide** for global policies, otherwise **per
+consumer**.
+
+```json
+{
+  "slug": "per_tool_rate_limiter",
+  "settings": {
+    "behavior_default": "reject_response",
+    "rules": [
+      {
+        "tool": "execute_code*",
+        "windows": [{ "duration": "1m", "max": 10 }]
+      }
+    ]
+  }
+}
+```
 
 ---
 
-## Tool definition transformation
+## What is not a catalog policy
 
-**`tool_definition_transformation`** — rewrite the tool definitions the model sees.
-
-| Capability | Meaning |
+| Control | Where it lives |
 |---|---|
-| Schema / description patches | Override provider tool metadata. |
-| Inject tools | Add operator-authored function tools (similar to legacy “tool injection”). |
-| Conflict rules | What happens when an injected name collides with the client’s tools. |
-
----
-
-## Per-tool rate limiter
-
-**`per_tool_rate_limiter`** — limit how often a tool pattern may run.
-
-| Setting (UI) | Meaning |
-|---|---|
-| Tool patterns | Names or globs to match. |
-| Window + max | Requests (or calls) per window. |
-| On exceed | Reject, inject an error tool result, or strip the tool call. |
+| **MCP toolkit** (which MCP tools/prompts/resources an agent may use) | Consumer **Routing** / MCP binding, or [Roles](/trustgate/concepts/roles) `mcp_policies` — see [MCP](/trustgate/mcp/overview). |
+| **Which LLM models** a consumer may call | **Filter by available models** / **default model** on the consumer (or role) **Routing** tab — see [Model resolution](/trustgate/routing/model-resolution). |
 
 ---
 
 ## Related
 
 - [Policies overview](/trustgate/policies/overview)
-- [MCP toolkits](/trustgate/mcp/overview#toolkits--scoping-what-an-agent-can-use)
-- [Playground](/trustgate/console/playground) to exercise tool-using consumers
+- [Rate limiting & budgets](/trustgate/policies/rate-limiting) — request-volume and token/dollar budgets
+- [MCP](/trustgate/mcp/overview) — toolkit scoping for MCP servers
+- [Playground](/trustgate/console/playground) — exercise LLM tool-using consumers
