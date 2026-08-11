@@ -1,84 +1,63 @@
 ---
 title: "Auth"
-description: "Auth credentials authenticate clients as a consumer — API key, OAuth2, OIDC, or mTLS. Created per gateway and attached to consumers."
+description: "How clients authenticate as a consumer — API key, OAuth2, or OIDC — created and managed in the NeuralTrust console."
 ---
 
 An **auth** credential is how a client proves it may act as a
-[consumer](/trustgate/concepts/consumers). Credentials are created at the gateway level and
-**attached** to one or more consumers, so you can rotate or share them independently of the
-consumer itself.
+[consumer](/trustgate/concepts/consumers). Credentials are created on the gateway and
+attached to consumers, so you can rotate or share them independently of routing config.
 
-<Note>
-The same auth (API key or IdP credential) can be attached to several consumers. The request still targets a consumer by **`/{consumer_slug}/…`** — the credential proves access; the slug selects which consumer. Prefer one auth per consumer when you can; sharing is supported but weaker for audit and rotation.
-</Note>
-
-This is distinct from a registry's [target auth](/trustgate/concepts/registries#target-auth),
-which is how TrustGate authenticates to the **upstream provider**.
+This is distinct from a registry's upstream provider credential, which is how TrustGate
+authenticates to the **model provider** or MCP server.
 
 ## Auth types
 
-| `type` | How the client authenticates | Routing mode |
+| Type | How the client authenticates | Typical routing |
 |---|---|---|
-| **`api_key`** | `X-AG-API-Key`, `x-api-key`, or `Authorization: Bearer ag_…` | inline |
-| **`oauth2`** | `Authorization: Bearer <jwt>` (or opaque token + introspection) validated against an OAuth2 provider | inline or role_based |
-| **`oidc`** | `Authorization: Bearer <jwt>` from your IdP; claims select a [role](/trustgate/concepts/roles) | inline or role_based |
-| **`mtls`** | Client certificate (or a trusted `X-Forwarded-Client-Cert` header) | inline |
+| **API key** | `X-AG-API-Key: ag_…` header | Static (inline) |
+| **OAuth2** | `Authorization: Bearer <token>` validated against your OAuth2 provider | Static or identity-based |
+| **OIDC** | `Authorization: Bearer <jwt>` from your IdP; claims can select a [role](/trustgate/concepts/roles) | Static or identity-based |
 
-| Plane | Consumer auth types |
+**By protocol in the console:**
+
+| Protocol | Auth methods in the UI |
 |---|---|
-| **LLM** | `api_key`, `oauth2`, `oidc` |
-| **MCP** | `oauth2` |
+| **LLM** | **API Key**, **OAuth2**, **OIDC** |
+| **MCP** | **OAuth2**, or **Use NeuralTrust** (built-in login with no linked auth entity) |
 
-A `role_based` LLM consumer carries exactly one identity credential — `oauth2` or `oidc`.
+An **identity-based** LLM consumer uses an **OIDC** or **OAuth2** credential so token claims
+can select [roles](/trustgate/concepts/roles).
 
-## API keys
+## Create an API key
 
-API keys are prefixed **`ag_`**. The raw secret is returned **once**, at creation — store
-it then. TrustGate only persists a SHA-256 hash; at request time it hashes the inbound key
-and compares, so the secret is never recoverable from the gateway.
+1. Open **TrustGate** → **Consumers** → select a consumer (or create one).
+2. Under **Authentication** / **Auth**, choose **API Key**.
+3. Create the key and **copy it immediately** — the cleartext secret is shown only once.
+4. Use the key in app requests or in the consumer **Connect** snippets.
 
-On the **proxy** plane, send the key in any of these headers (first match wins):
+API keys are prefixed **`ag_`**. TrustGate stores only a hash; the secret cannot be
+recovered later. Rotate by creating a new key, updating clients, then revoking the old one.
 
-| Header | Example | Typical clients |
-|---|---|---|
-| `X-AG-API-Key` | `X-AG-API-Key: ag_…` | TrustGate snippets, custom apps |
-| `x-api-key` | `x-api-key: ag_…` | Anthropic-compatible SDKs |
-| `Authorization` | `Authorization: Bearer ag_…` | OpenAI-compatible clients that only set an API key (e.g. Cursor, Claude Desktop-style base URL + key) |
+You can also create API key entities under [Identity → Auth](/trustgate/concepts/identity)
+and attach them to consumers.
 
-`Authorization: Bearer` with a value that does **not** start with `ag_` is treated as an
-OAuth2/OIDC JWT, not an API key. Prefer `X-AG-API-Key` when you control both headers.
+## OAuth2 / OIDC
 
-```bash
-# create → returns api_key (cleartext) once
-POST /v1/gateways/{gateway_id}/auths
-{ "name": "my-app-key", "type": "api_key" }
+Configure issuer, audiences, JWKS (or public keys), scopes, and related fields in the
+console when you create the credential. For identity-based routing, OIDC claim values must
+match the [role](/trustgate/concepts/roles) mappings you define.
 
-# attach to a consumer
-POST /v1/gateways/{gateway_id}/consumers/{id}/auths/{auth_id}
-```
+End-to-end IdP setup:
 
-## OAuth2 / OIDC / mTLS
+- [Authorization overview](/trustgate/concepts/authorization/overview)
+- [Okta](/trustgate/concepts/authorization/okta)
+- [Entra ID](/trustgate/concepts/authorization/entra-id)
 
-JWT- and certificate-based credentials carry a `config` block:
+## Where credentials appear
 
-| Type | Config fields |
+| Place | What you do |
 |---|---|
-| `oauth2` | `issuer`, `audiences`, `jwks_url`, `introspection_url`, `client_id`/`secret`, `required_scopes`, `allowed_algorithms`, optional `session_mode`. |
-| `oidc` | `issuer`, `audiences`, `jwks_url`, `public_keys`, `required_scopes`, `allowed_algorithms`, `subject_claim`. |
-| `mtls` | `ca_cert`, `allowed_common_names`, `allowed_dns_names`, `allowed_fingerprints`. |
-
-For **`oidc`** credentials on a `role_based` consumer, the validated token's claims are
-matched against role [OIDC mappings](/trustgate/concepts/roles) to select the consumer's
-routing — this is how identity-based routing works.
-
-For end-to-end, provider-specific setup (custom authorization servers, scopes, group/role
-claims, and the exact credential payloads), see the
-[Authorization](/trustgate/concepts/authorization/overview) manuals for
-[Okta](/trustgate/concepts/authorization/okta) and
-[Entra ID](/trustgate/concepts/authorization/entra-id).
-
-## Managing auth
-
-CRUD lives under `/v1/gateways/{gateway_id}/auths`; attach/detach via the consumer's
-`…/auths/{auth_id}` sub-resource. See the [Auth API](/trustgate/api/overview).
-
+| **New consumer** flow | Create the first API key and copy it on success. |
+| Consumer **Auth** tab | Add, attach, or revoke credentials. |
+| Consumer **Connect** tab | Ready-made headers and snippets for apps. |
+| [Identity → Auth](/trustgate/concepts/identity) | Gateway-level auth entities reused across consumers. |

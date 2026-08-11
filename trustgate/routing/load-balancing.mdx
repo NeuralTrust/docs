@@ -1,66 +1,60 @@
 ---
 title: "Load balancing"
-description: "Distribute traffic across a consumer's registries with round-robin, weighted, least-connections, random, or semantic strategies — with health checks and weights."
+description: "Distribute traffic across a consumer's registries from the console — round-robin, weighted, least-connections, random, or smart routing by prompt complexity."
 ---
 
 When a [consumer](/trustgate/concepts/consumers) can reach more than one
-[registry](/trustgate/concepts/registries), the load balancer picks which one serves each
-request. The simplest setup just lists `registry_ids`; for explicit control, define a
-named pool with `lb_config`.
+[registry](/trustgate/concepts/registries), load balancing picks which one serves each
+request. Configure it on the consumer under **Routing** → **Strategy** → **Load balancing**.
 
 ## Strategies
 
-| Algorithm | How it picks |
+| Strategy in the UI | How it picks |
 |---|---|
-| `round-robin` | Rotates through registries in order. |
-| `weighted-round-robin` | Interlaces picks by per-registry weight (`1..100`). |
-| `least-connections` | Picks the registry with the fewest in-flight requests. |
-| `random` | Uniform random pick. |
-| `semantic` | Embeds the prompt and routes to the registry whose description is the closest cosine match — requires an embedding config. |
+| **Smart routing** | Routes by prompt complexity across **tiers** (each tier = complexity label + registry + model). Recommended multi-model path. Requires **at least two tiers**. |
+| **Round robin** | Cycles evenly across pool members. |
+| **Weighted** | Sends more traffic to members with higher weights. |
+| **Least connections** | Prefers the member with the fewest in-flight requests. |
+| **Random** | Uniform random pick. |
+
+**Simple routing** and **Fallback** live under the **Direct** group in the same Strategy
+dropdown — they are not load-balancing algorithms.
+
+## Configure load balancing
+
+1. Open **Consumers** → select a consumer → **Routing**.
+2. Set **Routing mode** to **Static**.
+3. Open **Strategy** and choose an algorithm under **Load balancing**.
+4. Add pool members (registries / models). For **Weighted**, set each member's weight.
+5. For **Smart routing**, open **Complexity tiers** and add at least two tiers (for example
+   Simple → cheaper model, Hard → stronger model). Each tier can use a different model even
+   when registries are the same.
+6. Save.
+
+Connect snippets for load-balanced consumers use `"model": "auto"` so clients do not need
+to name a model — see [Model resolution](/trustgate/routing/model-resolution).
 
 ## Weights
 
-For weighted round-robin, each registry carries a weight from **1 to 100**, set when you
-attach it to the consumer:
+For **Weighted**, each pool member carries a weight from **1 to 100**. A member at 70
+receives roughly 70% of the share of one at 30. Set weights in the registry / member rows
+in the Routing editor.
 
-```bash
-POST /v1/gateways/{gateway_id}/consumers/{id}/registries/{registry_id}
-{ "weight": 70 }
-```
+## Smart routing tiers
 
-A registry at weight 70 receives roughly 70% of the share of one at weight 30.
+| Column | Meaning |
+|---|---|
+| **Complexity** | Simple / Medium / Hard (unique labels per consumer). |
+| **Registry** | Upstream provider connection. |
+| **Model** | Model used when that complexity band is selected. |
 
-## Named pools (`lb_config`)
-
-For more than a flat list, define a pool:
-
-```json
-"lb_config": {
-  "enabled": true,
-  "algorithm": "weighted-round-robin",
-  "pool_alias": "prod-pool",
-  "members": [
-    { "registry_id": "<openai>",    "models": ["gpt-4o"] },
-    { "registry_id": "<anthropic>", "models": ["claude-3-5-sonnet"] }
-  ]
-}
-```
-
-- `pool_alias` is referenced from a request via the `pool:<alias>` model reference (see
-  [Model resolution](/trustgate/routing/model-resolution)).
-- `members` scope which models each registry serves within the pool.
-- The `semantic` algorithm additionally needs an `embedding_config`.
+Tiers map prompt complexity scores to the registry and model for that band. Add tiers with
+**Add tier**; the UI blocks save until at least two valid tiers exist.
 
 ## Health checks
 
-LLM registries can define `health_checks`; unhealthy registries are skipped by the load
-balancer until they recover, so traffic shifts to healthy upstreams automatically.
+LLM registries can define health checks in the Registry editor. Unhealthy registries are
+skipped by the load balancer until they recover.
 
-## Session affinity
-
-When the gateway has [session affinity](/trustgate/concepts/gateways#session-affinity)
-enabled, requests carrying a session id are pinned to the same selection across a
-conversation.
-
-Pair load balancing with [fallback](/trustgate/routing/fallback) so a failed pick retries
-the next registry instead of erroring.
+Pair load balancing with [fallback](/trustgate/routing/fallback) so a failed pick can retry
+another path instead of erroring immediately.

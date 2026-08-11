@@ -1,45 +1,39 @@
 ---
 title: "Model resolution"
-description: "How the model field in a request selects a registry — short pass-through, provider-qualified, or pool reference — and how model policies constrain it."
+description: "How the model field in a client request selects a registry — including auto for load balancing and smart routing — and how model policies constrain it in the UI."
 ---
 
-A client never names a provider URL — it names a **model**, and TrustGate resolves which
-[registry](/trustgate/concepts/registries) to use. The `model` field accepts three forms.
+A client never names a provider URL — it names a **model** (or uses **`auto`**), and
+TrustGate resolves which [registry](/trustgate/concepts/registries) to use.
 
-## Model reference syntax
+## What clients send
 
 | Form | Example | Meaning |
 |---|---|---|
-| **Short** (pass-through) | `gpt-4o-mini` | Sent as-is to the selected registry. The [load balancer](/trustgate/routing/load-balancing) picks among the consumer's registries. |
-| **Provider-qualified** | `@openai/gpt-4o` | Restrict routing to registries of provider `openai`, then pick. |
-| **Pool reference** | `pool:my-pool` | Route via the consumer's enabled load-balancing pool whose `pool_alias` matches (case-insensitive), across the pool's members. Inline routing only. |
+| **`auto`** | `"model": "auto"` | Used when the consumer has **load balancing** or **smart routing**. The gateway picks registry and model. Connect snippets show this automatically. |
+| **Short name** | `gpt-4o-mini` | Sent as-is to the selected registry. |
+| **Provider-qualified** | `@openai/gpt-4o` | Prefer registries of that provider, then pick. |
+| **Explicit model** | any allowed model id | Required when multiple registries are bound **without** load balancing — the client must specify the model. |
 
-## Model policies
+Copy the right form from the consumer **Connect** tab so snippets stay in sync with the
+strategy you configured.
 
-[Consumers](/trustgate/concepts/consumers) and [roles](/trustgate/concepts/roles) can
-constrain which models are reachable per registry with `model_policies`:
+## Model policies in the UI
 
-```json
-"model_policies": {
-  "<registry_id>": {
-    "allowed": ["gpt-4o", "gpt-4o-mini"],
-    "default": "gpt-4o-mini"
-  }
-}
-```
+On a consumer (or [role](/trustgate/concepts/roles)), open the registry rows under
+**Routing** (or the providers editor):
 
-- **`allowed`** — the allow-list of models for that registry. Empty/omitted means all
-  models are permitted.
-- **`default`** — used when the request names no model; it must be a member of `allowed`.
+1. Leave **all models permitted**, or open **Filter by available models** and select a
+   subset.
+2. Set the **default model** when the client omits `model` (must be in the allow-list when
+   filtering is on).
 
 A request for a model outside the allow-list is rejected before it reaches the provider.
 
 ## Resolution order
 
-1. Parse the `model` reference (short / qualified / pool).
-2. Narrow the candidate registries (the consumer's `registry_ids` or the pool members,
-   filtered by provider for qualified refs).
-3. Apply `model_policies` — reject disallowed models; fill in the `default` when none was
-   given.
-4. Hand the candidates to the [load balancer](/trustgate/routing/load-balancing) to pick
-   one, with [fallback](/trustgate/routing/fallback) on failure.
+1. Read the `model` value (`auto`, short name, qualified, or empty → default).
+2. Narrow candidate registries from the consumer's bindings (or smart-routing / LB pool).
+3. Apply model policies — reject disallowed models; fill in the default when none was given.
+4. Hand candidates to [load balancing](/trustgate/routing/load-balancing) / smart routing,
+   with [fallback](/trustgate/routing/fallback) on failure when configured.
