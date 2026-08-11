@@ -37,7 +37,8 @@ traffic flows through.
    weighted, least-connections, random, or smart routing), with fallback.
 5. The request is forwarded to the selected **provider adapter** (OpenAI, Anthropic,
    Bedrock, …), streaming when the client asked for it.
-6. The response returns and a **telemetry** event is emitted to Kafka.
+6. The response returns and a **telemetry** event is exported with OpenTelemetry
+   (background worker — off the request path).
 
 ```text
 Client ─▶ Proxy :8081
@@ -47,7 +48,7 @@ Client ─▶ Proxy :8081
    ├─ policies run at their stages (parallel or sequential)
    ├─ load balancer → registry (+ fallback chain)
    ├─ provider adapter → upstream (stream or full)
-   └─ response ─▶ client          telemetry ─▶ OTLP
+   └─ response ─▶ client          telemetry ─▶ OpenTelemetry collector
 ```
 
 ### Gateway discovery
@@ -63,11 +64,8 @@ Client ─▶ Proxy :8081
 | Component | Role |
 |---|---|
 | **PostgreSQL** | Source of truth for all configuration (gateways, registries, consumers, …). The Admin plane runs migrations on boot. |
-| **Redis** | Rate-limit counters, the semantic-cache vector store, session store, and a pub/sub channel for cache invalidation. |
-
-Telemetry is exported asynchronously over OTLP, off the request critical path, so a slow
-or unavailable collector never adds latency to a user request. See
-[Telemetry](/trustgate/observability/telemetry).
+| **Redis** | Rate-limit counters, session store, and a pub/sub channel for cache invalidation. |
+| **OpenTelemetry collector** | Receives per-request telemetry export (metadata for analytics and alerts). Off the request critical path. |
 
 ### Caching & invalidation
 
