@@ -1,78 +1,78 @@
 ---
 title: "Tool governance"
-description: "Govern agent tool use at the gateway: inject operator-authored tools and rate-limit individual tool calls observed in model responses."
+description: "Control agent tools at the gateway — allowlists, call validation, schema transforms, injection, and per-tool rate limits from the Policies catalog."
 ---
 
-For agent and function-calling traffic, TrustGate can govern the **tools** in flight with two
-catalog policies. Both are configured like any other [policy](/trustgate/policies/overview)
-and scoped global or per consumer.
+For agent and function-calling traffic, TrustGate can govern **tools** with several catalog
+policies. Create them under **Policies** → **Catalog**, or attach them from a consumer
+**Policies** tab. Scope each policy **gateway-wide** or **targeted**.
 
-| Policy (`slug`) | Stage | Acts on |
-|---|---|---|
-| [`tool_injection`](#tool-injection) | `pre_request` | The request `tools[]` array |
-| [`per_tool_rate_limiter`](#per-tool-rate-limiter) | `pre_request` · `pre_response` · `post_response` | Observed tool calls |
+| Policy (`slug`) | What it does |
+|---|---|
+| [`tool_allowlist`](#tool-allowlist) | Allow or deny tools in the request `tools[]` array. |
+| [`tool_call_validation`](#tool-call-validation) | Validate / redact tool calls the model returns. |
+| [`tool_definition_transformation`](#tool-definition-transformation) | Patch schemas, override descriptions, inject tools. |
+| [`per_tool_rate_limiter`](#per-tool-rate-limiter) | Rate-limit individual tool names/patterns. |
+
+MCP tool **grants** on consumers/roles (which MCP tools an agent may see) are separate —
+configure those on the consumer or [role](/trustgate/concepts/roles), and see
+[MCP](/trustgate/mcp/overview).
 
 ---
 
-## Tool injection
+## Tool allowlist
 
-The **`tool_injection`** policy appends operator-authored function tools to the request
-before they reach the model — a governance and steering layer, **not** an access gate. Name
-collisions with tools already on the request are resolved by `on_conflict`.
+**`tool_allowlist`** — allow or deny patterns for tools the client sends.
 
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `inject_tools` | array | — | Operator-authored function tools appended to the request. **Required.** |
-| `inject_tools[].type` | enum | `function` | Only `function` tools are supported. |
-| `inject_tools[].function` | object | — | `{ name, description, parameters }` — `name` required; `parameters` is a free-form JSON schema. |
-| `on_conflict` | enum | `gateway_wins` | Name collision resolution: `gateway_wins`, `client_wins`, or `reject`. |
+Configure in the UI: allow/deny lists, empty-list behavior (reject all vs allow all), and
+match patterns for tool names.
 
-```json
-{
-  "slug": "tool_injection",
-  "settings": {
-    "inject_tools": [
-      {
-        "type": "function",
-        "function": {
-          "name": "search_kb",
-          "description": "Search the internal knowledge base.",
-          "parameters": {
-            "type": "object",
-            "properties": { "query": { "type": "string" } },
-            "required": ["query"]
-          }
-        }
-      }
-    ],
-    "on_conflict": "gateway_wins"
-  }
-}
-```
+---
+
+## Tool call validation
+
+**`tool_call_validation`** — inspect tool calls in the model response.
+
+UI validators can include:
+
+| Validator | Use |
+|---|---|
+| Allowlist | Only named tools may be called. |
+| JSON schema | Arguments must match a schema. |
+| Semantic | Embedding/similarity checks on arguments. |
+| Regex | Pattern match on name or arguments. |
+| Denylist | Block specific tools or argument shapes. |
+
+Choose enforce vs observe on the policy **Scope** section.
+
+---
+
+## Tool definition transformation
+
+**`tool_definition_transformation`** — rewrite the tool definitions the model sees.
+
+| Capability | Meaning |
+|---|---|
+| Schema / description patches | Override provider tool metadata. |
+| Inject tools | Add operator-authored function tools (similar to legacy “tool injection”). |
+| Conflict rules | What happens when an injected name collides with the client’s tools. |
+
+---
 
 ## Per-tool rate limiter
 
-The **`per_tool_rate_limiter`** policy counts and enforces limits **per observed tool call** in
-model responses. The limit applies gateway-wide when the policy is global, otherwise per
-consumer. (In the Admin Console catalog it is listed under Traffic Control.)
+**`per_tool_rate_limiter`** — limit how often a tool pattern may run.
 
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `rules` | array | — | Ordered `[{ tool, windows, behavior }]`; the first matching `tool` glob wins. **Required.** |
-| `rules[].windows` | array | — | `[{ duration, max }]` fixed windows for the matched tool. |
-| `behavior_default` | enum | `reject_response` | Applied to rules without an explicit behavior. |
+| Setting (UI) | Meaning |
+|---|---|
+| Tool patterns | Names or globs to match. |
+| Window + max | Requests (or calls) per window. |
+| On exceed | Reject, inject an error tool result, or strip the tool call. |
 
-Per-rule / default `behavior` is one of `reject_response`, `inject_error_result`, or
-`strip_tool_from_request`.
+---
 
-```json
-{
-  "slug": "per_tool_rate_limiter",
-  "settings": {
-    "rules": [
-      { "tool": "execute_code*", "windows": [{ "duration": "1m", "max": 5 }] }
-    ],
-    "behavior_default": "inject_error_result"
-  }
-}
-```
+## Related
+
+- [Policies overview](/trustgate/policies/overview)
+- [MCP toolkits](/trustgate/mcp/overview#toolkits--scoping-what-an-agent-can-use)
+- [Playground](/trustgate/console/playground) to exercise tool-using consumers

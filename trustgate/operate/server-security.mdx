@@ -1,25 +1,37 @@
 ---
 title: "Server security"
-description: "How TrustGate secures its own surface: admin authentication, response security headers, and per-upstream client TLS."
+description: "How TrustGate secures its surface: console access, admin authentication for the control plane, and response security headers."
 ---
 
 Beyond per-consumer [auth](/trustgate/concepts/auth), TrustGate hardens its own HTTP
-surface and its connections to upstream providers.
+surface.
+
+## Console access
+
+Day-to-day configuration for most teams runs through the **NeuralTrust console** (SaaS
+control plane). Team members authenticate to NeuralTrust and manage gateways, registries,
+consumers, and policies in the UI — see the
+[Quickstart](/trustgate/getting-started/quickstart).
 
 ## Admin authentication
 
-The Admin plane requires a JWT (HS256) signed with `SERVER_SECRET_KEY`:
+The Admin plane (used by the console and by direct [Admin API](/trustgate/api/overview)
+callers) requires a JWT (HS256) signed with `SERVER_SECRET_KEY`:
 
 ```http
 Authorization: Bearer <admin-jwt>
 ```
 
 Keep `SERVER_SECRET_KEY` secret and rotate it like any signing key — anyone who can sign a
-token with it can administer every gateway. Mint short-lived tokens (see the
-[Quickstart](/trustgate/getting-started/quickstart#mint-an-admin-token)).
+token with it can administer every gateway. Mint short-lived tokens for automation and
+self-hosted control-plane access.
 
-The Proxy plane validates **consumer** credentials (API-key hash, OAuth2/OIDC JWT, or mTLS),
-and the MCP plane runs a full OAuth2 server — see [MCP](/trustgate/mcp/overview).
+For **Private** and self-hosted data planes, restrict deployment secrets to your platform
+team — see [Configuration](/trustgate/operate/configuration) and
+[Deployment](/trustgate/operate/deployment).
+
+The **proxy** validates **consumer** credentials (API-key hash or OAuth2/OIDC JWT).
+The **MCP** plane runs a full OAuth2 server for agents — see [MCP](/trustgate/mcp/overview).
 
 ## Security headers
 
@@ -33,24 +45,3 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Resource-Policy: same-site
 Strict-Transport-Security: max-age=31536000; includeSubDomains   # HTTPS only
 ```
-
-## Client TLS to upstreams
-
-A [gateway](/trustgate/concepts/gateways)'s `client_tls` configures TLS **per upstream
-hostname** (keyed by host), so you can pin certificates or constrain protocols for specific
-providers:
-
-| Field | Purpose |
-|---|---|
-| `ca_cert` | Custom CA to trust. |
-| `client_certs.{certificate, private_key}` | Mutual TLS to the upstream. |
-| `min_version` / `max_version` | TLS version bounds. |
-| `cipher_suites` / `curve_preferences` | Allowed cipher suites / curves. |
-| `disable_system_ca_pool` | Trust only your `ca_cert`. |
-| `allow_insecure_connections` | Skip verification (testing only). |
-
-## mTLS clients
-
-For consumer authentication by client certificate, use an [`mtls` auth](/trustgate/concepts/auth)
-credential. When TrustGate runs behind a TLS-terminating proxy, set `TRUST_XFCC_FROM` to the
-trusted sources allowed to present the forwarded client-certificate (XFCC) header.

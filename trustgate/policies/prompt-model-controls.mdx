@@ -1,47 +1,53 @@
 ---
-title: "Prompt management"
-description: "Inject and version system prompts with prompt_template so instructions live in the gateway rather than in every client."
+title: "Prompt & model controls"
+description: "Restrict which models a consumer may call and inject versioned system prompts — model allowlist and prompt template policies in the console."
 ---
 
-The **`prompt_template`** policy shapes the request before it is forwarded. It runs at
-`pre_request` and is scoped like any other [policy](/trustgate/policies/overview).
+Two catalog policies control **what model** may run and **what system prompt** is injected.
+Create them under **Policies** → **Catalog**, or attach them from a consumer.
 
-To restrict which models a consumer may call, use
-[`model_policies`](/trustgate/routing/model-resolution) on the consumer — not a catalog policy.
+| Policy (`slug`) | Purpose |
+|---|---|
+| [`model_allowlist`](#model-allowlist) | Restrict models; optional substitute/default. |
+| [`prompt_template`](#prompt-template) | Inject context-bound system prompts and named templates. |
 
-## `prompt_template`
+Per-registry **model filters** and **defaults** on the consumer Routing tab are complementary
+— see [Model resolution](/trustgate/routing/model-resolution). Use the **policy** when you
+want gateway-wide or cross-consumer enforcement with observe/enforce modes.
 
-Inject and version prompts server-side, so system instructions live in the gateway rather
-than in every client. It supports two modes, which can be combined:
+---
 
-- **Mode A — inject templates:** render operator-defined system prompts from context
-  variables (headers or JWT claims) and inject them into the request.
-- **Mode B — named templates:** maintain named, versioned templates that clients reference by
-  `{template://name@label}`, with required-variable validation.
+## Model allowlist
 
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `template_engine` | enum | `mustache` | Rendering engine (`mustache` in v1). |
-| `context_variables` | map | — | Named values resolved from `header` or `jwt_claim` sources. |
-| `inject_templates` | array | — | Mode A: `[{ id, content, position, on_existing_system }]`. |
-| `named_templates` | array | — | Mode B: named templates with `versions[]` (each `{ version, labels, content, required_variables }`). |
-| `allow_untemplated_requests` | bool | `true` | When false + named templates set, reject requests with no template reference. |
-| `on_missing_context_variable` | enum | `error` | `error`, `empty_string`, or `skip_injection`. |
-| `default_label` | string | — | Label used when a reference omits `@label`. |
+**`model_allowlist`**
 
-```json
-{
-  "slug": "prompt_template",
-  "settings": {
-    "context_variables": {
-      "tenant": { "source": "header", "name": "X-Tenant-Id" }
-    },
-    "inject_templates": [
-      { "id": "base", "content": "You are the assistant for {{tenant}}.", "on_existing_system": "merge" }
-    ]
-  }
-}
-```
+| Control | Meaning |
+|---|---|
+| **Allowed models** | List or patterns the request may use. |
+| **Default model** | Used when the client omits `model` (must be allowed). |
+| **On deny** | Reject, or **substitute** a safe model. |
 
-Injected content is placed in the `system` role; `on_existing_system` chooses whether to
-`merge` with or `replace` an existing system prompt.
+Configure under **Policies** with **Enforce** or **Observe**. Targeted scope can pin the
+rule to specific consumers.
+
+---
+
+## Prompt template
+
+**`prompt_template`**
+
+| Mode | Meaning |
+|---|---|
+| **Auto-inject** | Always prepend/append a system prompt for matching traffic. |
+| **Named templates** | Versioned templates (e.g. `template://…`) selected by request metadata. |
+
+Templates can use context variables (headers, JWT claims, mustache-style placeholders)
+depending on the form fields shown for your catalog version.
+
+---
+
+## Related
+
+- [Consumers](/trustgate/concepts/consumers) — registry-level model filter UI
+- [Model resolution](/trustgate/routing/model-resolution) — `auto` and client `model` forms
+- [Policies overview](/trustgate/policies/overview)

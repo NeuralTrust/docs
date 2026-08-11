@@ -1,123 +1,101 @@
 ---
 title: "Policies"
-description: "A policy is a configured governance rule on a gateway's traffic — rate limits, budgets, caching, tool governance, guardrails, and more — run at request/response stages, scoped globally or per consumer."
+description: "Govern gateway traffic from the console — rate limits, budgets, caching, tool governance, guardrails, and more — scoped globally or per consumer."
 ---
 
 A **policy** attaches behavior to a gateway's traffic. Each policy configures one built-in
-plugin — identified by its **`slug`** (e.g. `rate_limiter`, `semantic_cache`, `trustguard`) — with
-`settings`, and runs at one or more lifecycle **stages**, with a `mode`, `priority`, and a
-scope (global or per consumer).
+plugin with settings, runs at one or more lifecycle **stages**, and can apply to the whole
+gateway or selected consumers.
 
-<Note>
-A policy's `slug` is the **plugin name** it configures — always the underscore form
-(`rate_limiter`, `token_rate_limiter`, `request_size_limiter`, `semantic_cache`, …). Browse
-the live catalog and its settings schema at `GET /v1/policies-catalog` (same grouping as the
-Admin Console policy picker).
-</Note>
+## Policies screen
 
-## Built-in policies
+Open **Agent Gateway** → **Policies**.
 
-TrustGate ships **13 policies** in the Admin Console catalog, grouped as below:
+| Tab | Purpose |
+|---|---|
+| **Policies** | Table of configured policies — search, filter by protocol (**LLM** / **MCP**), pause/resume, open detail. |
+| **Catalog** | Browse plugins by category (guardrails first). **Add policy** starts create. |
+
+### Create or edit
+
+1. **Catalog** → pick a plugin, or **New policy**.
+2. Set **Name** (catalog types use a fixed prefix where required).
+3. **Scope**
+   - **Mode:** **Enforce** · **Observe** · **Throttle** (when the plugin supports it).
+   - **Coverage:** **Gateway-wide** or **Targeted** (pick consumers).
+4. Fill **Configuration** (dedicated form or schema-driven fields).
+5. Save. Use **Pause** / **Resume** / **Delete** from the detail panel without losing history of attachments.
+
+### Attach from a consumer
+
+Open a [consumer](/trustgate/concepts/consumers) → **Policies** → **Add Policy**, or
+**Clone policies** from another consumer. Global policies still apply automatically.
+
+## Catalog (UI plugins)
 
 ### Traffic control
 
-| Policy (`slug`) | Purpose |
-|---|---|
-| [`rate_limiter`](/trustgate/policies/rate-limiting) | Per-consumer / per-gateway request rate limiting (sliding window). |
-| [`request_size_limiter`](/trustgate/policies/request-size) | Reject requests above a byte / character budget. |
-| [`per_tool_rate_limiter`](/trustgate/policies/tool-governance) | Rate-limit individual tool calls observed in responses. |
+| Policy | UI / slug | Docs |
+|---|---|---|
+| Request rate limit | `rate_limiter` | [Rate limiting](/trustgate/policies/rate-limiting) |
+| Request size | `request_size_limiter` | [Request size](/trustgate/policies/request-size) |
+| Per-tool rate limit | `per_tool_rate_limiter` | [Tool governance](/trustgate/policies/tool-governance) |
 
-### Quota
+### Quota & cost
 
-| Policy (`slug`) | Purpose |
-|---|---|
-| [`token_rate_limiter`](/trustgate/policies/rate-limiting) ("LLM Budget") | Token or dollar budgets over time windows, aggregate or per-model. |
+| Policy | UI / slug | Docs |
+|---|---|---|
+| LLM Budget | `token_rate_limiter` | [Rate limiting & budgets](/trustgate/policies/rate-limiting) |
+| LLM Cost Cap | `cost_cap` | [Cost cap](/trustgate/policies/cost-cap) |
 
-### Routing
+### Routing & prompts
 
-| Policy (`slug`) | Purpose |
-|---|---|
-| [`semantic_cache`](/trustgate/policies/semantic-cache) | Exact or embedding-similarity response caching. |
-
-### Prompt management
-
-| Policy (`slug`) | Purpose |
-|---|---|
-| [`prompt_template`](/trustgate/policies/prompt-model-controls) | Inject context-bound system prompts and render named, versioned templates. |
+| Policy | UI / slug | Docs |
+|---|---|---|
+| Model allowlist | `model_allowlist` | [Prompt & model controls](/trustgate/policies/prompt-model-controls) |
+| Prompt template | `prompt_template` | [Prompt & model controls](/trustgate/policies/prompt-model-controls) |
 
 ### Tool governance
 
-| Policy (`slug`) | Purpose |
-|---|---|
-| [`tool_injection`](/trustgate/policies/tool-governance) | Inject operator-authored tools into the request before the model. |
+| Policy | UI / slug | Docs |
+|---|---|---|
+| Tool allowlist | `tool_allowlist` | [Tool governance](/trustgate/policies/tool-governance) |
+| Tool call validation | `tool_call_validation` | [Tool governance](/trustgate/policies/tool-governance) |
+| Tool definition transformation | `tool_definition_transformation` | [Tool governance](/trustgate/policies/tool-governance) |
 
 ### Guardrails
 
-| Policy (`slug`) | Purpose |
-|---|---|
-| [`trustguard`](/trustgate/policies/guardrails) | Inspect prompts/responses with [TrustGuard](/trustguard/overview) (jailbreaks, PII, toxicity, tool abuse). |
-| [`openai_moderation`](/trustgate/policies/guardrails) | Screen text with the OpenAI Moderations API. |
-| [`azure_content_safety`](/trustgate/policies/guardrails) | Screen text with Azure AI Content Safety. |
-| [`bedrock_guardrail`](/trustgate/policies/guardrails) | Apply an AWS Bedrock guardrail (topics, content, PII, grounding). |
-| [`regex_replace`](/trustgate/policies/guardrails) | Rewrite request or response text with ordered RE2 regular expressions. |
+| Policy | UI / slug | Docs |
+|---|---|---|
+| TrustGuard | `trustguard` | [Guardrails](/trustgate/policies/guardrails) · [TrustGuard gateway integration](/trustguard/integrations/gateway) |
+| OpenAI Moderation | `openai_moderation` | [Guardrails](/trustgate/policies/guardrails) |
+| Azure Content Safety | `azure_content_safety` | [Guardrails](/trustgate/policies/guardrails) |
+| Bedrock Guardrail | `bedrock_guardrail` | [Guardrails](/trustgate/policies/guardrails) |
+| Regex Replace | `regex_replace` | [Guardrails](/trustgate/policies/guardrails#regex-replace) |
 
-> **NeuralTrust-native detection.** The gateway ships several guardrail plugins, but the
-> deepest jailbreak / PII / toxicity / tool-abuse detection is [TrustGuard](/trustguard/overview),
-> attached via the [`trustguard`](/trustgate/policies/guardrails) policy. See the
-> [TrustGate integration](/trustguard/integrations/gateway).
+> **TrustGuard in the UI.** Adding the TrustGuard policy walks you through selecting or
+> creating an Agent Runtime **collector**. Connection details are injected by the platform;
+> you do not paste base URLs by hand in normal SaaS use.
 
-To restrict which models a consumer may call, use consumer
-[`model_policies`](/trustgate/routing/model-resolution) rather than a catalog policy.
+The live **Catalog** tab is authoritative for what you can add in your tenant.
 
 ## Stages
 
-A policy fires in one or more lifecycle **stages**:
-
 | Stage | When |
 |---|---|
-| `pre_request` | Before the request is forwarded upstream. |
-| `pre_response` | After the upstream responds, before returning to the client. |
-| `post_response` | After the response is returned (e.g. cache populate, budget accrual). |
-
-Some policies span two stages — the [semantic cache](/trustgate/policies/semantic-cache)
-looks up at `pre_request` and populates at `post_response`; the
-[LLM Budget](/trustgate/policies/rate-limiting) checks at `pre_request` and accrues usage at
-`post_response`. (A `post_request` stage exists in the model but is not executed on the proxy
-forward path.)
+| Pre-request | Before the request is forwarded upstream. |
+| Pre-response | After the upstream responds, before returning to the client. |
+| Post-response | After the response is returned (cache populate, budget accrual). |
 
 ## Mode
 
-A policy's `mode` sets its enforcement intent. Not every plugin supports every mode:
-
 | Mode | Behavior |
 |---|---|
-| `enforce` | Act on violations — reject, transform, or block (default). |
-| `throttle` | Delay rather than reject (supported by the rate/budget plugins). |
-| `observe` | Record only — no enforcement. |
+| **Enforce** | Act on violations — reject, transform, or block (default). |
+| **Throttle** | Delay rather than reject (rate/budget plugins). |
+| **Observe** | Record only — no enforcement. |
 
-## Ordering and scope
+## Ordering
 
-| Field | Meaning |
-|---|---|
-| `slug` | The built-in plugin this policy configures. |
-| `settings` | The policy's configuration (limits, thresholds, origins…). |
-| `priority` | Lower runs earlier. |
-| `parallel` | Run alongside other same-priority policies concurrently. |
-| `global` | Apply to **all** consumers in the gateway. |
-| `enabled` | Toggle without deleting. |
-
-Global policies are the gateway-wide baseline (e.g. a default request-size guard);
-consumer-scoped policies tune behavior per tenant. The proxy resolves both sets and runs
-them in `priority` order. When same-priority policies run in `parallel`, only one may mutate
-a given part of the request/response per batch. Policies that partition by a key (the rate
-limiters and budgets) also accept a `group_by_header` to sub-partition within scope.
-
-## Managing policies
-
-CRUD lives under `/v1/gateways/{gateway_id}/policies`, plus:
-
-- `…/{id}/global` (`POST`/`DELETE`) — promote/demote to global.
-- `…/{id}/duplicate` (`POST`) — clone a policy.
-- Attach to a consumer via `…/consumers/{id}/policies/{policy_id}`.
-
-See the [Policies API](/trustgate/api/overview).
+Lower **priority** runs earlier. Same-priority policies may run in parallel when enabled.
+Global policies are the baseline; targeted policies refine per consumer.
