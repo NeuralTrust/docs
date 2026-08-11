@@ -1,14 +1,28 @@
 ---
 title: "Smart routing"
-description: "Route each request by prompt complexity across tiers — pick cheaper models for simple prompts and stronger models for hard ones, configured on the consumer Routing tab."
+description: "Route each request by prompt complexity across Simple, Medium, and Hard tiers — pick cheaper models for easy prompts and stronger models for hard ones, configured on the consumer Routing tab."
 ---
 
 **Smart routing** is a [load balancing](/trustgate/routing/load-balancing) strategy that
-scores each prompt's complexity and sends the request to the matching **tier** (registry +
-model). Use it when you want cost-efficient defaults for easy traffic and stronger models
-only when the prompt needs them.
+classifies each prompt's complexity and sends the request to the matching **tier**
+(registry + model). Use it when you want cost-efficient defaults for easy traffic and
+stronger models only when the prompt needs them.
 
 In the console it is the first option under **Strategy** → **Load balancing**.
+
+## Complexity labels
+
+Every tier uses one of three fixed labels. Operators never set numeric thresholds — only
+these labels appear in the UI:
+
+| Label | Typical traffic |
+|---|---|
+| **Simple** | Short, low-stakes, or straightforward prompts. Prefer cheaper / faster models. |
+| **Medium** | Everyday product traffic that needs a balanced model. |
+| **Hard** | Long, multi-step, or demanding prompts. Prefer stronger models. |
+
+Each label can be used **at most once** per consumer. You need **at least two** tiers
+(for example Simple + Hard, or Simple + Medium + Hard).
 
 ## When to use it
 
@@ -22,21 +36,23 @@ In the console it is the first option under **Strategy** → **Load balancing**.
 
 1. The client calls the consumer (typically with `"model": "auto"` — see
    [Model resolution](/trustgate/routing/model-resolution)).
-2. TrustGate estimates **prompt complexity** as a score in **0–1**.
-3. It selects the tier whose **minimum score** is the highest value still ≤ that score.
+2. TrustGate classifies the prompt into a complexity band: **Simple**, **Medium**, or
+   **Hard**.
+3. It selects the tier configured for that label.
 4. The request is forwarded to that tier's **registry** and **model**.
 5. If the pick fails and [fallback](/trustgate/routing/fallback) is configured, TrustGate
    can retry another path.
 
-Tiers are ordered by rising complexity. Example:
+Example configuration:
 
-| Complexity (UI) | Min score | Registry | Model |
-|---|---|---|---|
-| Simple | `0` | OpenAI prod | `gpt-4o-mini` |
-| Medium | `0.3` | OpenAI prod | `gpt-4o` |
-| Hard | `0.8` | Anthropic | `claude-sonnet-…` |
+| Complexity | Registry | Model |
+|---|---|---|
+| **Simple** | OpenAI prod | `gpt-4o-mini` |
+| **Medium** | OpenAI prod | `gpt-4o` |
+| **Hard** | Anthropic | `claude-sonnet-…` |
 
-A score of `0.45` lands on **Medium**; `0.9` lands on **Hard**.
+A straightforward prompt lands on **Simple**; a demanding multi-step prompt lands on
+**Hard**. Tiers that share a registry with different models are supported and common.
 
 ## Configure in the console
 
@@ -46,7 +62,7 @@ A score of `0.45` lands on **Medium**; `0.9` lands on **Hard**.
 4. Open **Complexity tiers**.
 5. Add **at least two tiers** (the UI blocks save with fewer).
 6. For each tier set:
-   - **Complexity** — Simple / Medium / Hard (unique labels per consumer).
+   - **Complexity** — **Simple**, **Medium**, or **Hard** (each label once).
    - **Registry** — upstream provider connection.
    - **Model** — model used when that band is selected.
 7. Save. Open **Connect** — snippets use `"model": "auto"`.
@@ -56,8 +72,7 @@ A score of `0.45` lands on **Medium**; `0.9` lands on **Hard**.
 | Rule | Why |
 |---|---|
 | **≥ 2 tiers** | A single tier is not meaningful routing; use Simple routing instead. |
-| **Unique complexity labels** | Each band must be distinct. |
-| **Valid scores (0–1)** | Scores must be numbers in range with no duplicates. |
+| **Unique complexity labels** | Each of Simple / Medium / Hard may appear only once. |
 | **Registry + model required** | Every tier must resolve to a concrete upstream model. |
 
 You can point several tiers at the **same registry** with **different models** — that is
@@ -73,11 +88,12 @@ With smart routing enabled, applications should send:
 
 The consumer **Connect** tab and [Playground](/trustgate/console/playground) already use
 **Auto** for this strategy. Do not hard-code a single model id unless you intentionally
-want to bypass complexity selection (and the model is allowed by policy).
+want to bypass complexity selection (and the model is allowed on the consumer).
 
 ## Tips
 
-- Put the cheapest capable model on **Simple** (`min_score` `0`) so most traffic stays cheap.
+- Put the cheapest capable model on **Simple** so most easy traffic stays inexpensive.
+- Use **Medium** for the default production model when you need three bands.
 - Reserve **Hard** for models that justify the cost on difficult prompts.
 - Pair with [LLM Budget](/trustgate/policies/rate-limiting#llm-budget) if you need hard
   spend ceilings on top of routing.
@@ -91,5 +107,5 @@ want to bypass complexity selection (and the model is allowed by policy).
 - [Load balancing](/trustgate/routing/load-balancing) — other algorithms (round-robin,
   weighted, least-connections, random).
 - [Model resolution](/trustgate/routing/model-resolution) — `auto`, short names, and model
-  policies.
+  filters on the consumer.
 - [Consumers](/trustgate/concepts/consumers) — Routing tab overview.
