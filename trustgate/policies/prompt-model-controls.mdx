@@ -1,53 +1,220 @@
 ---
-title: "Prompt & model controls"
-description: "Restrict which models a consumer may call and inject versioned system prompts — model allowlist and prompt template policies in the console."
+title: "Prompt management"
+description: "Prompt Template and Prompt Compression policies — inject system prompts or named versioned templates, and shrink request content before the model runs."
 ---
 
-Two catalog policies control **what model** may run and **what system prompt** is injected.
-Create them under **Policies** → **Catalog**, or attach them from a consumer.
+**Prompt Management** catalog policies reshape the LLM request body on `pre_request`.
+Create them under **Policies** → **Catalog**, or attach them from a consumer **Policies**
+tab. Scope each policy **gateway-wide** or **targeted**.
 
-| Policy (`slug`) | Purpose |
-|---|---|
-| [`model_allowlist`](#model-allowlist) | Restrict models; optional substitute/default. |
-| [`prompt_template`](#prompt-template) | Inject context-bound system prompts and named templates. |
+| Policy in the catalog | Slug | What it does |
+|---|---|---|
+| **[Prompt Template](#prompt-template)** | `prompt_template` | Auto-inject system prompts and/or render client-referenced named, versioned templates. |
+| **[Prompt Compression](#prompt-compression)** | `prompt_compression` | Minify JSON, strip ANSI, collapse whitespace — deterministic, fail-open. |
 
-Per-registry **model filters** and **defaults** on the consumer Routing tab are complementary
-— see [Model resolution](/trustgate/routing/model-resolution). Use the **policy** when you
-want gateway-wide or cross-consumer enforcement with observe/enforce modes.
+Protocol: **LLM** only.
 
----
-
-## Model allowlist
-
-**`model_allowlist`**
-
-| Control | Meaning |
-|---|---|
-| **Allowed models** | List or patterns the request may use. |
-| **Default model** | Used when the client omits `model` (must be allowed). |
-| **On deny** | Reject, or **substitute** a safe model. |
-
-Configure under **Policies** with **Enforce** or **Observe**. Targeted scope can pin the
-rule to specific consumers.
+To **restrict which models** a consumer may call, use the consumer **Routing** tab
+(**Filter by available models** / **default model**) — not a catalog policy. See
+[Model resolution](/trustgate/routing/model-resolution).
 
 ---
 
-## Prompt template
+## Prompt Template
 
-**`prompt_template`**
+**`prompt_template`** runs at `pre_request` and rewrites the chat body using
+[Mustache](https://mustache.github.io/)-style `{{placeholders}}` (v1 engine: **mustache**
+only).
 
-| Mode | Meaning |
+The console form has two **modes**. The UI edits one mode at a time; config for the other
+mode is preserved if you switch.
+
+| Mode in the UI | Backend fields | Behavior |
+|---|---|---|
+| **Auto-inject** | `inject_templates` | Gateway always injects rendered **system** content into every request. |
+| **Named templates** | `named_templates` | Clients opt in with `{template://name@label}` in a **user** message string. |
+
+You must configure at least one inject template **or** one named template (backend
+validation).
+
+### Configure in the console
+
+1. **Policies** → **Catalog** → **Prompt Template**.
+2. Choose **Mode**: **Auto-inject** or **Named templates**.
+3. Add templates (details below).
+4. Set **If a variable is missing** (Reject request / Use empty string).
+5. Optionally open **Advanced Settings** (escape JSON control characters).
+6. Set mode (**Enforce** / **Observe**) and scope, then save.
+
+### Mode A — Auto-inject
+
+Gateway renders each inject template from **context variables** and writes a **system**
+message into the request.
+
+| UI field | Backend | Meaning |
+|---|---|---|
+| **Name** | `inject_templates[].id` | Unique id (required). |
+| **Content** | `content` | Template body with `{{var}}` placeholders (required). |
+| **If system prompt exists** | `on_existing_system` | **Merge** (default) or **Replace** an existing system message. |
+| **Insert position** | `position` | Fixed to **System** in v1. |
+
+Placeholders must match `{{name}}` where `name` is letters, digits, `.`, `-`, or `_`
+(e.g. `{{user_id}}`, `{{tenant.name}}`).
+
+**Context variables** (`context_variables`) map placeholder names to request data:
+
+| Source | Meaning |
 |---|---|
-| **Auto-inject** | Always prepend/append a system prompt for matching traffic. |
-| **Named templates** | Versioned templates (e.g. `template://…`) selected by request metadata. |
+| `header` | Read an HTTP header by name. |
+| `jwt_claim` | Read a claim from the validated JWT. |
 
-Templates can use context variables (headers, JWT claims, mustache-style placeholders)
-depending on the form fields shown for your catalog version.
+The console does not yet expose a full context-variable editor; values configured via API
+or existing policies are preserved. When a placeholder cannot be resolved:
+
+| Setting | UI label | Effect |
+|---|---|---|
+| `error` | **Reject request** (default) | Fail the request. |
+| `empty_string` | **Use empty string** | Substitute `""` and continue. |
+| `skip_injection` | *(API / advanced)* | Skip that inject template only. |
+
+The shared UI control writes the same choice to both
+`on_missing_context_variable` and `on_missing_client_variable` (client supports
+`error` / `empty_string` only).
+
+### Mode B — Named templates
+
+Clients reference a template in a **plain string** user message (not multimodal content
+parts):
+
+```text
+{template://support-greeting@stable}
+```
+
+or, if a **default label** is set on the policy:
+
+```text
+{template://support-greeting}
+```
+
+| UI field | Backend | Meaning |
+|---|---|---|
+| **Template name** | `named_templates[].name` | Name in `{template://name…}` (unique, required). |
+| **Version** | version id (UI) | Operator label for the version row. |
+| **Labels** | `versions[].labels` | At least one label that resolves this version (e.g. `stable`, `latest`). Labels must be unique across all versions of all templates on the policy. |
+| **Content** | `versions[].content` | Template body (required). May be a bare string **or** a JSON **array of message objects**. |
+| **Require template reference** | inverted `allow_untemplated_requests` | When on, requests **without** a `{template://…}` reference are rejected. Default in the UI is **on**. |
+| **Default label** | `default_label` | Used when the reference omits `@label`. Must match an existing version label if set. |
+
+**Resolution rules**
+
+1. Scan **user message string content** for `{template://name}` or `{template://name@label}`.
+2. Exactly one distinct reference per request (repeats of the same ref are OK for multi-turn).
+3. Resolve name → template, then label (or default label) → version.
+4. Render placeholders from **client variables** (request `properties` / template vars) and
+   context variables.
+5. **Replace the entire `messages` array** with the rendered content (not a single-message
+   patch). Multi-turn history sent by the client is discarded when rendering succeeds.
+
+Optional per-version `required_variables` (type / enum / max_length) can be set via API;
+the console preserves them if present.
+
+### Advanced
+
+| UI | Backend | Default | Meaning |
+|---|---|---|---|
+| **Escape JSON control characters** | `escape_json_control_chars` | on | Strip C0 control bytes from substituted values before insertion. |
+
+### Example (auto-inject)
+
+```json
+{
+  "slug": "prompt_template",
+  "settings": {
+    "template_engine": "mustache",
+    "context_variables": {
+      "tenant": { "source": "header", "name": "X-Tenant-Id" }
+    },
+    "inject_templates": [
+      {
+        "id": "safety-policy",
+        "position": "system",
+        "role": "system",
+        "content": "You serve tenant {{tenant}}. Follow company safety policy.",
+        "on_existing_system": "merge"
+      }
+    ],
+    "on_missing_context_variable": "error",
+    "escape_json_control_chars": true
+  }
+}
+```
+
+### Example (named template client call)
+
+```json
+{
+  "model": "auto",
+  "properties": { "persona": "friendly" },
+  "messages": [
+    { "role": "user", "content": "{template://support-greeting@stable}" }
+  ]
+}
+```
+
+---
+
+## Prompt Compression
+
+**`prompt_compression`** shrinks the request prompt on `pre_request` before the model runs.
+Transforms are **deterministic** (same input → same bytes) so provider prompt-cache
+prefixes stay stable, and the plugin **fails open**: any decode/transform error leaves the
+original body unchanged.
+
+The console uses the catalog **settings schema** form (booleans, integers, role multi-select).
+
+### Configure in the console
+
+1. **Policies** → **Catalog** → **Prompt Compression**.
+2. Enable at least one transform (defaults are all on).
+3. Tune thresholds and optional **target roles**.
+4. Set mode and scope, then save.
+
+### Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| **Compress JSON** (`compress_json`) | on | Minify standalone JSON message content, fenced JSON code blocks, and tool-call arguments (whitespace-only, lossless). |
+| **Normalize Whitespace** (`normalize_whitespace`) | on | Trim trailing spaces per line (keeps Markdown two-space hard breaks) and collapse runs of blank lines. |
+| **Strip ANSI Escapes** (`strip_ansi`) | on | Remove ANSI colour/cursor sequences (common in terminal/CI logs). |
+| **Max Consecutive Blank Lines** | `1` | Longest blank-line run kept when whitespace is normalized (`1`–`1000`). |
+| **Minimum Content Length** (`min_length`) | `256` | Skip message content shorter than this many bytes (protects tiny cache-stable prefixes). `0` = compress everything. |
+| **Max Body Bytes** (`max_body_bytes`) | `1048576` (1 MiB) | Skip the whole pipeline for larger bodies (CPU bound). `0` = no cap. |
+| **Target Roles** (`target_roles`) | empty = all | Restrict to `system` / `user` / `assistant` / `tool`. Empty compresses every role. |
+
+At least one of compress JSON / normalize whitespace / strip ANSI must stay enabled.
+
+### Example
+
+```json
+{
+  "slug": "prompt_compression",
+  "settings": {
+    "compress_json": true,
+    "normalize_whitespace": true,
+    "strip_ansi": true,
+    "max_consecutive_blank_lines": 1,
+    "min_length": 256,
+    "max_body_bytes": 1048576,
+    "target_roles": ["user", "tool"]
+  }
+}
+```
 
 ---
 
 ## Related
 
-- [Consumers](/trustgate/concepts/consumers) — registry-level model filter UI
-- [Model resolution](/trustgate/routing/model-resolution) — `auto` and client `model` forms
 - [Policies overview](/trustgate/policies/overview)
+- [Model resolution](/trustgate/routing/model-resolution) — filter models and defaults on the consumer
+- [Consumers](/trustgate/concepts/consumers) — Routing tab model filters
+- [Playground](/trustgate/console/playground) — exercise template behaviour
