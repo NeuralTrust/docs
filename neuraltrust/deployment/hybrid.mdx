@@ -1,0 +1,633 @@
+---
+title: Hybrid
+description: Run the request path in your cluster with the control plane on NeuralTrust SaaS — architecture, network, install, and high availability.
+---
+
+Hybrid runs the **data plane** in your environment and keeps the **control
+plane** on NeuralTrust SaaS. Raw prompts and responses stay in your PostgreSQL;
+only configuration requests and metadata reach NeuralTrust, and your cluster
+opens every one of those connections.
+
+Everything below is one page on purpose: architecture, the network rules to
+agree with your security team, the install, and how to make it highly
+available. You should not need another deployment model's page to finish a
+Hybrid install.
+
+## Architecture
+
+<img
+  src="/images/static/img/platform-architecture.svg"
+  alt="Hybrid architecture: in your cluster, clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, TrustGate calls TrustGuard on :8081, and TrustGuard calls the Firewall on :8000. TrustGate calls your upstream LLM providers. DataAgent hosts the OTLP egress collector on :4317 and :4318 and serves authorized retrieval. PostgreSQL and Redis are recommended datastores outside the cluster. Four outbound connections on 443 reach NeuralTrust SaaS — a config-sync endpoint for AgentGateway, a second one for TrustGuard, telemetry ingest, and DataBridge — all initiated from your environment."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/platform-architecture-dark.svg"
+  alt=""
+  className="hidden dark:block"
+/>
+
+| Plane | Where it runs | What it covers |
+| --- | --- | --- |
+| **Control plane** | NeuralTrust SaaS | Console, configuration, analytics |
+| **Data plane** | Your environment | TrustGate, TrustGuard, Firewall, data-plane API, DataAgent |
+
+### How the planes connect
+
+| Flow | From | To | Direction | Carries |
+| --- | --- | --- | --- | --- |
+| **Gateway traffic** | Your clients | TrustGate — LLM/proxy `8081`, MCP `8082` | Inbound to your edge | Prompts and responses |
+| **Request path** | TrustGate | TrustGuard, then Firewall | In-cluster | Evaluation and classification |
+| **Storage** | TrustGate, TrustGuard | Your PostgreSQL and Redis | Outbound to your stores | Raw payloads, cache, rate-limit state |
+| **Upstream models** | TrustGate | Your LLM providers | Outbound `443` | The proxied model call |
+| **Config sync** | TrustGate, TrustGuard | NeuralTrust configuration service — **one endpoint per product** | Outbound `443` | Policy and gateway configuration, pulled |
+| **Metadata** | DataAgent egress collector | NeuralTrust telemetry | Outbound `443` | OTLP metadata — payloads are not exported |
+| **Retrieval** | DataAgent | DataBridge | Outbound `443` | Authorized retrieval, scoped by the enrollment token |
+
+**Config sync and DataBridge are outbound only.** Your cluster dials them;
+nothing at NeuralTrust initiates those, so you open egress and never ingress
+for them.
+
+The console is the one exception. The **Dataplane URL** you register there is a
+URL NeuralTrust calls, so your published LLM and MCP entry points must accept
+inbound HTTPS from a single NeuralTrust source IP. Agree that rule with your
+network team early — it is the requirement security reviews most often push
+back on. The address is in [Network](#network).
+
+TrustGate and TrustGuard never talk to SaaS directly for metadata. They emit
+OTLP to a collector co-located with DataAgent inside your cluster, and that
+collector is what egresses.
+
+## What runs
+
+| Workload | Port | Job | If it stops |
+| --- | --- | --- | --- |
+| `agentgateway-proxy` (TrustGate) | 8081 | Terminates LLM traffic, applies policies, routes upstream | LLM API traffic fails |
+| `agentgateway-mcp` (TrustGate) | 8082 | The same, for MCP tool traffic | MCP tool calls fail |
+| `trustguard-data-plane` | 8081 | Evaluates prompts and responses against detectors | Protection checks fail |
+| `firewall` gateway + workers | 8000 | ML classifiers behind a gateway API. Deploys with TrustGuard and is the largest memory consumer in the data path | ML-backed detectors fail |
+| `data-plane-api` | 8080 | Red teaming and evaluation API | TrustTest runs fail |
+| `dataagent` (one per product) | 8080 health only | Answers authorized queries from SaaS over an outbound stream, and hosts the telemetry egress collector | Dashboards that read your data go blank |
+
+Products are selected with `global.products.trustgate`,
+`global.products.trustguard`, and `global.products.dataPlane`. All default to
+**off** and at least one must be `true`.
+
+DataAgent is worth understanding because it is unusual: it exposes **no inbound
+service**. It dials out to DataBridge and holds the stream open, and queries
+arrive over that stream. There is nothing to expose and nothing to allow
+inbound. It also runs single-replica by design — two would register duplicate
+streams. Each enabled product needs its own enrolled DataAgent; only a
+red-teaming-only install (`global.products.dataPlane` alone) runs without one.
+
+TrustGate admin, the console, and analytics are **not** deployed in Hybrid —
+they run on SaaS. There is no in-cluster ClickHouse.
+
+## Prerequisites
+
+- A Kubernetes cluster with an ingress controller, and Helm 3.8+
+- Roughly **3–4** workers at 8 vCPU / 16–32 GiB — a starting point, see
+  [Capacity](/neuraltrust/deployment/architecture#capacity)
+- A base domain you can point at the cluster ingress, for example
+  `platform.example.com`
+- The network rules in [Network](#network) below
+- A reachable PostgreSQL and Redis
+- The registry key NeuralTrust sends you when your account is provisioned —
+  [Container images](/neuraltrust/deployment/images)
+
+```bash
+kubectl get nodes
+kubectl get storageclass
+kubectl get ingressclass
+```
+
+### Check your datastores first
+
+The two most common first-install failures are a datastore that is not actually
+reachable and one that is reachable but silently wrong.
+
+**Redis is required.** Both gateways validate `REDIS_HOST` at boot and refuse to
+start without it, even though a Hybrid data plane does not use PostgreSQL for
+its own configuration. TrustGate uses Redis for rate limiting and semantic
+caching on the request path.
+
+**PostgreSQL is where your raw payloads live.** Prompts and responses are
+written there and never leave your cluster.
+
+The chart deploys both in-cluster by default so a proof of concept can start
+without provisioning anything. Production should set `deploy: false` and point
+at managed instances outside the cluster — see
+[Managed stores](/neuraltrust/deployment/configuration#managed-stores).
+
+An unreachable store fails loudly. The pattern to watch for is a component
+whose default quietly points at `localhost`: it comes up healthy and looks fine
+until you use the feature that needs it. Set every host explicitly.
+
+## Network
+
+Allow **TCP 443** from your cluster egress — and from any NAT or proxy in front
+of it — to these hosts. Prefer **hostname** rules where your firewall supports
+DNS-based allowlists; the IPs are for static ACLs. If DNS resolves differently
+in your region, trust DNS and ask NeuralTrust support to refresh the list.
+
+| Hostname | IP | Purpose |
+| --- | --- | --- |
+| `agentgateway-configsync.neuraltrust.ai` | `34.22.134.169` | TrustGate (AgentGateway) config-sync |
+| `trustguard-configsync.neuraltrust.ai` | `34.62.69.111` | TrustGuard config-sync |
+| `databridge.neuraltrust.ai` | `34.62.63.231` | DataAgent DataBridge |
+| `telemetry.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export (EU) |
+| `telemetry.us.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export (US) |
+
+Allow the telemetry host matching the region your tenant is provisioned in.
+Product metadata OTLP does not leave the pods directly — the co-located egress
+collector forwards to the ingest edge for your region, so that is the host to
+list if your policy enumerates every external destination.
+
+Also allow outbound HTTPS to your container registry (or mirror), your LLM
+upstreams, and your PostgreSQL and Redis.
+
+### Inbound
+
+Hybrid is not egress-only. Your published TrustGate LLM and MCP entry points
+must accept inbound HTTPS from:
+
+| Source IP |
+| --- |
+| `34.78.98.144` |
+
+Scope the rule to your edge or ingress for those two hosts. Nothing needs to
+reach TrustGuard, Firewall, the data-plane API, or DataAgent from outside the
+cluster.
+
+<Warning>
+A data plane that cannot reach the egress hosts does not crash. It starts
+cleanly, serves its last-known-good configuration, and quietly stops receiving
+updates or shipping telemetry. Verify reachability from inside the cluster
+before go-live rather than discovering it afterwards.
+</Warning>
+
+Two of these carry long-lived streams. If an egress proxy or middlebox reaps
+idle connections, config-sync and DataBridge drop and reconnect on that
+interval — check its idle timeout. A TLS-intercepting proxy breaks certificate
+verification unless its CA reaches the client: put it in the bundle you point
+`dataagent.databridge.tlsCa`, `<product>.configSync.tlsCa` and
+`global.clickstack.egress.tlsCaSecretName` at, since each of those replaces the
+system roots rather than adding to them.
+
+## Install
+
+<Note>
+Step 3 is where most installs fail. Those four Secrets are **never** generated by
+the chart. If your values file does not reference them, the install stops at
+render time with a validation error.
+</Note>
+
+<Steps>
+
+<Step title="Create the namespace and image pull secret">
+
+```bash
+kubectl create namespace neuraltrust
+```
+
+NeuralTrust images are private. Turn the registry key into the pull Secret every
+component expects, using the script from the
+[chart sources](/neuraltrust/deployment/images#get-the-chart-sources) — it fills
+in the registry server for you:
+
+```bash
+GCR_KEY_FILE=./neuraltrust-registry-key.json \
+  ./create-image-pull-secret.sh --namespace neuraltrust
+```
+
+If your cluster cannot reach the NeuralTrust registry, mirror the images into
+your own and set `global.imageRegistry`. Both paths, and the two collector
+images that `imageRegistry` does not rewrite, are in
+[Container images](/neuraltrust/deployment/images).
+
+</Step>
+
+<Step title="Create the gateway in the console">
+
+Open **TrustGate → New Gateway**, name it, choose **Private**, then
+**Kubernetes**. If you are also running TrustGuard, create a private TrustGuard
+in **TrustGuard → Agent Runtime** as well — each product is a separate console
+object with its own credentials.
+[Console setup](/neuraltrust/deployment/console-setup) covers the wizard screen
+by screen.
+
+The wizard produces a `values.yaml` with credentials inline. Treat that file as
+a secret, do not commit it, and take exactly two values out of it per product:
+
+- **`CONFIG_SYNC_TOKEN`** — proves to the SaaS control plane that this data
+  plane is yours
+- **the DataAgent enrollment JWT** — carries your tenant identity
+
+Everything else in the wizard output is superseded by the chart's own
+interfaces. One key needs renaming as you transcribe it: older consoles write
+`global.products.agentgateway: true`, which the chart rejects. `global.products`
+is keyed by product id, so TrustGate is `trustgate` there even though its values
+block is `agentgateway:` — see the
+[naming map](/neuraltrust/deployment/console-setup#one-product-four-names).
+
+</Step>
+
+<Step title="Create the four operator-supplied Secrets">
+
+Those four values are all you supply:
+
+```bash
+# Config sync — pulls runtime configuration from the hosted control plane
+kubectl create secret generic agentgateway-config-sync -n neuraltrust \
+  --from-literal=CONFIG_SYNC_TOKEN='<trustgate-config-sync-token>'
+
+kubectl create secret generic trustguard-config-sync -n neuraltrust \
+  --from-literal=CONFIG_SYNC_TOKEN='<trustguard-config-sync-token>'
+
+# DataAgent enrollment — powers DataBridge reads and product OTLP egress
+kubectl create secret generic dataagent-enrolment-trustgate -n neuraltrust \
+  --from-literal=ENROLMENT_TOKEN='<trustgate-enrolment-jwt>'
+
+kubectl create secret generic dataagent-enrolment-trustguard -n neuraltrust \
+  --from-literal=ENROLMENT_TOKEN='<trustguard-enrolment-jwt>'
+```
+
+Everything else — JWT signing secrets on both sides of every internal call,
+database passwords for in-cluster stores, the config-sync cache key, the MCP
+OAuth signing key — is generated on first install and reused on upgrade. Your
+own short list is the registry pull secret, these four tokens, and the
+credentials for any datastore you provide. See
+[Secrets](/neuraltrust/deployment/secrets).
+
+<Warning>
+Do **not** create `CONFIG_SYNC_LKG_KEY`. Earlier releases asked you to generate
+one with `openssl rand -base64 32`; since chart 2.6.0 the chart generates it,
+because it only encrypts a local cache and is never sent anywhere. The one
+exception is turning off chart secret generation entirely, which makes every
+generated credential yours to supply.
+</Warning>
+
+<Note>
+The enrollment JWT already carries `tenant_id` and `instance_id`. Do not set a
+tenant ID in values.
+</Note>
+
+</Step>
+
+<Step title="Write your values file">
+
+The chart ships `values-required.yaml`, a full-hybrid preset that already
+matches the Secret names above. Copy it and change the two cluster-specific
+lines:
+
+```yaml
+global:
+  platform: "kubernetes"          # aws | gcp | azure | openshift | kubernetes
+  domain: "platform.example.com"
+  products:
+    trustgate: true
+    trustguard: true
+    dataPlane: true
+
+agentgateway:
+  configSync:
+    existingSecret:
+      name: "agentgateway-config-sync"
+  dataagent:
+    enrolment:
+      existingSecret:
+        name: "dataagent-enrolment-trustgate"
+
+trustguard:
+  configSync:
+    existingSecret:
+      name: "trustguard-config-sync"
+  dataagent:
+    enrolment:
+      existingSecret:
+        name: "dataagent-enrolment-trustguard"
+```
+
+For a subset of products, drop the flags you do not need and use the matching
+tracked slice — `values-trustgate.yaml.example`,
+`values-trustguard.yaml.example`, or `values-red-teaming.yaml.example`
+(data-plane API only, which needs no DataAgent and no config-sync). Every switch
+is in
+[Values cheat sheet](/neuraltrust/deployment/configuration#values-cheat-sheet).
+
+Do **not** set `configSync.enabled: true`. Hybrid derives it from the deployment
+mode, and restating it is a frequent cause of confusing errors.
+
+</Step>
+
+<Step title="Install">
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust --create-namespace \
+  -f values-required.yaml
+```
+
+<Note>
+The chart registry is **public** — no `helm registry login` and no credentials
+needed to pull it. Only the container images are private, which is what the
+`gcr-secret` pull Secret in step 1 is for. Always pass `--version` so the
+release is reproducible.
+</Note>
+
+The chart validates your values before it renders, so a missing credential
+fails in your terminal rather than as a pod in `CreateContainerConfigError`
+twenty minutes later. The messages name the value to set. To inspect manifests
+first:
+
+```bash
+helm template neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust -f values-required.yaml > /tmp/rendered.yaml
+```
+
+</Step>
+
+</Steps>
+
+On OpenShift the install is the same but the chart renders native Routes instead
+of Ingress — see [OpenShift](/neuraltrust/deployment/openshift/overview).
+Provider-specific ingress, certificate, and managed-store choices are in
+[Cloud notes](/neuraltrust/deployment/cloud-notes).
+
+## Verify
+
+Running is not the same as working. A Hybrid data plane's readiness probe
+includes a snapshot check, so it reports Ready only after it has pulled
+configuration from SaaS.
+
+```bash
+kubectl get pods -n neuraltrust
+kubectl get ingress -n neuraltrust
+```
+
+With all three products enabled you should see `agentgateway-proxy`,
+`agentgateway-mcp`, `trustguard-data-plane`, `data-plane-api`, `firewall` and
+its workers, `dataagent`, and `dataagent-trustguard`. In-cluster
+`control-plane-postgresql` and `redis` appear only while `deploy: true`.
+
+A pod that is `Running` but never `Ready` is the signature of config-sync
+failing. Three causes, in order of likelihood:
+
+1. The token is wrong, or was pasted with trailing whitespace
+2. Egress to `*.neuraltrust.ai:443` is blocked — see [Network](#network)
+3. A TLS-intercepting proxy is present and its CA is not trusted
+
+For the last case set `configSync.tlsCa`. Do not reach for
+`configSync.tlsInsecure` — the runtimes refuse it under a deployed `APP_ENV`.
+[Config sync](/neuraltrust/deployment/config-sync) covers the mechanism and its
+diagnostics.
+
+### Expose both entry points
+
+Hostnames derive from `global.domain`:
+
+| Service | Host |
+| --- | --- |
+| TrustGate LLM gateway | `gateway.<domain>` and `*.llm.<domain>` |
+| TrustGate MCP | `mcp.<domain>` and `*.mcp.<domain>` |
+| TrustGuard | `trustguard.<domain>` |
+| data-plane API | `data-plane-api.<domain>` |
+
+TrustGate listens on two ports for two different protocols, and they need
+separate hostnames in production:
+
+```yaml
+# LLM URL: https://gateway.example.com   → port 8081
+# MCP URL: https://mcp.example.com       → port 8082
+```
+
+Point DNS at the ingress address, then set **both** in **Settings → Agent
+Gateway → General**. The wizard bootstraps both from a single URL, which works
+for the proxy and quietly breaks MCP — the failure appears as tool calls that
+never resolve rather than as an error.
+
+### What "metadata only" means concretely
+
+Raw prompts and responses are written to **your** PostgreSQL. What leaves your
+cluster is telemetry: request metadata, timings, detector verdicts, and counts.
+
+The egress path is worth knowing. A `clickstack-egress-collector` runs alongside
+your primary DataAgent. It exchanges the DataAgent enrollment JWT for a
+short-lived OTLP access token through a loopback broker on `127.0.0.1:9465`,
+then exports over OTLP with that token. There is no long-lived bearer token on
+the application pods, and the broker only listens on loopback.
+
+This is also why the chart refuses to install with a product enabled but no
+DataAgent enrollment configured: without it the egress collector has nothing to
+exchange, so telemetry would silently never leave.
+
+## Upgrades
+
+```bash
+helm upgrade neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust -f values-required.yaml
+```
+
+Generated credentials are looked up and reused, so an upgrade does not rotate
+secrets or invalidate sessions.
+
+One caveat: workloads that read configuration through `envFrom` carry no
+checksum of the ConfigMap, so a values change that only touches a ConfigMap
+updates the ConfigMap without restarting the pods. The change then takes effect
+at the next unrelated restart. If you changed something behavioural, restart the
+affected deployment yourself:
+
+```bash
+kubectl -n neuraltrust rollout restart deploy/agentgateway-proxy
+```
+
+## High availability
+
+Availability is a ladder, not a single design. Climb it only as far as the
+failure you actually have to survive — each rung costs more to operate than the
+one below it.
+
+| Tier | Survives | Cost |
+| --- | --- | --- |
+| **1. One cluster, multi-AZ** | Node and zone loss | Node pools in three zones; nothing else to run |
+| **2. Twin clusters, one region** | Cluster loss, bad upgrades | A second cluster and a traffic switch |
+| **3. Two regions, active/passive** | Regional loss | The above, plus DNS promotion and a datastore runbook |
+
+<img
+  src="/images/static/img/ha-ladder.svg"
+  alt="The three availability tiers side by side. Tier 1, one cluster multi-AZ: node pools in three availability zones, two or more replicas of TrustGate, TrustGuard and Firewall, and managed PostgreSQL and Redis with automatic failover inside the region; it survives node and zone loss and needs no promotion procedure or DNS work. Tier 2, twin clusters in one region: a serving cluster plus a second cluster to roll upgrades through, both against one PostgreSQL primary and one Redis primary shared inside the region; it survives cluster loss and bad upgrades. Tier 3, two regions active/passive: an active region running the only DataAgent, a warm passive region with no traffic, one writable PostgreSQL primary with a cross-region read replica, and region-local Redis per cluster; it survives regional loss and adds DNS promotion and a datastore runbook. Two invariants hold at every tier: exactly one writable PostgreSQL primary, and exactly one active DataAgent per gateway scope."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/ha-ladder-dark.svg"
+  alt=""
+  className="hidden dark:block"
+/>
+
+### Tier 1 — one cluster across zones
+
+Spread the node pool over three availability zones, run at least two replicas of
+TrustGate, TrustGuard and Firewall, and use managed PostgreSQL and Redis with
+automatic failover inside the region. There is no promotion procedure and no DNS
+work. **This is enough for most deployments** — start here and stop here unless
+a regional requirement says otherwise.
+
+### Tier 2 — twin clusters in one region
+
+Two clusters side by side, both pointed at **one PostgreSQL primary and one
+Redis primary**. Because they are in the same region, sharing both stores adds no
+network hop and loses nothing on a switch: state is identical from either side.
+It buys you an escape from a broken cluster or a bad upgrade — roll the second
+cluster, move traffic, and keep the first as your way back.
+
+### Tier 3 — two regions, active/passive
+
+<img
+  src="/images/static/img/hybrid-high-availability.svg"
+  alt="Two Hybrid data-plane clusters in active/passive across two regions. Clients reach global LLM and MCP URLs that a customer-operated traffic manager points at the active cluster. Both clusters pull the same gateway-scoped configuration from NeuralTrust SaaS over outbound 443 and keep their own last-known-good copy. Both use one shared writable PostgreSQL primary with a cross-region read replica promoted on failover, while each cluster runs its own region-local Redis. Only the active cluster runs DataAgent."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/hybrid-high-availability-dark.svg"
+  alt=""
+  className="hidden dark:block"
+/>
+
+The two stores are treated differently on purpose.
+
+**PostgreSQL: one writable primary, one cross-region read replica.** It holds
+durable state — payloads, detections, product data — so a single writer is what
+prevents split-brain. There is only one place to write, two clusters cannot
+diverge, and promotion is a datastore operation rather than a distributed
+decision. Your RPO is the replication lag.
+
+**Redis: region-local, one per cluster.** Redis carries semantic cache,
+rate-limit counters and evaluation progress, and it has
+[no persistence requirement](/neuraltrust/deployment/architecture#datastore-sizing-floors).
+Reaching across a region for that on every request costs latency on the hot path
+and buys nothing, because the data is worth seconds. After a promotion the new
+active cluster starts with cold counters and rebuilds them in seconds.
+
+<Note>
+The consequence is that rate limits are counted per region. With one active
+region at a time that is invisible, except in the switchover window, when a
+client could briefly get a fresh allowance. If you need a globally exact counter
+across two simultaneously active regions, that is a different design — talk to
+us before building it.
+</Note>
+
+| Component | How it is made available |
+| --- | --- |
+| TrustGate, TrustGuard, Firewall | Multiple replicas per cluster, across zones; full copies in both clusters |
+| PostgreSQL | One managed primary, multi-AZ, with a cross-region read replica |
+| Redis | One managed instance **per region**, each with automatic failover |
+| Configuration | Each cluster pulls the same gateway scope from SaaS independently and keeps its own last-known-good copy |
+| DataAgent | Active cluster only — two would register duplicate streams |
+| LLM and MCP URLs | One global URL each, pointed at the active cluster by your traffic manager |
+
+Both clusters use the same gateway scope and the same credentials for it. The
+passive cluster is warm: its workloads run, pass health checks, and keep
+synchronizing, but it receives no production traffic.
+
+### What each failure looks like
+
+| Failure | Effect |
+| --- | --- |
+| A node or zone | Remaining replicas absorb the traffic; no operator action |
+| The SaaS control plane, or your egress to it | Both clusters keep enforcing their last synchronized configuration. Changes apply once sync resumes |
+| The active cluster | Your traffic manager and promotion automation switch both global URLs to the passive cluster |
+| The PostgreSQL primary | Managed failover inside the region; losing the region means promoting the read replica and repointing both clusters |
+| A region's Redis | That cluster loses cache and counters and rebuilds them; the other region is untouched |
+
+Running pods survive a control-plane outage from their in-memory configuration,
+but a pod that **restarts** during one needs the last-known-good file on disk.
+The chart mounts it on an `emptyDir`, which does not survive a restart, so a
+restarted pod with no control-plane connectivity will not become Ready. If a
+cluster has to tolerate restarts mid-outage, move that mount to persistent
+storage. The `CONFIG_SYNC_LKG_KEY` that encrypts it is generated per cluster and
+needs no distribution.
+
+<Warning>
+Do not make configuration changes directly in one data plane during a
+control-plane outage. The control plane remains the source of truth.
+</Warning>
+
+### Promote the passive cluster
+
+<Steps>
+<Step title="Detect and fence">
+Use regional health checks backed by Kubernetes readiness on both request paths.
+Remove the failed cluster from both global endpoints and stop its DataAgent, so
+it cannot come back mid-recovery and register a second stream.
+</Step>
+
+<Step title="Point PostgreSQL at a writable primary">
+If the primary is in the failed region, promote the read replica and update
+`global.postgresql.host` in the surviving cluster. If the primary is unaffected,
+there is nothing to do here — this is the case the single-primary design is
+buying you. Redis needs no attention either way, because the surviving cluster
+already has its own.
+</Step>
+
+<Step title="Verify configuration and start active-only services">
+Confirm TrustGate and TrustGuard are Ready with a current or last-known-good
+configuration, then enable DataAgent. Only one DataAgent may be active.
+</Step>
+
+<Step title="Switch both traffic endpoints">
+Route the global LLM/proxy and MCP URLs to the promoted cluster. Keep both
+protocols on the same cluster, and remember that DNS-based promotion is delayed
+by resolver and client caching.
+</Step>
+
+<Step title="Verify enforcement">
+Run representative allowed and blocked requests, then confirm policy decisions
+and metadata export before declaring the failover complete.
+</Step>
+</Steps>
+
+Requests already in flight in the failed cluster fail. Clients should use bounded
+retries appropriate for their LLM or MCP operation.
+
+### Before you rely on it
+
+- [ ] Both clusters are deployed, health checked, and pulling the same gateway scope.
+- [ ] TrustGate and TrustGuard have redundant replicas across zones in each cluster.
+- [ ] PostgreSQL is managed, with one primary and a cross-region read replica.
+- [ ] Each region has its own managed Redis, and you accept per-region counters.
+- [ ] Both cluster edges accept the NeuralTrust inbound source IP.
+- [ ] Last-known-good configuration is on persistent storage.
+- [ ] Only the active cluster runs DataAgent.
+- [ ] The global LLM and MCP URLs resolve to exactly one cluster.
+- [ ] You have rehearsed: block egress to the control plane and confirm traffic
+      still flows; restart a pod during that outage; promote the passive cluster
+      and switch both URLs.
+
+Recovery time depends on health-check intervals, traffic-manager convergence,
+client DNS behavior, and datastore promotion. Measure yours rather than assuming
+it.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Console setup" icon="key" href="/neuraltrust/deployment/console-setup">
+    Create both products and map their tokens to chart Secrets.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/neuraltrust/deployment/configuration">
+    Managed stores, ingress, TLS, and every values switch.
+  </Card>
+  <Card title="Secrets" icon="lock" href="/neuraltrust/deployment/secrets">
+    What the chart generates and what you must supply.
+  </Card>
+  <Card title="Cloud notes" icon="cloud" href="/neuraltrust/deployment/cloud-notes">
+    Ingress, certificates, and managed stores per provider.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/neuraltrust/deployment/troubleshooting">
+    Install, pod, config-sync, and telemetry failures.
+  </Card>
+</CardGroup>

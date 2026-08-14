@@ -15,7 +15,26 @@ The console wizard used to emit `global.products.agentgateway: true`. The chart 
 
 ### `hybrid requires at least one product`
 
-No `global.products.*` is `true`. Frequently the same root cause as above: the key was set, but under a name the chart does not recognise.
+No `global.products.*` is `true`. Frequently the same root cause as above: the key was set, but under a name the chart does not recognise. External and Central ignore these flags entirely.
+
+### `agentgateway config-sync requires CONFIG_SYNC_TOKEN`
+
+The Secret holding the console-issued token is missing or not referenced. Create it and point `configSync.existingSecret` at it — [Hybrid install, step 3](/neuraltrust/deployment/hybrid#install). Set `configSync.enabled: false` only if you manage configuration in PostgreSQL out of band. Before chart 2.6.0 this message also named `CONFIG_SYNC_LKG_KEY`, which the chart now generates: do not create one.
+
+### `hybrid trustgate/trustguard requires dataagent enrolment`
+
+Each enabled product needs its own DataAgent enrollment Secret. Without it the telemetry egress collector has nothing to exchange for an OTLP token, so metadata would silently never leave — which is why this is a render-time error rather than a warning.
+
+### `global.clickstack.enabled is no longer supported`
+
+Product telemetry is mandatory in Hybrid and there is no opt-out. For a deployment with no NeuralTrust dependency, use [External](/neuraltrust/deployment/external).
+
+<Note>
+A clean render still cannot see your cluster. A missing `gcr-secret`, a Secret you
+referenced but never created, or an absent ingress class only surfaces as pod
+failures after install — check `kubectl get pods -n neuraltrust` and the pod
+events.
+</Note>
 
 ## Pods
 
@@ -119,6 +138,19 @@ Redis unavailable at redis://localhost:6379/0; complexity state disabled
 ```
 
 The firewall is not given a Redis URL and falls back to `localhost`. Startup then completes normally, so the pod is Ready with a feature switched off. Set the firewall's Redis URL explicitly rather than relying on the default.
+
+### Firewall or its workers do not come up
+
+Firewall deploys with TrustGuard, as a gateway plus five workers. Check all of them together:
+
+```bash
+kubectl get pods -n neuraltrust -l app.kubernetes.io/name=firewall
+kubectl get service firewall -n neuraltrust
+kubectl logs -n neuraltrust \
+  -l app.kubernetes.io/name=firewall,app.kubernetes.io/component=gateway
+```
+
+Pending workers usually mean insufficient memory — it is the largest consumer in the data path. With [GPU workers](/neuraltrust/deployment/configuration#gpu-firewall-workers), inspect resource availability, taints, node labels, and the NVIDIA device plugin with `kubectl describe pod`.
 
 ### AlertEngine fails every 45 seconds
 

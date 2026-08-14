@@ -1,15 +1,17 @@
 ---
-title: Architecture and dependencies
-description: Every component the chart deploys, every dependency you provide, and the ports between them.
+title: Requirements and dependencies
+description: What you have to provide, the ports between components, and how much cluster capacity to plan for.
 ---
 
 This is the page to hand to a platform or infrastructure team before an install.
-It answers three questions: what runs, what it depends on, and what has to be
-reachable. For the topology *decision* — SaaS, Hybrid, External, or a Central
-control plane — start with
-[Deployment models](/neuraltrust/deployment/deployment-models).
+It covers what the platform depends on, what talks to what, and how much capacity
+to plan for — independent of which model you deploy.
 
-Everything below ships as a **single umbrella Helm chart**,
+For the topology itself, including its diagram and component inventory, go to your
+model's guide: [Hybrid](/neuraltrust/deployment/hybrid),
+[External](/neuraltrust/deployment/external), or
+[Central](/neuraltrust/deployment/central). Everything ships as a **single
+umbrella Helm chart**,
 [`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform),
 with one value selecting the topology:
 
@@ -18,168 +20,100 @@ global:
   deploymentMode: hybrid # hybrid | external | saas
 ```
 
-## Hybrid
-
-The request path runs in your cluster; configuration and analytics stay on
-NeuralTrust SaaS. Every connection to SaaS is initiated outbound from your
-cluster.
-
-```mermaid
-flowchart LR
-  CLIENT["Your apps"] --> RP
-  subgraph CL["Your cluster"]
-    direction TB
-    subgraph RP["Request path"]
-      direction LR
-      TG["TrustGate<br/>proxy 8081 · MCP 8082"] --> TGU["TrustGuard<br/>data plane 8080"] --> FW["Firewall<br/>gateway + workers"]
-    end
-    DPA["data-plane-api"]
-    DA["DataAgent<br/>+ egress collector"]
-    subgraph DS["Your datastores"]
-      direction LR
-      PG[("PostgreSQL<br/>5432")]
-      RD[("Redis<br/>6379")]
-    end
-    RP -->|OTLP| DA
-    RP --> DS
-    DPA --> DS
-    DA --> PG
-  end
-  TG --> LLM["LLM providers"]
-  RP -.->|"config-sync gRPC 443"| NT
-  DA -.->|"OTLP · DataBridge 443"| NT
-  NT["NeuralTrust SaaS<br/>control plane · analytics"]
-```
-
-| Component | Deployed when | Purpose |
-| --- | --- | --- |
-| TrustGate proxy + MCP | `global.products.trustgate` | AI gateway request path |
-| TrustGuard data plane | `global.products.trustguard` | Runtime safety evaluation |
-| Firewall (gateway + workers) | with TrustGuard | Prompt and response classifiers |
-| data-plane API | `global.products.dataPlane` | Red teaming and evaluation API |
-| DataAgent | one per enabled product | Outbound telemetry egress and entitled retrieval |
-| PostgreSQL | `global.postgresql.deploy` | Raw payloads and product data |
-| Redis | `global.redis.deploy` | Semantic cache, rate limiting |
-
-TrustGate admin, the console, and analytics are **not** deployed in Hybrid —
-they run on SaaS. There is no in-cluster ClickHouse in Hybrid.
-
-## External (self-hosted)
-
-External adds the control planes, the console, and the analytics stack, and
-removes the SaaS runtime dependency entirely.
-
-```mermaid
-flowchart LR
-  CLIENT["Your apps"] --> RP
-  USER["Operators"] --> CP
-  subgraph CL["Your cluster"]
-    direction TB
-    subgraph CP["Control plane"]
-      direction LR
-      APP["Console<br/>control-plane-app"] --> API["control-plane-api"]
-      TGA["TrustGate<br/>admin 8080"]
-      TGUC["TrustGuard<br/>control plane"]
-    end
-    subgraph RP["Request path"]
-      direction LR
-      TG["TrustGate<br/>proxy 8081 · MCP 8082"] --> TGU["TrustGuard<br/>data plane 8080"] --> FW["Firewall"]
-    end
-    subgraph AN["Analytics"]
-      direction LR
-      COL["ClickStack collector<br/>4317 · 4318"] --> CH[("ClickHouse<br/>8123 · 9000")]
-      DPA["data-plane-api"] --> CH
-      DC["DataCore"] --> CH
-      AE["AlertEngine<br/>API + worker"] --> CH
-    end
-    subgraph DS["Datastores"]
-      direction LR
-      PG[("PostgreSQL<br/>5432")]
-      RD[("Redis<br/>6379")]
-    end
-    CP --> DS
-    RP --> DS
-    RP -->|OTLP| COL
-  end
-  TG --> LLM["LLM providers"]
-  AE --> SIEM["SIEM / integrations"]
-```
-
-## Central control plane (`saas`)
-
-A superset of External, spread across clusters. The central cluster runs
-everything External runs, plus three components that let data planes in **other**
-clusters enrol into it. Each of those data planes is an ordinary Hybrid install
-pointed at your domain rather than at NeuralTrust.
-
-```mermaid
-flowchart TB
-  subgraph CEN["Central cluster — deploymentMode: saas"]
-    direction TB
-    CP["Console · control-plane-api · AlertEngine<br/>TrustGate + TrustGuard config-sync"]
-    DC["DataCore<br/>mints enrolment + OTLP tokens<br/>serves JWKS"]
-    DB["DataBridge<br/>northbound 50051 in-cluster<br/>southbound 443 public"]
-    GW["ClickStack ingest gateway<br/>verifies OTLP tokens"]
-    COL["ClickStack collector"] --> CH[("ClickHouse")]
-    DC --> DB
-    GW --> COL
-    DB -.->|introspect| DC
-    GW -.->|JWKS| DC
-  end
-  subgraph REM["Data-plane cluster N — deploymentMode: hybrid"]
-    direction TB
-    PR["TrustGate / TrustGuard"]
-    DA["DataAgent<br/>unique instance ID"]
-    EG["egress collector"]
-  end
-  DA -->|"gRPC 443 + enrolment token"| DB
-  EG -->|"OTLP 443 + bearer token"| GW
-  PR -.->|"config-sync gRPC 443"| CP
-```
-
-| Addition | Deployed when | Purpose |
-| --- | --- | --- |
-| DataBridge | `deploymentMode: saas` | Holds a bidirectional gRPC stream per remote DataAgent; DataCore queries across them |
-| ClickStack ingest gateway | `deploymentMode: saas` | Public OTLP edge that verifies tokens and stamps the tenant from the verified claim |
-| Published config-sync Services | `deploymentMode: saas` | Lets remote products reach the central control planes |
-
-DataCore also switches to a hybrid residency backend, so entitled reads for a
-remote data plane go out through DataBridge instead of to the local ClickHouse.
-Raw payloads never move: they stay in the cluster that produced them.
-
-See [Central control plane](/neuraltrust/deployment/central) for endpoints, TLS,
-and authentication.
-
-The full per-mode component matrix, including which values gate each one, lives
-in the chart's
-[`docs/architecture.md`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/docs/architecture.md).
-
 ## Infrastructure dependencies
 
-The chart can run every datastore in-cluster for evaluation. For production,
-point it at managed instances instead. Nothing here is optional-but-hidden: if a
-row says required, the platform does not start without it.
+The chart can run every datastore in-cluster for evaluation. **Recommended for
+production** is managed PostgreSQL and Redis (`deploy: false` plus a host you
+provide) with ClickHouse left in-cluster. The in-cluster default exists so a
+proof of concept can `helm install` without provisioning those services first.
 
 | Dependency | Required | Chart can deploy it | Version the chart ships | Port | Used for |
 | --- | --- | --- | --- | --- | --- |
 | **PostgreSQL** | Yes | Yes (`global.postgresql.deploy`) | 17 | 5432 | Product data, raw payloads, control-plane state |
 | **Redis** | Yes | Yes (`global.redis.deploy`) | 7.2 | 6379 | Semantic cache, rate limiting, evaluation progress |
-| **ClickHouse** | External mode only | Yes (`infrastructure.clickhouse.deploy`) | 26.7 | 8123 / 9000 | Self-hosted analytics and telemetry |
+| **ClickHouse** | External and Central only | Yes (`infrastructure.clickhouse.deploy`) | 26.7 | 8123 / 9000 | Self-hosted analytics and telemetry |
 | **Ingress or Routes** | Yes | Renders the objects | — | 443 | Public entry points |
 | **StorageClass** | Yes, when running in-cluster stores | No | — | — | PostgreSQL, Redis, ClickHouse volumes |
-| **Container registry** | Yes | No | — | 443 | Image pull (or your mirror) |
+| **Container registry** | Yes | No | — | 443 | Image pull, or your mirror |
 | **LLM providers** | Yes, for the gateway path | No | — | 443 | Upstream model calls |
 | cert-manager | No | No | — | — | TLS automation, if you use it |
 | External Secrets Operator | No | No | — | — | Credential delivery, if you use it |
-| Object storage (S3 / Azure Blob) | No | No | — | 443 | ClickHouse backups, External mode |
-| SMTP or email provider | External mode only | No | — | 587 / 443 | Console invitations |
+| Object storage (S3 / Azure Blob) | No | No | — | 443 | ClickHouse backups |
+| SMTP or email provider | External and Central only | No | — | 587 / 443 | Console invitations |
 
 Redis is **not** optional and it is not only a cache: TrustGate uses it for rate
 limiting and semantic caching on the request path. Redis OSS is sufficient —
 there is no Enterprise-only feature in use. The chart's in-cluster Redis runs a
 plain `redis-server`.
 
-### Not required
+## Ports between components
+
+In-cluster hops are plain Services; there is no service mesh requirement.
+
+| Component | Port | Reached by |
+| --- | --- | --- |
+| TrustGate proxy | 8081 | Your clients, through Ingress |
+| TrustGate MCP | 8082 | Your MCP clients, through Ingress |
+| TrustGate admin | 8080 | Console (External and Central only) |
+| TrustGuard data plane | 8081 | TrustGate |
+| Firewall gateway | 8000 | TrustGuard |
+| data-plane API | 8000 | Console and TrustTest |
+| DataAgent | 8080 | Health probes only — it has no inbound service |
+| ClickStack collector | 4317 / 4318 | TrustGate, TrustGuard (OTLP) |
+| ClickHouse | 8123 / 9000 | Collector, DataCore, AlertEngine, data-plane API |
+| DataBridge northbound | 50051 | DataCore, in-cluster (Central only) |
+| DataBridge southbound | 443 | Remote DataAgents (Central only) |
+
+What has to cross a network boundary depends on the model, and each model page
+carries its own rules: [Hybrid](/neuraltrust/deployment/hybrid#network) needs
+outbound HTTPS to NeuralTrust plus one inbound source IP,
+[External](/neuraltrust/deployment/external#network) needs neither, and
+[Central](/neuraltrust/deployment/central#network-rules) needs the same outbound
+set as Hybrid but against your own domain, with the central cluster accepting it.
+
+## Capacity
+
+Chart defaults ship as a **sensible starting point** for evaluation and typical
+production traffic. They are not a hard ceiling — right-size CPU, memory,
+replicas, and node pools to match your traffic, latency goals, and budget.
+
+The shapes below reflect chart defaults with in-cluster PostgreSQL and Redis and
+Firewall CPU workers. They do **not** include the node OS, kube-system, or your
+ingress controller, so leave headroom for those.
+
+| | Hybrid (all products) | External or Central |
+| --- | --- | --- |
+| Approximate chart requests | ~10 vCPU / ~28 GiB | ~15 vCPU / ~38 GiB |
+| Comfortable cluster shape | **3–4** workers at **8 vCPU / 16–32 GiB** | **4–5** workers at **8 vCPU / 16–32 GiB** |
+| Example cloud shapes | AWS `m6i.2xlarge` × 3 · Azure `Standard_D8s_v5` × 3 · GCP `e2-standard-8` × 3 | The same SKU class with one extra node |
+
+Hybrid with fewer products — TrustGate only, so no Firewall — needs substantially
+less memory. External and Central add the console, ClickHouse, the collector,
+DataCore, and AlertEngine on top of the data path.
+
+| What drives capacity | Notes |
+| --- | --- |
+| Firewall CPU workers | Largest memory footprint whenever TrustGuard is enabled |
+| data-plane API | Significant CPU and memory during evaluation runs |
+| ClickHouse | Keep headroom for analytics queries; scale with retention |
+| PostgreSQL and Redis | Prefer [managed stores](/neuraltrust/deployment/configuration#managed-stores), so datastore capacity is independent of the node pool |
+
+Common adjustments: scale out busy gateway and TrustGuard replicas, or enable
+horizontal autoscaling once your cluster has metrics; right-size Firewall workers
+if you run a subset of detectors, or move heavy ones to
+[GPU](/neuraltrust/deployment/configuration#gpu-firewall-workers), which needs a
+separate GPU node pool; pin workloads to a dedicated pool when you want isolation
+from other cluster tenants.
+
+### Datastore sizing floors
+
+| Store | Minimum for production | Notes |
+| --- | --- | --- |
+| PostgreSQL | 2 vCPU, 4 GiB RAM, 20 GiB storage | Grows with retained raw payloads |
+| Redis | 1 GiB memory | No persistence requirement |
+| ClickHouse | 50 GiB volume, 4 GiB memory | External and Central; scale with retention |
+
+## Not required
 
 Deployments sometimes budget for these because older material mentioned them, or
 because comparable products need them. Platform v2 does **not**:
@@ -187,46 +121,28 @@ because comparable products need them. Platform v2 does **not**:
 | Not required | Why |
 | --- | --- |
 | **Kafka** or any message broker | Removed in v2. Telemetry is OTLP; the legacy Kafka pipeline ended with chart v1. |
+| **AISPM** | Retired. AlertEngine covers SIEM forwarding. |
+| **Agent Guardians** | Not in the v2 platform chart. |
+| **Control-plane Scheduler** | Removed in v2 (`CONTROL_PLANE_SCHEDULER_URL` is dead). |
+| **data-plane Kafka workers** | Removed with the Kafka pipeline. |
 | A dedicated **vector database** | Semantic caching uses Redis. There is no Milvus, Qdrant, or pgvector requirement. |
 | A **service mesh** | In-cluster hops are plain Services. |
-| **GPU nodes** | CPU Firewall images are the default; GPU is opt-in for higher throughput — see [Firewall](/neuraltrust/deployment/firewall). |
+| **GPU nodes** | CPU Firewall images are the default; GPU is opt-in for higher throughput. |
 
 <Note>
-If you are working from documentation or a diagram that shows Kafka, it predates
-chart **v2.0.0**. The legacy TrustGate/Kafka line ended at v1.14.16.
+If you are working from documentation or a diagram that shows Kafka, AISPM,
+Agent Guardians, or a control-plane Scheduler, it predates chart **v2.0.0**.
+The legacy TrustGate/Kafka line ended at v1.14.16.
 </Note>
-
-## Datastore sizing floors
-
-| Store | Minimum for production | Notes |
-| --- | --- | --- |
-| PostgreSQL | 2 vCPU, 4 GiB RAM, 20 GiB storage | Grows with retained raw payloads |
-| Redis | 1 GiB memory | No persistence requirement |
-| ClickHouse | 50 GiB volume, 4 GiB memory | External mode; scale with retention |
-
-Cluster-level capacity — roughly 3–4 workers at 8 vCPU / 16–32 GiB for Hybrid,
-4–5 for External — is in [Cluster sizing](/neuraltrust/deployment/sizing).
-
-## Egress and ingress
-
-Hybrid requires outbound HTTPS to NeuralTrust for config-sync, telemetry, and
-DataBridge, plus one inbound source IP for console health checks of your
-Dataplane URL. External requires none of it.
-
-A Central control plane inverts the ingress side: each data-plane cluster needs
-the same outbound set as Hybrid but against **your** domain, and the central
-cluster has to **accept** those connections on four published endpoints.
-
-The authoritative hostname and IP list, which you should use rather than copying
-values from this page, is the
-[network allowlist](/neuraltrust/deployment/network).
 
 ## Where each interface is documented
 
 | Question | Answer lives in |
 | --- | --- |
 | Every value the chart accepts | [`values.yaml`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values.yaml) |
+| The switches that matter | [Configuration](/neuraltrust/deployment/configuration#values-cheat-sheet) |
 | Which Secret holds which key | [Secrets](/neuraltrust/deployment/secrets) · [`SECRETS.md`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/SECRETS.md) |
 | Managed datastore wiring | [Configuration](/neuraltrust/deployment/configuration#managed-stores) |
-| Images to mirror for a disconnected cluster | [Images](/neuraltrust/deployment/images) |
-| Provider specifics | [GCP](/neuraltrust/deployment/gcp/overview) · [AWS](/neuraltrust/deployment/aws/overview) · [Azure](/neuraltrust/deployment/azure/overview) · [OpenShift](/neuraltrust/deployment/openshift/overview) · [Kubernetes](/neuraltrust/deployment/kubernetes/overview) |
+| Images to mirror for a disconnected cluster | [Container images](/neuraltrust/deployment/images) |
+| Provider specifics | [Cloud notes](/neuraltrust/deployment/cloud-notes) · [OpenShift](/neuraltrust/deployment/openshift/overview) |
+| The full per-mode component matrix | [`docs/architecture.md`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/docs/architecture.md) in the chart |

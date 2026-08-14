@@ -1,11 +1,11 @@
 ---
-title: Overview
+title: OpenShift
 description: OpenShift prerequisites, Routes, and SecurityContextConstraints for the NeuralTrust chart.
 ---
 
 The same [`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform) chart installs on OpenShift as on any other Kubernetes distribution. Three things differ: the chart renders native **Routes** instead of Ingress, wildcard Routes need cluster-level admission, and one workload needs an SCC decision. Everything else — Secrets, values, `helm upgrade --install` — is identical.
 
-Both topologies are supported. Hybrid runs the **data plane** in your cluster with the control plane on NeuralTrust SaaS; [External](/neuraltrust/deployment/external) runs everything in-cluster. See [Architecture and dependencies](/neuraltrust/deployment/architecture) for what each one deploys.
+Every topology is supported. Install by following [Hybrid](/neuraltrust/deployment/hybrid) or [External](/neuraltrust/deployment/external) as written — namespace, Secrets, values file, `helm upgrade --install`, verification — and apply the OpenShift specifics on this page as you go.
 
 ## Requirements
 
@@ -99,12 +99,23 @@ Granting `anyuid` to the one ServiceAccount, rather than relaxing the namespace 
 oc adm policy add-scc-to-user anyuid -z firewall -n neuraltrust
 ```
 
-Keep `restricted-v2` for everything else. If your policy forbids `anyuid` outright, raise it before install — the Firewall is deployed with TrustGuard and is not separately optional.
+Keep `restricted-v2` for everything else. If your policy forbids `anyuid` outright, raise it before install — Firewall deploys with TrustGuard and has no separate switch.
+
+## Expose the entry points
+
+```bash
+oc get route -n neuraltrust
+```
+
+Cluster wildcard DNS and certificates may already cover the Route hosts; for custom hosts, follow cluster ingress policy. In Hybrid you expose two:
+
+- The LLM/proxy Route, targeting the proxy Service's named `http` port (Service port `80`, TrustGate container port `8081`)
+- The MCP Route, targeting the MCP Service's named `http` port (Service port `80`, TrustGate container port `8082`)
+
+Then set both URLs in the console, as in [Hybrid → Expose both entry points](/neuraltrust/deployment/hybrid#expose-both-entry-points). External additionally renders Routes for the console, its API, and the gateway admin surface.
 
 ## Also plan for
 
-- Worker capacity for your topology — [Cluster sizing](/neuraltrust/deployment/sizing) (Hybrid ~**3–4** × 8 vCPU / 16–32 GiB; External ~**4–5**; right-size later)
-- Hybrid only: the [network allowlist](/neuraltrust/deployment/network) for config-sync and DataBridge egress, plus the NeuralTrust inbound source IP
-- Disconnected clusters: mirror every image and set `global.imageRegistry` — see [Images](/neuraltrust/deployment/images). Hybrid cannot be air-gapped, because product telemetry egress is mandatory; a fully disconnected install must use [External](/neuraltrust/deployment/external)
-
-Continue with [OpenShift Hybrid](/neuraltrust/deployment/openshift/hybrid), or the [External guide](/neuraltrust/deployment/external) for a self-hosted install.
+- Worker capacity for your topology — [Capacity](/neuraltrust/deployment/architecture#capacity) (Hybrid ~**3–4** × 8 vCPU / 16–32 GiB; External ~**4–5**; right-size later)
+- Hybrid only: the [network rules](/neuraltrust/deployment/hybrid#network) for config-sync, telemetry, and DataBridge egress, plus the NeuralTrust inbound source IP
+- Disconnected clusters: mirror every image and set `global.imageRegistry` — see [Container images](/neuraltrust/deployment/images). Hybrid cannot be air-gapped, because product telemetry egress is mandatory; a fully disconnected install must use [External](/neuraltrust/deployment/external)

@@ -1,0 +1,161 @@
+---
+title: Cloud notes
+description: Provider particularities for EKS, AKS, GKE, and conformant Kubernetes — cluster creation, ingress, certificates, and managed stores.
+---
+
+The install is the same on every provider. Follow your model's guide —
+[Hybrid](/neuraltrust/deployment/hybrid),
+[External](/neuraltrust/deployment/external), or
+[Central](/neuraltrust/deployment/central) — and use this page for the choices
+that differ underneath it.
+
+[OpenShift](/neuraltrust/deployment/openshift/overview) has its own page, because
+Routes, wildcard admission, and SCCs change more than a setting.
+
+Capacity is provider-independent: roughly **3–4** workers at 8 vCPU / 16–32 GiB
+for Hybrid and **4–5** for External or Central — see
+[Capacity](/neuraltrust/deployment/architecture#capacity). Minimum managed
+datastore sizes are in
+[Managed stores](/neuraltrust/deployment/configuration#managed-stores).
+
+<Warning>
+On RDS with IAM authentication, `global.postgresql.authMode: iam` does **not**
+reach the Go gateways in External or Central mode. Also set
+`agentgateway.database.iamAuth: true` and `trustguard.database.iamAuth: true`, or
+they attempt password authentication against an IAM-only database and fail at
+connection time with nothing pointing at the cause.
+</Warning>
+
+<AccordionGroup>
+
+<Accordion title="AWS (EKS)">
+
+```bash
+eksctl create cluster \
+  --name neuraltrust \
+  --region <REGION> \
+  --managed \
+  --node-type m6i.2xlarge \
+  --nodes 3
+
+aws eks update-kubeconfig --name neuraltrust --region <REGION>
+```
+
+Install the **EBS CSI driver** and the **AWS Load Balancer Controller** before
+exposing anything, and use IRSA for AWS API access.
+
+| Choice | On EKS |
+| --- | --- |
+| Ingress and TLS | ALB (`global.ingress.className: alb`) with ACM (`global.ingress.aws.certificateArn`) |
+| Storage | `global.storageClass: gp3` |
+| Identity | IRSA |
+| Datastores | Private RDS or Aurora, and ElastiCache |
+
+ACM certificates terminate at the load balancer, so they cover Ingress hosts but
+**not** the layer-4 endpoints a [central control
+plane](/neuraltrust/deployment/central#tls) publishes — TLS terminates in those
+pods and ACM does not export private keys. Use cert-manager or your own PKI
+there, with `service.beta.kubernetes.io/aws-load-balancer-type: nlb` and
+`aws-load-balancer-scheme: internal` for private callers.
+
+</Accordion>
+
+<Accordion title="Azure (AKS)">
+
+```bash
+az aks create \
+  --resource-group <RESOURCE_GROUP> \
+  --name neuraltrust \
+  --node-count 3 \
+  --node-vm-size Standard_D8s_v5 \
+  --enable-oidc-issuer \
+  --enable-workload-identity \
+  --generate-ssh-keys
+
+az aks get-credentials --resource-group <RESOURCE_GROUP> --name neuraltrust
+```
+
+AKS ships **no ingress controller** by default — install Application Gateway or
+NGINX before exposing the data plane.
+
+| Choice | On AKS |
+| --- | --- |
+| Ingress and TLS | Application Gateway or NGINX, with Key Vault or cert-manager |
+| Identity | Microsoft Entra Workload ID |
+| Datastores | Flexible Server PostgreSQL and Azure Cache for Redis, on private endpoints |
+
+An internal load balancer is
+`service.beta.kubernetes.io/azure-load-balancer-internal: "true"`.
+
+</Accordion>
+
+<Accordion title="GCP (GKE)">
+
+```bash
+gcloud container clusters create neuraltrust \
+  --region <REGION> \
+  --release-channel regular \
+  --workload-pool=<PROJECT_ID>.svc.id.goog \
+  --machine-type e2-standard-8 \
+  --num-nodes 1
+
+gcloud container clusters get-credentials neuraltrust \
+  --region <REGION> --project <PROJECT_ID>
+```
+
+`--num-nodes 1` in a regional cluster gives one node per zone, so three in total.
+
+| Choice | On GKE |
+| --- | --- |
+| Ingress and TLS | GKE Ingress with a reserved address, or NGINX / Gateway API; Google-managed certificates or cert-manager |
+| Identity | Workload Identity Federation |
+| Datastores | Cloud SQL on private IP, and Memorystore |
+
+For GKE Ingress set `global.platform: gcp`,
+`global.ingress.gcp.staticIpName`, and `managedCertificates`. Google-managed
+certificates **reject wildcards**, so if you rely on the chart's wildcard hosts
+(`*.llm.<domain>` / `*.mcp.<domain>`) use cert-manager, or set
+`agentgateway.config.autoWildcardHosts: false` and list exact hosts.
+
+A plain `LoadBalancer` Service already gives a layer-4 passthrough load balancer;
+its private form is `networking.gke.io/load-balancer-type: "Internal"`.
+
+</Accordion>
+
+<Accordion title="Conformant Kubernetes">
+
+For clusters without a dedicated guide. Confirm the capabilities first:
+
+```bash
+kubectl version
+kubectl get nodes
+kubectl get storageclass
+kubectl get ingressclass
+```
+
+You need a default StorageClass (or `global.storageClass`), an Ingress or Gateway
+implementation, DNS for `global.domain`, and TLS from cert-manager or
+pre-created Secrets.
+
+```yaml
+global:
+  platform: kubernetes
+  domain: platform.example.com
+  ingress:
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    tls:
+      autoGenerate: false
+      secretName: neuraltrust-tls
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+## GPU nodes
+
+Only needed if you run Firewall on GPU, which is opt-in. It requires a separate
+GPU node pool, the vendor device plugin, and matching labels and taints — see
+[GPU Firewall workers](/neuraltrust/deployment/configuration#gpu-firewall-workers).
