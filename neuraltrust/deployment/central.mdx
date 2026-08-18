@@ -304,7 +304,7 @@ query result and audit trail, and nothing later signals that it happened.
 
 ## Secrets
 
-Four credentials come from the shared platform Secret and are generated for you
+Five credentials come from the shared platform Secret and are generated for you
 when the chart owns secrets:
 
 | Key | Used by |
@@ -312,14 +312,24 @@ when the chart owns secrets:
 | `ENROLMENT_INTROSPECTION_TOKEN` | DataCore — compares what DataBridge presents |
 | `DATACORE_SERVICE_TOKEN` | DataBridge — alias of the above, must hold the identical value |
 | `ENROLMENT_SIGNING_SECRET` | DataCore — signs enrolment tokens |
+| `CONFIG_SYNC_SIGNING_SECRET` | DataCore — signs private-gateway install tokens; the product control planes verify it as `CONFIG_SYNC_JWT_SECRET` |
 | `TELEMETRY_JWT_PRIVATE_KEY_PEM` | DataCore — RS256 key for the OTLP tokens the ingest gateway verifies |
 
 If you pre-provision secrets yourself — `global.preserveExistingSecrets`,
 `global.autoGenerateSecrets: false`, or `global.platformSecret.existingSecret` —
-all four must be present, and the two token keys must hold one identical value.
+all five must be present, and the two token keys must hold one identical value.
 When they drift, every agent connection returns 401 with nothing visibly wrong on
-either side. Running `./create-secrets.sh` with `DEPLOYMENT_MODE=saas` writes all
-four correctly, including the alias.
+either side. Omitting `CONFIG_SYNC_SIGNING_SECRET` fails later and further away:
+DataCore answers `POST /v1/admin/credentials` with HTTP 501 `not implemented`, so
+the console's private-gateway wizard breaks *after* it has already created the
+gateway row. Running `./create-secrets.sh` with `DEPLOYMENT_MODE=saas` writes all
+five correctly, including the alias.
+
+<Note>
+Taking the platform Secret out of play in this mode is rejected at render time
+rather than at runtime, so a mistake here surfaces during `helm upgrade` instead
+of on first traffic.
+</Note>
 
 See [Secrets](/neuraltrust/deployment/secrets) for how the shared platform Secret
 works generally.
@@ -462,6 +472,75 @@ helm upgrade --install neuraltrust-platform \
 Install and verify the central cluster first, then bring up one remote cluster as
 a canary before the rest.
 
+## Verify
+
+Verify the central cluster on its own before any remote cluster dials it. A
+remote plane that enrols against a half-configured control plane fails in ways
+that look like network faults.
+
+```bash
+kubectl get pods -n neuraltrust
+kubectl get svc,ingress -n neuraltrust
+```
+
+Everything in the [External baseline](#external-baseline-also-here) should be
+running, plus the two workloads that make this a control plane for other
+clusters: `databridge` and `clickstack-ingest-gateway`. If either is absent,
+`global.deploymentMode` is not `saas` — and nothing else about the install will
+look wrong, because every other component is shared with External.
+
+Then confirm the four cross-cluster endpoints have addresses and that DNS
+resolves to them. Three are layer-4 Services and one is an Ingress, so they
+appear in different places:
+
+```bash
+kubectl get svc -n neuraltrust databridge-southbound \
+  agentgateway-admin-configsync trustguard-control-plane-configsync
+kubectl get ingress -n neuraltrust clickstack-ingest-gateway
+```
+
+The Service names are not the hostnames. Those three Services must each report an
+external address, and the DNS records from
+[Cross-cluster endpoints](#cross-cluster-endpoints) —
+`databridge.<domain>`, `agentgateway-configsync.<domain>`, and
+`trustguard-configsync.<domain>` — are what point at them.
+
+Those DNS records are an operator prerequisite the chart cannot check. Until each
+name resolves, remote clusters cannot enrol; and because config-sync and
+DataBridge retry, the symptom is a remote data plane that stays `Running` but
+never becomes `Ready`, with nothing wrong on the central side.
+
+Sign in to the console and create the organisation exactly as in
+[External → Verify](/neuraltrust/deployment/external#verify); the console is the
+same install here.
+
+### Then enrol one remote cluster
+
+Bring up a single remote data plane as a canary. Two log lines on the remote
+side prove both directions of the topology, and both are worth reading before
+the rest of the clusters follow:
+
+```bash
+kubectl logs -n neuraltrust deploy/dataagent | grep -i databridge
+kubectl logs -n neuraltrust deploy/trustguard-data-plane | grep -i 'config snapshot'
+```
+
+| Log line | What it proves |
+| --- | --- |
+| `registered with databridge` with your `addr` and `tenant_id` | The DataAgent reached `databridge.<domain>:443`, its enrolment token verified, and residency queries can now reach this cluster |
+| `applied config snapshot` with a version hash | Config-sync pulled configuration from **your** central control plane |
+
+<Warning>
+Check the `addr` in that first line names your domain. A remote cluster that
+still reads `databridge.<saas region>` has an empty `global.controlPlane.domain`
+and has enrolled into NeuralTrust SaaS instead of into your control plane.
+</Warning>
+
+Finish with the [validation checklist](/neuraltrust/deployment/validation),
+which covers the parts no `kubectl` command reaches: TLS from the remote
+clusters, one enrolment identity per data plane, LLM and MCP traffic, and
+telemetry arriving in the central ClickHouse.
+
 ## High availability
 
 This topology has two availability questions, and they are not equally urgent.
@@ -566,5 +645,8 @@ the platform Secret and apply the same one to both clusters — see
   </Card>
   <Card title="Secrets" icon="lock" href="/neuraltrust/deployment/secrets">
     Credential handling, including the four cross-cluster keys.
+  </Card>
+  <Card title="Validation checklist" icon="clipboard-check" href="/neuraltrust/deployment/validation">
+    What to prove before the install counts as done.
   </Card>
 </CardGroup>

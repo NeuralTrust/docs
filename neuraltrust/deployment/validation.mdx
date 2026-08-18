@@ -1,0 +1,173 @@
+---
+title: Validation checklist
+description: What to prove before a NeuralTrust install counts as done — the checks that pods being Ready does not cover.
+---
+
+Running pods are not a working install. Every mode page ends with a `Verify`
+section that confirms the workloads came up; this page is the hand-off gate that
+covers what `kubectl` cannot see — DNS from the caller's network, certificate
+trust from the dialling side, real traffic through both TrustGate entry points,
+policy decisions, and telemetry arriving where you expect it.
+
+Work through it once per cluster. Items are marked **Hybrid**, **External**, or
+**Central** where they apply to one topology only; everything unmarked applies
+to all three.
+
+<Note>
+The failures this catches are mostly silent. A data plane with no telemetry
+export, an MCP endpoint bootstrapped from the LLM URL, and a remote cluster
+enrolled into NeuralTrust SaaS instead of your own control plane all look
+healthy in `kubectl get pods`.
+</Note>
+
+## Preflight
+
+Before the first `helm upgrade --install`.
+
+- [ ] The chosen mode matches your data-residency, ownership, and multi-cluster
+      requirements — see the [Comparison](/neuraltrust/deployment/overview#comparison).
+- [ ] Chart version, image registry (or mirror), and the resolved image tags are
+      recorded somewhere you can find at upgrade time.
+- [ ] `kubectl config current-context` and the target namespace are the intended
+      ones.
+- [ ] No placeholder is left in your values file — no `<VERSION>`, no example
+      hostname, no `changeme`.
+- [ ] Every required image pulls from the cluster's registry path, and
+      `gcr-secret` exists in the install namespace.
+- [ ] Datastore versions and sizing meet
+      [Prerequisites](/neuraltrust/deployment/hybrid#prerequisites), and you have
+      confirmed connectivity to them from inside the cluster rather than from a
+      laptop.
+- [ ] **Hybrid / Central ·** You have decided who supplies `CONFIG_SYNC_LKG_KEY`.
+      The chart generates it unless you set `global.autoGenerateSecrets: false`
+      or `global.preserveExistingSecrets: true` — do not create it by hand
+      otherwise. See [Secrets](/neuraltrust/deployment/secrets).
+
+## DNS and TLS
+
+The most common cause of an install that never finishes converging.
+
+- [ ] Public hostnames resolve **from the network the client actually uses**, not
+      only from inside the cluster.
+- [ ] Certificates name the exact hostnames the console, APIs, and gateways are
+      reached on, and the chain validates from a browser.
+- [ ] **Hybrid ·** Egress to `*.neuraltrust.ai:443` is allowed, and any
+      TLS-intercepting proxy's CA is supplied through `configSync.tlsCa`. Never
+      reach for `configSync.tlsInsecure` — the runtimes refuse it under a
+      deployed `APP_ENV`.
+- [ ] **Central ·** All four cross-cluster names resolve from **every remote
+      cluster**: `databridge.<domain>`, `telemetry.<domain>`,
+      `agentgateway-configsync.<domain>`, `trustguard-configsync.<domain>`.
+- [ ] **Central ·** If the central cluster serves chart-generated certificates,
+      every remote cluster trusts that CA bundle. Each of `configSync.tlsCa`,
+      `dataagent.databridge.tlsCa`, and
+      `global.clickstack.egress.tlsCaSecretName` **replaces** the system roots
+      rather than adding to them, so a public certificate elsewhere in the path
+      still needs its own bundle.
+
+## Connectivity
+
+- [ ] Required egress destinations are reachable: registry, LLM upstreams, and
+      each cluster's own PostgreSQL and Redis.
+- [ ] Inbound paths are restricted to documented sources rather than left open —
+      in particular the layer-4 endpoints a central cluster publishes.
+- [ ] Long-lived gRPC streams survive the path. If a middlebox reaps idle
+      connections, config-sync and DataBridge will reconnect on that interval;
+      confirm its idle timeout is not doing so every few seconds.
+- [ ] **Central ·** Each remote DataAgent logs `registered with databridge` and
+      the `addr` in that line is **your** domain, not a NeuralTrust region.
+
+## Installation health
+
+- [ ] `helm list -n <namespace>` shows the release `deployed` at the intended
+      chart version.
+- [ ] Every pod is `Ready`, and still `Ready` after
+      `kubectl rollout restart` — this is what catches a dependency that only
+      resolved because of start-up ordering.
+- [ ] No `CrashLoopBackOff`, image-pull, migration, or missing-Secret events
+      remain: `kubectl get events -n <namespace> --sort-by=.lastTimestamp`.
+- [ ] **Hybrid / Central ·** No pod is `Running` but permanently not `Ready`. A
+      data-plane readiness probe includes a snapshot check, so this is the
+      signature of config-sync failing — usually a mistyped token, blocked
+      egress, or an untrusted intercepting CA.
+- [ ] PersistentVolumeClaims are `Bound`, and the config-sync last-known-good
+      cache is on persistent storage so a restart during a control-plane outage
+      still has configuration to fall back on.
+- [ ] **External / Central ·** Database migrations completed, and ClickHouse is
+      reachable from the collector.
+
+## Console and configuration sync
+
+- [ ] You can sign in over the documented hostname.
+- [ ] **External / Central ·** The bootstrap super-admin worked, the
+      organisation exists, and that first credential has been rotated or
+      disabled.
+- [ ] **Hybrid ·** The console shows the data plane connected, and both the LLM
+      and MCP URLs are registered under **Settings → Agent Gateway → General**.
+- [ ] **Central ·** Every data plane appears as its own identity. One enrolment
+      token per remote cluster — a reused token collapses them into a single
+      identity in query results and audit trails, and nothing later signals that
+      it happened.
+- [ ] A deliberate configuration change in the console reaches the data plane,
+      visible as `applied config snapshot` with a new version hash.
+
+## LLM and MCP traffic
+
+TrustGate serves two protocols on two ports, and they need separate hostnames.
+
+- [ ] A known-good LLM request succeeds through `gateway.<domain>` and the
+      response comes from the intended provider.
+- [ ] MCP is tested **separately** through `mcp.<domain>`. The console wizard
+      bootstraps both from a single URL, which works for the proxy and quietly
+      breaks MCP — the failure looks like tool calls that never resolve rather
+      than an error.
+- [ ] A provider-credential failure is distinguishable from a gateway or network
+      failure in the logs.
+- [ ] **TrustGuard ·** `POST /v1/evaluate` returns findings for a representative
+      payload.
+
+## Policies and telemetry
+
+- [ ] A request that should be allowed is allowed.
+- [ ] A request that should be blocked is blocked, and the decision is visible
+      in the console rather than only in a pod log.
+- [ ] Telemetry reaches its destination. Metadata and raw are configured as
+      separate exporters (`TELEMETRY_EXPORTERS_METADATA` and
+      `TELEMETRY_EXPORTERS_RAW`), so confirm **each** — a missing exporter is
+      silent. See [Telemetry](/trustgate/observability/telemetry).
+- [ ] **Hybrid ·** Raw prompts and responses are in **your** PostgreSQL, and
+      what left the cluster is metadata only.
+- [ ] **Central ·** Metadata is queryable in the central ClickHouse, and a raw
+      payload opened from the console is fetched on demand through DataBridge
+      from the cluster that produced it.
+- [ ] Audit events are visible, and forwarded to your SIEM where that is
+      configured.
+
+## Recovery and hand-off
+
+- [ ] Restart behaviour is tested for the gateways and for each stateful
+      dependency.
+- [ ] A deliberate, temporary loss of the control plane produces the documented
+      behaviour: data planes keep serving from last-known-good configuration,
+      and recover without manual intervention when it returns.
+- [ ] Backup and restore ownership is written down for PostgreSQL, ClickHouse,
+      and object storage, and a restore has actually been rehearsed.
+- [ ] The final chart version, values files, Secret inventory, endpoints, and
+      the results of this checklist are archived with the escalation path.
+
+<Tip>
+Re-run the DNS, TLS, traffic, and telemetry sections after every upgrade that
+changes hostnames, certificates, or exporter configuration. Those four are where
+a working install silently regresses.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Troubleshooting" icon="wrench" href="/neuraltrust/deployment/troubleshooting">
+    Symptoms, causes, and fixes for the failures above.
+  </Card>
+  <Card title="Config sync" icon="arrows-rotate" href="/neuraltrust/deployment/config-sync">
+    How snapshots, tokens, and the last-known-good cache work.
+  </Card>
+</CardGroup>
