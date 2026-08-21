@@ -1,0 +1,48 @@
+---
+title: "Fastly Compute"
+description: "TrustGuard from a Fastly Compute service."
+---
+
+1. `npm create @fastly/compute` — handler in `src/index.js`.
+2. Backends: `trustguard` (evaluate host), `origin` (app).
+3. Key in a Fastly Secret Store.
+4. `fastly compute publish` — Next-Gen WAF still runs first.
+
+```js
+addEventListener("fetch", (event) => event.respondWith(handler(event)));
+
+async function handler(event) {
+  const req = event.request;
+
+  if (req.method === "POST") {
+    const text = await req.clone().text();
+    const result = await fetch("{TRUSTGUARD_URL}/v1/evaluate", {
+      method: "POST",
+      backend: "trustguard",
+      headers: {
+        Authorization: "Bearer <collector-api-key>",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        protocol: "llm",
+        direction: "input",
+        payload: { input: text },
+        consumer_id: req.headers.get("x-user-id") ?? "",
+        session_id: req.headers.get("x-session-id") ?? "",
+      }),
+    }).then((r) => r.json());
+
+    if (result.status === "block") {
+      return new Response("Blocked by TrustGuard", { status: 403 });
+    }
+    if (result.status === "transform" && result.transformed_payload) {
+      return fetch(
+        new Request(req, { body: JSON.stringify(result.transformed_payload) }),
+        { backend: "origin" },
+      );
+    }
+  }
+
+  return fetch(req, { backend: "origin" });
+}
+```

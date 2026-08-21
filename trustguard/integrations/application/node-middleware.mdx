@@ -1,0 +1,37 @@
+---
+title: "Node.js middleware"
+description: "TrustGuard on the request path in Express (same pattern in Next.js)."
+---
+
+Middleware for **input**. Call `guard` again with `direction: "output"` after the model
+([Node.js SDK](/trustguard/integrations/application/node-sdk)).
+
+```ts
+import express from "express";
+import { TrustGuard } from "@neuraltrust/trustguard-sdk";
+
+const app = express();
+app.use(express.json());
+
+const client = new TrustGuard({
+  baseUrl: "<your-trustguard-url>",
+  apiKey: "<collector-api-key>",
+});
+
+app.use(async (req, res, next) => {
+  if (req.method !== "POST") return next();
+  const response = await client.guard({
+    payload: { input: JSON.stringify(req.body) },
+    direction: "input",
+    consumerId: req.get("x-user-id") ?? "",
+    sessionId: req.cookies?.session_id ?? "",
+  });
+  if (response.isBlocked) {
+    return res.status(403).json({ detail: "Blocked by TrustGuard" });
+  }
+  if (response.transformedPayload) {
+    req.body = response.transformedPayload;
+  }
+  next();
+});
+```

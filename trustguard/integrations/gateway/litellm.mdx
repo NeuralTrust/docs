@@ -1,0 +1,168 @@
+---
+title: "LiteLLM"
+description: "Add TrustGuard as a LiteLLM custom guardrail — Python class, proxy config, pre_call and post_call."
+---
+
+Add TrustGuard as a LiteLLM **custom guardrail** on the [LiteLLM proxy](https://docs.litellm.ai/docs/proxy/guardrails/custom_guardrail). The guardrail calls [`/v1/evaluate`](/trustguard/api/evaluate) on every request (and optionally every completion).
+
+This runs on the **proxy**, not when you call `litellm.completion` in-process without the proxy.
+
+## Prerequisites
+
+- LiteLLM proxy you control (config + ability to mount a Python file)
+- TrustGuard collector API key
+- `pip install trustguard-sdk` on the proxy image/host (or call evaluate over HTTP)
+
+## 1. Create the collector key
+
+In TrustGuard, create a **LiteLLM** collector (or any gateway collector) and mint an API key. You will pass it as `api_key` in the LiteLLM guardrail config.
+
+## 2. Custom guardrail class
+
+Create `trustguard_guardrail.py` next to your proxy config (or mount it into the container at `/app`).
+
+LiteLLM calls `apply_guardrail` with extracted `texts`. Map `input_type` to TrustGuard `direction`, raise on block, and rewrite texts on transform.
+
+```python
+from typing import TYPE_CHECKING, List, Literal, Optional
+
+from litellm.integrations.custom_guardrail import CustomGuardrail
+from litellm.types.utils import GenericGuardrailAPIInputs
+from trustguard import AsyncTrustGuard
+
+if TYPE_CHECKING:
+    from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+
+
+class TrustGuard(CustomGuardrail):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        api_base: Optional[str] = None,
+        **kwargs,
+    ):
+        # api_base is the full evaluate URL, e.g. https://…/v1/evaluate
+        # AsyncTrustGuard wants the TrustGuard origin; strip the path if present.
+        base = (api_base or "").rstrip("/")
+        if base.endswith("/v1/evaluate"):
+            base = base[: -len("/v1/evaluate")]
+        self._client = AsyncTrustGuard(base, api_key=api_key or "")
+        super().__init__(**kwargs)
+
+    async def apply_guardrail(
+        self,
+        inputs: GenericGuardrailAPIInputs,
+        request_data: dict,
+        input_type: Literal["request", "response"],
+        logging_obj: Optional["LiteLLMLoggingObj"] = None,
+    ) -> GenericGuardrailAPIInputs:
+        direction = "input" if input_type == "request" else "output"
+        meta = request_data.get("metadata") or {}
+        consumer_id = (
+            meta.get("user_api_key_user_id")
+            or meta.get("user_api_key_end_user_id")
+            or request_data.get("user")
+            or ""
+        )
+        session_id = (
+            meta.get("litellm_session_id")
+            or meta.get("session_id")
+            or request_data.get("litellm_session_id")
+            or ""
+        )
+
+        checked: List[str] = []
+        for text in inputs.get("texts") or []:
+            result = await self._client.guard(
+                {"input": text},
+                direction=direction,
+                consumer_id=str(consumer_id),
+                session_id=str(session_id),
+            )
+            if result.is_blocked:
+                raise Exception("Blocked by TrustGuard")
+            if result.transformed_payload:
+                # transformed_payload may be a dict {"input": "…"} or a string
+                tp = result.transformed_payload
+                if isinstance(tp, dict):
+                    checked.append(str(tp.get("input", text)))
+                else:
+                    checked.append(str(tp))
+            else:
+                checked.append(text)
+
+        inputs["texts"] = checked
+        return inputs
+```
+
+| Mapping | Source → TrustGuard |
+| --- | --- |
+| `direction` | `input_type == "request"` → `input`; `"response"` → `output` |
+| `consumer_id` | LiteLLM key user / end-user id / `user` field |
+| `session_id` | `litellm_session_id` (or equivalent) in request metadata |
+
+Without `consumer_id` / `session_id`, Activity still works but per-user and behavioral detectors are weaker.
+
+## 3. Proxy `config.yaml`
+
+Point `guardrail` at the module and class (`trustguard_guardrail.TrustGuard`). Pass the evaluate URL and collector key (same placeholders the console collector panel shows).
+
+```yaml
+model_list:
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+guardrails:
+  - guardrail_name: trustguard
+    litellm_params:
+      guardrail: trustguard_guardrail.TrustGuard
+      mode: [pre_call, post_call]   # request + response
+      api_base: {TRUSTGUARD_URL}/v1/evaluate
+      api_key: <collector-api-key>
+      default_on: true
+```
+
+| Mode | When it runs | TrustGuard `direction` |
+| --- | --- | --- |
+| `pre_call` | Before the model | `input` |
+| `post_call` | After the model responds | `output` |
+| `during_call` | In parallel with the model | `input` (good for block-only; masks may not land in time) |
+
+Use both `pre_call` and `post_call` so Input- and Output-phase [policy](/trustguard/concepts/policies) rules both run.
+
+## 4. Start the proxy
+
+Install the SDK on the host or image, mount the class file, restart:
+
+```bash
+pip install 'litellm[proxy]' trustguard-sdk
+
+# Local
+litellm --config config.yaml
+
+# Docker: mount config + guardrail module into /app
+docker run -d -p 4000:4000 \
+  -v $(pwd)/config.yaml:/app/config.yaml \
+  -v $(pwd)/trustguard_guardrail.py:/app/trustguard_guardrail.py \
+  -e OPENAI_API_KEY \
+  ghcr.io/berriai/litellm:main-latest \
+  --config /app/config.yaml --port 4000
+```
+
+Send a test chat completion through the proxy. A blocked prompt should fail the client call; a clean one should appear in TrustGuard **Activity**.
+
+## Enforce behavior
+
+| TrustGuard `status` | Guardrail behavior |
+| --- | --- |
+| `block` | Raise → LiteLLM denies the client |
+| `transform` | Replace the checked text with `transformed_payload` before continuing |
+| `report` / `allow` | Continue unchanged |
+
+## Notes
+
+- Prefer the [Python SDK](/trustguard/integrations/application/python-sdk) inside the guardrail over hand-rolled HTTP.
+- Full evaluate contract: [Evaluate API](/trustguard/api/evaluate).
+- Official LiteLLM custom guardrail reference: [Custom Guardrail](https://docs.litellm.ai/docs/proxy/guardrails/custom_guardrail).

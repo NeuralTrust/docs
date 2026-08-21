@@ -1,0 +1,48 @@
+---
+title: "Claude Enterprise"
+description: "Connect Claude chat, Claude Code, and Claude Cowork to TrustGuard via Anthropic Inference Hooks."
+---
+
+One Anthropic organization endpoint maps to **one** TrustGuard collector. Claude chat,
+Claude Code, and Claude Cowork share that hook; TrustGuard stamps
+`source.application` so policies can target a surface without separate collectors.
+
+## Setup
+
+1. In TrustGuard, create a **Claude Enterprise** collector (Catalog → IDE & coding agents).
+2. Mint a `tgk_…` API key on the collector **Auth** tab.
+3. In the Anthropic admin console (Data and Privacy → Inference hooks), set:
+   - **Hook URL:** `{TRUSTGUARD_URL}/v1/evaluate/claude`
+   - **Authorization:** `Bearer <collector API key>` (the `tgk_…` key — not `tgcol_…`)
+4. **Save** the endpoint in Anthropic first — that generates the `whsec_…` signing secret.
+5. Paste `whsec_…` into the collector **Connection** tab in TrustGuard.
+6. Reopen Edit in Anthropic and run **Test connection** (after the secret is installed).
+7. Assign a default [policy](/trustguard/concepts/policies) before enforcing in production.
+
+## Evaluate path
+
+```text
+Anthropic → POST /v1/evaluate/claude
+  Authorization: Bearer tgk_…
+  Standard Webhooks signature (whsec_)
+  → TrustGuard allow | deny
+```
+
+This is **not** the generic [`POST /v1/evaluate`](/trustguard/api/evaluate) path. The
+Claude dialect returns only **allow** or **deny**. Failures degrade to allow so a
+TrustGuard outage does not block the org’s Claude usage.
+
+## Surfaces
+
+| `source.application` (observed) | Product |
+| --- | --- |
+| `claude-ai` | Claude chat |
+| `claude-code` | Claude Code |
+| (Cowork when Anthropic emits it) | Claude Cowork |
+
+Use policy gates on `source.application` if you need different rules per surface.
+
+## Related
+
+- [Collectors](/trustguard/concepts/collectors)
+- [Evaluate API](/trustguard/api/evaluate)

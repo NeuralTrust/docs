@@ -1,32 +1,59 @@
 ---
-title: "Integrations overview"
-description: "Every way to send traffic to TrustGuard — gateway, application SDK, browser, and edge/WAF collectors — all using the same /v1/evaluate call."
+title: "Overview"
+description: "Ways to send traffic to TrustGuard — gateway, IDE, application, browser, and edge/WAF."
 ---
 
 A [collector](/trustguard/concepts/collectors) is wherever you call
-[`/v1/evaluate`](/trustguard/api/evaluate). When you create or open a collector in the console,
-its side panel shows the exact steps and a ready-to-paste snippet for the integration you
-picked. This section documents each one.
+[`/v1/evaluate`](/trustguard/api/evaluate) (or `/v1/evaluate/claude`). The console
+collector side panel has the steps and snippet for the integration you pick.
 
-<CardGroup cols={2}>
-  <Card title="Gateway" icon="network" href="/trustguard/integrations/gateway">
-    Enforce at the AI gateway. TrustGate is first-class; Portkey, LiteLLM, Kong, Apigee,
-    and Azure APIM are supported.
-  </Card>
-  <Card title="Application" icon="code" href="/trustguard/integrations/application">
-    Wrap model calls in your app with the Python / Node SDKs, middleware, or the REST API.
-  </Card>
-  <Card title="Browser" icon="globe" href="/trustguard/integrations/browser">
-    Monitor AI web apps from a managed Chrome / Edge / Firefox extension.
-  </Card>
-  <Card title="Edge / WAF" icon="shield" href="/trustguard/integrations/edge-waf">
-    Run at the CDN edge: Cloudflare Workers, CloudFront Lambda@Edge, Fastly, Akamai.
-  </Card>
-</CardGroup>
+## Gateway
 
-## The call is always the same
+| | |
+| --- | --- |
+| [TrustGate](/trustguard/integrations/gateway/trustgate) | Native — no collector API key |
+| [Portkey](/trustguard/integrations/gateway/portkey) | Guardrails webhook |
+| [LiteLLM](/trustguard/integrations/gateway/litellm) | Custom guardrail |
+| [Kong](/trustguard/integrations/gateway/kong) | ai-custom-guardrail |
+| [Apigee](/trustguard/integrations/gateway/apigee) | Shared Flow |
+| [Azure APIM](/trustguard/integrations/gateway/azure-apim) | send-request policies |
 
-Every integration makes one call:
+## IDE & coding agents
+
+| | |
+| --- | --- |
+| [Claude Enterprise](/trustguard/integrations/ide/claude-enterprise) | Inference Hooks → `/v1/evaluate/claude` |
+| [Cursor](/trustguard/integrations/ide/cursor) | Plugin from GitHub · MDM config only → `/v1/evaluate` |
+| [Codex](/trustguard/integrations/ide/codex) | Plugin from GitHub · MDM config only → `/v1/evaluate` |
+
+## Application
+
+| | Package |
+| --- | --- |
+| [Python SDK](/trustguard/integrations/application/python-sdk) | `trustguard-sdk` |
+| [Node.js SDK](/trustguard/integrations/application/node-sdk) | `@neuraltrust/trustguard-sdk` |
+| [REST](/trustguard/integrations/application/rest) | Any HTTP client |
+| [Python middleware](/trustguard/integrations/application/python-middleware) | FastAPI / Django / Flask |
+| [Node middleware](/trustguard/integrations/application/node-middleware) | Express / Next.js |
+
+Go: `github.com/NeuralTrust/trustguard-sdk/go`.
+
+## Browser
+
+[Chrome](/trustguard/integrations/browser/chrome) ·
+[Edge](/trustguard/integrations/browser/edge) ·
+[Firefox](/trustguard/integrations/browser/firefox)
+
+## Edge / WAF
+
+[Cloudflare](/trustguard/integrations/edge-waf/cloudflare) ·
+[CloudFront](/trustguard/integrations/edge-waf/aws-cloudfront) ·
+[Fastly](/trustguard/integrations/edge-waf/fastly) ·
+[Akamai](/trustguard/integrations/edge-waf/akamai)
+
+---
+
+Except [TrustGate](/trustguard/integrations/gateway/trustgate) (native), integrations call:
 
 ```http
 POST {TRUSTGUARD_URL}/v1/evaluate
@@ -34,56 +61,17 @@ Authorization: Bearer <collector API key>
 Content-Type: application/json
 
 {
-  "protocol": "llm",                 // llm | mcp | a2a
-  "direction": "input",              // "input" (prompt) or "output" (completion)
+  "protocol": "llm",
+  "direction": "input",
   "payload": { "input": "…" },
-  "session_id": "sess-123",          // the conversation
-  "consumer_id": "alex@acme.com"     // the user / device
+  "session_id": "sess-123",
+  "consumer_id": "alex@acme.com"
 }
 ```
 
-…and reacts to the verdict:
-
 ```text
-if  status == "block"       → block the request (e.g. 403)
-elif status == "transform"  → forward transformed_payload instead
-else                        → forward unchanged
+block → deny · transform → forward transformed_payload · else → forward
 ```
 
-Inspect **input** before calling the model and **output** before returning it —
-usually **two** calls per interaction, each with the matching `direction`. That
-`direction` selects which [policy](/trustguard/concepts/policies) **Detectors**
-phase runs. **Exception:** [TrustGate](/trustguard/integrations/gateway) sets
-`direction` for you on the request and response path. See the full contract in
-the [Evaluate API](/trustguard/api/evaluate) and the SDK walkthrough in
-[Application integrations](/trustguard/integrations/application).
-
-## Rules for every integration
-
-1. **Create the API key on the collector** and pass it as
-   `Authorization: Bearer <key>`.
-2. **Always send `consumer_id` and `session_id`** when you have them. They attribute
-   findings to the right user and conversation in **Activity** and power the
-   behavioral detectors. Each snippet shows the natural source on its platform
-   (auth context, headers, cookies).
-3. **Send `direction`** (`input` / `output`) unless TrustGate is the collector —
-   otherwise Output-phase (or Input-phase) policy rules will not run.
-
-## SDKs
-
-For application code, prefer the official TrustGuard SDKs over hand-rolled HTTP — they
-take the base URL and call `/v1/evaluate` for you:
-
-| Language | Package |
-|---|---|
-| Node / TypeScript | `@neuraltrust/trustguard-sdk` |
-| Python | `trustguard-sdk` (import `from trustguard import TrustGuard`) |
-| Go | `github.com/NeuralTrust/trustguard-sdk/go` |
-
-Gateway and edge integrations use raw HTTP, since they run inside vendor config or edge
-runtimes where the SDKs don't apply.
-
-## Run several at once
-
-You can run multiple collectors simultaneously (e.g. gateway + browser). Each has its own
-key and policy, and behavioral signals correlate across them by `consumer_id`.
+Call with `direction: "input"` before the model and `"output"` after, unless TrustGate
+owns the path. Full contract: [Evaluate API](/trustguard/api/evaluate).
