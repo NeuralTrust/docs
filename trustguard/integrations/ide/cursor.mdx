@@ -1,0 +1,117 @@
+---
+title: "Cursor"
+description: "Install the TrustGuard Cursor plugin from GitHub and protect prompts, tool calls, and tool results with one org API key."
+---
+
+The [TrustGuard Cursor plugin](https://github.com/NeuralTrust/trustguard-cursor-plugin)
+runs on each developer machine. It maps Cursor agent hooks to
+[`POST /v1/evaluate`](/trustguard/api/evaluate) with a **shared org API key**. Developers
+do not need NeuralTrust accounts.
+
+## What IT deploys vs what developers install
+
+| | Who | What |
+| --- | --- | --- |
+| **Plugin** | Each developer (or your standard Cursor plugin rollout) | Import from GitHub — see below |
+| **Config** | IT / MDM | `cursor.json` with the org `tgk_…` key only |
+
+You do **not** need to package or push the plugin binary tree via MDM. MDM only needs
+the managed config file. The plugin’s bootstrap downloads the platform
+`trustguard-cursor` binary from GitHub Releases on first use (checksum-pinned).
+
+## Console setup
+
+1. Create a **Cursor** collector (Catalog → IDE & coding agents).
+2. Mint a `tgk_…` API key on the **Auth** tab (shown once — store it).
+3. Assign a default [policy](/trustguard/concepts/policies) on the **Policies** tab.
+
+## Install the plugin (from GitHub)
+
+The plugin is published as a public GitHub repo. In Cursor, add it the same way you
+import any GitHub-hosted plugin (Plugins / marketplace → import or add from GitHub):
+
+**Repository:** [https://github.com/NeuralTrust/trustguard-cursor-plugin](https://github.com/NeuralTrust/trustguard-cursor-plugin)
+
+Exact UI labels vary by Cursor version; look for add/import plugin from GitHub or from a
+git URL and paste that repo.
+
+### Local clone (optional)
+
+If you prefer a local checkout (e.g. offline pilots):
+
+```bash
+git clone https://github.com/NeuralTrust/trustguard-cursor-plugin.git
+cd trustguard-cursor-plugin
+make install-local
+```
+
+Or **Customize → Plugins → Add → From Local Repo** pointing at the clone.
+`make install-local` copies into `~/.cursor/plugins/local/trustguard` (Cursor rejects
+out-of-tree symlinks).
+
+## Managed config (MDM — config only)
+
+Deploy **only** this file with MDM. Do not distribute the plugin package via MDM unless
+you have a separate reason to pin a private fork.
+
+```json
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "closed"
+}
+```
+
+| OS | Managed config path |
+| --- | --- |
+| macOS | `/Library/Application Support/TrustGuard/cursor.json` |
+| Linux | `/etc/trustguard/cursor.json` |
+| Windows | `%ProgramData%\TrustGuard\cursor.json` |
+
+### Managed mode
+
+When the managed file includes `api_key`:
+
+- **Locked:** `api_key`, `data_url`, `fail_mode` — user file and env cannot replace them.
+- **Soft prefs** may still live in `~/.trustguard/cursor.json`: `timeout_ms`,
+  `transform_action`, `events`, `consumer_id`.
+
+### Local config only (no MDM)
+
+For pilots without MDM, write `~/.trustguard/cursor.json` (`chmod 600`) with the same
+JSON shape.
+
+## Verify
+
+1. Open Cursor and send a test prompt.
+2. Confirm the event in TrustGuard **Activity**.
+3. `consumer_id` is typically `cursor:<email>` when the Cursor account email is present.
+
+Smoke-test the binary (optional):
+
+```bash
+echo '{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"echo hello"},"user_email":"you@company.com"}' \
+  | trustguard-cursor hook
+```
+
+## What is evaluated
+
+| Cursor hook | TrustGuard |
+| --- | --- |
+| `beforeSubmitPrompt` | `protocol: llm`, `direction: input` |
+| `preToolUse` (Shell) | `protocol: all`, `direction: input` |
+| `preToolUse` (other tools) | `protocol: mcp`, tools/call |
+| `postToolUse` | `protocol: mcp`, tool result / output |
+
+## Attributes
+
+- `attributes.collector.type = "ide"`
+- `attributes.cursor.event`, workspace, and related fields
+- `consumer_id` typically `cursor:<email>`
+
+Gate policies on `collector.type` and/or `cursor.*` as needed.
+
+## Related
+
+- [Plugin README](https://github.com/NeuralTrust/trustguard-cursor-plugin)
+- [Evaluate API](/trustguard/api/evaluate)
