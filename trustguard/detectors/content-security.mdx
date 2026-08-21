@@ -1,13 +1,13 @@
 ---
 title: "Content security detectors"
-description: "Jailbreak and prompt-injection detection, toxicity, topic moderation, and document/URL analysis on AI input and output."
+description: "Jailbreak detection, toxicity, Moderation, and document/URL screening for indirect prompt injection and PII."
 ---
 
-Content‑security detectors are the LLM‑aware core of TrustGuard: they score
-prompts and model output for jailbreaks, toxicity, and off‑topic/disallowed
-content, and analyze documents and URLs. Several call the **NeuralTrust
-Firewall**; its credentials are configured globally (env) or overridden
-per‑detector under `settings.credentials`.
+Content-security detectors are the LLM-aware core of TrustGuard: they score
+prompts and model output for jailbreaks, toxicity, and off-topic/disallowed
+content, and analyze documents and URLs for **indirect prompt injection** and
+PII. Several call the **NeuralTrust Firewall**; its credentials are configured
+globally (env) or overridden per-detector under `settings.credentials`.
 
 All of these are **detection‑only** — the action (**Monitor** / **Block**) and
 evaluation phase (Input / Output) are set on the
@@ -71,12 +71,14 @@ Dual‑mode moderation — enable at least one mode.
 
 ## URL Analyzer — `url_analyzer`
 
-Extracts URLs from content, fetches each page (SSRF‑guarded, size/timeout‑bounded,
-up to 10 URLs per request), and screens the fetched text for jailbreaks and PII.
+Extracts URLs from the request **body / messages** (not from
+`payload.attachments`), fetches each page (SSRF-guarded, size/timeout-bounded,
+up to 10 URLs per request), and screens the fetched text for **indirect prompt
+injection** and PII. **Input side only.**
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `threshold` | number | `0.7` | Jailbreak score threshold. |
+| `threshold` | number | `0.7` | Indirect prompt injection score threshold. |
 | `url.timeout` | integer | `20000` | Milliseconds. |
 | `url.max_content_size` | integer | `1048576` | Bytes (1 MiB). |
 | `url.allowed_domains` / `url.blocked_domains` | array&lt;string&gt; | — | Allow/deny lists. |
@@ -85,13 +87,14 @@ up to 10 URLs per request), and screens the fetched text for jailbreaks and PII.
 ## Document Analyzer — `doc_analyzer`
 
 Extracts text from uploaded documents (PDF, Office, images via OCR, plain text)
-sent as `payload.attachments`, then screens for PII and (optionally) jailbreaks.
+sent as `payload.attachments`, then screens for PII and (optionally) **indirect
+prompt injection**. **Input side only.**
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `max_file_size` | integer | `52428800` (50 MiB) | Bytes. |
 | `entities` | array&lt;enum&gt; | — | PII entities to detect. |
-| `firewall.enabled` | boolean | `false` | Jailbreak screening of extracted text. |
+| `firewall.enabled` | boolean | `false` | Indirect prompt injection screening of extracted text. |
 | `firewall.threshold` | number | `0.7` | |
 | `ocr.enabled` | boolean | `false` | OCR for images/scans (requires the OCR build). |
 | `ocr.languages` | array&lt;string&gt; | — | Tesseract language codes. |
@@ -100,6 +103,7 @@ sent as `payload.attachments`, then screens for PII and (optionally) jailbreaks.
 
 - **`prompt_guard`** is the baseline jailbreak defense for chat traffic.
 - **`url_analyzer` / `doc_analyzer`** for RAG and agent flows that ingest
-  links/files.
+  links/files (content risk in untrusted text — not malware scanning).
 - **`toxicity`** on input and/or output for abuse and safety.
-- **`prompt_moderation`** for topic/scope control ("only answer about X").
+- **Moderation** (`prompt_moderation`) for topic/scope control ("only answer about X").
+- Tool-result IPI → [Indirect Prompt Injection](/trustguard/detectors/agent-mcp-security).
