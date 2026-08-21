@@ -1,0 +1,34 @@
+---
+title: "Python middleware"
+description: "TrustGuard on the request path in FastAPI (same client for Django / Flask)."
+---
+
+Middleware covers **input**. Guard completions in the route with `direction="output"`
+([Python SDK](/trustguard/integrations/application/python-sdk)).
+
+```python
+import json
+
+from fastapi import FastAPI, Request
+from starlette.responses import JSONResponse
+from trustguard import AsyncTrustGuard
+
+app = FastAPI()
+client = AsyncTrustGuard("<your-trustguard-url>", api_key="<collector-api-key>")
+
+@app.middleware("http")
+async def trustguard_middleware(request: Request, call_next):
+    if request.method == "POST":
+        body = await request.body()
+        response = await client.guard(
+            {"input": body.decode()},
+            direction="input",
+            consumer_id=request.headers.get("x-user-id", ""),
+            session_id=request.cookies.get("session_id", ""),
+        )
+        if response.is_blocked:
+            return JSONResponse({"detail": "Blocked by TrustGuard"}, status_code=403)
+        if response.transformed_payload:
+            request._body = json.dumps(response.transformed_payload).encode()
+    return await call_next(request)
+```
