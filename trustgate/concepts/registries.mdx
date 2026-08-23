@@ -7,7 +7,7 @@ A **registry** is a single upstream backend that a gateway can route to. There a
 
 | Type | Points at | Used by |
 |---|---|---|
-| **LLM** | A model provider endpoint (OpenAI, Anthropic, Bedrock, …). | Chat / Responses / Messages traffic. |
+| **LLM** | A model provider endpoint (OpenAI, Anthropic, Bedrock, …). | Chat / Responses / Messages / [embeddings](/trustgate/routing/embeddings). |
 | **MCP** | A Model Context Protocol server. | The [MCP plane](/trustgate/mcp/overview). |
 
 [Consumers](/trustgate/concepts/consumers) and [roles](/trustgate/concepts/roles) select
@@ -31,7 +31,8 @@ failed) and origin (**Built-in** / **Custom**). Open a card to connect, edit cre
 1. Open **Registry** → **Models** (or **Getting started** → **Connect a provider**).
 2. Choose a provider card or **Custom Model**.
 3. Enter name, credentials, and provider options (API key, Azure SP, AWS keys, base URL,
-   custom headers, …).
+   custom headers, …). Optional [contract pricing](#contract-pricing) is on the Registry
+   panel, not on Getting started.
 4. Select **Test connection**, then **Connect** / **Save**.
 
 You can disable a registry without deleting it when you need to take an upstream out of
@@ -43,8 +44,8 @@ OpenAI · Anthropic · Google Gemini · Azure OpenAI · Amazon Bedrock · Vertex
 Groq · Cohere · **Local / custom** (OpenAI-compatible base URL) · and other catalog entries
 your tenant exposes.
 
-Use a **custom / OpenAI-compatible** backend when the provider speaks Chat Completions but
-is not listed as a first-class card.
+Use a **custom / OpenAI-compatible** backend when the provider speaks Chat Completions
+or `/v1/embeddings` but is not listed as a first-class card.
 
 TrustGate normalizes the inbound format (OpenAI / Anthropic / Responses / Gemini) to each
 provider's wire format, so a client speaks one dialect regardless of the upstream.
@@ -63,6 +64,44 @@ The credential TrustGate uses to call the **provider** is distinct from the
 | **GCP service account** | Vertex AI. |
 
 Provider credentials stay in TrustGate — applications only hold consumer keys or tokens.
+
+## Contract pricing
+
+Set this on a connected LLM registry so [Analytics](/trustgate/console/analytics) **Cost**,
+telemetry `cost.*`, and [LLM Budget](/trustgate/policies/rate-limiting#llm-budget) dollar
+mode use the same rates as your contract.
+
+Open the connected card. Under **Contract pricing**:
+
+| Field | UI | Stored / API |
+|---|---|---|
+| **List discount** | Percent off catalog list (`20` = 20% off) | `discount` as a fraction (`0.2`) |
+| **Overrides** | Model slug or glob (`gpt-4o`, `gpt-4o-mini*`) + input / output | USD **per token** |
+
+An exact slug beats a glob; among globs the most specific match wins. If a model has no
+override, the discount is applied to the models.dev catalog price. Otherwise the catalog
+price is used as-is. A model with no catalog price is unpriced: the event has no `cost`,
+and a dollar budget accrues `0` for that request.
+
+The **served** registry after routing is the one that applies. The same slug can have
+different rates on two registries.
+
+Saving empty pricing from the Registry panel clears stored rates. **Getting started →
+Connect a provider** does not set or clear them.
+
+```json
+{
+  "pricing": {
+    "discount": 0.2,
+    "overrides": {
+      "gpt-4o": { "input": 0.0000015, "output": 0.000006 },
+      "gpt-4o-mini*": { "input": 0.0000001, "output": 0.0000004 }
+    }
+  }
+}
+```
+
+On update, `pricing: {}` clears. Omit `pricing` on create to leave it unset.
 
 ## Connect an MCP server
 
