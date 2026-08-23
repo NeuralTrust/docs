@@ -1,0 +1,79 @@
+---
+title: "Images"
+description: "Call POST /{consumer}/v1/images/generations (JSON) plus multipart /edits and /variations. TrustGate routes only to registries that can generate images."
+---
+
+Clients send the same OpenAI Images requests they would send to OpenAI. Auth and the
+consumer slug are the same as [chat](/trustgate/getting-started/quickstart#call-from-your-application).
+
+```bash
+curl -X POST "https://<gateway-host>/<consumer-slug>/v1/images/generations" \
+  -H "X-AG-API-Key: <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "dall-e-3",
+    "prompt": "A minimal TrustGate logo",
+    "n": 1,
+    "size": "1024x1024"
+  }'
+```
+
+Edits and variations are multipart, same host and key:
+
+```bash
+curl -X POST "https://<gateway-host>/<consumer-slug>/v1/images/edits" \
+  -H "X-AG-API-Key: <your-api-key>" \
+  -F model=dall-e-2 \
+  -F prompt="make it blue" \
+  -F image=@logo.png
+
+curl -X POST "https://<gateway-host>/<consumer-slug>/v1/images/variations" \
+  -H "X-AG-API-Key: <your-api-key>" \
+  -F model=dall-e-2 \
+  -F image=@logo.png
+```
+
+On a Private data plane, add `X-AG-Gateway-Slug` as in the chat snippets.
+
+`GET` is rejected with **400**. Bare `/v1/images` and extra path tails (`/generations/extra`,
+`/edits/extra`) are **404**.
+
+OpenAI SDKs use the same consumer base URL: `client.images.generate()`, `client.images.edit()`,
+and `client.images.create_variation()`.
+
+## Providers
+
+| Registry | Generations | Edits / variations |
+|---|---|---|
+| **OpenAI** | `{base_url or https://api.openai.com/v1}/images/generations` | `.../images/edits`, `.../images/variations` |
+| **Azure OpenAI** | `{endpoint}/openai/deployments/{model}/images/generations?api-version=…` | `.../images/edits`, `.../images/variations` |
+| **Custom / OpenAI-compatible** | `{base_url}/images/generations` | `{base_url}/images/edits`, `{base_url}/images/variations` |
+| **OpenRouter** | `POST https://openrouter.ai/api/v1/images` | `/api/v1/images/edits`, `/api/v1/images/variations` |
+
+Groq, Anthropic, Gemini / Vertex, Bedrock, Mistral, xAI, Cohere, and other chat-only
+providers do not expose an Images API. They are left out of the candidate pool.
+
+Gemini / Imagen native is out of scope. Chat vision parts are a different surface.
+
+The JSON `model` field is allowlisted as usual. For multipart edits/variations, TrustGate
+reads the form `model` field for allowlists, Azure deployment names, and `@provider/model`
+pins. It does **not** rewrite the multipart body.
+
+## Routing
+
+1. The consumer's registries are filtered to those that advertise images.
+2. [Model resolution](/trustgate/routing/model-resolution) and
+   [load balancing](/trustgate/routing/load-balancing) run on that pool.
+3. Pinning a registry that cannot generate images is a **400**, not a failover — including
+   `@provider/model` in a multipart `model` field.
+4. An empty capable pool is a **503**.
+
+Attach at least one images-capable registry to the consumer. A mixed chat + images pool is
+fine: chat still uses every chat-capable member; images skip the rest.
+
+## Related
+
+- [Registries](/trustgate/concepts/registries)
+- [Consumers](/trustgate/concepts/consumers) — Connect tab
+- [Embeddings](/trustgate/routing/embeddings)
+- [Quickstart](/trustgate/getting-started/quickstart)
