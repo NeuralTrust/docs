@@ -1,22 +1,29 @@
 ---
 title: "Cursor"
-description: "Install the TrustGuard Cursor plugin from GitHub and protect prompts, tool calls, and tool results with one org API key."
+description: "Install the NeuralTrust Cursor plugin — TrustGuard firewall hooks plus TrustGate MCP Gateway — with org credentials."
 ---
 
-The [TrustGuard Cursor plugin](https://github.com/NeuralTrust/trustguard-cursor-plugin)
-runs on each developer machine. It maps Cursor agent hooks to
-[`POST /v1/evaluate`](/trustguard/api/evaluate) with a **shared org API key**. Developers
-do not need NeuralTrust accounts.
+The [NeuralTrust Cursor plugin](https://github.com/NeuralTrust/trustguard-cursor-plugin)
+(`trustguard` package) runs on each developer machine and ships **two** surfaces:
+
+| Surface | Role | Credential |
+| --- | --- | --- |
+| **TrustGuard hooks** | Prompts, tool calls, tool results → [`POST /v1/evaluate`](/trustguard/api/evaluate) | Org Cursor collector `tgk_…` (MDM / `cursor.json`) |
+| **TrustGate MCP** | Aggregated MCP tools for the agent | Plugin variables: MCP URL (+ API key if not OAuth) |
+
+Developers do not need NeuralTrust accounts for the firewall path. Do **not** reuse
+the `tgk_…` collector key as an MCP credential.
 
 ## What IT deploys vs what developers install
 
 | | Who | What |
 | --- | --- | --- |
-| **Plugin** | Each developer (or your standard Cursor plugin rollout) | Import from GitHub — see below |
-| **Config** | IT / MDM | `cursor.json` with the org `tgk_…` key only |
+| **Plugin** | Each developer (or Team Marketplace / standard rollout) | Import from GitHub — see below |
+| **Firewall config** | IT / MDM | `cursor.json` with the org `tgk_…` key |
+| **MCP config** | IT (team plugin variables) or developer | `TRUSTGATE_MCP_URL` (+ optional API key / gateway slug) |
 
 You do **not** need to package or push the plugin binary tree via MDM. MDM only needs
-the managed config file. The plugin’s bootstrap downloads the platform
+the managed firewall config file. The plugin’s bootstrap downloads the platform
 `trustguard-cursor` binary from GitHub Releases on first use (checksum-pinned).
 
 ## Console setup
@@ -81,7 +88,30 @@ When the managed file includes `api_key`:
 For pilots without MDM, write `~/.trustguard/cursor.json` (`chmod 600`) with the same
 JSON shape.
 
+## TrustGate MCP Gateway (same plugin)
+
+The plugin registers a remote MCP server named **TrustGate**. Values are Cursor
+[plugin variables](https://cursor.com/docs/reference/plugins) (Customize → Plugins →
+**Configure**), not `cursor.json`.
+
+1. In the console, open an **MCP consumer** → **Connect** and copy the endpoint
+   `https://{host}/{consumer-slug}/mcp`.
+2. Set:
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `TRUSTGATE_MCP_URL` | Yes | Full URL from Connect |
+| `TRUSTGATE_MCP_API_KEY` | API-key auth only | `X-AG-API-Key`. Leave empty for OAuth |
+| `TRUSTGATE_GATEWAY_SLUG` | Hybrid only | `X-AG-Gateway-Slug` |
+
+OAuth consumers need only the URL — Cursor runs the login flow on first tool use.
+Team admins can set variables once for Team Marketplace installs.
+
+MCP tool calls still pass through TrustGuard hooks (`preToolUse` / `postToolUse`).
+
 ## Verify
+
+### Firewall
 
 1. Open Cursor and send a test prompt.
 2. Confirm the event in TrustGuard **Activity**.
@@ -94,13 +124,18 @@ echo '{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command
   | trustguard-cursor hook
 ```
 
+### MCP
+
+1. Confirm **TrustGate** is enabled under Customize → MCP.
+2. Ask the agent to list or use a tool from a toolkit bound to that consumer.
+
 ## What is evaluated
 
 | Cursor hook | TrustGuard |
 | --- | --- |
 | `beforeSubmitPrompt` | `protocol: llm`, `direction: input` |
 | `preToolUse` (Shell) | `protocol: all`, `direction: input` |
-| `preToolUse` (other tools) | `protocol: mcp`, tools/call |
+| `preToolUse` (other tools, including TrustGate MCP) | `protocol: mcp`, tools/call |
 | `postToolUse` | `protocol: mcp`, tool result / output |
 
 ## Attributes
@@ -115,3 +150,4 @@ Gate policies on `collector.type` and/or `cursor.*` as needed.
 
 - [Plugin README](https://github.com/NeuralTrust/trustguard-cursor-plugin)
 - [Evaluate API](/trustguard/api/evaluate)
+- [TrustGate authorization](/trustgate/concepts/authorization/overview)
