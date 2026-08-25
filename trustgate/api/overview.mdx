@@ -1,56 +1,189 @@
 ---
-title: "Admin API"
-description: "The TrustGate Admin API manages gateways, registries, consumers, auth, policies, roles, and catalogs. Authenticated with a bearer admin JWT."
+title: "Overview"
+description: "Control-plane REST API for TrustGate: gateways, registries, consumers, auth, policies, roles, catalogs, config-sync, and playground traces."
 ---
 
-Most teams configure TrustGate from the **[NeuralTrust console](/trustgate/getting-started/quickstart)**
-(gateways, registries, consumers, policies). The **Admin API** is the open-source control
-plane underneath that UI — use it for automation, self-hosted deployments, or when you need
-REST access to the same objects the console manages.
+TrustGate exposes a **control-plane REST API** on the Admin plane. The NeuralTrust console uses it under the hood. You can call the same endpoints from automation, CI, or self-hosted operators when you need programmatic access.
 
-Everything the console does, you can do over REST — create gateways, register upstreams,
-mint consumer keys, attach policies. The endpoint pages in this section are generated
-directly from the [TrustGate OpenAPI spec](https://github.com/NeuralTrust/TrustGate) and
-include a live request builder.
+Day-to-day setup for most teams still starts in the
+**[console](/trustgate/getting-started/quickstart)**. Use this API for scripts, infrastructure-as-code style workflows, or integrations that skip the UI.
 
-## Base URL & authentication
+The **API reference** in the sidebar is generated from the live OpenAPI specification (`trustgate/api/openapi.json`) and includes a request builder for each operation.
 
-The Admin plane listens on `:8080`. All `/v1/...` routes require a bearer **admin JWT**
-(HS256), signed with the deployment's `SERVER_SECRET_KEY`:
+## Base URL
 
-```http
-Authorization: Bearer <admin-jwt>
+| Plane | Default port | Purpose |
+|---|---|---|
+| **Admin** | `8080` | Control plane — every route in this reference except the proxy sample. |
+| **Proxy** | `8081` | Runtime LLM traffic (consumer credentials), not admin tokens. |
+| **MCP** | `8082` | Runtime MCP traffic (consumer credentials). |
+
+Self-hosted example:
+
+```text
+http://localhost:8080
 ```
 
-See [Server security](/trustgate/operate/server-security#admin-authentication) for how to
-mint one. For a console-first walkthrough (no admin JWT), start with the
-[Quickstart](/trustgate/getting-started/quickstart).
+SaaS and Hybrid admin hostnames come from your deployment (console **Settings** or your platform team). Path prefixes stay the same (`/v1/...`).
 
-On NeuralTrust SaaS and Hybrid, automation should use
-[machine credentials](/trustgate/api/machine-credentials) instead: a `client_id` /
-`client_secret` pair scoped to one gateway, exchanged for a short-lived access token, so a
-long-running job never depends on someone re-issuing a token by hand.
+## Authentication
 
-## Resources
+Almost every `/v1/...` route expects:
 
-| Group | Path | Manages |
+```http
+Authorization: Bearer <token>
+```
+
+| Token | When to use |
+|---|---|
+| **Admin JWT** (HS256) | Self-hosted or short-lived ops. Signed with `SERVER_SECRET_KEY`. See [Server security](/trustgate/operate/server-security#admin-authentication). |
+| **Machine access token** (RS256) | SaaS / Hybrid automation. Exchange `client_id` / `client_secret` for a short-lived, gateway-scoped token — see [Authentication](/trustgate/api/credentials). |
+
+Probes under **system** (`/healthz`, `/readyz`, `/__/version`, `/health`) do not require a token.
+
+Interactive-only routes (catalogs, playground traces, config-sync connections) accept console or admin JWTs and reject machine credentials. Gateway-scoped resources accept either token type when the scopes and gateway binding allow it.
+
+## Endpoints
+
+OpenAPI currently documents **56 operations** across **32 paths**. Summary by tag:
+
+### system
+
+| Method | Path | Description |
 |---|---|---|
-| System | `/healthz`, `/readyz`, `/__/version` | Probes and build info (no auth). |
-| Gateways | `/v1/gateways` | [Gateways](/trustgate/concepts/gateways). |
-| Registries | `/v1/gateways/{gateway_id}/registries` | [Registries](/trustgate/concepts/registries) + test-connection, tools. |
-| Consumers | `/v1/gateways/{gateway_id}/consumers` | [Consumers](/trustgate/concepts/consumers) + registry/role/auth/policy attach. |
-| Auth | `/v1/gateways/{gateway_id}/auths` | [Auth credentials](/trustgate/concepts/auth). |
-| Policies | `/v1/gateways/{gateway_id}/policies` | [Policies](/trustgate/policies/overview) + global, duplicate. |
-| Roles | `/v1/gateways/{gateway_id}/roles` | [Roles](/trustgate/concepts/roles) + registry binding. |
-| Catalogs | `/v1/providers-catalog`, `/v1/models-catalog`, `/v1/policies-catalog`, `/v1/mcp-servers-catalog` | Read-only reference data (including the [policy](/trustgate/policies/overview) catalog + settings schemas). |
-| Playground | `/v1/playground/traces/{trace_id}` | Fetch the metrics event for a single request by trace id. |
+| `GET` | `/healthz` | Liveness probe |
+| `GET` | `/health` | Liveness alias for load balancers |
+| `GET` | `/readyz` | Readiness probe |
+| `GET` | `/__/version` | Build / version info |
 
-## The proxy is separate
+### gateways
 
-This reference covers the **Admin** API. Runtime traffic goes to the **Proxy** plane
-(`:8081`) on the format-specific routes — `POST /{consumer_slug}/v1/chat/completions`,
-`/v1/messages`, `/v1/responses`, and the Gemini `/v1beta/models/{model}:generateContent` —
-authenticated with the consumer's API key (`X-AG-API-Key`, `x-api-key`, or
-`Authorization: Bearer ag_…`) or an OAuth2/OIDC token, not the admin JWT. See
-[Auth](/trustgate/concepts/auth), [Architecture](/trustgate/architecture), and the
-[Quickstart](/trustgate/getting-started/quickstart).
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/gateways` | Create gateway |
+| `GET` | `/v1/gateways` | List gateways |
+| `GET` | `/v1/gateways/{id}` | Get gateway |
+| `PUT` | `/v1/gateways/{id}` | Update gateway |
+| `DELETE` | `/v1/gateways/{id}` | Delete gateway |
+
+### registries
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/gateways/{gateway_id}/registries` | Create registry |
+| `GET` | `/v1/gateways/{gateway_id}/registries` | List registries |
+| `GET` | `/v1/gateways/{gateway_id}/registries/{id}` | Get registry |
+| `PUT` | `/v1/gateways/{gateway_id}/registries/{id}` | Update registry |
+| `DELETE` | `/v1/gateways/{gateway_id}/registries/{id}` | Delete registry |
+| `POST` | `/v1/gateways/{gateway_id}/registries/test-connection` | Test provider connection |
+| `GET` | `/v1/gateways/{gateway_id}/registries/{id}/tools` | List tools exposed by an MCP registry |
+
+### consumers
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/gateways/{gateway_id}/consumers` | Create consumer |
+| `GET` | `/v1/gateways/{gateway_id}/consumers` | List consumers |
+| `GET` | `/v1/gateways/{gateway_id}/consumers/{id}` | Get consumer |
+| `PUT` | `/v1/gateways/{gateway_id}/consumers/{id}` | Update consumer |
+| `DELETE` | `/v1/gateways/{gateway_id}/consumers/{id}` | Delete consumer |
+| `POST` / `DELETE` | `/v1/gateways/{gateway_id}/consumers/{id}/registries/{registry_id}` | Attach / detach registry |
+| `POST` / `DELETE` | `/v1/gateways/{gateway_id}/consumers/{id}/roles/{role_id}` | Attach / detach role |
+| `POST` / `DELETE` | `/v1/gateways/{gateway_id}/consumers/{id}/auths/{auth_id}` | Attach / detach auth |
+| `POST` / `DELETE` | `/v1/gateways/{gateway_id}/consumers/{id}/policies/{policy_id}` | Attach / detach policy |
+
+### auths
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/gateways/{gateway_id}/auths` | Create auth credential |
+| `GET` | `/v1/gateways/{gateway_id}/auths` | List auth credentials |
+| `GET` | `/v1/gateways/{gateway_id}/auths/{id}` | Get auth credential |
+| `PUT` | `/v1/gateways/{gateway_id}/auths/{id}` | Update auth credential |
+| `DELETE` | `/v1/gateways/{gateway_id}/auths/{id}` | Delete auth credential |
+
+### policies
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/gateways/{gateway_id}/policies` | Create policy |
+| `GET` | `/v1/gateways/{gateway_id}/policies` | List policies |
+| `GET` | `/v1/gateways/{gateway_id}/policies/{id}` | Get policy |
+| `PUT` | `/v1/gateways/{gateway_id}/policies/{id}` | Update policy |
+| `DELETE` | `/v1/gateways/{gateway_id}/policies/{id}` | Delete policy |
+| `POST` | `/v1/gateways/{gateway_id}/policies/{id}/global` | Mark policy global |
+| `DELETE` | `/v1/gateways/{gateway_id}/policies/{id}/global` | Unset global |
+| `POST` | `/v1/gateways/{gateway_id}/policies/{id}/duplicate` | Duplicate policy |
+
+### roles
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/gateways/{gateway_id}/roles` | Create role |
+| `GET` | `/v1/gateways/{gateway_id}/roles` | List roles |
+| `GET` | `/v1/gateways/{gateway_id}/roles/{id}` | Get role |
+| `PUT` | `/v1/gateways/{gateway_id}/roles/{id}` | Update role |
+| `DELETE` | `/v1/gateways/{gateway_id}/roles/{id}` | Delete role |
+| `POST` / `DELETE` | `/v1/gateways/{gateway_id}/roles/{role_id}/registries/{registry_id}` | Attach / detach registry |
+
+### catalog
+
+Read-only platform catalogs (interactive identity required):
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/providers-catalog` | Provider catalog |
+| `GET` | `/v1/models-catalog` | Models catalog |
+| `GET` | `/v1/policies-catalog` | Policy types and settings schemas |
+| `GET` | `/v1/mcp-servers-catalog` | MCP servers catalog |
+
+### playground
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/playground/traces/{trace_id}` | Fetch a playground metrics event by trace id |
+
+### config-sync
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/config-sync/connections` | List data-plane configuration-sync connections |
+
+### proxy (sample)
+
+Documented for reference only. These run on the **Proxy** plane with **consumer** credentials, not admin tokens:
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/{consumer_slug}/v1/chat/completions` | OpenAI Chat Completions sample |
+
+Other fixed proxy routes (not all expanded in OpenAPI) include Anthropic `/v1/messages` and OpenAI Responses `/v1/responses` under the consumer slug.
+
+## Admin plane vs Proxy plane
+
+| | **Admin** (`:8080`) | **Proxy** (`:8081`) / **MCP** (`:8082`) |
+|---|---|---|
+| Who calls it | Console, operators, automation | Your applications |
+| Auth | Admin JWT or [Authentication](/trustgate/api/credentials) | Consumer API key / OAuth (`X-AG-API-Key`, `x-api-key`, `Authorization: Bearer ag_…`) |
+| Typical paths | `/v1/gateways/...` | `/{consumer_slug}/v1/chat/completions`, MCP tools, … |
+
+For client connect snippets and `model: "auto"`, use the consumer **Connect** tab or
+[Quickstart](/trustgate/getting-started/quickstart) — not the Admin plane.
+
+## Related concepts
+
+| Tag | Concepts |
+|---|---|
+| gateways | [Gateways](/trustgate/concepts/gateways) |
+| registries | [Registries](/trustgate/concepts/registries) |
+| consumers | [Consumers](/trustgate/concepts/consumers) |
+| auths | [Auth](/trustgate/concepts/auth) |
+| policies | [Policies](/trustgate/policies/overview) |
+| roles | [Roles](/trustgate/concepts/roles) |
+
+## Next steps
+
+- [Authentication](/trustgate/api/credentials) — machine tokens for SaaS / Hybrid automation
+- [Server security](/trustgate/operate/server-security) — minting admin JWTs self-hosted
+- [Architecture](/trustgate/architecture) — Admin, Proxy, and MCP planes
+- Sidebar **API reference** — full request and response schemas from OpenAPI
