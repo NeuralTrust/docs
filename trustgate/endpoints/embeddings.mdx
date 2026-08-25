@@ -1,0 +1,60 @@
+---
+title: "Embeddings"
+description: "Create embeddings with an OpenAI-shaped request while TrustGate routes to a compatible provider."
+---
+
+Applications use the OpenAI embeddings format regardless of the selected upstream provider:
+
+```text
+/{consumer_slug}/v1/embeddings
+```
+
+## Endpoint
+
+| Method | Path after consumer slug | Client format |
+|---|---|---|
+| `POST` | `/v1/embeddings` | OpenAI Embeddings |
+
+## Send a request
+
+```bash
+curl -X POST "https://<llm-host>/<consumer-slug>/v1/embeddings" \
+  -H "X-AG-API-Key: <consumer-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "text-embedding-3-small",
+    "input": ["First document", "Second document"]
+  }'
+```
+
+Copy the host and credentials from the consumer **Connect** tab. See
+[Auth](/trustgate/concepts/auth) for supported authentication methods.
+
+The `input` can be a string or an array. The response uses the OpenAI embeddings shape,
+including the embeddings array, model, indexes, and usage when the provider returns it.
+
+## Provider adaptation
+
+TrustGate routes only to registries that support embeddings:
+
+| Registry provider | Behavior |
+|---|---|
+| OpenAI, Azure OpenAI, OpenAI-compatible, Mistral | OpenAI-shaped request and response |
+| Cohere | Converts the OpenAI request to Cohere Embed and normalizes the response |
+| Google Vertex AI | Converts single or batched inputs to Vertex embeddings |
+| Amazon Bedrock | Converts inputs for supported Titan embedding models |
+
+Registries without embedding support are excluded from the routing pool. If a request
+explicitly selects an incompatible registry, TrustGate rejects it instead of silently
+using another provider. If no compatible registry is available, the response is
+`503 no_backend_available`.
+
+## Routing and limitations
+
+- Bind at least one embeddings-capable [registry](/trustgate/concepts/registries) to the
+  [consumer](/trustgate/concepts/consumers).
+- Consumer model allowlists and defaults still apply.
+- Embeddings are synchronous; streaming embeddings are not supported.
+- Unknown endpoint shapes return **404**.
+
+Successful responses include `X-Selected-Provider` and `X-Selected-Model`.

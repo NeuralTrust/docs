@@ -1,0 +1,67 @@
+---
+title: "Files"
+description: "Upload, list, retrieve, download, and delete provider files through one consumer-scoped API."
+---
+
+File routes preserve the provider file API while applying consumer authentication,
+policies, and capability-aware registry selection.
+
+## Endpoints
+
+| Method | Path after consumer slug | Description |
+|---|---|---|
+| `GET` | `/v1/files` | List files |
+| `POST` | `/v1/files` | Upload file |
+| `GET` | `/v1/files/{id}` | Get file |
+| `DELETE` | `/v1/files/{id}` | Delete file |
+| `GET` | `/v1/files/{id}/content` | Download file content |
+
+Other method and path combinations are rejected. For example, deleting `/v1/files` or
+posting to `/v1/files/{id}` returns `400 invalid_request`; unknown nested paths return
+**404**.
+
+## Upload a file
+
+Uploads use `multipart/form-data`. TrustGate preserves the multipart body and content type:
+
+```bash
+curl -X POST "https://<llm-host>/<consumer-slug>/v1/files" \
+  -H "X-AG-API-Key: <consumer-api-key>" \
+  -F "purpose=assistants" \
+  -F "file=@./data.jsonl"
+```
+
+Use the returned file ID for retrieve, content, and delete calls.
+
+## Supported registries
+
+File routes can use OpenAI, Azure OpenAI, Anthropic, Mistral, OpenRouter, and xAI
+registries. The exact operations and `purpose` values remain provider-dependent.
+
+TrustGate forwards the request body and provider response rather than converting file
+formats. Azure paths and credentials are adapted to the configured Azure deployment.
+
+## File ID routing
+
+TrustGate uses known file-ID families to avoid sending a lookup to an incompatible
+provider:
+
+| File ID shape | Eligible registry family |
+|---|---|
+| `file-…` | OpenAI-compatible file providers |
+| `file_…` | Anthropic |
+| Other prefix | Any files-capable registry bound to the consumer |
+
+For an unpinned request by ID, a provider **404** can fall through to another eligible
+registry in the same family. Other provider errors return immediately without another
+intra-family attempt. TrustGate never sends a known file-ID family to a different family.
+
+## Limitations
+
+- File operations use regular synchronous HTTP responses, not server-sent events.
+- Arbitrary subpaths are not accepted.
+- If no compatible registry is available, TrustGate returns
+  `503 no_backend_available`.
+
+Copy the host and credentials from the consumer **Connect** tab. See
+[Auth](/trustgate/concepts/auth).

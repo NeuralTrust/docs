@@ -1,17 +1,71 @@
 ---
 title: "Overview"
-description: "Provider manuals for wiring TrustGate to an external IdP — OIDC identity-based LLM routing and OAuth2 for MCP — with end-to-end setup for Okta and Microsoft Entra ID."
+description: "Identity in the console — Auth credentials and Roles — plus IdP patterns for OIDC Identity-based LLM routing and OAuth2 for MCP (Okta, Entra ID)."
 ---
 
-This section is the practical, provider-by-provider companion to
+**Identity** (`Agent Gateway` → **Identity**) is where you manage credentials and
+Identity-based access for the selected gateway. It has two tabs: **Auth** and **Roles**.
+
+This section is also the provider-by-provider companion to
 [Auth](/trustgate/concepts/auth), [Consumers](/trustgate/concepts/consumers), and
-[Roles](/trustgate/concepts/roles). Those pages define the concepts; the manuals here walk
-through standing up a real identity provider and configuring TrustGate in the NeuralTrust
-app (**Agent Gateway → Identity** and **Consumers**).
+[Roles](/trustgate/concepts/roles). The manuals below walk through standing up a real
+identity provider.
+
+## Auth tab
+
+Create reusable auth **entities**, then attach them to [consumers](/trustgate/concepts/consumers).
+
+| Type | Label in UI | Typical use |
+|---|---|---|
+| **API Key** | **API Key** | Static `ag_…` keys for LLM and MCP consumers. |
+| **OAuth2** | **OAuth2** | Interactive login (IdP discovery or manual URLs) or M2M token validation. |
+| **OIDC** | **OIDC** | JWT validation (JWKS / public keys) for LLM and Identity-based routing. |
+
+### Create an auth entity
+
+1. Open **Identity** → **Auth** → **New Auth**.
+2. Choose the type and fill issuer / JWKS / client / key fields as prompted.
+3. For **API Key**, generate the key and set expiry (**Never**, 30 days, 90 days, 1 year).
+   Copy the secret once.
+4. Save. Attach the entity from a consumer **Auth** tab or during consumer create.
+
+Consumers can also create API keys on their own **Auth** tab. See
+[Auth](/trustgate/concepts/auth).
+
+### OAuth2 setup modes (UI)
+
+| Mode | When |
+|---|---|
+| **Validate tokens only (M2M)** | Services present bearer tokens; no browser login. |
+| **Interactive login · IdP with discovery** | Browser/agent login; OpenID discovery. |
+| **Interactive login · IdP without discovery** | Manual authorize / token / userinfo URLs. |
+
+OIDC fields include issuer, JWKS URL, audiences, required scopes, allowed algorithms,
+subject claim, and optional public keys / certificate constraints.
+
+### Consumer attachment
+
+| Consumer protocol | Auth methods in UI |
+|---|---|
+| **LLM** | **API Key**, **OAuth2**, **OIDC** |
+| **MCP** | **OAuth2**, **API Key**. For **OAuth2**, attach an IdP or **Use NeuralTrust** (built-in login). |
+
+## Roles tab
+
+Roles power **Identity-based** consumer routing.
+
+1. Open **Identity** → **Roles** → **New Role**.
+2. Set **Claim** and **Value** (for example `groups` = `engineering`).
+3. **Add Registry** — grant LLM and/or MCP registries.
+4. Optionally **restrict models** or **tools** (or leave all permitted).
+5. On a consumer, set **Routing mode** → **Identity-based** and select the role(s). Ensure
+   the consumer uses an OIDC (or OAuth2) credential whose tokens carry matching claims.
+
+Details: [Roles](/trustgate/concepts/roles).
 
 ## Two patterns
 
-Almost every integration is one of two patterns. Both validate an inbound
+Almost every IdP integration is one of two patterns. Both validate an inbound
 `Authorization: Bearer <jwt>` against your IdP's JWKS. You can use the **same** Okta or
 Entra tenant for both — they are two TrustGate **auth types**, not two different IdPs.
 
@@ -38,18 +92,10 @@ the gateway to run the interactive OAuth login.
 
 <Note>
 An Identity-based LLM consumer carries **exactly one** identity auth (**OIDC** or
-**OAuth2**). LLM consumers can also use **API key**. MCP consumers use **OAuth2** only — **not** OIDC or API key.
+**OAuth2**). LLM consumers can also use **API key**. MCP consumers use **OAuth2** or
+**API key** — **not** OIDC. For MCP **OAuth2**, attach an IdP or **Use NeuralTrust**
+(built-in login).
 </Note>
-
-## Where to configure in the app
-
-| Task | Navigation |
-|---|---|
-| Create IdP credential | **Agent Gateway → Identity → Auth → New Auth** |
-| Map claims to resources | **Identity → Roles → New Role** (Claim / Value + resources) |
-| Attach auth to a consumer | **Agent Gateway → Consumers → Consumer**, or the consumer **Auth** tab |
-| Identity-based LLM routing | Consumer **Routing** → **Identity-based** → select **Roles** |
-| MCP connection URL for Cursor | Consumer **Connect** tab |
 
 ## Rules that apply to every provider
 

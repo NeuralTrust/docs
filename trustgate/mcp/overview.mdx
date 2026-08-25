@@ -1,151 +1,95 @@
 ---
-title: "MCP plane"
-description: "TrustGate's MCP plane aggregates registered Model Context Protocol servers into one endpoint — composing tools, prompts, and resources — with toolkit scoping, flexible upstream auth, and a built-in OAuth2 server for agents."
+title: "Overview"
+description: "Expose registered MCP servers as one agent endpoint with consumer auth, tool scoping, and OAuth."
 ---
 
-Beyond LLM traffic, TrustGate runs a dedicated **MCP plane** (`:8082`) that fronts
-[Model Context Protocol](https://modelcontextprotocol.io) servers. Rather than connecting an
-agent to each MCP server directly, TrustGate **aggregates** several servers into a single
-MCP endpoint — composing their tools, prompts, and resources — and applies the same tenancy,
-access control, auth, and observability as LLM traffic.
+TrustGate's **MCP plane** aggregates [MCP registries](/trustgate/concepts/registries) into
+one endpoint per [consumer](/trustgate/concepts/consumers). Agents connect once, see a
+composed catalog of tools, prompts, and resources, and TrustGate applies the same tenancy,
+auth, and observability as LLM traffic.
+
+The transport is JSON-RPC over **streamable HTTP**. Copy the URL from the consumer
+**Connect** tab:
+
+```text
+https://<mcp-host>/<consumer-slug>/mcp
+```
 
 <Note>
-The TrustGate **data plane must reach** each MCP registry `url`. SaaS cannot call private VPC endpoints unless you expose them. Use [Hybrid](/neuraltrust/deployment/deployment-models) for internal MCPs.
+The data plane must reach each MCP server URL. SaaS cannot call private VPC endpoints unless
+you expose them. Use [Hybrid](/neuraltrust/deployment/deployment-models) for internal MCP
+servers.
 </Note>
 
-## One endpoint, many servers
-
-An agent connects to one TrustGate MCP endpoint and sees a unified surface. TrustGate speaks
-JSON-RPC over the **`streamable-http`** transport and implements the standard methods:
-
-| Method | Returns |
-|---|---|
-| `tools/list` · `tools/call` | The composed tool catalog, and tool invocation. |
-| `resources/list` · `resources/templates/list` · `resources/read` | Composed resources and templates. |
-| `prompts/list` · `prompts/get` | Composed prompts. |
-
-Behind the endpoint, each upstream is an [MCP registry](/trustgate/concepts/registries)
-(`type: MCP`). TrustGate fans `list` calls out to the bound registries, merges the results,
-and routes each `call`/`read`/`get` to the owning server.
-
-### Tool name composition
-
-Because two servers can expose the same tool name, TrustGate keeps names unique on the
-merged surface:
-
-- Unique names pass through unchanged.
-- On a collision, the tool is prefixed with the **registry name** (e.g. `asana_create_task`).
-- If that still collides, a short registry id is added; as a last resort a numeric suffix.
-
-So an agent always sees stable, unambiguous names regardless of how many servers are behind
-the endpoint.
-
-## Registering an MCP server
-
-Connect MCP servers from the console — no control-plane API required:
+## Register an MCP server
 
 1. Open **TrustGate** → **Registry** → **MCP**.
-2. Pick a **catalog** server (one-click when no extra config is needed) or **Add custom**
-   with a server URL.
-3. Configure transport (**streamable HTTP**), static headers, and upstream **auth** mode.
+2. Connect a **catalog** server, or **Custom MCP** with your own URL.
+3. Set **Authentication** as prompted: **None**, **Static header**, or
+   **OAuth (forwarded)**.
 4. Select **Test connection**, then **Connect** / **Save**.
-5. Open the registry to browse live **tools** the server exposes.
+5. Open the registry to browse the tools the server exposes.
 
-| Setting | Meaning |
-|---|---|
-| **Catalog code** | Join key used when a catalog server is already connected (empty for custom URLs). |
-| **URL** | The server's `http(s)` endpoint. |
-| **Transport** | Streamable HTTP (the supported transport). |
-| **Headers** | Static headers sent upstream. |
-| **Auth** | How TrustGate authenticates to the server (see below). |
+Catalog servers that need extra config (client ID, secret, URL variables) collect those in
+the connect panel before TrustGate registers them.
 
-## Toolkits — scoping what an agent can use
+## Create an MCP consumer
 
-A consumer doesn't automatically get every tool on every bound server. Access is governed by
-a **toolkit** — a list of grants, each scoping a registry to specific tools, prompts, or
-resources:
+1. Open **Consumers** → **New Consumer**.
+2. Set **Protocol** to **MCP**.
+3. Under **Auth**, choose:
+   - **OAuth2** — agent login. Attach an IdP, or **Use NeuralTrust** (built-in login).
+   - **API Key** — send `X-AG-API-Key` from the MCP client.
+4. On **Routing**, bind MCP registries and optionally restrict tools per server.
+5. Save, then copy the URL and snippets from **Connect**.
 
-| Entry field | Meaning |
-|---|---|
-| `registry_id` | Which MCP registry the grant applies to. |
-| `tool` / `prompt` / `resource` | The capability name to allow; `*` grants all of that kind. |
-| `expose_as` | Optional rename for how the capability appears to the agent. |
+See [Auth](/trustgate/concepts/auth) and [Authorization](/trustgate/concepts/authorization/overview).
 
-For [inline](/trustgate/concepts/consumers) MCP consumers, the toolkit lives on the consumer
-(`mcp.toolkit`). For [role-based](/trustgate/concepts/roles) consumers, the effective view is
-built from the matched roles:
+## What the agent sees
 
-- **Registries** = the union of the matched roles' MCP registries.
-- **Toolkit** = the union of the roles' `mcp_policies` toolkits. A role that binds an MCP
-  registry *without* an explicit toolkit grants that server **fully**.
+TrustGate fans `tools/list`, `resources/list`, and `prompts/list` out to the bound
+servers and merges the results. Each `tools/call`, `resources/read`, or `prompts/get` goes
+to the owning server.
 
-So one MCP endpoint can present a different, identity-scoped toolkit to each caller.
+If two servers expose the same tool name, TrustGate keeps names unique:
 
-### Fail mode
+- Unique names pass through unchanged.
+- On a collision, the tool is prefixed with the **registry name**.
+- If that still collides, a short registry id or numeric suffix is added.
 
-`fail_mode` decides what happens when an upstream server is unavailable:
+For **Static** consumers, the toolkit lives on the consumer. Leave tools unrestricted to
+grant the whole server, or restrict to named tools. For **Identity-based** consumers, the
+effective registries and tools are the union of the matched [roles](/trustgate/concepts/roles).
+A role that binds an MCP registry without restricting tools grants that server fully.
 
-- **`open`** — degrade gracefully (skip the failed server).
-- **`closed`** — fail the call.
-
-For role-based consumers, the effective mode is **open only when every contributing role
-declares it open**; otherwise it is closed (and closed when no role grants access).
+If an upstream server is unavailable, TrustGate can skip it or fail the call depending on
+how the consumer or role is configured.
 
 ## Upstream authentication
 
-`mcp_target.auth.mode` controls how TrustGate authenticates **to the MCP server**. Each mode
-has its own requirements:
+This is how TrustGate authenticates **to the MCP server**, not how the agent authenticates
+to TrustGate.
 
-| Mode | Behavior | Requires |
-|---|---|---|
-| `none` | No upstream auth. | — |
-| `static` | A fixed header/token on every call. | `header` + `value`. |
-| `passthrough` | Forward the caller's own bearer token unchanged. | `expected_audience` (unconstrained passthrough is rejected); the caller's token audience must match. |
-| `exchange` | Exchange the caller's token for a downstream one (STS). | a `pattern` (see below). |
-| `forwarded` | Use a per-user credential the user authorized once (OAuth connect). | `provider` + registration config. |
-
-### Exchange patterns
-
-The `exchange` mode implements standard token-exchange patterns:
-
-| Pattern | Requires |
+| Authentication in the UI | Behavior |
 |---|---|
-| `impersonation` | `audience` |
-| `delegation` | `audience` + `actor` |
-| `obo` (on-behalf-of) | `scope` (e.g. `resource/.default`) |
-| `token_exchange` | `audience` |
+| **None** | No upstream credential. |
+| **Static header** | A fixed header (for example `Authorization`) on every call. |
+| **OAuth (forwarded)** | Per-user OAuth. Registration **Automatic (DCR)** or **Manual** (client ID, authorize URL, token URL). |
 
-### Forwarded (per-user OAuth)
-
-For SaaS servers where each end-user must connect their own account (e.g. their Asana),
-`forwarded` mode stores a per-user OAuth credential:
-
-- Set `provider` and either `registration: auto` (TrustGate registers the client) or
-  `registration: manual` with `client_id`, `authorize_url`, and `token_url`.
-- The first call for a user with no stored credential returns a **consent-required** signal
-  with a connect link; the user authorizes the provider once and the credential is vaulted.
-- TrustGate refreshes expiring credentials automatically and re-prompts for consent only
-  when a grant can no longer be refreshed.
+With **OAuth (forwarded)**, the first call for a user without a stored credential returns a
+connect link. After the user authorizes once, TrustGate vaults and refreshes the credential.
 
 ## Agent authentication
 
-The MCP plane is itself an **OAuth2 authorization server** for the agents connecting to it,
-implementing the standard discovery and flow endpoints:
+Agents authenticate to TrustGate as the MCP consumer.
 
-| Endpoint | Purpose |
+| Consumer auth | How the agent connects |
 |---|---|
-| `/.well-known/oauth-protected-resource` | Protected-resource metadata. |
-| `/.well-known/oauth-authorization-server` | Authorization-server metadata. |
-| `/register` | Dynamic Client Registration (DCR). |
-| `/authorize` · `/callback` · `/token` | Authorization-code flow with **PKCE**. |
-| `/.well-known/jwks.json` | Public keys for token verification. |
-| `/connect` · `/disconnect` | Connect/disconnect an agent's link to a downstream provider (the consent flow used by `forwarded` auth). |
+| **OAuth2** / **Use NeuralTrust** | The MCP client runs OAuth (authorization code + PKCE). TrustGate advertises discovery at `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource`. |
+| **API Key** | The client sends `X-AG-API-Key`. On Private deployments, also send `X-AG-Gateway-Slug` unless the host already scopes the gateway. |
 
-Together these let an agent register, obtain a token, call the unified MCP endpoint, and —
-when a downstream needs per-user authorization — complete a one-time connect without leaving
-the gateway.
+## Related
 
-## Connect from agents
-
-- [Microsoft Copilot Studio](/trustgate/mcp/copilot-studio)
-- [Okta](/trustgate/concepts/authorization/okta) · [Entra ID](/trustgate/concepts/authorization/entra-id) (external IdP + Cursor)
+- [Registries](/trustgate/concepts/registries) — connect catalog or custom MCP servers
+- [Consumers](/trustgate/concepts/consumers) — MCP protocol, routing, Connect
+- [Okta](/trustgate/concepts/authorization/okta) and [Entra ID](/trustgate/concepts/authorization/entra-id) — external IdP for agent login

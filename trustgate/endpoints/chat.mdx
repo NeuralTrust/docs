@@ -1,0 +1,85 @@
+---
+title: "Chat"
+description: "Use OpenAI, Anthropic, Cohere, or Gemini request formats while TrustGate selects and adapts the upstream provider."
+---
+
+TrustGate accepts several provider-shaped chat APIs on the same consumer. The endpoint you
+call defines the request and response format your application uses; it does not force
+TrustGate to route to that provider.
+
+```text
+/{consumer_slug}/{fixed_route}
+```
+
+For example, an Anthropic Messages request can be routed to an OpenAI registry. TrustGate
+adapts the request, response, and supported streaming events while preserving the client
+format.
+
+## Endpoints and client formats
+
+| Method | Path after consumer slug | Client format |
+|---|---|---|
+| `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
+| `POST` | `/v1/messages` | Anthropic Messages |
+| `POST` | `/v1/responses` | OpenAI Responses |
+| `POST` | `/v2/chat` | Cohere Chat v2 |
+| `POST` | `/v1beta/models/{model}:generateContent` | Gemini generateContent |
+| `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini streamGenerateContent |
+
+Only these fixed shapes are accepted. Similar but unlisted paths, such as
+`/v2/chat/completions`, return **404**.
+
+## Send a request
+
+Use the **LLM URL** and credentials from the consumer **Connect** tab:
+
+```bash
+curl -X POST "https://<llm-host>/<consumer-slug>/v1/chat/completions" \
+  -H "X-AG-API-Key: <consumer-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "messages": [{"role": "user", "content": "Explain zero trust in one sentence."}]
+  }'
+```
+
+TrustGate accepts `X-AG-API-Key`, `x-api-key`, or
+`Authorization: Bearer ag_…`. OAuth2 and OIDC bearer tokens are also accepted when
+configured. Private deployments may require `X-AG-Gateway-Slug`.
+
+See [Auth](/trustgate/concepts/auth) and [Quickstart](/trustgate/getting-started/quickstart).
+
+## Model selection and routing
+
+The consumer controls which registries and models can serve the request:
+
+- Use `"model": "auto"` for load balancing or Smart routing.
+- Use an allowed model ID to request a specific model.
+- Gemini puts the model in the URL path instead of the request body.
+- Model allowlists and defaults are enforced before TrustGate calls the provider.
+
+Routing references are resolved by TrustGate and are not forwarded upstream. Successful
+responses include `X-Selected-Provider` and `X-Selected-Model`, which are useful when
+debugging routing decisions.
+
+See [Model resolution](/trustgate/routing/model-resolution),
+[Load balancing](/trustgate/routing/load-balancing), and
+[Smart routing](/trustgate/routing/smart-routing).
+
+## Streaming
+
+For OpenAI, Anthropic, Cohere, and Responses clients, set `"stream": true` in the request.
+For Gemini, call `:streamGenerateContent` or add `?alt=sse`.
+
+TrustGate adapts normal server-sent events to the format expected by the client. If an
+upstream stream stops unexpectedly after the HTTP response has started, TrustGate emits
+this fixed error event; the already-sent HTTP status remains `200`:
+
+```text
+data: {"error":{"message":"upstream stream terminated unexpectedly","type":"upstream_error"}}
+```
+
+<Note>
+Provider-specific features can differ. TrustGate adapts supported request and response
+fields, but does not guarantee every provider extension is portable across every provider.
+</Note>
