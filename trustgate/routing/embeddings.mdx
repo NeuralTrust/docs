@@ -1,0 +1,58 @@
+---
+title: "Embeddings"
+description: "Call POST /{consumer}/v1/embeddings with an OpenAI-shaped body. TrustGate routes only to registries that can embed."
+---
+
+Clients send the same OpenAI embeddings body they would send to OpenAI. Auth and the
+consumer slug are the same as [chat](/trustgate/getting-started/quickstart#call-from-your-application).
+
+```bash
+curl -X POST "https://<gateway-host>/<consumer-slug>/v1/embeddings" \
+  -H "X-AG-API-Key: <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "text-embedding-3-small",
+    "input": ["Hello from TrustGate"]
+  }'
+```
+
+On a Private data plane, add `X-AG-Gateway-Slug` as in the chat snippets.
+
+## Providers
+
+| Registry | Upstream |
+|---|---|
+| **OpenAI** | `{base_url}/embeddings` (default `https://api.openai.com/v1/embeddings`) |
+| **Azure OpenAI** | `{endpoint}/openai/deployments/{model}/embeddings?api-version=…` |
+| **Mistral** | `https://api.mistral.ai/v1/embeddings` (chat host unchanged) |
+| **Custom / OpenAI-compatible** | `{base_url}/embeddings` |
+| **Cohere** | Same OpenAI body, adapted to Cohere `/v2/embed` |
+| **Vertex AI** | Gemini `:embedContent` (one input) or `:batchEmbedContents` (many) |
+| **Amazon Bedrock** | Titan **embed** only (`InvokeModel` with `{inputText}`). Model IDs that contain `titan-embed`, including `eu.` / `us.` prefixes. |
+
+Anthropic, Gemini (AI Studio), Bedrock Claude / Nova / Titan **text**, and other chat-only
+providers do not embed. They are left out of the candidate pool.
+
+Bedrock rejects a non–Titan-embed model with a 400. Vertex embeddings ignore the chat
+`provider_options.action` — they always call the embed endpoints.
+
+## Routing
+
+1. The consumer's registries are filtered to those that advertise embeddings.
+2. [Model resolution](/trustgate/routing/model-resolution) and
+   [load balancing](/trustgate/routing/load-balancing) run on that pool.
+3. Pinning a registry that cannot embed is a **400**, not a failover.
+4. An empty capable pool is a **503**.
+
+Attach at least one embeddings-capable registry to the consumer. A mixed chat + embeddings
+pool is fine: chat still uses every chat-capable member; embeddings skip the rest.
+
+## Related
+
+- [Registries](/trustgate/concepts/registries)
+- [Consumers](/trustgate/concepts/consumers) — Connect tab
+- [Rerank](/trustgate/routing/rerank)
+- [Files](/trustgate/routing/files)
+- [Audio](/trustgate/routing/audio)
+- [Models](/trustgate/routing/models)
+- [Quickstart](/trustgate/getting-started/quickstart)

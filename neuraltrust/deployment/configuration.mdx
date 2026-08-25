@@ -1,58 +1,63 @@
 ---
 title: Configuration
-description: Generated private TrustGate configuration and customer-managed Hybrid services.
+description: Every chart switch that changes a deployment — products, datastores, ingress, Firewall workers, and cross-cluster endpoints.
 ---
 
-## Generated setup
+This is the values reference the model guides link into. Start from your model's
+page — [Hybrid](/neuraltrust/deployment/hybrid),
+[External](/neuraltrust/deployment/external), or
+[Central](/neuraltrust/deployment/central) — and come here for the individual
+settings.
 
-Start in [TrustGate's private gateway wizard](/neuraltrust/deployment/overview#create-a-private-trustgate-gateway). The runtime choices are **Docker**, **Kubernetes**, and **Manual**.
+The exhaustive list, with every default, is
+[`values.yaml`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values.yaml)
+in the chart.
 
-**Docker** displays a generated Compose command. It fetches the maintained TrustGate Compose manifest and injects:
+## Values cheat sheet
 
-- A generated `CONFIG_SYNC_LKG_KEY`
-- The wizard-issued `CONFIG_SYNC_TOKEN`
-- The wizard-issued `ENROLMENT_TOKEN`
+The switches that matter most. `global.products` applies to Hybrid only —
+External and Central ignore it and always deploy the full stack.
 
-Before running it, provide these additional values required by the Compose manifest:
+| Value | Guidance | Effect |
+| --- | --- | --- |
+| `global.deploymentMode` | `hybrid` \| `external` \| `saas` | Selects the topology. `saas` is a [Central control plane](/neuraltrust/deployment/central) that you run. |
+| `global.controlPlane.domain` | Empty for NeuralTrust SaaS | A bare DNS suffix enrols this data plane into your own central control plane instead. |
+| `global.products.trustgate` | `true` to run TrustGate | Renders the TrustGate proxy and MCP data plane. Defaults to `false`; select at least one product. |
+| `global.products.trustguard` | `true` to run TrustGuard | Renders the TrustGuard data plane. Firewall follows. |
+| `global.products.dataPlane` | `true` for the red-teaming shim | Renders the data-plane API. Needs no DataAgent and no config sync. |
+| `global.postgresql.deploy` | **`false` in production** | `true` runs an in-cluster store, which is the proof-of-concept default. |
+| `global.redis.deploy` | **`false` in production** | Same for Redis. |
+| `agentgateway.configSync.existingSecret` | Reference your Secret | TrustGate config-sync token. Config sync is on by default in Hybrid — do not restate `enabled: true`. |
+| `trustguard.configSync.existingSecret` | Reference your Secret | TrustGuard config-sync token. |
+| `agentgateway.dataagent.enrolment.existingSecret` | Reference your Secret | TrustGate DataAgent enrollment token (OTLP egress and DataBridge). |
+| `trustguard.dataagent.enrolment.existingSecret` | Reference your Secret | TrustGuard DataAgent enrollment token. |
+| `agentgateway.mcp.enabled` | `true` | TrustGate MCP entry point. |
+| `global.platform` | `aws` \| `gcp` \| `azure` \| `openshift` \| `kubernetes` | Selects provider-specific ingress and storage behaviour. |
+| `global.imageRegistry` | Your mirror | Rewrites the registry prefix — see [Container images](/neuraltrust/deployment/images). |
+| `global.autoGenerateSecrets` | `true` | Chart owns the credentials it can generate. |
+| `global.preserveExistingSecrets` | `false` | For GitOps: pre-create every Secret and set `true`. |
 
-- `SERVER_SECRET_KEY` — a random value of at least 32 bytes
-- `CONFIG_SYNC_GRPC_ENDPOINT` — the SaaS config-sync endpoint as `host:port`
-- `DATABRIDGE_ADDR` — the DataBridge endpoint as `host:port`
+Leave `watchdog.enabled` off unless NeuralTrust asks you to enable it.
 
-The generated Compose path starts the TrustGate LLM/proxy process and publishes port `8081`. It does **not** start or expose the MCP process on `8082`. Use Kubernetes for production MCP support, or run the full local TrustGate stack when you need both processes locally.
+<Note>
+Product telemetry export is **mandatory** in Hybrid and always on — there is no
+`global.clickstack.enabled: false` opt-out. TrustGate and TrustGuard send OTLP to
+a co-located, enrollment-backed egress collector, which is why the enrollment
+tokens are required. For a deployment with no NeuralTrust dependency at all, use
+[External](/neuraltrust/deployment/external).
+</Note>
 
-**Kubernetes** displays generated `values.yaml` and a Helm command. Kubernetes is recommended for production-grade deployments, but this output is setup and credential input rather than an install-ready chart contract. Use the maintained `neuraltrust-platform` chart or manifests as the deployment source, and map the generated credentials and settings into its current values and Secret interfaces before applying.
+## Managed stores
 
-**Manual** displays exactly these generated environment values and does not display a deployment command:
-
-- `CONTROL_PLANE_JWT`
-- `DATA_AGENT_JWT`
-
-Treat these values as secrets except for service URLs. Inject them into your maintained deployment manifests through an approved secret manager; do not commit them.
-
-After deployment, expose separate LLM/proxy and MCP entry points. Enter the LLM/proxy URL as the wizard's bootstrap **Dataplane URL**, then select **Save and Finish**. The wizard initially seeds both URLs with that value. Open **Settings → Agent Gateway → General** and set the final **LLM URL** and **MCP URL** independently.
-
-TrustGate listens on these ports by default:
-
-| Entry point | Port |
-| --- | --- |
-| Admin | `8080` |
-| LLM/proxy | `8081` |
-| MCP | `8082` |
-
-When the full local TrustGate stack runs both processes, use the same hostname with different ports, such as `http://gateway.example:8081` and `http://gateway.example:8082`. Do not configure an MCP URL for the generated Compose path unless you separately run and expose the MCP process.
-
-## Kubernetes
-
-Choose **Kubernetes** in the wizard to obtain setup and credential input. Do not apply its generated values or local-chart Helm command unchanged. Platform operators must review and map that input into the current maintained `neuraltrust-platform` chart or manifests. Use **Manual** when you maintain a fully custom deployment.
-
-For production, set `deploymentMode: hybrid` and point the maintained chart at managed PostgreSQL and Redis (`deploy: false`):
+Managed PostgreSQL and Redis are the usual production choice in every self-hosted
+model. Pre-create the database, role, and Redis credentials on the managed
+instance — Helm never issues `CREATE USER` against a store it does not own. The
+chart can still run both in-cluster with `deploy: true` for evaluation; in
+External and Central mode from chart **2.7.0** that path also bootstraps the
+per-service roles automatically.
 
 ```yaml
 global:
-  deploymentMode: hybrid
-  platform: kubernetes
-  domain: platform.example.com
   postgresql:
     deploy: false
     host: postgres.example.com
@@ -71,39 +76,24 @@ global:
       name: hybrid-redis
 ```
 
-<Warning>
-A Secret you supply through `postgresql.existingSecret` is consumed with `envFrom`
-and never renamed, so it must hold `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`,
-`DB_NAME`, `DB_SSL_MODE` and, in Hybrid, `SENSIBLE_PG_DSN` — **not** the `POSTGRES_*`
-names the chart uses in its own Secret. In External prefer the narrower
-`global.postgresql.passwordSecret`, which keeps the chart's Secret and replaces only
-the password. See
-[Bringing your own Secret](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret).
-</Warning>
-
-The wizard-generated Kubernetes file contains credentials directly. Do not commit or use it as a production values file. Move its credentials into pre-created Kubernetes Secrets or an approved secret manager, then use the maintained chart's documented Secret interfaces. For custom manifests, inject the two Manual JWT values through an approved secret manager. See [Credential contracts](/neuraltrust/deployment/secrets#credential-contracts).
-
-## Cluster sizing
-
-Chart defaults are a **sensible starting point**. For Hybrid, plan on about
-**3–4** workers at **8 vCPU / 16–32 GiB**; for External, about **4–5** of the
-same class. Right-size and fine-tune for your traffic — see
-[Cluster sizing](/neuraltrust/deployment/sizing).
-
-## Managed stores
-
-Managed PostgreSQL and Redis are the usual production choice in both Hybrid and External. Pre-create the database, role, and Redis credentials on the managed instance — Helm never issues `CREATE USER` against a store it does not own. The chart can still run in-cluster PostgreSQL and Redis with `deploy: true` for evaluation; in External mode from chart **2.7.0** that path also bootstraps the per-service roles automatically — see [External datastores](/neuraltrust/deployment/external#datastores).
-
-How you point the chart at a managed store depends on the topology:
+How you supply credentials depends on the topology:
 
 | Topology | Endpoints | Credentials |
 | --- | --- | --- |
 | **Hybrid** | `global.postgresql` / `global.redis` (one shared role) | Chart-built `postgresql-secrets`, or `global.postgresql.existingSecret` with the [`DB_*` key contract](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret) |
-| **External** | Same global blocks — per-service hosts inherit since chart 2.6.0 | Control-plane password via `global.postgresql.passwordSecret` (chart 2.8.0+, or inline `global.postgresql.password`); runtime roles via per-service [`existingSecret` hooks](/neuraltrust/deployment/secrets#external-per-service-datastore-credentials) |
+| **External / Central** | The same global blocks — per-service hosts inherit since chart 2.6.0 | Control-plane password via `global.postgresql.passwordSecret` (chart 2.8.0+); runtime roles via per-service [`existingSecret` hooks](/neuraltrust/deployment/secrets#external-per-service-datastore-credentials) |
 
-For regional active/passive deployments, each region uses independent stores; runtime and historical data are not replicated between regions. See [High availability](/neuraltrust/deployment/high-availability#no-cross-region-data-replication).
+<Warning>
+A Secret you supply through `postgresql.existingSecret` is consumed with `envFrom`
+and never renamed, so it must hold `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`,
+`DB_NAME`, `DB_SSL_MODE` and, in Hybrid, `SENSIBLE_PG_DSN` — **not** the
+`POSTGRES_*` names the chart uses in its own Secret. In External prefer the
+narrower `global.postgresql.passwordSecret`, which keeps the chart's Secret and
+replaces only the password. See
+[Bringing your own Secret](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret).
+</Warning>
 
-| Store | Minimum size |
+| Store | Minimum for production |
 | --- | --- |
 | **PostgreSQL** | **2 vCPU**, **4 GiB RAM**, **20 GiB** storage |
 | **Redis** | **1 GiB** memory |
@@ -114,7 +104,10 @@ For regional active/passive deployments, each region uses independent stores; ru
 | GCP | Cloud SQL `db-custom-2-4096`, 20 GiB+ | Memorystore **1 GiB** |
 | Azure | Flexible Server **2 vCores / 4 GiB**, 20 GiB+ | Cache for Redis **C1** (1 GiB)+ |
 
-Reach both over private networking from the cluster. Secret key contracts: [Secrets](/neuraltrust/deployment/secrets).
+Reach both over private networking from the cluster. When you run two clusters
+active/passive across regions, they share **one writable PostgreSQL primary**
+with a cross-region read replica, and each region gets **its own Redis** — see
+[Hybrid → High availability](/neuraltrust/deployment/hybrid#high-availability).
 
 ## Ingress
 
@@ -129,13 +122,179 @@ global:
       certificateArn: arn:aws:acm:region:account:certificate/id
 ```
 
-`global.domain` is used with the default host prefixes to render two public names:
+`global.domain` combines with default host prefixes to render the public names.
+In Hybrid that is two: `gateway.<domain>` for the LLM/proxy Ingress and
+`mcp.<domain>` for MCP. External and Central add the console, its API, and the
+gateway admin surface.
 
-- `gateway.<global.domain>` for the LLM/proxy Ingress
-- `mcp.<global.domain>` for the MCP Ingress
+The chart creates separate `agentgateway-gateway` and `agentgateway-mcp` Ingress
+resources backed by separate Services. Each Service exposes port `80`: the proxy
+Service targets TrustGate container port `8081` and the MCP Service targets
+`8082`. Set the corresponding full URLs, including `https://`, in **Settings →
+Agent Gateway → General** — `global.domain` does not update those console
+settings.
 
-The maintained chart creates separate `agentgateway-gateway` and `agentgateway-mcp` Ingress resources backed by separate Services. Each Service exposes port `80`: the proxy Service targets TrustGate container port `8081`, and the MCP Service targets container port `8082`. Set the corresponding full URLs, including `https://`, in **Settings → Agent Gateway → General**. `global.domain` does not update those console settings.
+The chart can auto-add wildcard hosts (`*.llm.<domain>` / `*.mcp.<domain>`) for
+slug-based gateway discovery; set `agentgateway.config.autoWildcardHosts: false`
+to use exact hosts instead. Ingress class, annotations, and certificate sources
+are provider-specific — see
+[Cloud notes](/neuraltrust/deployment/cloud-notes).
 
-For regional active/passive deployments, put global LLM and MCP endpoints in front of the regional Ingress resources and configure those stable URLs in the console. See [High availability](/neuraltrust/deployment/high-availability#regional-topology).
+With two clusters active/passive, put one global LLM URL and one global MCP URL
+in front of both clusters' Ingress resources and configure those stable URLs in
+the console.
 
-Render and install with your maintained deployment manifests. See [Feature flags](/neuraltrust/deployment/feature-flags) and [Secrets](/neuraltrust/deployment/secrets).
+## Firewall workers
+
+Firewall deploys with TrustGuard: no values are needed to get it. The chart
+renders two gateway replicas and one replica for each of the five default
+workers — `toxicity`, `indirect-prompt-injections`, `prompt-jailbreak`,
+`prompt-moderation`, and `response-jailbreak` — all on the `firewall-cpu` image
+pinned by your chart version.
+
+Default worker requests are 1 CPU and 3 GiB, with 2 CPU and 4 GiB limits;
+`prompt-moderation` overrides memory to 4 GiB requested and 6 GiB limited.
+Official images bundle their models, so `HUGGINGFACE_TOKEN` is optional. This is
+the largest memory consumer in the data path, so it is the first thing to
+right-size if you run a subset of detectors.
+
+TrustGuard derives `NEURAL_TRUST_FIREWALL_BASE_URL` as
+`http://firewall.<namespace>.svc.cluster.local` and maps
+`firewall-secrets/JWT_SECRET` to its client secret. Both sides are wired by the
+chart, so there is nothing to configure.
+
+<Warning>
+`firewall.enabled`, `firewall.firewall.enabled`, and `trustguard.firewall.enabled`
+have no effect on whether Firewall renders. Setting all three to `false` with
+TrustGuard on still produces the gateway and all five workers. To reduce its
+footprint, size the workers instead.
+</Warning>
+
+### GPU Firewall workers
+
+Chart defaults are CPU. GPU mode needs a NeuralTrust-provided `firewall-gpu`
+image plus explicit GPU resources and scheduling, and a separate GPU node pool.
+Keep the gateway on the CPU image:
+
+```yaml
+firewall:
+  firewall:
+    gateway:
+      image:
+        repository: registry.example.com/neuraltrust/firewall-cpu
+    workerDefaults:
+      image:
+        repository: registry.example.com/neuraltrust/firewall-gpu
+      resources:
+        requests:
+          cpu: "1"
+          memory: 4Gi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "2"
+          memory: 8Gi
+          nvidia.com/gpu: "1"
+      nodeSelector:
+        accelerator: nvidia
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      hostIPC: true
+    config:
+      cudaMpsActiveThreadPercentage: "25"
+      cudaMpsPinnedDeviceMemLimit: "6000M"
+```
+
+This matches
+[`values-dataplane-gpu.yaml.example`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-dataplane-gpu.yaml.example),
+which ships with the chart. Install the vendor device plugin and validate node
+labels first. CUDA MPS and `hostIPC` may require extra security approval,
+especially on [OpenShift](/neuraltrust/deployment/openshift/overview). If GPU pods
+stay Pending, inspect resource availability, taints, node labels, and the NVIDIA
+device plugin with `kubectl describe pod`.
+
+## Central control plane values
+
+These apply only on the **central** cluster, under `global.deploymentMode: saas`.
+Data-plane clusters need none of them — they set `global.controlPlane.domain` and
+are otherwise ordinary Hybrid installs.
+
+| Value | Guidance | Effect |
+| --- | --- | --- |
+| `global.controlPlane.domain` | Required | Bare DNS suffix every cross-cluster endpoint derives from. No scheme, port, or path. |
+| `databridge.auth.mode` | `introspect` | How DataBridge identifies each data plane. `jwt` also works; `token` and `dev` are rejected because they share one credential across every agent. |
+| `databridge.tls.existingSecret` | One of three | `kubernetes.io/tls` Secret covering `databridge.<domain>`. |
+| `databridge.tls.certManager.enabled` | One of three | cert-manager issues it from an Issuer you already run. |
+| `databridge.tls.autoGenerate` | One of three | Chart mints a self-signed CA and keypair. The route for a control plane on a private network; distribute the CA with `scripts/export-controlplane-ca.sh`. |
+| `databridge.service.southbound.annotations` | Provider-specific | Free-form annotations on the LoadBalancer, for example an internal NLB on EKS. |
+| `databridge.service.southbound.loadBalancerSourceRanges` | **Set in production** | Restrict to your data-plane egress ranges. Empty means anyone who can reach the load balancer can open a connection. |
+| `agentgateway.configSync.expose.enabled` | `true` | Publishes the TrustGate config-sync listener. `false` keeps it ClusterIP behind a private link. |
+| `agentgateway.configSync.grpcTls.existingSecret` | One of two, when exposed | Certificate for `agentgateway-configsync.<domain>` from a CA the data planes already trust. |
+| `agentgateway.configSync.expose.selfSignedTls` | One of two, when exposed | Publish with the chart's own certificate and distribute its CA as configuration. |
+| `trustguard.configSync.expose.enabled` | `true` | Same for TrustGuard. |
+| `trustguard.configSync.grpcTls.existingSecret` | One of two, when exposed | Certificate for `trustguard-configsync.<domain>`. |
+| `trustguard.configSync.expose.selfSignedTls` | One of two, when exposed | Same for TrustGuard. |
+| `clickstack-ingest-gateway.ingress.tls.secretName` | One of two | Certificate for `telemetry.<domain>`. This endpoint terminates at the ingress, so ACM works here. |
+| `clickstack-ingest-gateway.ingress.tls.autoGenerate` | One of two | Chart mints a self-signed CA and leaf for the telemetry host. |
+
+<Warning>
+The chart refuses to render an endpoint with no certificate at all, rather than
+publishing one nothing outside the cluster can verify. The self-signed CA it
+generates is not in any remote cluster's trust store until you put it there.
+</Warning>
+
+### Trusting a private control plane
+
+Set these on a **remote** cluster when the central control plane serves
+chart-generated or private-PKI certificates. Each **replaces** the system roots
+for that connection, so the bundle must carry every CA that leg needs.
+
+| Value | Guidance | Effect |
+| --- | --- | --- |
+| `global.customCaCert.enabled` / `.secretName` | Required | Mounts the bundle's `ca.crt` into every pod, by default at `/etc/ssl/certs/custom-ca.crt`. |
+| `dataagent.databridge.tlsCa` | Path | CA bundle DataAgent verifies DataBridge against. Also required by the binary when `tlsMode: mtls`. |
+| `agentgateway.configSync.tlsCa` | Path | CA bundle for the TrustGate config-sync endpoint. |
+| `trustguard.configSync.tlsCa` | Path | CA bundle for the TrustGuard config-sync endpoint. |
+| `global.clickstack.egress.tlsCaSecretName` | Secret name | CA for the telemetry endpoint. A Secret name, not a path: the collector configures TLS from its own config and ignores the mount above. |
+
+## Wizard-generated setup
+
+The private gateway wizard's **Kubernetes** output is credential and setup input,
+not an install-ready chart contract. Map its values into the maintained chart's
+interfaces rather than applying it unchanged, and move every credential into
+pre-created Secrets — see [Console setup](/neuraltrust/deployment/console-setup)
+and [Secrets](/neuraltrust/deployment/secrets#credential-contracts).
+
+**Docker** is for local evaluation of the LLM/proxy path. Its generated Compose
+command injects a generated `CONFIG_SYNC_LKG_KEY` and the two wizard-issued
+tokens, and needs three more values from you:
+
+- `SERVER_SECRET_KEY` — a random value of at least 32 bytes
+- `CONFIG_SYNC_GRPC_ENDPOINT` — the config-sync endpoint as `host:port`
+- `DATABRIDGE_ADDR` — the DataBridge endpoint as `host:port`
+
+That path starts TrustGate's LLM/proxy process on `8081` and does **not** start
+or expose MCP on `8082`. Use Kubernetes for production MCP support.
+
+**Manual** returns `CONTROL_PLANE_JWT` and `DATA_AGENT_JWT` for fully custom
+manifests, and no deployment command.
+
+TrustGate listens on these ports by default:
+
+| Entry point | Port |
+| --- | --- |
+| Admin (External and Central only) | `8080` |
+| LLM/proxy | `8081` |
+| MCP | `8082` |
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Secrets" icon="lock" href="/neuraltrust/deployment/secrets">
+    Key contracts for every Secret you supply.
+  </Card>
+  <Card title="Requirements" icon="list-check" href="/neuraltrust/deployment/architecture">
+    Dependencies, ports, and capacity.
+  </Card>
+</CardGroup>

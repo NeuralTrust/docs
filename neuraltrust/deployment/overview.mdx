@@ -1,143 +1,114 @@
 ---
 title: Overview
-description: Create and operate a private TrustGate data plane from the NeuralTrust console.
+description: Choose between SaaS, Hybrid, External, and a Central control plane — then follow that model's guide end to end.
 ---
 
-NeuralTrust supports **SaaS**, **Hybrid**, and **External**. SaaS is fully operated by NeuralTrust. Hybrid runs the request-path **data plane** in your environment and keeps the **control plane** on NeuralTrust SaaS. [External](/neuraltrust/deployment/external) runs every plane — control, data, and analytics — in your own cluster with no runtime SaaS dependency. This guide covers Hybrid; see the [External (self-hosted)](/neuraltrust/deployment/external) guide for the fully self-hosted topology.
+NeuralTrust ships as a **single umbrella Helm chart**,
+[`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform),
+with one value selecting the topology:
 
-## Architecture
+```yaml
+global:
+  deploymentMode: hybrid # hybrid | external | saas
+```
 
-<img
-  src="/images/static/img/platform-architecture.svg"
-  alt="Hybrid architecture: in your environment, clients call TrustGate, TrustGate calls TrustGuard, and TrustGuard calls the Firewall classifiers. TrustGate calls your upstream LLM providers. Raw payloads and cache stay in your PostgreSQL and Redis, and TrustGate and TrustGuard send OTLP to a DataAgent egress collector in your cluster. Three outbound connections reach NeuralTrust SaaS — config sync, telemetry, and authorized retrieval — and every one of them is initiated from your environment."
-/>
+Pick the model first. It changes what you install, what you have to create
+beforehand, and whether you need the NeuralTrust console at all. Each model then
+has **one page** that takes you from architecture to a verified, highly
+available install.
 
-| Plane | Where it runs | What you care about |
-| --- | --- | --- |
-| **Control plane** | NeuralTrust SaaS | Console, configuration, analytics |
-| **Data plane** | Your environment (Hybrid) | TrustGate, TrustGuard, Firewall (with TrustGuard), DataAgent (one per product) |
+## Comparison
 
-For the full component list, the datastores you have to provide, and the ports
-between them, see
-[Architecture and dependencies](/neuraltrust/deployment/architecture).
-
-## How the planes connect
-
-Raw prompts and responses stay in **your** PostgreSQL. Only configuration
-requests and metadata reach NeuralTrust, and your cluster opens every one of
-those connections.
-
-| Flow | From | To | Direction | Carries |
+| | **SaaS** | **Hybrid** | **External** | **Central control plane** |
 | --- | --- | --- | --- | --- |
-| **Gateway traffic** | Your clients | TrustGate — LLM/proxy `8081`, MCP `8082` | Inbound to your edge | Prompts and responses |
-| **Request path** | TrustGate | TrustGuard, then Firewall | In-cluster | Evaluation and classification |
-| **Storage** | TrustGate, TrustGuard | Your PostgreSQL and Redis | In-cluster | Raw payloads, cache, rate-limit state |
-| **Upstream models** | TrustGate | Your LLM providers | Outbound `443` | The proxied model call |
-| **Config sync** | TrustGate, TrustGuard | NeuralTrust configuration service | Outbound `443` | Policy and gateway configuration, pulled |
-| **Metadata** | DataAgent egress collector | NeuralTrust telemetry | Outbound `443` | OTLP metadata — payloads are not exported |
-| **Retrieval** | DataAgent | DataBridge | Outbound `443` | Authorized retrieval, scoped by the enrollment token |
+| Control plane | NeuralTrust | NeuralTrust | Your environment | Your environment |
+| Data plane (TrustGate / TrustGuard) | NeuralTrust | Your environment | Your environment | Your environment, in several clusters |
+| Raw payloads | NeuralTrust | Your PostgreSQL | Your PostgreSQL | Stays in the cluster that produced it |
+| Metadata / analytics | NeuralTrust | Exported to NeuralTrust (OTLP) | Your in-cluster ClickHouse | Exported to your central ClickHouse |
+| SaaS dependency at runtime | Full | Config sync + metadata export | None (optional hosted export) | None |
+| Clusters | None of yours | One | One | One central, plus one per data plane |
+| Console setup first? | Nothing to install | Yes — each product issues tokens you need at install | No | No, but your console issues tokens to data planes |
+| Typical size | — | 3–4 workers at 8 vCPU / 16–32 GiB | 4–5 workers of the same class | 4–5 central, plus 3–4 per data plane |
+| `global.deploymentMode` | — | `hybrid` | `external` | `saas` |
 
-TrustGate and TrustGuard do not talk to SaaS directly for metadata; they emit
-OTLP to a collector co-located with DataAgent inside your cluster, and that
-collector is what egresses.
+## SaaS
 
-Nothing in the SaaS control plane dials into your cluster to reach TrustGuard,
-Firewall, DataAgent, or your datastores. The one inbound connection Hybrid does
-need is the **Dataplane URL** you register in the console: NeuralTrust calls it,
-so your edge must accept HTTPS from a single NeuralTrust source IP. That IP and
-the outbound hostnames are in
-[Network allowlist](/neuraltrust/deployment/network).
+NeuralTrust operates both planes. There is nothing to install in your cluster
+and nothing on these pages to follow.
 
-DataAgent is not optional once you run TrustGate or TrustGuard. Each of those
-products needs its own enrolled DataAgent, because the metadata flow above runs
-through the collector co-located with it. Only a red-teaming-only deployment —
-`global.products.dataPlane` alone — runs without one.
+## Hybrid
 
-Managed PostgreSQL and Redis are recommended for production. The chart can run in-cluster stores for evaluation and non-production use. See [Configuration](/neuraltrust/deployment/configuration#managed-stores) for guidance. For regional resilience, see [High availability](/neuraltrust/deployment/high-availability).
+You run the data plane; NeuralTrust runs the control plane. Raw prompts and
+responses stay in your PostgreSQL (`TELEMETRY_EXPORTERS_RAW=postgres`), and
+metadata leaves as OTLP (`TELEMETRY_EXPORTERS_METADATA=otlp`). Your cluster
+opens every connection to NeuralTrust — configuration is pulled, never pushed.
+
+Each product you run is a separate console object with its **own** tokens, so an
+install with both TrustGate and TrustGuard collects two token sets.
+
+<Card title="Hybrid" icon="cloud-arrow-up" href="/neuraltrust/deployment/hybrid">
+  Architecture, network rules, install, verification, and high availability.
+</Card>
+
+## External
+
+You run **everything** — control planes, data planes, the product console, and a
+self-hosted analytics stack (ClickStack collector, ClickHouse, DataCore, and
+AlertEngine). There is no runtime dependency on NeuralTrust SaaS, so no console
+tokens are issued and DataAgent does not run.
+
+Choose it for air-gapped or strict data-residency environments.
+
+<Card title="External (self-hosted)" icon="server" href="/neuraltrust/deployment/external">
+  The full inventory, datastores, install, and high availability.
+</Card>
+
+## Central control plane
+
+You run **one** control plane and enrol data planes into it from **other**
+clusters. Choose it when a single External install cannot work because data has
+to stay where it was produced — separate business units, jurisdictions, or
+environments — but the console, alerting, and cross-cluster reporting have to be
+in one place.
 
 <Note>
-Ready to install? The [Quick start](/neuraltrust/deployment/quickstart) is the
-shortest working path for both Hybrid and External, with the prerequisites,
-Secrets, and Helm commands in order.
+The chart value is `saas` because this control plane behaves like NeuralTrust's
+hosted one — but it is yours, and it runs in your environment. It is the opposite
+of the hosted **SaaS** model above, where there is nothing to install.
 </Note>
 
-## Choose a deployment method
+<Card title="Central control plane" icon="sitemap" href="/neuraltrust/deployment/central">
+  The central cluster, cross-cluster endpoints, remote data planes, and high availability.
+</Card>
 
-The private gateway wizard offers three deployment methods:
+## Shared reference
 
-| Method | Use it for | Wizard output |
-| --- | --- | --- |
-| **Kubernetes** | **Recommended for production-grade deployments** | Generated credential and setup input to map into the maintained chart or manifests |
-| **Docker** | Local development and evaluation of the LLM/proxy path | Generated Docker Compose command |
-| **Manual** | Custom or operator-managed deployments | `CONTROL_PLANE_JWT` and `DATA_AGENT_JWT` |
+The model guides link into these where they need them. You do not have to read
+them first.
 
-## Create a private TrustGate gateway
-
-<Note>
-Each product runs as a separate console object with its own credentials. A Hybrid
-install that also runs TrustGuard must create a **private TrustGuard** in
-**TrustGuard → Agent Runtime** as well, and collect its own config-sync and
-enrollment tokens. See [Console setup](/neuraltrust/deployment/console-setup) for
-the full token flow and how to map both products' tokens into chart Secrets.
-</Note>
-
-1. Open **TrustGate** and choose **New Gateway**.
-2. Enter a gateway name and choose **Private**.
-3. Choose **Kubernetes**, **Docker**, or **Manual**.
-4. Follow the deployment guidance outside the app:
-   - For Kubernetes, use the maintained `neuraltrust-platform` chart or manifests as the deployment source. Review and map the wizard-generated credentials and settings into the current chart interfaces before applying anything.
-   - For Docker, the generated Compose path starts the LLM/proxy entry point on `8081`. It does not currently start or expose the MCP process.
-   - Manual provides the two JWT values needed by a custom deployment.
-5. Expose both TrustGate entry points:
-   - **LLM/proxy** — TrustGate port `8081`
-   - **MCP** — TrustGate port `8082`
-6. Enter the LLM/proxy URL as the wizard's bootstrap **Dataplane URL**, then choose **Save and Finish**. The wizard initially uses this URL for both entry points.
-7. Open **Settings → Agent Gateway → General** and set or verify the separate **LLM URL** and **MCP URL**.
-
-For production MCP support, use Kubernetes. For local MCP testing, run the full local TrustGate stack that includes the MCP process. When both entry points run locally, use one hostname with separate ports:
-
-- LLM URL: `http://gateway.example:8081`
-- MCP URL: `http://gateway.example:8082`
-
-For Kubernetes, expose two ingress hosts:
-
-- LLM URL: `https://gateway.example.com`
-- MCP URL: `https://mcp.example.com`
-
-Both URLs must be reachable by their intended clients. The maintained Kubernetes chart creates separate gateway and MCP Services and Ingress resources.
-
-The wizard-generated Kubernetes `values.yaml` contains credentials directly. Treat the file as a secret, do not commit it, and move credentials into pre-created Kubernetes Secrets or an approved secret manager for production. See [Configuration](/neuraltrust/deployment/configuration) and [Secrets](/neuraltrust/deployment/secrets).
-
-## Manage the gateway
-
-Open **Settings → Agent Gateway**:
-
-- **General** lets you edit the Hybrid gateway's **LLM URL** and **MCP URL** independently.
-- **Deployment** can regenerate private install configuration and credentials.
-
-Consumer connection snippets use the two configured URLs separately.
-
-## Network requirements
-
-Allow outbound connections from the Hybrid data plane to NeuralTrust for
-configuration pulls, metadata export, and DataAgent enrollment or retrieval.
-TrustGate and TrustGuard initiate config-sync; DataAgent reaches DataBridge.
-Config-sync and DataBridge are **outbound-only** — you do not open inbound
-ports for those services.
-
-For the exact hostnames, IPs, and the NeuralTrust inbound source IP to allow
-at your edge, see [Network allowlist](/neuraltrust/deployment/network).
-
-Also allow the data plane to reach your LLM providers, PostgreSQL, Redis, and
-container registry. Allow clients to reach the configured LLM and MCP URLs.
-
-## Provider guides
-
-- [GCP (GKE)](/neuraltrust/deployment/gcp/overview)
-- [AWS (EKS)](/neuraltrust/deployment/aws/overview)
-- [Azure (AKS)](/neuraltrust/deployment/azure/overview)
-- [OpenShift](/neuraltrust/deployment/openshift/overview)
-- [Vanilla Kubernetes](/neuraltrust/deployment/kubernetes/overview)
+<CardGroup cols={2}>
+  <Card title="Requirements and dependencies" icon="list-check" href="/neuraltrust/deployment/architecture">
+    Every dependency you provide, the ports between components, and capacity.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/neuraltrust/deployment/configuration">
+    Managed stores, ingress, TLS, GPU workers, and every values switch.
+  </Card>
+  <Card title="Container images" icon="box" href="/neuraltrust/deployment/images">
+    The registry key, mirroring for air-gapped clusters, chart sources.
+  </Card>
+  <Card title="Secrets" icon="lock" href="/neuraltrust/deployment/secrets">
+    What the chart generates and what you must supply.
+  </Card>
+  <Card title="Cloud notes" icon="cloud" href="/neuraltrust/deployment/cloud-notes">
+    EKS, AKS, GKE, and vanilla Kubernetes particularities.
+  </Card>
+  <Card title="Validation checklist" icon="clipboard-check" href="/neuraltrust/deployment/validation">
+    The hand-off gate: what to prove before an install counts as done.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/neuraltrust/deployment/troubleshooting">
+    Install, pod, config-sync, login, and telemetry failures.
+  </Card>
+</CardGroup>
 
 ## The chart repository
 
@@ -157,4 +128,4 @@ is worth a look if you are the person actually running the platform.
 
 All of it also ships inside the chart artifact, so `helm pull <chart-ref>
 --version <VERSION> --untar` gives you the copy that matches the version you run
-— see [Get the chart sources](/neuraltrust/deployment/quickstart#get-the-chart-sources).
+— see [Get the chart sources](/neuraltrust/deployment/images#get-the-chart-sources).

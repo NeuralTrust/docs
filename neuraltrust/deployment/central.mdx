@@ -21,12 +21,43 @@ cannot work because data has to stay where it was produced — separate business
 units, jurisdictions, or environments — but the console, alerting, and
 cross-cluster reporting have to be in one place. If every workload fits in one
 cluster, External is simpler. If NeuralTrust hosts the control plane, use
-[Hybrid](/neuraltrust/deployment/deployment-models#hybrid).
+[Hybrid](/neuraltrust/deployment/hybrid).
+
+## Architecture
+
+<img
+  src="/images/static/img/central-architecture.svg"
+  alt="Central control plane architecture: remote Hybrid clusters each run the request path — TrustGate on :8081 and :8082, TrustGuard on :8081, the Firewall on :8000 — with their own recommended PostgreSQL and Redis; raw payloads stay there. Each remote cluster opens four outbound connections on 443 to your central cluster: one config-sync endpoint each for AgentGateway and TrustGuard, the telemetry ingest gateway, and DataBridge. The central cluster runs the console and API on :8000, both product control planes on :8080, a collector on :4317 and :4318, ClickHouse, DataCore, and AlertEngine, plus recommended PostgreSQL and Redis of its own. The central cluster never dials into a remote one."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/central-architecture-dark.svg"
+  alt=""
+  className="hidden dark:block"
+/>
 
 ## What runs in your central cluster
 
 This mode is a superset of External: everything External deploys, plus three
-components and one behaviour change.
+components and one behaviour change. PostgreSQL and Redis are **recommended
+managed, outside the cluster**; ClickHouse stays in-cluster on the **central**
+side only. Each remote cluster has its own recommended PostgreSQL and Redis —
+raw payloads never leave the cluster that produced them.
+
+### External baseline (also here)
+
+| Component | Purpose |
+| --- | --- |
+| TrustGate proxy + MCP, TrustGuard data plane, Firewall | Request path (also on every remote cluster) |
+| AgentGateway admin, TrustGuard control plane | In-cluster product control planes |
+| control-plane-app + control-plane-api | Console |
+| ClickStack collector + ClickHouse | In-cluster analytics |
+| DataCore | Residency query API |
+| AlertEngine API + worker | Alert rules / SIEM forwarding |
+| PostgreSQL (five databases) | Recommended managed, outside the cluster |
+| Redis | Recommended managed, outside the cluster |
+
+### Additions that make it a control plane for other clusters
 
 | Addition | Purpose |
 | --- | --- |
@@ -38,9 +69,10 @@ The behaviour change is in DataCore: it runs with a hybrid residency backend
 rather than reading the local ClickHouse for everything, so entitled reads go
 out through DataBridge to the cluster that holds the data.
 
-Everything in [External](/neuraltrust/deployment/external) — the console,
-ClickHouse, AlertEngine, the first administrator, datastore choices — applies
-here unchanged.
+The console, ClickHouse, AlertEngine, the bootstrap administrator, and the
+datastore split all behave exactly as in
+[External](/neuraltrust/deployment/external) — this page covers only what a
+control plane for other clusters adds on top.
 
 ## Select the topology
 
@@ -77,6 +109,41 @@ Set the same `global.controlPlane.domain` on the central cluster **and** on ever
 remote cluster. DNS, certificates, and load-balancer provisioning for these names
 are operator prerequisites.
 
+There are no NeuralTrust hostnames or IPs anywhere in this topology, and no
+NeuralTrust inbound source IP — you own both ends.
+
+### Network rules
+
+**From each remote cluster (egress):** allow TCP 443 to all four endpoints above
+on your own domain, plus the container registry (or mirror), the LLM upstreams,
+and that cluster's own PostgreSQL and Redis.
+
+Remote planes keep raw payloads in that cluster's PostgreSQL and export
+metadata over OTLP to `https://telemetry.<domain>`
+(`TELEMETRY_EXPORTERS_METADATA=otlp`, `TELEMETRY_EXPORTERS_RAW=postgres`), so
+the central ClickHouse holds metadata and the console reaches raw payloads on
+demand through DataBridge.
+
+**Into the central cluster (ingress):** it publishes those four endpoints, so it
+accepts inbound TCP 443 on each. Restrict them to the egress ranges of your
+data-plane clusters rather than leaving them open, and prefer an internal
+load-balancer scheme when the callers are on a private network — see
+[Cloud notes](#cloud-notes). Where a link is private, you can skip publishing a
+config-sync Service at all with
+`<product>.configSync.expose.enabled: false`.
+
+Nothing here has to traverse the internet. VPC peering, a Transit Gateway or
+Direct Connect all work, and a private path is what makes the chart's own
+certificates a sound choice — see [TLS](#tls).
+
+Two of these carry long-lived streams. If an egress proxy or middlebox in the
+path reaps idle connections, config-sync and DataBridge drop and reconnect on
+that interval — check its idle timeout. A TLS-intercepting proxy breaks
+certificate verification unless its CA reaches the client: put it in the same
+bundle you point `dataagent.databridge.tlsCa`, `<product>.configSync.tlsCa` and
+`global.clickstack.egress.tlsCaSecretName` at, since each of those replaces the
+system roots rather than adding to them.
+
 ## Prerequisites
 
 Have these ready before installing. Everything else the chart does for you.
@@ -88,6 +155,13 @@ Have these ready before installing. Everything else the chart does for you.
 | 3 | Network reachability from every remote cluster to all four endpoints | VPC peering, Transit Gateway, Direct Connect or the public internet — the chart does not care which. |
 | 4 | An ingress controller in the central cluster | Only the telemetry endpoint uses one. The other three are layer-4 Services. |
 | 5 | One enrolment token per remote data plane, issued from your console | See [Telling data planes apart](#telling-data-planes-apart). |
+
+The central cluster is also a full External install, so the External
+prerequisites apply to it: capacity for roughly **4–5** workers at 8 vCPU /
+16–32 GiB, the `gcr-secret` image pull Secret, an `onprem-superadmin` Secret for
+the first console administrator, and a decision on the console hostname before
+install. Each is covered in
+[External → Prerequisites](/neuraltrust/deployment/external#prerequisites).
 
 ### Images
 
@@ -230,7 +304,7 @@ query result and audit trail, and nothing later signals that it happened.
 
 ## Secrets
 
-Four credentials come from the shared platform Secret and are generated for you
+Five credentials come from the shared platform Secret and are generated for you
 when the chart owns secrets:
 
 | Key | Used by |
@@ -238,14 +312,24 @@ when the chart owns secrets:
 | `ENROLMENT_INTROSPECTION_TOKEN` | DataCore — compares what DataBridge presents |
 | `DATACORE_SERVICE_TOKEN` | DataBridge — alias of the above, must hold the identical value |
 | `ENROLMENT_SIGNING_SECRET` | DataCore — signs enrolment tokens |
+| `CONFIG_SYNC_SIGNING_SECRET` | DataCore — signs private-gateway install tokens; the product control planes verify it as `CONFIG_SYNC_JWT_SECRET` |
 | `TELEMETRY_JWT_PRIVATE_KEY_PEM` | DataCore — RS256 key for the OTLP tokens the ingest gateway verifies |
 
 If you pre-provision secrets yourself — `global.preserveExistingSecrets`,
 `global.autoGenerateSecrets: false`, or `global.platformSecret.existingSecret` —
-all four must be present, and the two token keys must hold one identical value.
+all five must be present, and the two token keys must hold one identical value.
 When they drift, every agent connection returns 401 with nothing visibly wrong on
-either side. Running `./create-secrets.sh` with `DEPLOYMENT_MODE=saas` writes all
-four correctly, including the alias.
+either side. Omitting `CONFIG_SYNC_SIGNING_SECRET` fails later and further away:
+DataCore answers `POST /v1/admin/credentials` with HTTP 501 `not implemented`, so
+the console's private-gateway wizard breaks *after* it has already created the
+gateway row. Running `./create-secrets.sh` with `DEPLOYMENT_MODE=saas` writes all
+five correctly, including the alias.
+
+<Note>
+Taking the platform Secret out of play in this mode is rejected at render time
+rather than at runtime, so a mistake here surfaces during `helm upgrade` instead
+of on first traffic.
+</Note>
 
 See [Secrets](/neuraltrust/deployment/secrets) for how the shared platform Secret
 works generally.
@@ -266,8 +350,11 @@ global:
 ```
 
 Its enrolment and config-sync tokens are issued by **your** console, not by
-[app.neuraltrust.ai](https://app.neuraltrust.ai/en/v2/). Everything else in the
-[Hybrid quick start](/neuraltrust/deployment/quickstart) applies unchanged.
+[app.neuraltrust.ai](https://app.neuraltrust.ai/en/v2/). Everything else — the
+four operator-supplied Secrets, the values file, verification, exposing both
+TrustGate entry points — is the ordinary
+[Hybrid install](/neuraltrust/deployment/hybrid#install), with
+`global.controlPlane.domain` set and no NeuralTrust hostnames to allow.
 
 ### Trusting a chart-generated control plane
 
@@ -309,8 +396,7 @@ proxy, for instance — put every CA in one bundle.
 Before rolling out, confirm from inside each remote cluster that it can reach all
 four central endpoints. A data plane whose egress is blocked does not crash — it
 starts cleanly, serves its last-known-good configuration, and quietly stops
-receiving updates. See the
-[network allowlist](/neuraltrust/deployment/network#central-control-plane-endpoints).
+receiving updates. See [Network rules](#network-rules).
 </Note>
 
 ## Cloud notes
@@ -386,19 +472,181 @@ helm upgrade --install neuraltrust-platform \
 Install and verify the central cluster first, then bring up one remote cluster as
 a canary before the rest.
 
+## Verify
+
+Verify the central cluster on its own before any remote cluster dials it. A
+remote plane that enrols against a half-configured control plane fails in ways
+that look like network faults.
+
+```bash
+kubectl get pods -n neuraltrust
+kubectl get svc,ingress -n neuraltrust
+```
+
+Everything in the [External baseline](#external-baseline-also-here) should be
+running, plus the two workloads that make this a control plane for other
+clusters: `databridge` and `clickstack-ingest-gateway`. If either is absent,
+`global.deploymentMode` is not `saas` — and nothing else about the install will
+look wrong, because every other component is shared with External.
+
+Then confirm the four cross-cluster endpoints have addresses and that DNS
+resolves to them. Three are layer-4 Services and one is an Ingress, so they
+appear in different places:
+
+```bash
+kubectl get svc -n neuraltrust databridge-southbound \
+  agentgateway-admin-configsync trustguard-control-plane-configsync
+kubectl get ingress -n neuraltrust clickstack-ingest-gateway
+```
+
+The Service names are not the hostnames. Those three Services must each report an
+external address, and the DNS records from
+[Cross-cluster endpoints](#cross-cluster-endpoints) —
+`databridge.<domain>`, `agentgateway-configsync.<domain>`, and
+`trustguard-configsync.<domain>` — are what point at them.
+
+Those DNS records are an operator prerequisite the chart cannot check. Until each
+name resolves, remote clusters cannot enrol; and because config-sync and
+DataBridge retry, the symptom is a remote data plane that stays `Running` but
+never becomes `Ready`, with nothing wrong on the central side.
+
+Sign in to the console and create the organisation exactly as in
+[External → Verify](/neuraltrust/deployment/external#verify); the console is the
+same install here.
+
+### Then enrol one remote cluster
+
+Bring up a single remote data plane as a canary. Two log lines on the remote
+side prove both directions of the topology, and both are worth reading before
+the rest of the clusters follow:
+
+```bash
+kubectl logs -n neuraltrust deploy/dataagent | grep -i databridge
+kubectl logs -n neuraltrust deploy/trustguard-data-plane | grep -i 'config snapshot'
+```
+
+| Log line | What it proves |
+| --- | --- |
+| `registered with databridge` with your `addr` and `tenant_id` | The DataAgent reached `databridge.<domain>:443`, its enrolment token verified, and residency queries can now reach this cluster |
+| `applied config snapshot` with a version hash | Config-sync pulled configuration from **your** central control plane |
+
+<Warning>
+Check the `addr` in that first line names your domain. A remote cluster that
+still reads `databridge.<saas region>` has an empty `global.controlPlane.domain`
+and has enrolled into NeuralTrust SaaS instead of into your control plane.
+</Warning>
+
+Finish with the [validation checklist](/neuraltrust/deployment/validation),
+which covers the parts no `kubectl` command reaches: TLS from the remote
+clusters, one enrolment identity per data plane, LLM and MCP traffic, and
+telemetry arriving in the central ClickHouse.
+
+## High availability
+
+This topology has two availability questions, and they are not equally urgent.
+
+**The data planes matter most**, because they are on the request path. Each
+remote cluster climbs the same ladder as in
+[Hybrid → High availability](/neuraltrust/deployment/hybrid#high-availability):
+one cluster across zones first, then twin clusters, and only for regional loss an
+active/passive pair on one writable PostgreSQL primary with region-local Redis,
+with just the active cluster running DataAgent.
+
+<img
+  src="/images/static/img/ha-ladder.svg"
+  alt="The three availability tiers side by side. Tier 1, one cluster multi-AZ: node pools in three availability zones, two or more replicas of TrustGate, TrustGuard and Firewall, and managed PostgreSQL and Redis with automatic failover inside the region; it survives node and zone loss and needs no promotion procedure or DNS work. Tier 2, twin clusters in one region: a serving cluster plus a second cluster to roll upgrades through, both against one PostgreSQL primary and one Redis primary shared inside the region; it survives cluster loss and bad upgrades. Tier 3, two regions active/passive: an active region running the only DataAgent, a warm passive region with no traffic, one writable PostgreSQL primary with a cross-region read replica, and region-local Redis per cluster; it survives regional loss and adds DNS promotion and a datastore runbook. Two invariants hold at every tier: exactly one writable PostgreSQL primary, and exactly one active DataAgent per gateway scope."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/ha-ladder-dark.svg"
+  alt=""
+  className="hidden dark:block"
+/>
+
+**The central cluster is not on the request path.** If it goes down, every remote
+data plane keeps serving traffic from its last synchronized configuration. What
+stops is configuration updates, telemetry ingest, cross-cluster reporting, and
+the console. That is an availability target measured in minutes of operator
+inconvenience rather than dropped requests — as long as remote clusters keep
+their last-known-good configuration on persistent storage.
+
+### The central cluster
+
+Most central clusters should sit on tier 1: one cluster across three zones with
+managed stores. It is not on the request path, so a promotion runbook is rarely
+worth its own operational cost.
+
+If a regional requirement forces tier 3, run it as an External active/passive
+pair on **one writable PostgreSQL primary** with a cross-region read replica and
+**region-local Redis** — see
+[External → High availability](/neuraltrust/deployment/external#high-availability)
+for the shape, the ClickHouse caveat, and the promotion steps. Two things are
+specific to a central cluster:
+
+<img
+  src="/images/static/img/central-high-availability.svg"
+  alt="What a central-cluster promotion moves. Remote data planes are unaffected: they keep serving on their last-known-good configuration, and config sync and DataBridge retry until DNS converges — provided the snapshot cache is on persistent storage. DNS holds the four published hostnames: agentgateway-configsync, trustguard-configsync, telemetry, and databridge. They resolve to the active central cluster and must be repointed at the standby after a promotion. Both central clusters are identical installs, each with four L4 Services and its own CA, a console and API on :8000, and its own ClickHouse whose history does not follow the promotion. Both read and write one writable PostgreSQL primary with a cross-region read replica, promoted only if the failed region held the primary. Certificates must be valid from both central clusters: chart-generated CAs are per cluster, so install both bundles in every remote cluster or issue the four certificates from your own PKI."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/central-high-availability-dark.svg"
+  alt=""
+  className="hidden dark:block"
+/>
+
+**The four published endpoints have to follow the promotion.** Remote clusters
+dial `databridge.<domain>`, `telemetry.<domain>`, and the two config-sync
+hostnames. Those names must resolve to the promoted cluster's load balancers, so
+plan the DNS switch as part of the runbook. DataBridge streams and config-sync
+reconnect on their own once DNS converges; there is nothing to restart in the
+remote clusters.
+
+**Certificates must be valid from both central clusters.** Chart-generated
+certificates are minted per cluster with a per-cluster CA, so a remote cluster
+that trusts only the primary's bundle fails every handshake after a promotion.
+Either export and install both clusters' CA bundles in every remote cluster, or
+issue the four certificates from your own PKI or cert-manager so one bundle
+covers either cluster. The second option is much easier to operate — see
+[TLS](#tls).
+
+<Note>
+The `ENROLMENT_SIGNING_SECRET` and `TELEMETRY_JWT_PRIVATE_KEY_PEM` in the
+platform Secret must be **identical** in both central clusters. If each cluster
+generates its own, enrolment tokens and OTLP tokens minted by one are rejected by
+the other, and every remote agent returns 401 after a promotion. Pre-provision
+the platform Secret and apply the same one to both clusters — see
+[Secrets](#secrets).
+</Note>
+
+### Before you rely on it
+
+- [ ] Every remote cluster keeps its last-known-good configuration on persistent
+      storage, so a central outage cannot take the request path down.
+- [ ] Central PostgreSQL is managed, with one primary and a cross-region read
+      replica; each central region has its own Redis.
+- [ ] The four endpoint DNS records can be repointed, and you know how long
+      convergence takes.
+- [ ] Both central clusters serve certificates every remote cluster trusts.
+- [ ] Both central clusters hold the same platform Secret values.
+- [ ] You have rehearsed a central promotion and confirmed remote data planes
+      reconnect without intervention.
+
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Deployment models" icon="diagram-project" href="/neuraltrust/deployment/deployment-models">
-    Compare SaaS, Hybrid, External, and Central responsibilities.
+  <Card title="Hybrid" icon="cloud-arrow-up" href="/neuraltrust/deployment/hybrid">
+    The install every remote data-plane cluster runs.
   </Card>
-  <Card title="Network allowlist" icon="network-wired" href="/neuraltrust/deployment/network">
-    Endpoints a remote data plane must reach.
+  <Card title="External" icon="server" href="/neuraltrust/deployment/external">
+    The baseline your central cluster is built on.
   </Card>
   <Card title="Config sync" icon="arrows-rotate" href="/neuraltrust/deployment/config-sync">
     How remote products pull configuration from your control plane.
   </Card>
-  <Card title="Secrets" icon="key" href="/neuraltrust/deployment/secrets">
+  <Card title="Secrets" icon="lock" href="/neuraltrust/deployment/secrets">
     Credential handling, including the four cross-cluster keys.
+  </Card>
+  <Card title="Validation checklist" icon="clipboard-check" href="/neuraltrust/deployment/validation">
+    What to prove before the install counts as done.
   </Card>
 </CardGroup>

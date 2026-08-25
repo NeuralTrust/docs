@@ -48,7 +48,7 @@ separately.
 2. Choose **New Gateway**, enter a name, and select **Private** (*High stakes* — fixed capacity, no cold starts).
 3. Under **Where do you want to run your gateway?** choose **Kubernetes** (recommended for production). Creating the gateway issues its **config-sync token** and **DataAgent enrollment token**.
 4. Copy the two tokens from the generated `values.yaml`. Treat the whole file as a secret — see [Secrets](/neuraltrust/deployment/secrets).
-5. Leave the wizard open. After the data plane is running you return here to set the **Dataplane URL** (see [Overview](/neuraltrust/deployment/overview#create-a-private-trustgate-gateway)).
+5. Leave the wizard open. After the data plane is running you return here to set the **Dataplane URL** — see [Register the URLs](#register-the-urls).
 
 <Warning>
 Older consoles emit `global.products.agentgateway: true` in the generated
@@ -81,6 +81,27 @@ The TrustGuard wizard offers **Kubernetes** and **Manual** only (no Docker). In 
 combined install, TrustGate and TrustGuard each keep independent tokens; never
 reuse one product's token for the other.
 </Note>
+
+## Translate the wizard output
+
+The **Kubernetes** wizard hands you a complete-looking `values.yaml`. Treat it as
+credential and setup **input**, not as the file you install. The maintained chart
+is the source of truth; where the two disagree, the chart wins. Four differences
+matter, and a file that keeps any of them installs but does not behave the way
+you expect:
+
+| In the wizard output | In the maintained chart | Your action |
+| --- | --- | --- |
+| `global.products.agentgateway: true` | `global.products.trustgate: true` | Rename that one key. The `agentgateway:` block below it is correct — see [One product, four names](#one-product-four-names). |
+| Credentials inline in `values.yaml` | `existingSecret` references | Move both tokens per product into the Secrets in [Map tokens to chart Secrets](#map-tokens-to-chart-secrets). Inline values enter Helm release history. |
+| One bootstrap **Dataplane URL** | Separate **LLM URL** and **MCP URL** | Set both in **Settings → Agent Gateway → General** after install. One URL serves the proxy and quietly breaks MCP — see [Register the URLs](#register-the-urls). |
+| Everything else it emits | The chart's own values interface | Take the tokens and discard the rest; datastores, ingress, TLS, and sizing come from your values file. |
+
+<Warning>
+The single-URL default is the one item here with no error message. Tool calls
+simply never resolve, and nothing in the console or the pod logs says the MCP URL
+was never set.
+</Warning>
 
 ## Map tokens to chart Secrets
 
@@ -140,6 +161,32 @@ installs you may inline the raw values with `configSync.token` and
 `dataagent.enrolment.token` instead of an `existingSecret`, but those values
 enter Helm release history.
 
+## Register the URLs
+
+The console needs to reach the data plane you just installed, so finish the
+wizard once TrustGate is serving traffic.
+
+1. Expose both TrustGate entry points — LLM/proxy on port `8081` and MCP on port
+   `8082` — as described in
+   [Hybrid → Expose both entry points](/neuraltrust/deployment/hybrid#expose-both-entry-points).
+2. Return to the wizard, enter the LLM/proxy URL as the bootstrap **Dataplane
+   URL**, and choose **Save and Finish**. The wizard initially uses this one URL
+   for both entry points.
+3. Open **Settings → Agent Gateway → General** and set the **LLM URL** and
+   **MCP URL** separately.
+
+| Method | Use it for | Wizard output |
+| --- | --- | --- |
+| **Kubernetes** | Production-grade deployments | Credential and setup input to map into the maintained chart |
+| **Docker** | Local evaluation of the LLM/proxy path | A Docker Compose command; does not start MCP |
+| **Manual** | Custom or operator-managed deployments | `CONTROL_PLANE_JWT` and `DATA_AGENT_JWT` |
+
+Both URLs must be reachable by their intended clients, and NeuralTrust calls the
+Dataplane URL from a single source IP that your edge has to allow — see
+[Hybrid → Network](/neuraltrust/deployment/hybrid#network). **Settings → Agent
+Gateway → Deployment** can regenerate the install configuration and credentials
+later.
+
 ## Regenerate tokens
 
 Issue fresh tokens any time from **Settings → Agent Gateway → Deployment** (TrustGate)
@@ -150,16 +197,16 @@ runtime pods.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Overview" icon="compass" href="/neuraltrust/deployment/overview">
-    See the full private-gateway setup flow and network requirements.
+  <Card title="Hybrid" icon="cloud-arrow-up" href="/neuraltrust/deployment/hybrid">
+    The install these tokens are for, start to finish.
   </Card>
   <Card title="Secrets" icon="key" href="/neuraltrust/deployment/secrets">
     Handle config-sync and enrollment tokens safely.
   </Card>
-  <Card title="Feature flags" icon="toggle-right" href="/neuraltrust/deployment/feature-flags">
-    Chart switches that shape the Hybrid data plane.
-  </Card>
   <Card title="Configuration" icon="sliders" href="/neuraltrust/deployment/configuration">
-    Managed stores, ingress, and generated setup.
+    Managed stores, ingress, and every values switch.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/neuraltrust/deployment/troubleshooting">
+    Config-sync and install failures.
   </Card>
 </CardGroup>

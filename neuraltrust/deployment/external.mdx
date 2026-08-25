@@ -3,98 +3,168 @@ title: External (self-hosted)
 description: Run the full NeuralTrust platform — control plane, data plane, and analytics — inside your own cluster.
 ---
 
-**External** is the fully self-hosted topology. Unlike [Hybrid](/neuraltrust/deployment/deployment-models#hybrid),
-which keeps the control plane on NeuralTrust SaaS, External runs **every** plane
-in your environment: control planes, data planes, the product console, and the
-analytics stack. Nothing leaves your network unless you explicitly enable hosted
-export.
+**External** is the fully self-hosted topology. Every plane runs in your
+environment: control planes, data planes, the product console, and the analytics
+stack. Nothing leaves your network unless you explicitly enable hosted export,
+so there are no console-issued tokens and no NeuralTrust endpoints to allow.
 
 Choose External for air-gapped environments, strict data-residency mandates, or
 when policy forbids any outbound dependency on NeuralTrust SaaS.
 
-## What runs in your cluster
+This page is the whole install: architecture, prerequisites, datastores, the
+step-by-step install, and high availability.
 
-External deploys the components Hybrid leaves in SaaS, plus a self-hosted
-analytics pipeline:
+## Architecture
+
+<img
+  src="/images/static/img/external-architecture.svg"
+  alt="External architecture: everything runs in your environment. Clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, TrustGate calls TrustGuard on :8081, and TrustGuard calls the Firewall on :8000. An in-cluster control plane — console and API on :8000, AgentGateway admin on :8080, and the TrustGuard control plane on :8080 — serves configuration to TrustGate and TrustGuard. TrustGate and TrustGuard emit OTLP to a collector on :4317 and :4318 that writes to in-cluster ClickHouse; DataCore and AlertEngine read from it. PostgreSQL and Redis are recommended datastores outside the cluster. There is no DataAgent and no runtime dependency on NeuralTrust SaaS."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/external-architecture-dark.svg"
+  alt=""
+  className="hidden dark:block"
+/>
+
+Two properties shape everything else on this page:
+
+- **Configuration comes from PostgreSQL, not from a config-sync stream.** Each
+  product's data plane reads its configuration directly from that product's
+  database, which its own in-cluster control plane owns and migrates.
+- **DataCore replaces DataAgent.** There is no SaaS pushing queries over an
+  outbound stream, so an in-cluster HTTP API serves tenant-scoped queries from
+  ClickHouse instead, plus deployment metadata from its own `datacore` database.
+
+## What runs
+
+A complete platform install. Every table below is deployed by the same umbrella
+chart in one release.
+
+### Request path
 
 | Component | Purpose |
 | --- | --- |
-| AgentGateway admin, proxy, MCP | Gateway administration and the AI request path |
-| TrustGuard control + data planes | Policy administration and runtime safety evaluation |
-| Control-plane API + web app | The product console and its API |
-| ClickStack OTel Collector | Receives product OTLP and writes it to ClickHouse |
-| ClickHouse | Self-hosted analytics store (External only) |
-| DataCore | Residency query API over ClickHouse + PostgreSQL metadata |
-| AlertEngine (API + worker) | Evaluates alert rules and forwards to SIEM/integrations |
-| Firewall | Prompt/response safety classifiers; always deployed with TrustGuard |
+| TrustGate proxy `:8081` | LLM/proxy entry point |
+| TrustGate MCP `:8082` | MCP entry point |
+| TrustGuard data plane | Runtime safety evaluation |
+| Firewall (gateway + 5 workers) | Prompt and response classifiers; deploys with TrustGuard and is the largest memory consumer in the data path |
+| data-plane-api | Red-teaming and evaluation API |
+
+### Control plane
+
+| Component | Purpose |
+| --- | --- |
+| control-plane-app | Product console (`app.<domain>`) |
+| control-plane-api | Console API (`api.<domain>`) |
+| AgentGateway admin `:8080` | Gateway administration (`admin.<domain>`) |
+| TrustGuard control plane | Policy administration |
+
+### Analytics
+
+| Component | Purpose |
+| --- | --- |
+| ClickStack OTel collector | Receives product OTLP (`:4317` / `:4318`) and writes to ClickHouse |
+| ClickHouse | Self-hosted analytics store (`:8123` / `:9000`) |
+| DataCore | Query API over ClickHouse plus PostgreSQL metadata |
+| AlertEngine API + worker | Evaluates alert rules and forwards to SIEM and integrations |
+
+`global.products` is ignored in External mode — the full stack always deploys.
+DataAgent does not run at all.
+
+## Prerequisites
+
+- A Kubernetes cluster with an ingress controller, and Helm 3.8+
+- Roughly **4–5** workers at 8 vCPU / 16–32 GiB — the console and analytics stack
+  on top of the data path. See
+  [Capacity](/neuraltrust/deployment/architecture#capacity)
+- A base domain you can point at the cluster ingress
+- PostgreSQL, Redis, and ClickHouse — see [Datastores](#datastores)
+- The registry key NeuralTrust sends you, or a mirror of the images for an
+  air-gapped cluster — [Container images](/neuraltrust/deployment/images)
+- An SMTP or email provider, for console invitations and password resets
+
+```bash
+kubectl get nodes
+kubectl get storageclass
+kubectl get ingressclass
+```
+
+### Decide the console hostname first
+
+`APP_URL` and `NEXTAUTH_URL` drive email links, SSO redirects, and OAuth
+callbacks. Changing them later invalidates in-flight invitations and breaks
+configured SSO redirect URIs, so pick the hostname before installing.
+
+One limitation to know about: a handful of console values are `NEXT_PUBLIC_*`,
+which Next.js inlines into the JavaScript bundle at **image build time**. Helm
+cannot set them. In practice two matter, and both are cosmetic rather than
+blocking — the SCIM tenant URL shown to administrators and the `meta.location`
+returned to your IdP will show `app.neuraltrust.ai`. Enter your own host in your
+IdP rather than copying what the screen displays.
+
+## Network
+
+External needs **no** outbound connectivity to NeuralTrust. There are no
+hostnames or IPs to allowlist and no inbound source IP to admit.
+
+What you do need reachable:
+
+| From the cluster to | Port | For |
+| --- | --- | --- |
+| Your container registry, or your mirror | 443 | Image pull |
+| Your LLM upstreams | 443 | The proxied model call |
+| Your PostgreSQL and Redis | 5432 / 6379 | All planes |
+| Your SMTP or email provider | 587 / 443 | Console invitations |
+| Your SIEM or alert integrations | 443 | AlertEngine forwarding, if configured |
+
+Inbound, clients reach the TrustGate LLM and MCP hosts, and your operators reach
+the console — see [Public routing](#public-routing).
 
 <Note>
-**DataAgent does not run in External mode**, and there are **no console-issued
-config-sync or enrollment tokens** to collect. Because the control planes are
-in-cluster, the platform is its own configuration source — you do not create a
-Private gateway in [app.neuraltrust.ai](https://app.neuraltrust.ai/en/v2/) as you
-do for [Hybrid](/neuraltrust/deployment/console-setup).
+Air-gapped installs mirror the images into an internal registry and set
+`global.imageRegistry`. Two collector images are pinned in full and need separate
+overrides — see
+[Mirror to your own registry](/neuraltrust/deployment/images#mirror-to-your-own-registry).
 </Note>
-
-## Select the topology
-
-One global value switches the whole platform to self-hosted:
-
-```yaml
-global:
-  deploymentMode: external
-  platform: kubernetes      # aws | gcp | azure | openshift | kubernetes
-  domain: platform.example.com
-```
-
-### First administrator
-
-External seeds an initial super-admin for the console. Prefer a pre-created
-Secret over inline credentials so they never enter Helm release history:
-
-```yaml
-global:
-  superadmin:
-    existingSecret:
-      name: onprem-superadmin   # ONPREM_SUPERADMIN_EMAIL / ONPREM_SUPERADMIN_PASSWORD
-```
-
-## Cluster sizing
-
-External adds the console and analytics stack on top of the data path. Plan on
-about **4–5** workers at **8 vCPU / 16–32 GiB** as a comfortable starting
-point, then right-size for your traffic — see
-[Cluster sizing](/neuraltrust/deployment/sizing).
 
 ## Datastores
 
-PostgreSQL and Redis deploy in-cluster by default in both modes. ClickHouse
-deploys in-cluster **only** in External mode — Hybrid keeps analytics on the
-hosted path.
+**Recommended for production:** managed PostgreSQL and Redis **outside** the
+cluster, with ClickHouse **in-cluster**. The chart defaults to in-cluster
+PostgreSQL and Redis (`deploy: true`) so a proof of concept can `helm install`
+without provisioning anything first — that is convenience, not the production
+shape.
 
-In External mode each service owns its **own** PostgreSQL database and migrations
-(`agentgateway`, `trustguard`, `alertengine`, `datacore`, plus `neuraltrust` for
-the console). The data-plane API shim reads analytics from ClickHouse.
+| Store | Placement | Used for |
+| --- | --- | --- |
+| PostgreSQL `:5432` | Recommended managed | Five databases: `neuraltrust`, `agentgateway`, `trustguard`, `alertengine`, `datacore` |
+| Redis `:6379` | Recommended managed | Semantic cache, rate limiting, evaluation progress |
+| ClickHouse `:8123` / `:9000` | In-cluster | Telemetry and every dashboard metric |
 
-The **endpoint** is shared. Since chart 2.6.0 an empty per-service `host`, `port`,
-or `sslMode` (and Redis `host` / `port` / `username` / `tls`) inherits from
-`global.postgresql` / `global.redis` before falling back to the in-cluster Service
-names. Declare a managed datastore once on the global blocks; add a per-service
-`database:` / `redis:` block only to send one service somewhere else.
+ClickHouse is mandatory here, unlike a Hybrid data plane where analytics stay on
+the hosted path. Nearly everyone runs the in-cluster subchart, because it is
+telemetry storage the platform owns end to end.
 
-### In-cluster PostgreSQL (default)
+Each service owns its **own** PostgreSQL database and migrations. The
+**endpoint** is shared: since chart 2.6.0 an empty per-service `host`, `port` or
+`sslMode` (and Redis `host` / `port` / `username` / `tls`) inherits from
+`global.postgresql` / `global.redis` before falling back to the in-cluster
+Service names. Declare a managed datastore once on the global blocks; add a
+per-service `database:` / `redis:` block only to send one service somewhere else.
+
+### In-cluster PostgreSQL (proof of concept)
 
 Leave `global.postgresql.deploy: true`. From chart **2.7.0** a
 `control-plane-postgresql-bootstrap` Job creates each service role and database
-using the password already in that service's Secret. You do not run SQL by hand
-for evaluation or demos. Expect a few restarts on the Postgres-backed workloads
-while the Job waits for PostgreSQL, then they become Ready.
+using the password already in that service's Secret, so you run no SQL by hand.
+Expect a few restarts on the Postgres-backed workloads while the Job waits for
+PostgreSQL, then they become Ready.
 
 ### Managed PostgreSQL and Redis (production)
 
-The usual production shape is **managed PostgreSQL and Redis with in-cluster
-ClickHouse**. Name the endpoints once, disable the in-cluster stores you are
-replacing, and leave ClickHouse alone:
+Name the endpoints once, disable the in-cluster stores you are replacing, and
+leave ClickHouse alone:
 
 ```yaml
 global:
@@ -129,18 +199,19 @@ you created, including the control-plane role through
 `global.postgresql.passwordSecret` (chart 2.8.0+) — see
 [External per-service datastore credentials](/neuraltrust/deployment/secrets#external-per-service-datastore-credentials).
 On chart 2.7.x and earlier the control-plane password had to stay inline as
-`global.postgresql.password`, because the chart composed the console's
-connection string while rendering.
+`global.postgresql.password`, because the chart composed the console's connection
+string while rendering.
 
 For minimum sizes see
-[Configuration](/neuraltrust/deployment/configuration#managed-stores) and
+[Managed stores](/neuraltrust/deployment/configuration#managed-stores) and
 [`values-managed-datastores.yaml.example`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-managed-datastores.yaml.example),
-which ships with the chart.
+which ships with the chart. On AWS, RDS IAM authentication needs a per-gateway
+setting as well as the global one — see
+[Cloud notes](/neuraltrust/deployment/cloud-notes).
 
 <Note>
-Running ClickHouse outside the cluster is supported but uncommon — it is the
-platform's own telemetry store, and most deployments let the chart run it. Only
-if your policy requires it, add:
+Running ClickHouse outside the cluster is supported but uncommon. Only if your
+policy requires it, add:
 
 ```yaml
 infrastructure:
@@ -149,11 +220,168 @@ infrastructure:
 ```
 </Note>
 
-## Telemetry egress
+## Install
 
-External keeps product telemetry in your in-cluster ClickHouse. To run with **no**
-outbound NeuralTrust SaaS telemetry — the air-gapped default — disable hosted
-export:
+<Note>
+External needs no console setup, no config-sync tokens, and no DataAgent
+enrollment. The platform is its own configuration source.
+</Note>
+
+<Steps>
+
+<Step title="Create the namespace and image pull secret">
+
+```bash
+kubectl create namespace neuraltrust
+```
+
+Turn the registry key NeuralTrust sent you into the pull Secret every component
+expects, using the script from the
+[chart sources](/neuraltrust/deployment/images#get-the-chart-sources):
+
+```bash
+GCR_KEY_FILE=./neuraltrust-registry-key.json \
+  ./create-image-pull-secret.sh --namespace neuraltrust
+```
+
+</Step>
+
+<Step title="Create the bootstrap administrator Secret">
+
+There is no hosted console to sign in from and no sign-up flow, so seed the first
+super-admin. A pre-created Secret keeps the credentials out of Helm release
+history:
+
+```bash
+kubectl create secret generic onprem-superadmin -n neuraltrust \
+  --from-literal=ONPREM_SUPERADMIN_EMAIL='admin@example.com' \
+  --from-literal=ONPREM_SUPERADMIN_PASSWORD='<strong-password>'
+```
+
+The feature activates only when `DEPLOYMENT_MODE=external` and both values are
+non-empty. On password login the console checks these **before** normal user
+authentication, and on a match upserts the user with a verified email and grants
+OWNER on every team.
+
+Treat it as a break-glass account: it bypasses the normal user table by design.
+Create a personal administrator through the UI afterwards.
+
+</Step>
+
+<Step title="Write your values file">
+
+The chart ships `values-external.yaml.example`. Copy it and set your platform and
+domain:
+
+```yaml
+global:
+  deploymentMode: external
+  platform: "kubernetes"          # aws | gcp | azure | openshift | kubernetes
+  domain: "platform.example.com"
+  superadmin:
+    existingSecret:
+      name: "onprem-superadmin"
+  observability:
+    hostedExport:
+      enabled: false              # no outbound telemetry to NeuralTrust
+```
+
+With the defaults above, PostgreSQL and Redis stay in-cluster and need no extra
+Secrets beyond the pull secret and `onprem-superadmin`. For the production shape,
+start from `values-managed-datastores.yaml.example` and follow
+[Managed PostgreSQL and Redis](#managed-postgresql-and-redis-production).
+
+</Step>
+
+<Step title="Install, and watch the ordering">
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust --create-namespace \
+  -f values-external.yaml.example
+```
+
+Two things must complete before the console serves traffic:
+
+1. A **pre-install Helm hook Job** generates the MCP OAuth RSA signing key into a
+   Secret. It checks for an existing key first, so upgrades do not rotate it and
+   invalidate live access tokens. It only ever writes its own Secret — the Role
+   is name-scoped.
+2. An **init container** runs `prisma migrate deploy` followed by the seed.
+
+The console Deployment rolls with `maxUnavailable: 0`, so a failed migration
+blocks the rollout rather than serving against a half-migrated schema.
+`control-plane-api` reads the *same* schema and runs no migrations of its own —
+it assumes the console has already applied them.
+
+The chart registry is **public**; only the container images are private. Always
+pass `--version` so the release is reproducible.
+
+</Step>
+
+</Steps>
+
+On OpenShift the install is the same but the chart renders native Routes instead
+of Ingress — see [OpenShift](/neuraltrust/deployment/openshift/overview).
+Provider-specific ingress, certificate, and managed-store choices are in
+[Cloud notes](/neuraltrust/deployment/cloud-notes).
+
+## Verify
+
+```bash
+kubectl get pods -n neuraltrust
+kubectl get ingress -n neuraltrust
+kubectl -n neuraltrust logs deploy/datacore | grep -i 'migration\|listening'
+kubectl -n neuraltrust logs deploy/agentgateway-admin | grep -i 'migration\|listening'
+```
+
+You should see the full inventory: the request path (`agentgateway-proxy`,
+`agentgateway-mcp`, `trustguard-data-plane`, `firewall` plus its workers,
+`data-plane-api`), the in-cluster control plane (`agentgateway-admin`,
+`trustguard-control-plane`, `control-plane-api`, `control-plane-app`), and the
+analytics stack (`clickstack-collector`, `clickhouse`, `datacore`,
+`alertengine-api`, `alertengine-worker`). No `dataagent` pod appears.
+In-cluster `control-plane-postgresql` and `redis` appear only while
+`deploy: true`.
+
+Data-plane readiness has no snapshot gate here, so `Running` and `Ready` track
+each other closely. Point DNS at the ingress address, sign in with the
+super-admin credentials, and create the organization.
+
+### Configuration comes from PostgreSQL
+
+Config sync is **off** by default in External mode, and each product's data plane
+reads configuration from its own database. Practical consequences:
+
+- There is no config-sync token to create and no snapshot cache to reason about
+- Each product needs its **own** database and role, not one shared credential
+
+The chart still generates gRPC TLS material for the product control planes: a
+self-signed CA and a server certificate whose SANs cover the control-plane
+Service DNS name, preserved across upgrades. Nothing consumes it while config
+sync is off, but it means you can enable config sync later without provisioning
+certificates. If your policy requires your own PKI, supply a
+`kubernetes.io/tls` Secret including `ca.crt` through
+`configSync.grpcTls.existingSecret`; setting `autoGenerate: false` without one is
+rejected at render time.
+
+DataCore is reached by the console at `DATACORE_URL` with a JWT signed by a
+secret that must equal DataCore's `AUTH_JWT_HS256_SECRET`. The chart wires both
+ends from a single generated value. If you override one by hand you must
+override the other, or every dashboard returns an authorization error.
+
+The checks above confirm the install came up. Before handing it over, work
+through the [validation checklist](/neuraltrust/deployment/validation) — it
+covers what `kubectl` cannot see: DNS and TLS from the caller's network, MCP
+tested separately from the LLM route, policy decisions, backup ownership, and a
+rehearsed restore.
+
+## Telemetry
+
+Product telemetry stays in your in-cluster ClickHouse. To run with **no**
+outbound NeuralTrust telemetry — the air-gapped default — disable hosted export:
 
 ```yaml
 global:
@@ -167,52 +395,199 @@ only stops optional egress to NeuralTrust.
 
 ## Public routing
 
-AgentGateway exposes three surfaces in External mode: **admin** (External only),
-**proxy**, and **MCP**. `global.domain` combines with default prefixes to render
-hostnames, and the chart can auto-add wildcard hosts (`*.llm.<domain>` /
-`*.mcp.<domain>`) for slug-based discovery. DNS, certificates, and cloud
-controller settings remain operator prerequisites. See
-[Configuration](/neuraltrust/deployment/configuration#ingress).
+AgentGateway exposes three surfaces in External mode: **admin**, **proxy**, and
+**MCP**. `global.domain` combines with default prefixes to render hostnames, and
+the chart can auto-add wildcard hosts (`*.llm.<domain>` / `*.mcp.<domain>`) for
+slug-based discovery.
 
-## Install
+| Surface | Host |
+| --- | --- |
+| Console | `app.<domain>` |
+| Console API | `api.<domain>` |
+| Gateway admin | `admin.<domain>` |
+| TrustGate LLM gateway | `gateway.<domain>` and `*.llm.<domain>` |
+| TrustGate MCP | `mcp.<domain>` and `*.mcp.<domain>` |
 
-Start from the maintained
-[`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform)
-chart and its tracked
-[`values-external.yaml.example`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-external.yaml.example),
-then layer your platform, domain, ingress, and datastore choices. Unpacking the
-chart gives you that file at the version you are installing:
+DNS, certificates, and cloud controller settings remain operator prerequisites —
+see [Ingress](/neuraltrust/deployment/configuration#ingress).
 
-```bash
-helm pull oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version <VERSION> --untar && cd neuraltrust-platform
-```
+## What you have taken on
 
-```bash
-helm upgrade --install neuraltrust-platform \
-  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
-  --version <VERSION> \
-  --namespace neuraltrust --create-namespace \
-  -f values-external.yaml.example
-```
+Worth stating plainly, since it is the real cost of running External:
 
-For the full sequence — prerequisites, namespace, pull secret, bootstrap
-administrator, and verification — follow the
-[External quick start](/neuraltrust/deployment/quickstart).
+- **Database migrations** are yours to run and to roll back
+- **Backups** of PostgreSQL and ClickHouse are yours
+- **Certificate rotation** for anything you supplied yourself
+- **The bootstrap credential** is a standing break-glass path into every team
+- **Email deliverability** — invitations and password resets stop working
+  silently if it breaks
+
+### Known rough edges
+
+External is newer than Hybrid, and these are the issues you are most likely to
+meet. Each has a workaround in
+[Troubleshooting](/neuraltrust/deployment/troubleshooting).
+
+- Login lockout after repeated failed password attempts
+- SCIM setup screens display the SaaS host instead of yours
+- Alert evaluation does not currently run
+- Firewall complexity state silently disables itself without a Redis URL
+- Trace export returns 404 when the OTLP endpoint includes a signal path
+- `imagePullSecrets` is only honoured on the console under `control-plane-app`
+- IAM database auth needs setting per gateway, not only globally
+
+## High availability
+
+Availability is a ladder, not a single design. Climb it only as far as the
+failure you actually have to survive.
+
+| Tier | Survives | Cost |
+| --- | --- | --- |
+| **1. One cluster, multi-AZ** | Node and zone loss | Node pools in three zones; nothing else to run |
+| **2. Twin clusters, one region** | Cluster loss, bad upgrades | A second cluster and a traffic switch |
+| **3. Two regions, active/passive** | Regional loss | The above, plus DNS promotion and a datastore runbook |
+
+<img
+  src="/images/static/img/ha-ladder.svg"
+  alt="The three availability tiers side by side. Tier 1, one cluster multi-AZ: node pools in three availability zones, two or more replicas of TrustGate, TrustGuard and Firewall, and managed PostgreSQL and Redis with automatic failover inside the region; it survives node and zone loss and needs no promotion procedure or DNS work. Tier 2, twin clusters in one region: a serving cluster plus a second cluster to roll upgrades through, both against one PostgreSQL primary and one Redis primary shared inside the region; it survives cluster loss and bad upgrades. Tier 3, two regions active/passive: an active region running the only DataAgent, a warm passive region with no traffic, one writable PostgreSQL primary with a cross-region read replica, and region-local Redis per cluster; it survives regional loss and adds DNS promotion and a datastore runbook. Two invariants hold at every tier: exactly one writable PostgreSQL primary, and exactly one active DataAgent per gateway scope."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/ha-ladder-dark.svg"
+  alt=""
+  className="hidden dark:block"
+/>
+
+### Tier 1 — one cluster across zones
+
+Spread the node pool over three availability zones, run at least two replicas of
+the request path and both product control planes, and use managed PostgreSQL and
+Redis with automatic failover inside the region. No promotion procedure, no DNS
+work. **This is enough for most deployments.**
+
+### Tier 2 — twin clusters in one region
+
+Two clusters against **one PostgreSQL primary and one Redis primary**. Sharing
+both stores inside a region costs no extra hop and keeps state identical from
+either side, which is what makes a blue/green upgrade safe here: External keeps
+its entire configuration state in PostgreSQL, so the second cluster is already
+looking at the same policies the moment it starts.
+
+### Tier 3 — two regions, active/passive
+
+<img
+  src="/images/static/img/external-high-availability.svg"
+  alt="External in active/passive across two regions. A traffic manager you operate points the gateway, MCP and console hostnames at the active cluster. Each cluster holds a full copy of every component: the request path, both product control planes, the console and API, its own region-local Redis, and its own in-cluster ClickHouse. Both clusters read and write one shared PostgreSQL primary, which holds configuration, console data, payloads and detections, with a cross-region read replica promoted on failover. Four consequences of a promotion: ClickHouse does not follow it, so each cluster only has the telemetry its own collector received; rate limits are counted per region; console sessions live in the region that issued them; and nothing dials NeuralTrust, because both clusters are self-contained."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/external-high-availability-dark.svg"
+  alt=""
+  className="hidden dark:block"
+/>
+
+The two stores are treated differently on purpose.
+
+**PostgreSQL: one writable primary, one cross-region read replica.** It holds
+every piece of durable state this mode has — configuration, console data,
+payloads, detections — so a single writer is what prevents split-brain. Both
+clusters run the same components against the same authoritative state, so there
+is nothing to reconcile after a promotion. Your RPO is the replication lag.
+
+**Redis: region-local, one per cluster.** Redis carries semantic cache,
+rate-limit counters and evaluation progress, and it has
+[no persistence requirement](/neuraltrust/deployment/architecture#datastore-sizing-floors).
+Crossing a region for that on every request costs latency on the hot path to
+protect data that is worth seconds. After a promotion the new active cluster
+rebuilds its counters in seconds.
+
+<Note>
+Two consequences to accept: rate limits are counted per region, and console
+sessions live in the region that issued them, so a promotion signs operators out
+and they sign in again against the same PostgreSQL.
+</Note>
+
+| Component | How it is made available |
+| --- | --- |
+| Request path and control planes | Multiple replicas per cluster, across zones; full copies in both clusters |
+| PostgreSQL | One managed primary, multi-AZ, with a cross-region read replica |
+| Redis | One managed instance **per region**, each with automatic failover |
+| ClickHouse | In-cluster and therefore **per cluster** — see the caveat below |
+| Console traffic | One hostname, pointed at the active cluster by your traffic manager |
+
+<Warning>
+**ClickHouse does not follow a promotion.** It is an in-cluster store, so each
+cluster holds only the telemetry its own collector received. After a failover the
+console works and enforcement is unaffected, but dashboards show the promoted
+cluster's history rather than the failed one's. Either accept that, or configure
+ClickHouse replication between the two clusters.
+</Warning>
+
+### Upgrades and migrations with two clusters
+
+Both consoles run `prisma migrate deploy` in an init container against the same
+database. Upgrade **one cluster at a time**, active first, and let its rollout
+complete before starting the second. A migration is applied once and the second
+cluster's init container no-ops, but running both simultaneously against one
+schema is worth avoiding — and the console rolls with `maxUnavailable: 0`, so a
+failed migration blocks that cluster rather than serving a half-migrated schema.
+
+### Promote the passive cluster
+
+<Steps>
+<Step title="Detect and fence">
+Health check both request paths and the console. Remove the failed cluster from
+the traffic manager so it cannot take traffic during a partial recovery.
+</Step>
+
+<Step title="Point PostgreSQL at a writable primary">
+If the primary is in the failed region, promote the read replica and update
+`global.postgresql.host` in the surviving cluster. If the primary is unaffected,
+there is nothing to do here. Redis needs no attention either way, because the
+surviving cluster already has its own.
+</Step>
+
+<Step title="Switch traffic">
+Route the gateway, MCP, and console hostnames to the promoted cluster. Keep them
+together.
+</Step>
+
+<Step title="Verify">
+Sign in to the console, run representative allowed and blocked requests, and
+confirm new telemetry is arriving in the promoted cluster's ClickHouse.
+</Step>
+</Steps>
+
+### Before you rely on it
+
+- [ ] Both clusters are deployed and health checked against the same primary.
+- [ ] PostgreSQL is managed, with one primary and a cross-region read replica.
+- [ ] Each region has its own managed Redis, and you accept per-region counters
+      and sessions.
+- [ ] Certificates and DNS cover the published hostnames from both clusters.
+- [ ] You have decided whether ClickHouse history needs replicating.
+- [ ] Backups of PostgreSQL and ClickHouse are running and have been restored once.
+- [ ] You have rehearsed a promotion, including the datastore step.
 
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Deployment models" icon="diagram-project" href="/neuraltrust/deployment/deployment-models">
-    Compare SaaS, Hybrid, and External responsibilities.
-  </Card>
   <Card title="Configuration" icon="sliders" href="/neuraltrust/deployment/configuration">
-    Datastores, ingress, and TLS.
+    Managed stores, ingress, TLS, and every values switch.
   </Card>
-  <Card title="Secrets" icon="key" href="/neuraltrust/deployment/secrets">
-    Credential handling for a self-hosted install.
+  <Card title="Secrets" icon="lock" href="/neuraltrust/deployment/secrets">
+    Per-service datastore credentials and what the chart generates.
   </Card>
-  <Card title="Firewall" icon="shield" href="/neuraltrust/deployment/firewall">
-    Size the Firewall that deploys with TrustGuard.
+  <Card title="Requirements" icon="list-check" href="/neuraltrust/deployment/architecture">
+    Dependencies, ports, and capacity.
+  </Card>
+  <Card title="Cloud notes" icon="cloud" href="/neuraltrust/deployment/cloud-notes">
+    Ingress, certificates, and managed stores per provider.
+  </Card>
+  <Card title="Validation checklist" icon="clipboard-check" href="/neuraltrust/deployment/validation">
+    What to prove before the install counts as done.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/neuraltrust/deployment/troubleshooting">
+    Login, migration, and telemetry failures.
   </Card>
 </CardGroup>

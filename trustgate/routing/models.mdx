@@ -1,0 +1,50 @@
+---
+title: "Models"
+description: "Call GET /{consumer}/v1/models to list the native model ids this consumer can actually call. This is gateway-owned discovery, not an upstream passthrough."
+---
+
+Clients that probe `client.models.list()` against an OpenAI-compatible `base_url` hit
+this route. Auth and the consumer slug are the same as
+[chat](/trustgate/getting-started/quickstart#call-from-your-application).
+
+```bash
+curl "https://<gateway-host>/<consumer-slug>/v1/models" \
+  -H "X-AG-API-Key: <your-api-key>"
+
+curl "https://<gateway-host>/<consumer-slug>/v1/models/gpt-4o-mini" \
+  -H "X-AG-API-Key: <your-api-key>"
+```
+
+On a Private data plane, add `X-AG-Gateway-Slug` as in the chat snippets.
+
+`GET /v1/models` returns `{ "object": "list", "data": [{ "id", "object": "model", "owned_by" }] }`.
+`GET /v1/models/{id}` is **200** when that id is in the list, otherwise **404**.
+Non-`GET` methods are **400**. Extra path tails (`/models/{id}/extra`) are **404**.
+
+This is **not** a forward of the provider's `/v1/models` and **not** the admin models
+catalog. The list is the union of native slugs the consumer can actually call.
+
+## What is listed
+
+For each bound registry (plus fallbacks, role policies, and load-balancing member models):
+
+1. If the consumer (or role) has an allow-list, those ids are candidates.
+2. If the policy is open, TrustGate expands from the provider catalog.
+3. Only **native** slugs are kept — no `auto`, no `@provider/…`, no `pool:…`.
+4. A slug is kept only when the registry's provider supports that modality (chat always;
+   [embeddings](/trustgate/routing/embeddings) / [rerank](/trustgate/routing/rerank) only
+   when the provider advertises them). Catalog flags win; otherwise the slug is inferred
+   (`embed` → embeddings, `rerank` → rerank, else chat).
+
+`owned_by` is the registry **provider** (for example `openai` or `anthropic`).
+
+[Files](/trustgate/routing/files) have no model ids and are not listed.
+[Images](/trustgate/routing/images) ids appear only when the catalog (or allow-list) includes
+them and the consumer has an images-capable registry.
+
+## Related
+
+- [Model resolution](/trustgate/routing/model-resolution)
+- [Consumers](/trustgate/concepts/consumers) — Connect tab
+- [Registries](/trustgate/concepts/registries)
+- [Quickstart](/trustgate/getting-started/quickstart)
