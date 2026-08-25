@@ -1,63 +1,84 @@
 ---
-title: "Auth"
-description: "How clients authenticate as a consumer — API key, OAuth2, or OIDC — created and managed in the NeuralTrust console."
+title: "Overview"
+description: "API keys, OAuth2, and OIDC — how clients authenticate as a consumer, and how to wire an IdP for Identity-based LLM routing and MCP login."
 ---
 
-An **auth** credential is how a client proves it may act as a
-[consumer](/trustgate/concepts/consumers). Credentials are created on the gateway and
-attached to consumers, so you can rotate or share them independently of routing config.
+An **auth** is how a client proves it may act as a [consumer](/trustgate/concepts/consumers).
+Create entities under **Identity → Auth**, then attach them to consumers. Distinct from a
+registry's **upstream** credential (how TrustGate calls the model provider or MCP server).
 
-This is distinct from a registry's upstream provider credential, which is how TrustGate
-authenticates to the **model provider** or MCP server.
+Manage entities at **Agent Gateway → Identity → Auth**. Attach them on the consumer **Auth**
+tab, or during consumer create. **Roles** live on the other Identity tab — see
+[Roles](/trustgate/concepts/roles).
 
-## Auth types
+## Types
 
-| Type | How the client authenticates | Typical routing |
+| Type | How the client authenticates | Typical use |
 |---|---|---|
-| **API key** | `X-AG-API-Key: ag_…` header | Static (inline) |
-| **OAuth2** | `Authorization: Bearer <token>` validated against your OAuth2 provider | Static or identity-based |
-| **OIDC** | `Authorization: Bearer <jwt>` from your IdP; claims can select a [role](/trustgate/concepts/roles) | Static or identity-based |
+| **API Key** | `X-AG-API-Key: ag_…` (also `x-api-key` or `Authorization: Bearer ag_…`) | Static consumers |
+| **OAuth2** | Bearer token. TrustGate can **validate** a token the client already has, or **broker** the login (authorization code + PKCE) | MCP agents; M2M |
+| **OIDC** | Bearer JWT validated against your IdP JWKS. Claims can select a [role](/trustgate/concepts/roles) | Identity-based LLM routing |
 
-**By protocol in the console:**
-
-| Protocol | Auth methods in the UI |
+| Protocol | Methods in the UI |
 |---|---|
-| **LLM** | **API Key**, **OAuth2**, **OIDC** |
-| **MCP** | **OAuth2**, or **Use NeuralTrust** (built-in login with no linked auth entity) |
+| **LLM** | API Key, OAuth2, OIDC |
+| **MCP** | OAuth2 or API Key. For OAuth2, attach an IdP or **Use NeuralTrust** (built-in login, empty `auth_ids`). Not OIDC — agents need the gateway to run the interactive login. |
 
-An **identity-based** LLM consumer uses an **OIDC** or **OAuth2** credential so token claims
-can select [roles](/trustgate/concepts/roles).
+An Identity-based LLM consumer carries **exactly one** identity auth (OIDC or OAuth2).
 
-## Create an API key
+## API keys
 
-1. Open **TrustGate** → **Consumers** → select a consumer (or create one).
-2. Under **Authentication** / **Auth**, choose **API Key**.
-3. Create the key and **copy it immediately** — the cleartext secret is shown only once.
-4. Use the key in app requests or in the consumer **Connect** snippets.
+1. **Identity → Auth → New Auth → API Key**, or create the key on the consumer **Auth** tab.
+2. Set expiry (**Never**, 30 days, 90 days, 1 year). Copy the secret once.
+3. Use it in requests or in the consumer **Connect** snippets.
 
-API keys are prefixed **`ag_`**. TrustGate stores only a hash; the secret cannot be
-recovered later. Rotate by creating a new key, updating clients, then revoking the old one.
+Keys are prefixed `ag_`. TrustGate stores a hash; the secret cannot be recovered. Rotate by
+creating a new key, updating clients, then revoking the old one.
 
-You can also create API key entities under [Identity → Auth](/trustgate/concepts/authorization/overview)
-and attach them to consumers.
+## OAuth2 setup modes
 
-## OAuth2 / OIDC
-
-Configure issuer, audiences, JWKS (or public keys), scopes, and related fields in the
-console when you create the credential. For identity-based routing, OIDC claim values must
-match the [role](/trustgate/concepts/roles) mappings you define.
-
-End-to-end IdP setup:
-
-- [Authorization overview](/trustgate/concepts/authorization/overview)
-- [Okta](/trustgate/concepts/authorization/okta)
-- [Entra ID](/trustgate/concepts/authorization/entra-id)
-
-## Where credentials appear
-
-| Place | What you do |
+| Mode | When |
 |---|---|
-| **New consumer** flow | Create the first API key and copy it on success. |
-| Consumer **Auth** tab | Add, attach, or revoke credentials. |
-| Consumer **Connect** tab | Ready-made headers and snippets for apps. |
-| [Identity → Auth](/trustgate/concepts/authorization/overview) | Gateway-level auth entities reused across consumers. |
+| **Validate tokens only (M2M)** | Services present bearer tokens; no browser login. |
+| **Interactive login · IdP with discovery** | Browser/agent login; OpenID discovery (Okta, Entra ID). |
+| **Interactive login · IdP without discovery** | Manual authorize / token / userinfo URLs. |
+
+OIDC fields: issuer, JWKS URL, audiences, required scopes, allowed algorithms, subject
+claim, optional public keys / certificate constraints.
+
+## Two IdP patterns
+
+Same Okta or Entra tenant can back both. They are two TrustGate **auth types**, not two IdPs.
+
+| Pattern | Auth type | Consumer | Purpose |
+|---|---|---|---|
+| **OIDC · Identity-based LLM** | OIDC | LLM, Identity-based routing | Token claims (`groups`, `roles`, …) select a [role](/trustgate/concepts/roles) |
+| **OAuth2 · MCP** | OAuth2 (interactive discovery) | MCP | Agents use TrustGate's authorization-code + PKCE broker. **Required scopes** gate access. Client-credentials tokens are for curl checks only. |
+
+| | **OIDC** | **OAuth2** |
+|---|---|---|
+| What TrustGate does | Validates a JWT the client already has | Can also broker the login (client ID / secret → IdP authorize) |
+| Typical consumer | LLM · Identity-based | MCP |
+| Access | Claim → role | Required scopes on the token |
+| IdP app | Issuer + JWKS + audiences (no client secret required) | Same issuer family, plus a confidential client and `{mcp_base_url}/oauth/callback` |
+
+## Rules for every provider
+
+- **Audiences** is required and must match the token's `aud` claim.
+- **Required scopes** must not include `openid`, `profile`, `email`, or `offline_access`.
+- Scope matching uses `scp`/`scope` **and** Auth0/Entra-style `permissions` and `roles` arrays.
+- Interactive MCP: **Setup → Interactive login · IdP with discovery**, Session mode off,
+  Okta app type **Web Application** (not API Services).
+- **JWKS URL** can stay under **Token validation · advanced**; TrustGate resolves keys from
+  the issuer when needed.
+
+## Provider manuals
+
+<CardGroup cols={2}>
+  <Card title="Okta" icon="key" href="/trustgate/concepts/authorization/okta">
+    Custom authorization server, scopes, groups claim, and both app patterns.
+  </Card>
+  <Card title="Entra ID" icon="microsoft" href="/trustgate/concepts/authorization/entra-id">
+    App registration, exposed API scopes, app roles, and both app patterns.
+  </Card>
+</CardGroup>
