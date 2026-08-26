@@ -1,152 +1,156 @@
 ---
 title: "Policies"
-description: "A policy is where enforcement lives: gates that match request attributes before detection, detector rules that run detectors and decide the action, and a policy-wide Report/Enforce switch."
+description: "A policy is where enforcement lives: gates that match request attributes before detection, detector rules that run detectors and decide the action, and a policy-wide Observe/Enforce switch."
 ---
 
 A **policy** turns detection into a decision. [Detectors](/trustguard/concepts/detectors)
 say *what* is in the traffic; a policy says *what to do about it*. You build
-policies in the console's **Policies** screen, then attach them to
+policies under **Runtime → Policies**, then attach them to
 [collectors](/trustguard/concepts/collectors).
 
-A policy has five tabs: **Gates**, **Detectors**, **Collectors**, **Test**, and
-**History** — plus a policy-wide **Enforcement mode**.
+Opening a policy opens a side panel with six tabs:
 
-## Enforcement mode — Report vs Enforce
-
-A single switch controls whether the policy can act:
-
-| Mode | Effect |
+| Tab | What it is |
 |---|---|
-| **Report** | Every gate and detector action is downgraded to a non-blocking record. Nothing is blocked or transformed. Use it to measure signal and false positives before turning on enforcement. |
-| **Enforce** | Actions apply as configured — gates can block, detector rules can block or transform. |
+| **Basics** | Name and **Enforcement mode**. |
+| **Gates** | Attribute matchers that run *before* detectors. |
+| **Detectors** | Detector rules, split by **Input** / **Output**. |
+| **Collectors** | Which collectors send traffic here, and how. |
+| **Test** | Sandbox against the **last saved** policy. |
+| **History** | Change log for the policy, gates, detector rules, and routing. |
 
-Report mode maps to the API's `report_only` flag. A typical rollout runs a new
-policy in **Report** first, reviews findings, then flips to **Enforce**.
+The list columns **Gates**, **Detectors**, and **Collectors** count what’s on those tabs. **Mode** is Observe or Enforcing.
 
-## Gates: match before you detect
+## Enforcement mode — Observe vs Enforce
 
-**Gates** are evaluated **before** any detector runs. A gate matches on request
-**attributes** (not content) and takes an action. Because they run first, gates
-are how you cheaply allow, block, or waive traffic without spending detection.
+The switch is on **Basics** (and in the panel header):
 
-Each gate is a set of **conditions** joined by **And**/**Or**, and a **Then**
-action:
+| Console | API | Effect |
+|---|---|---|
+| **Observe** | `report_only: true` | Every gate and detector action is recorded only. Nothing is blocked, asked, or transformed. |
+| **Enforce** | `report_only: false` | Actions apply as configured. |
 
-| Gate action | Effect |
+Run a new policy in **Observe**, check **Activity** and **Test**, then switch to **Enforce**.
+
+## Gates
+
+**Gates** match request **attributes** (not prompt text) and run **before** any detector.
+
+Each gate is a name, **And**/**Or** conditions, and a **Then** action:
+
+| Action | Effect |
 |---|---|
-| **Block** | Block the request immediately; **detectors are skipped**. (In Report mode this is recorded, not enforced.) |
+| **Block** | Stop immediately; **detectors are skipped**. In Observe this is recorded, not enforced. |
 | **Report** | Record a finding and continue to detection. |
-| **Skip** | Stop gate evaluation and proceed to detectors — no finding. Use it to waive specific traffic. |
+| **Skip** | Stop remaining gates and go to detectors — no finding. Use it to waive traffic. |
+| **Ask** | Ask the user to confirm in the IDE. **Input only** (missing `direction` counts as input). On **output** the gate does not match. Detectors are skipped. |
 
-All gates are evaluated and the **most restrictive** outcome wins; if any gate
-blocks, the request is blocked and detection is skipped.
+Block, Skip, and Ask end the gate chain. Report continues. If any matching gate **Blocks**, detection does not run.
+
+IDE plugins map **Ask** to a permission prompt. The copy is always
+`A TrustGuard policy needs your approval to continue.` — not the gate name.
+[Codex](/trustguard/integrations/ide/codex) has no Ask dialog; it allows the call
+and injects that sentence as extra context.
 
 ### Condition attributes
 
-Conditions target these request attributes:
-
-| Group | Attributes |
+| Group (console) | Attributes |
 |---|---|
 | **Consumer** | `consumer.id`, `consumer.name`, `consumer.tag`, `consumer.type` |
 | **Model** | `model.name`, `model.provider` |
 | **Collector** | `collector.id`, `collector.type` |
 | **Source** | `source.application` |
 | **Session** | `session.id` |
-| **Protocol** | `protocol` |
+| **Protocol** | `protocol` (`llm` / `mcp` / `a2a`; API also accepts `all`) |
+| **Direction** | `direction` (`input` / `output`) |
+| **Tool** | `tool.name`, `tool.command`, `tool.arguments` |
 
-**Operators:** Equals (`eq`), Not equals (`neq`), Greater than (`gt`), Less than
-(`lt`), Contains (`contains`), Does not contain (`not_contains`), In (`in` — a
-comma‑separated list), Matches (`match` — a regular expression).
+**Operators:** Equals, Not equals, Greater than, Less than, Contains, Does not contain, In (list), Matches (regex).
 
 `consumer.*`, `model.*`, `collector.type`, and `source.application` come from
-the request `attributes` object (or are stamped by a dialect such as the
-[Claude Enterprise](/trustguard/integrations/ide/claude-enterprise) inference
-hook). `collector.id`, `session.id`, and `protocol` are resolved by TrustGuard.
+the request `attributes` object, or are stamped by an integration.
+`collector.id`, `session.id`, `protocol`, and `direction` are resolved by
+TrustGuard.
 
-#### Example: Claude surface
+**`tool.name`** for MCP `tools/call` is read from **`payload.params.name`**, not
+from `attributes.tool`. Hosts that expose tools as `mcp__<server>__<tool>` send
+the last segment (`search_threads`). Gate on that short name.
+`tool.command` is the shell line for Bash / Shell.
 
-One Claude Enterprise collector covers chat and Claude Code. Stamp differs by
-`source.application` (`claude-ai`, `claude-code`, …). Gate on it to apply a
-stricter action only on Code:
+Do not put `name` inside `{ "input": "…" }` when `protocol` is `all` — that
+body is rejected (`400`).
 
-| Condition | Then |
+#### `source.application` (Claude)
+
+| Value | Path |
 |---|---|
-| `source.application` **eq** `claude-code` | **Block** (or **Report**) |
-| (no match) | Continue to detectors |
+| `claude-ai` | [Inference Hooks](/trustguard/integrations/ide/claude-enterprise) — claude.ai chat |
+| `claude-code` | Inference Hooks — Claude Code (org hook, not the laptop plugin) |
+| `claude-code-plugin` | [Claude Code plugin](/trustguard/integrations/ide/claude-code) — local lifecycle hooks |
+| `cursor-plugin` | [Cursor plugin](/trustguard/integrations/ide/cursor) |
+| `config-test` | Anthropic **Test connection** |
 
-Or waive chat-only traffic: `source.application` **eq** `claude-ai` → **Skip**.
+A gate on `claude-code` does **not** match the laptop plugin (`claude-code-plugin`).
 
-## Detectors — run detectors and decide the action
+## Detectors
 
-The policy's **Detectors** tab holds its detector rules, split by **evaluation
-phase**:
+The **Detectors** tab is split by **evaluation phase**:
 
-- **Input** — evaluate the prompt/request.
-- **Output** — evaluate the completion/response.
+- **Input** — prompt / tool call.
+- **Output** — completion / tool result.
 
-At runtime TrustGuard only runs the rules for the phase that matches the
-request's **`direction`** (`input` or `output`). The phase you configure here
-and the `direction` on each `/v1/evaluate` call must line up — otherwise those
-detectors never fire.
+TrustGuard only runs the phase that matches the request `direction`. If the
+caller never sends `output`, Output rules never run.
 
 <Note>
 **Who sets `direction`?**
 
-- **[TrustGate](/trustguard/integrations/gateway/trustgate)** sets it for you (`input` on
+- **[TrustGate](/trustguard/integrations/gateway/trustgate)** sets it (`input` on
   the request path, `output` on the response path).
-- **Any other collector** (SDK, REST, browser, edge/WAF) must send `direction`
-  explicitly on each call — typically **two** evaluates per turn (prompt then
-  completion). Omitting it defaults to `input`, so Output-phase rules never run.
-
-See the [Python SDK](/trustguard/integrations/application/python-sdk) or [REST](/trustguard/integrations/application/rest) for SDK/REST
-examples, [Integrations overview](/trustguard/integrations/overview) for the
-shared call shape, and [How it works](/trustguard/how-it-works) for how rules are
-filtered by direction.
+- **IDE plugins** set it per hook (prompt and `preToolUse` → input; `postToolUse` → output).
+- **SDK / REST / browser / edge** must send it on every call. Omitting it defaults to `input`.
 </Note>
 
-Each rule references one [detector](/trustguard/concepts/detectors), an
-**action**, and optional **conditions** (same attribute model as gates):
+Each rule picks a [detector](/trustguard/concepts/detectors), an **action**, and
+optional **conditions** (same attributes as gates):
 
-| Action | Console label | Effect | Rewrites payload |
+| Action | Console | Effect | Rewrites payload |
 |---|---|---|---|
 | `report` | **Monitor** | Record a finding only. | — |
-| `block` | **Block** | Flag the request for blocking; stops the remaining detector chain. | — |
-| `transform` | **Transform** | Mask/rewrite the payload. Only valid for a **mutable** detector (`data_loss_prevention`). | ✅ |
-
-All matching rules for the phase are evaluated. A **`block`** finding **cuts
-the detection chain** — the remaining detector rules in that phase are
-skipped. Otherwise, the completed rules reduce to the **most restrictive**
-action.
+| `block` | **Block** | Flag for blocking; stops the remaining detector chain. | — |
+| `transform` | **Transform** | Mask/rewrite. Only valid for **`data_loss_prevention`**. | Yes |
 
 ## Verdict precedence
 
-TrustGuard reduces everything that fired into one top‑level `status`, from most
-to least restrictive:
-
 ```text
-block  →  transform  →  report  →  allow
+block  →  ask  →  transform  →  report  →  allow
 ```
 
-`allow` means nothing fired (or everything was waived). The caller enforces the
-verdict — see the [Evaluate API](/trustguard/api/evaluate).
+`allow` means nothing fired, or everything was waived. The caller enforces the
+verdict — see the [Evaluate API](/trustguard/api/evaluate). In **Observe**, the
+status never goes past `report`.
 
-## Test and History
+## Test
 
-- **Test** runs a sample input or output through the **last saved** version of
-  the policy and shows the decision (Blocked / Transformed / Reported / Allowed)
-  and every finding — without touching production or emitting telemetry.
-- **History** is the policy's change log: created/updated/deleted events for the
-  policy, its gates, its detector rules, and collector routing.
+**Test** evaluates the **saved** policy (unsaved Gates/Detectors do not apply).
 
-## Routing: attaching policies to collectors
+1. **Test direction** — Input or Output (must match the Detectors phase you care about).
+2. **Sample** — paste text, pick a preset, or **Upload file** (forces protocol **LLM**).
+3. **Extra parameters** — same attributes as Gates. Skip, Block, and Ask only match when these are set (for example **Tool name** = `search_threads`, or **Source application** = `claude-code-plugin`).
+4. **Run test** — Decision is Blocked / Transformed / Reported / Allowed, plus findings.
 
-A policy runs when a [collector](/trustguard/concepts/collectors) routes traffic
-to it. On the policy's **Collectors** tab you attach collectors with a routing
-mode:
+Test does not emit **Activity** and does not consume the `/v1/evaluate` plan rate limit.
 
-- **Default** — the collector's fallback policy for all its traffic.
-- **Consumer ID** — the policy only applies to requests from a specific
-  consumer, letting one collector send different consumers to different policies.
+## History
 
-If a collector has no policy for a request, that request is **unguarded** (no
-gates, no detectors) and returns `status: "allow"` with no findings.
+Created / updated / deleted events for the policy, its gates, detector rules, and collector routing.
+
+## Collectors tab
+
+Attach collectors with a routing mode:
+
+- **Default** — fallback for all of that collector’s traffic.
+- **Consumer ID** — only requests with that `consumer_id`.
+
+You can also bind routing from the collector’s **Policies** tab. A collector
+with no matching policy leaves that request **unguarded** (`status: "allow"`, no findings).
