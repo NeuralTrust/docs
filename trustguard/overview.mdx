@@ -1,114 +1,132 @@
 ---
 title: "Overview"
-description: "TrustGuard is NeuralTrust's runtime security service: it evaluates AI traffic against the collector's policy and reports findings — without ever dropping traffic."
+description: "TrustGuard inspects LLM and agent traffic against a policy and returns a verdict — allow, report, transform, ask, or block — that the collector enforces."
 ---
 
-**TrustGuard** is NeuralTrust's runtime security engine for generative-AI and agentic
-traffic. It inspects prompts, model output, documents, URLs, and agent/tool activity
-in flight and returns a structured security verdict for each request.
+**TrustGuard** is NeuralTrust's runtime security engine. It inspects prompts, completions,
+documents, URLs, and tool calls, then returns a structured verdict. It is **not** a
+gateway: it does not route, load-balance, or talk to model providers. The
+[collector](/trustguard/concepts/collectors) that called it decides whether to allow,
+mask, prompt the user, or block.
 
-TrustGuard is deliberately **decision-only**: it tells you *what* it found and *what*
-it would do, but it never blocks or drops traffic itself. The component that calls
-TrustGuard (the [collector](/trustguard/concepts/collectors)) decides whether to
-allow, mask, or block based on the verdict. This keeps TrustGuard safe to deploy
-inline anywhere — a failure or timeout can never take your application down.
+It sits next to **[TrustGate](/trustgate/overview)** (native inline enforcement) and
+**[TrustTest](/trusttest/getting-started/overview)** (red teaming). You can also attach it
+to another gateway, an SDK, a browser/WAF worker, or a coding-agent plugin.
 
-> TrustGuard pairs naturally with **[TrustGate](/trustgate/overview)** (the AI
-> gateway, the most common collector) and **[TrustTest](/trusttest/getting-started/overview)**
-> (red teaming).
+## What it inspects
 
-## What it does
+| Area | Catalog |
+|---|---|
+| Jailbreaks, toxicity, topic/keyword moderation | [Content security](/trustguard/detectors/content-security) |
+| PII and secrets (optional in-flight masking) | [Data loss prevention](/trustguard/detectors/data-loss-prevention) |
+| URLs and uploaded documents (indirect prompt injection, PII) | `url_analyzer`, `doc_analyzer` |
+| Tool-sourced content (MCP / `role=tool`) | [Agent & MCP security](/trustguard/detectors/agent-mcp-security) |
 
-<CardGroup cols={2}>
-  <Card title="Prompt & content security" icon="shield-check">
-    Jailbreak and prompt-injection detection, topic moderation, toxicity scoring,
-    plus document/URL screening for indirect prompt injection and PII (input).
-  </Card>
-  <Card title="Data loss prevention" icon="eye-off">
-    Detect and mask 43 PII entities and secrets (API keys, tokens, JWTs) in flight,
-    returning a transformed payload.
-  </Card>
-  <Card title="URL & document analysis" icon="file-search">
-    Fetch and screen URLs, and extract text from uploaded documents (including OCR)
-    for indirect prompt injection and PII before they reach the model.
-  </Card>
-  <Card title="Secrets in flight" icon="key">
-    Catch leaked credentials and sensitive tokens in prompts and model outputs
-    alongside PII masking.
-  </Card>
-</CardGroup>
+Detectors only **find**. What happens next is the [policy](/trustguard/concepts/policies):
+gates first (match attributes — consumer, model, tool, source, …), then detector rules
+(**Monitor** / **Block** / **Transform**).
 
-## The model in one minute
+## Where traffic comes from
 
-TrustGuard has four building blocks. You compose them once, then send traffic.
+Create a collector under **Runtime → Collectors → Catalog**.
+
+| Group | Examples |
+|---|---|
+| **Gateway** | [TrustGate](/trustguard/integrations/gateway/trustgate) (native — no `tgk_…` key), Portkey, LiteLLM, Kong, Apigee, Azure APIM |
+| **IDE & coding agents** | [Claude Enterprise](/trustguard/integrations/ide/claude-enterprise), [Claude Code](/trustguard/integrations/ide/claude-code), [Cursor](/trustguard/integrations/ide/cursor), [Codex](/trustguard/integrations/ide/codex) |
+| **Application** | [Python](/trustguard/integrations/application/python-sdk) / [Node](/trustguard/integrations/application/node-sdk) SDK, REST, middleware |
+| **Browser / WAF** | Chrome, Edge, Firefox; Cloudflare, CloudFront, Fastly, Akamai |
+
+Most collectors call [`POST /v1/evaluate`](/trustguard/api/evaluate) with a collector
+API key. TrustGate authenticates as the gateway. Claude Enterprise uses
+`POST /v1/evaluate/claude`.
+
+<Warning>
+A collector with **no matching policy** is **unguarded**: TrustGuard returns
+`status: "allow"` and inspects nothing. Assign a default policy (and per-consumer
+overrides if you need them) before you rely on it.
+</Warning>
+
+## Coding agents
+
+The **IDE & coding agents** catalog group covers developer tools. TrustGuard sees
+**prompts and tool use** (shell, MCP `tools/call`, tool results), not only chat.
+
+| Collector | Path | `source.application` | Enforcement |
+|---|---|---|---|
+| [Claude Enterprise](/trustguard/integrations/ide/claude-enterprise) | Org Inference Hooks (`/v1/evaluate/claude`) | `claude-ai`, `claude-code` | Allow or deny. **Ask** is not a dialog here. |
+| [Claude Code](/trustguard/integrations/ide/claude-code) | Laptop plugin + binary + `tgk_…` | `claude-code-plugin` | Block / Ask on input (prompt, PreToolUse) |
+| [Cursor](/trustguard/integrations/ide/cursor) | Plugin + MDM `cursor.json` | `cursor-plugin` | Same; Ask is Cursor’s permission dialog |
+| [Codex](/trustguard/integrations/ide/codex) | Plugin / managed hooks + `codex.json` | `codex-plugin` | Block to stop. Ask is extra context only (no dialog) |
+
+A gate on `claude-code` (Inference Hooks) does **not** match the laptop plugin
+(`claude-code-plugin`). TrustGate MCP is an [org Connector](/trustgate/mcp/claude), not
+these plugins — do not put a `tgk_…` key on the connector.
+
+Full list: [Integrations](/trustguard/integrations/overview).
+
+## Building blocks
 
 | Concept | What it is |
 |---|---|
-| **[Detector](/trustguard/concepts/detectors)** | A reusable, named detection you create from the [catalog](/trustguard/detectors/overview) — a catalog detector (e.g. `prompt_guard`, `data_loss_prevention`) plus its `settings` (thresholds, entity lists, …). Detection‑only — it decides *what* it finds, not what to do. |
-| **[Policy](/trustguard/concepts/policies)** | Where enforcement lives: **gates** (match request attributes before detection) + **detector rules** (Monitor / Block / Transform), plus **Observe / Enforce**. |
-| **[Collector](/trustguard/concepts/collectors)** | A traffic tap (gateway, SDK, browser, WAF) authenticated by an API key. It routes each request to a policy. |
-| **Finding** | What a gate or detector reported — its `source`, `signal`, `outcome`, and `evidence`. |
+| **[Detector](/trustguard/concepts/detectors)** | A named instance of a [catalog](/trustguard/detectors/overview) detector plus its settings. Detection-only. |
+| **[Policy](/trustguard/concepts/policies)** | Gates + detector rules (Input / Output), and **Observe / Enforce**. Built under **Runtime → Policies**. |
+| **[Collector](/trustguard/concepts/collectors)** | One tap. Routes each request to a policy. |
+| **Finding** | What a gate or detector reported (`source`, `signal`, `outcome`, `evidence`). |
+
+The request does **not** name detectors. TrustGuard resolves the collector, picks the
+policy, runs gates, then the detector rules that match `direction`. See
+[How it works](/trustguard/how-it-works).
+
+## Observe vs Enforce
+
+On the policy **Basics** tab:
+
+| Console | Effect |
+|---|---|
+| **Observe** | Record only. Status never goes past `report`. |
+| **Enforce** | Apply **Block** / **Ask** / **Transform** as configured. |
 
 ```text
-        POST /v1/evaluate  (Authorization: Bearer <collector api key>)
-                              │
- ┌──────────┐  resolves  ┌────▼─────┐  routes to  ┌──────────────────────────────┐
- │ API key  │───────────▶│Collector │────────────▶│ Policy                       │
- └──────────┘  collector └──────────┘   a policy   │  gates → detector rules      │
-                                                    └──────────────┬───────────────┘
-                                                                   ▼
-                    { status, findings[], transformed_payload, trace_id }
+block  →  ask  →  transform  →  report  →  allow
 ```
 
-A request names **no detectors**: TrustGuard resolves the collector's policy and
-runs its gates and the detector rules that match the request's direction and
-conditions. See [How it works](/trustguard/how-it-works).
-
-## What makes it safe to run inline
-
-<Warning>
-Traffic with **no matching policy** is **unguarded**: TrustGuard returns `status: "allow"` with no inspection. Attach a default (or per-consumer) policy on the collector after setup.
-</Warning>
-
-
-- **Never drops traffic.** A detection is always `HTTP 200` with the finding in the
-  response body. Non-2xx is reserved for auth (401), bad requests (400), and system
-  failures (500).
-- **Fail-open or fail-closed — your choice.** If a detector errors (e.g. an upstream
-  model API is down), TrustGuard either drops that detector's result and continues
-  (fail-open) or returns `500` so you can hold traffic (fail-closed). The mode is **configured per deployment** (ask NeuralTrust if unsure). A structured block decision always applies.
-- **Enforcement is the caller's choice.** The response `status`
-  (`allow` / `report` / `transform` / `ask` / `block`) is advisory. Your collector
-  decides what to do with it.
+The collector acts on `status`. TrustGate does it on the route; IDE plugins deny the
+tool or show a permission prompt. A detection is `HTTP 200` even when `status` is
+`block` — non-2xx is auth, a bad body, or a fail-closed detector error.
 
 ## Get started
 
-1. Create a collector ([TrustGate](/trustguard/integrations/gateway/trustgate), [SDK](/trustguard/integrations/application/python-sdk), or another collector).
-2. Create detectors from the [catalog](/trustguard/detectors/overview).
-3. Create a [policy](/trustguard/concepts/policies) with **Input** and **Output** detectors chained and configure rules if needed.
-4. Attach the policy to the collector created (default and/or per-consumer).
-5. Run a sample on the policy **Test** tab.
-6. Verify live traffic in **Activity**.
+1. Create a [collector](/trustguard/concepts/collectors) — TrustGate, a coding-agent
+   collector, or an SDK.
+2. Create [detectors](/trustguard/detectors/overview) you need (skip this if the policy
+   is gates only).
+3. Create a [policy](/trustguard/concepts/policies) in **Observe**. Add gates and/or
+   Input / Output detector rules.
+4. Attach it to the collector (**Policies** tab on the collector, or **Collectors** on
+   the policy).
+5. Run a sample on the policy **Test** tab, then check **Activity**.
+6. Switch the policy to **Enforce** when the signal looks right.
 
 ## Where to go next
 
 <CardGroup cols={2}>
   <Card title="How it works" icon="workflow" href="/trustguard/how-it-works">
-    The guard pipeline, gates, and the findings model.
-  </Card>
-  <Card title="Core concepts" icon="boxes" href="/trustguard/concepts/detectors">
-    Detectors, policies, and collectors.
+    Collector → policy → gates → detectors → status.
   </Card>
   <Card title="Policies" icon="shield-check" href="/trustguard/concepts/policies">
-    Gates, detector rules, and the Observe / Enforce switch.
+    Tabs, Observe / Enforce, gates (including Ask), Test.
+  </Card>
+  <Card title="Coding agents" icon="laptop" href="/trustguard/integrations/overview">
+    Claude Enterprise, Claude Code, Cursor, Codex.
   </Card>
   <Card title="Detector catalog" icon="list" href="/trustguard/detectors/overview">
-    Every built-in detection and its settings.
+    Built-in detections and settings.
   </Card>
   <Card title="Evaluate API" icon="code" href="/trustguard/api/evaluate">
-    The `POST /v1/evaluate` request and response contract.
+    `POST /v1/evaluate` request and response.
   </Card>
   <Card title="Telemetry Alerts" icon="siren" href="/platform/alerts">
-    Turn guard findings into prioritized alerts — prompt-injection spikes, leaked PII/secrets, toxicity bursts.
+    Turn findings into alerts.
   </Card>
 </CardGroup>
