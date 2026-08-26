@@ -1,0 +1,88 @@
+---
+title: "OpenAPI tools"
+description: "Expose a customer REST API as MCP tools by pointing an MCP registry at an OpenAPI 3 document."
+---
+
+TrustGate can turn an **OpenAPI 3** document into MCP **tools** without standing up a
+separate MCP server. The registry is still `type: MCP`. The discriminator is
+`mcp_target.source`: `mcp` (default, a real MCP URL) or `openapi` (compile operations
+from a spec).
+
+Agents keep talking MCP to TrustGate. TrustGate compiles the document, lists each
+callable operation as a tool, and on `tools/call` issues the matching REST request.
+
+<Note>
+OpenAPI registries are **tools only**. `prompts/*` and `resources/*` from that registry
+are empty. Other MCP registries on the same consumer still federate prompts and
+resources as usual.
+</Note>
+
+## Console
+
+1. Open **TrustGate** → **Registry** → **MCP** → **Add custom**.
+2. Set **Source** to **OpenAPI document** (instead of **MCP server URL**).
+3. Enter the **OpenAPI spec URL** (`http`/`https`, OpenAPI 3.x). Optionally set **API
+   base URL** to override `servers[0]`.
+4. Choose upstream auth: **None**, **Static header**, or **OAuth2 client credentials**.
+5. Select **Validate OpenAPI**. TrustGate fetches the spec, compiles tools, and previews
+   names, methods, and paths. Connect stays blocked until validation succeeds (`ok`).
+6. **Connect** / **Save**. Bind the registry to an [MCP consumer](/trustgate/mcp/overview)
+   and use toolkits the same way as for a remote MCP server.
+
+The data plane must be able to fetch the spec URL and call the resolved API base URL.
+SaaS cannot reach private VPC hosts unless you expose them; use
+[Hybrid](/neuraltrust/deployment/hybrid) for internal APIs.
+
+## What gets compiled
+
+| Rule | Behavior |
+|---|---|
+| One tool per operation | `operationId` when present; otherwise `{method}_{path}`. |
+| Arguments | Path, query, header, cookie parameters plus a JSON request body. |
+| Result schema | First `2xx` JSON response, when declared. |
+| Skipped operations | Non-JSON request bodies are omitted with an `unsupported_operation` warning. The rest of the spec still compiles. |
+| Size | At most **500** operations. More than **80** tools adds a `large_toolset` warning so you can curate with a toolkit. |
+| Fetch | Spec up to **5 MB**, **10 s** timeout. External `$ref`s are not followed. Private, loopback, link-local, and reserved destinations are rejected (SSRF). |
+
+Validate always returns HTTP 200 for spec outcomes and reports `ok` plus the failing
+`stage` (`fetch`, `parse`, `compile`). Create and update still compile server-side and
+return **422** if the document is invalid.
+
+## Auth to the REST API
+
+How TrustGate authenticates **to the OpenAPI backend** (not how the agent authenticates
+to TrustGate):
+
+| Mode | Use when |
+|---|---|
+| `none` | The API is open on the network TrustGate can reach. |
+| `static` | A fixed header (API key, `Authorization: Bearer …`). |
+| `client_credentials` | TrustGate fetches a token from a token URL and attaches it. |
+
+`passthrough`, `exchange`, and `forwarded` are **not** supported for OpenAPI sources.
+
+## Example: TrustGate Admin API
+
+The Admin plane publishes its own OpenAPI document (`docs/openapi.json` in the TrustGate
+repo). You can register that spec as an OpenAPI MCP source to drive Admin from an agent
+— useful for dogfooding and for verifying compilation against a large real document.
+
+1. Serve or publish the spec at an `https` URL the data plane can fetch (or point
+   `spec_url` at Admin if you expose `/openapi.json` / swagger).
+2. Set **API base URL** (`mcp_target.url`) to the Admin origin (for example
+   `https://admin.example:8080`). The generated document uses `servers: [{ "url": "/" }]`,
+   so without an override the base URL is resolved relative to the spec URL.
+3. Use **static** auth with an Admin JWT (`Authorization` + `Bearer <token>`).
+4. Validate, connect, bind a consumer, then call `tools/list`. Expect on the order of
+   tens of tools (`GET /healthz`, `POST /v1/gateways`, registry CRUD, including
+   `POST /v1/gateways/{gateway_id}/registries/validate-openapi`).
+5. Curate with a **toolkit** before giving an agent the full Admin surface.
+
+Do not point a production agent at live Admin unless that is an explicit operational
+choice. Prefer a scoped toolkit and a dedicated Admin token.
+
+## Related
+
+- [MCP plane](/trustgate/mcp/overview) — federation, toolkits, agent OAuth
+- [Registries](/trustgate/concepts/registries) — connecting MCP and LLM backends
+- [Connect from Cursor](/trustgate/mcp/cursor)
