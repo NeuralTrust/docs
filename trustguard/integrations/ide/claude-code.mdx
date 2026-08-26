@@ -1,0 +1,143 @@
+---
+title: "Claude Code"
+description: "Local TrustGuard lifecycle hooks on Claude Code — plugin, binary, and collector key. TrustGate MCP stays on org Connectors."
+---
+
+The [TrustGuard Claude Code plugin](https://github.com/NeuralTrust/trustguard-claude-code-plugin)
+adds **lifecycle hooks** on the developer machine. It calls
+[`POST /v1/evaluate`](/trustguard/api/evaluate) with a collector `tgk_…` key.
+
+This is **not** [Claude Enterprise Inference Hooks](/trustguard/integrations/ide/claude-enterprise)
+(`POST /v1/evaluate/claude`, `source.application = claude-code`). The plugin stamps
+`source.application = claude-code-plugin`. Gate the two paths separately.
+
+**TrustGate MCP is not this plugin.** Org-wide MCP (claude.ai, Desktop, Cowork,
+Claude Code) is an [organization connector](/trustgate/mcp/claude). Do not put
+the collector `tgk_…` on the connector, and do not put the MCP URL in the
+plugin (`pluginConfigs` / `mcpServers`).
+
+## Three pieces
+
+Hooks fire only when all three are present:
+
+| Piece | What | If missing |
+|---|---|---|
+| **Plugin** `trustguard@neuraltrust` | Registers `hooks.json` | Claude Code never calls bootstrap |
+| **Binary** `trustguard-claude-code` | Kandji `/Library/Application Support/TrustGuard/bin/` or `~/.trustguard/bin` | Bootstrap fail-opens (`{}`) |
+| **Collector key** `tgk_…` | `claude-code.json` | Binary runs and **allows without evaluate** |
+
+`claude plugin list` showing the plugin **installed** is not enough. **Status
+must be enabled.** `Scope: managed` only means the marketplace installed it.
+
+## Console setup
+
+1. **Runtime → Collectors → Catalog → IDE & coding agents → Claude Code** (or the Claude Code collector type your workspace lists).
+2. **Auth** — mint a `tgk_…` key (shown once).
+3. **Policies** — assign a default [policy](/trustguard/concepts/policies). Gate **Ask** / **Block** on `source.application` **eq** `claude-code-plugin` if this collector also receives other traffic.
+
+## Enable the plugin
+
+Server-managed settings (claude.ai **Admin → Claude Code → Managed settings**) or
+`/Library/Application Support/ClaudeCode/managed-settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "neuraltrust": {
+      "source": {
+        "source": "github",
+        "repo": "NeuralTrust/trustguard-claude-code-plugin"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "trustguard@neuraltrust": true
+  }
+}
+```
+
+No `pluginConfigs`. No MCP URL.
+
+`enabledPlugins: true` in the admin JSON does **not** always flip the CLI to
+enabled. Claude Code skips server-managed settings when
+`ANTHROPIC_BASE_URL` or `CLAUDE_CODE_USE_*` is set (including a TrustGate LLM
+proxy). In that case deploy the **file** path above (Kandji:
+`TRUSTGUARD_DEPLOY_CLAUDE_MANAGED_SETTINGS=1`).
+
+Check on the laptop:
+
+```bash
+# Inside `claude`: /status  →  Enterprise managed settings: remote  (or file)
+claude plugin list          # Status: enabled
+claude plugin enable trustguard@neuraltrust   # if still disabled
+```
+
+Then start a **new** Claude Code session so `hooks.json` loads.
+
+## Collector config + binary (MDM)
+
+```json
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "open"
+}
+```
+
+| OS | Config | Binary (optional pin) |
+|---|---|---|
+| macOS | `/Library/Application Support/TrustGuard/claude-code.json` | `…/TrustGuard/bin/trustguard-claude-code` |
+| Linux | `/etc/trustguard/claude-code.json` | `~/.trustguard/bin/` |
+| Windows | `%ProgramData%\TrustGuard\claude-code.json` | `%ProgramData%\TrustGuard\bin\` |
+
+If the managed file has `api_key`, that key, `data_url`, and `fail_mode` are
+locked. Missing `~/.trustguard/bin` is fine when the MDM binary exists.
+
+Private GitHub repo: bootstrap `curl` of Releases **404s** without a token
+(fail-open). Kandji install can set `TRUSTGUARD_GITHUB_TOKEN` and pin the
+release version.
+
+`fail_mode: open` + an empty hook body `{}` means **allow**. That is also the
+response when evaluate returns `allow`.
+
+## What is evaluated
+
+| Claude Code event | Protocol | Direction | Notes |
+|---|---|---|---|
+| `UserPromptSubmit` | `llm` | input | Block / Ask on the prompt |
+| `PreToolUse` (`Bash` / `Shell`) | `all` (`{ "input": "<command>" }`) | input | `tool.command` is the line; `tool.name` is `Bash` |
+| `PreToolUse` (MCP and other tools) | `mcp` `tools/call` | input | `tool.name` = `payload.params.name` (last segment of `mcp__server__tool`) |
+| `PostToolUse` | `mcp` result | output | Ask gates do not match |
+
+Ask on PreToolUse shows Claude Code’s permission dialog. The **subtitle** is
+the generic TrustGuard sentence above. The **title** (tool name) is Claude
+Code’s; the plugin cannot change it.
+
+## Verify
+
+```bash
+ls -l "/Library/Application Support/TrustGuard/bin/trustguard-claude-code"
+cat "/Library/Application Support/TrustGuard/claude-code.json"   # data_url + tgk_ prefix only
+
+echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"},"session_id":"pilot"}' \
+  | trustguard-claude-code hook
+```
+
+A manual probe that shows up in **Activity** with
+`source.application = claude-code-plugin` means the binary and key work. If
+Claude Code still never evaluates, the plugin is disabled or hooks did not
+reload.
+
+Remote SSH / WSL: hooks run on the **remote** host. A Kandji binary on the Mac
+does not cover that session.
+
+claude.ai / Desktop: no lifecycle hooks. Use Inference Hooks and/or org
+Connectors, not this plugin.
+
+## Related
+
+- [Claude Enterprise (Inference Hooks)](/trustguard/integrations/ide/claude-enterprise)
+- [Policies — Gates](/trustguard/concepts/policies#gates)
+- [Evaluate API](/trustguard/api/evaluate)
+- [Plugin repo](https://github.com/NeuralTrust/trustguard-claude-code-plugin)
