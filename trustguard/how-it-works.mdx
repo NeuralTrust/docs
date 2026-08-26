@@ -25,22 +25,23 @@ TrustGuard picks the [policy](/trustguard/concepts/policies) for this request:
 
 If the collector has no matching policy, the request is **unguarded**: TrustGuard
 returns `status: "allow"` with no findings. The policy's **Enforcement mode**
-(Report vs Enforce) is read here — in **Report** mode every action below is
+(Observe vs Enforce) is read here — in **Observe** every action below is
 downgraded to a non‑blocking record.
 
 ## 3. Run gates
 
-[Gates](/trustguard/concepts/policies#gates-match-before-you-detect) are
-evaluated **before** any detector. Each gate matches request **attributes**
-(consumer, model, collector, protocol, session) and takes an action:
+[Gates](/trustguard/concepts/policies#gates) are evaluated **before** any
+detector. Each gate matches request **attributes** (consumer, model, collector,
+protocol, direction, tool, session, source) and takes an action:
 
 | Gate action | Effect |
 |---|---|
-| **Block** | The request is blocked and **detectors are skipped**. Returns `status: "block"`. |
+| **Block** | Detectors skipped. Returns `status: "block"`. |
 | **Report** | Records a finding and continues to detection. |
-| **Skip** | Stops gate evaluation and proceeds to detection — no finding. |
+| **Skip** | Stops remaining gates and proceeds to detection — no finding. |
+| **Ask** | Detectors skipped. Returns `status: "ask"`. Matches **input** only (empty `direction` counts as input); ignored on output. |
 
-All gates are evaluated and the most restrictive outcome wins.
+Block, Skip, and Ask end the gate chain. Report continues.
 
 ## 4. Run the detector rules
 
@@ -75,10 +76,10 @@ Everything that fired is reduced to one top‑level `status`, most to least
 restrictive:
 
 ```text
-block  →  transform  →  report  →  allow
+block  →  ask  →  transform  →  report  →  allow
 ```
 
-In **Report** mode, blocks and transforms are downgraded, so the status never
+In **Observe**, blocks, asks, and transforms are downgraded, so the status never
 exceeds `report`.
 
 ## 6. The response
@@ -102,7 +103,7 @@ exceeds `report`.
 
 | Field | Meaning |
 |---|---|
-| `status` | `allow` · `report` · `transform` · `block` — the reduced verdict. Advisory: the caller enforces. |
+| `status` | `allow` · `report` · `transform` · `ask` · `block` — the reduced verdict. Advisory: the caller enforces. |
 | `transformed_payload` | The rewritten payload, or absent/`null` if no Transform rule changed anything. |
 | `findings[]` | One entry per gate or detector that fired. See the [Evaluate API](/trustguard/api/evaluate) for the full shape. |
 | `trace_id` / `request_id` | Correlation IDs propagated through logs and telemetry. |
