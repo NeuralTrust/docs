@@ -21,8 +21,9 @@ resources as usual.
 
 1. Open **TrustGate** → **Registry** → **MCP** → **Add custom**.
 2. Set **Source** to **OpenAPI document** (instead of **MCP server URL**).
-3. Enter the **OpenAPI spec URL** (`http`/`https`, OpenAPI 3.x). Optionally set **API
-   base URL** to override `servers[0]`.
+3. Enter the **OpenAPI spec URL** (`http`/`https`, OpenAPI 3.x). This must be the raw
+   JSON or YAML document, not a Swagger UI page. Optionally set **API base URL** to
+   override `servers[0]`.
 4. Choose upstream auth: **None**, **Static header**, or **OAuth2 client credentials**.
 5. Select **Validate OpenAPI**. TrustGate fetches the spec, compiles tools, and previews
    names, methods, and paths. Connect stays blocked until validation succeeds (`ok`).
@@ -48,6 +49,10 @@ Validate always returns HTTP 200 for spec outcomes and reports `ok` plus the fai
 `stage` (`fetch`, `parse`, `compile`). Create and update still compile server-side and
 return **422** if the document is invalid.
 
+Only **OpenAPI 3.x** is accepted. A Swagger 2.0 document fails at the `parse` stage with
+`value of openapi must be a non-empty string`; convert it first (for example with
+`swagger2openapi`) and publish the OpenAPI 3 result.
+
 ## Auth to the REST API
 
 How TrustGate authenticates **to the OpenAPI backend** (not how the agent authenticates
@@ -63,20 +68,25 @@ to TrustGate):
 
 ## Example: TrustGate Admin API
 
-The Admin plane publishes its own OpenAPI document (`docs/openapi.json` in the TrustGate
-repo). You can register that spec as an OpenAPI MCP source to drive Admin from an agent
-— useful for dogfooding and for verifying compilation against a large real document.
+The Admin plane serves its own OpenAPI 3 document at **`GET /docs/openapi.json`**, public
+like Swagger UI. You can register it as an OpenAPI MCP source to drive Admin from an
+agent — useful for dogfooding and for checking a large real document.
 
-1. Serve or publish the spec at an `https` URL the data plane can fetch (or point
-   `spec_url` at Admin if you expose `/openapi.json` / swagger).
-2. Set **API base URL** (`mcp_target.url`) to the Admin origin (for example
-   `https://admin.example:8080`). The generated document uses `servers: [{ "url": "/" }]`,
-   so without an override the base URL is resolved relative to the spec URL.
+1. Use the Admin origin plus that path as the **spec URL**, for example
+   `https://admin.example/docs/openapi.json`.
+2. Leave **API base URL** empty. The document declares `servers: [{ "url": "/" }]`, so
+   the base resolves to the host that served the spec.
 3. Use **static** auth with an Admin JWT (`Authorization` + `Bearer <token>`).
 4. Validate, connect, bind a consumer, then call `tools/list`. Expect on the order of
    tens of tools (`GET /healthz`, `POST /v1/gateways`, registry CRUD, including
    `POST /v1/gateways/{gateway_id}/registries/validate-openapi`).
 5. Curate with a **toolkit** before giving an agent the full Admin surface.
+
+<Warning>
+`/docs/*` (Swagger UI) publishes **Swagger 2.0**, which the compiler rejects at the
+`parse` stage. Always point `spec_url` at `/docs/openapi.json`, and never at the Swagger
+UI HTML page.
+</Warning>
 
 Do not point a production agent at live Admin unless that is an explicit operational
 choice. Prefer a scoped toolkit and a dedicated Admin token.
