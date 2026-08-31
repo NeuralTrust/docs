@@ -1,0 +1,291 @@
+---
+title: Google Workspace SSO
+description: "Step-by-step guide to configure Google Workspace Single Sign-On for NeuralTrust, including optional directory group sync via a service account."
+---
+
+# Google Workspace Single Sign-On
+
+Single Sign-On (SSO) lets your organization members sign in to NeuralTrust with their
+Google Workspace accounts instead of a separate password. NeuralTrust has a **dedicated
+Google Workspace provider** — you no longer need to configure it as a generic OIDC
+provider — which adds **directory group sync**: NeuralTrust reads your Workspace groups
+and their members to drive platform roles and gateway access.
+
+<Note>
+**Using a different identity provider?** For Microsoft, see [Microsoft Entra ID SSO](/platform/sso).
+For Okta, Auth0, PingIdentity, or any other OIDC provider, see
+[Generic OIDC SSO](/platform/generic-oidc-sso).
+</Note>
+
+## What you get
+
+- **Login** — a **Sign in with Google** button on the NeuralTrust login page (OAuth 2.0).
+- **Directory group sync (optional)** — NeuralTrust pulls your Workspace groups and
+  members from the Admin SDK Directory API, so you can map groups to roles and gateway
+  access. Without it, login still works; only group-based governance is unavailable.
+
+<Note>
+The two halves use **different Google credentials**. Login uses an **OAuth client**.
+Directory sync uses a **service account with domain-wide delegation**. You configure
+both in NeuralTrust, but they are set up separately in Google.
+</Note>
+
+## Prerequisites
+
+Before you begin, ensure you have:
+
+- A Google Workspace organization
+- **Super Admin** access to the [Google Admin console](https://admin.google.com) (only a
+  super admin can authorize directory access org-wide)
+- Access to a [Google Cloud](https://console.cloud.google.com) project
+- Owner or Admin role in NeuralTrust
+
+---
+
+## Part 1: Create the OAuth client (login)
+
+### Step 1: Configure the OAuth consent screen
+
+1. Go to <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank">Google Cloud Console → APIs &amp; Services → OAuth consent screen</a>
+2. Set **User type** to **Internal** (only your Workspace users can sign in)
+3. Fill in the app name (e.g. `NeuralTrust`), support email, and developer contact
+4. Save
+
+### Step 2: Create the OAuth client ID
+
+1. Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank">APIs &amp; Services → Credentials</a>
+2. Click **+ Create Credentials** → **OAuth client ID**
+3. **Application type**: **Web application**
+4. **Name**: `NeuralTrust SSO`
+5. Under **Authorized redirect URIs**, add:
+   ```
+   https://app.neuraltrust.ai/api/auth/callback/google-workspace
+   ```
+6. Click **Create**
+
+### Step 3: Copy your credentials
+
+Copy the **Client ID** and **Client secret** shown after creation — you'll enter them in
+NeuralTrust. The login flow requests the standard `openid email profile` scopes only.
+
+<Warning>
+The redirect URI must match **exactly**, including the path
+`/api/auth/callback/google-workspace`. A mismatch causes a `redirect_uri_mismatch` error.
+</Warning>
+
+---
+
+## Part 2: Enable directory group sync (optional)
+
+Skip this part if you only want login. Complete it to map Google groups to NeuralTrust
+roles and gateway access.
+
+### Step 1: Enable the Admin SDK API
+
+1. In your Google Cloud project, go to <a href="https://console.cloud.google.com/apis/library/admin.googleapis.com" target="_blank">APIs &amp; Services → Library</a>
+2. Search for **Admin SDK API** and click **Enable**
+
+### Step 2: Create a service account and key
+
+1. Go to <a href="https://console.cloud.google.com/iam-admin/serviceaccounts" target="_blank">IAM &amp; Admin → Service Accounts</a>
+2. Click **+ Create Service Account**, name it `neuraltrust-directory`, and create it
+3. Open the service account → **Keys** → **Add key** → **Create new key** → **JSON**
+4. A JSON key file downloads. Keep it safe — you'll paste its contents into NeuralTrust
+5. On the service account's **Details** page, copy its **Unique ID (Client ID)** — a long
+   numeric value you'll need in the next step
+
+### Step 3: Authorize domain-wide delegation
+
+1. Go to <a href="https://admin.google.com/ac/owl/domainwidedelegation" target="_blank">Google Admin console → Security → Access and data control → API controls → Domain-wide delegation</a>
+2. Click **Add new**
+3. **Client ID**: the service account's numeric Client ID from the previous step
+4. **OAuth scopes**: paste these three, comma-separated (read-only):
+   ```
+   https://www.googleapis.com/auth/admin.directory.group.readonly,
+   https://www.googleapis.com/auth/admin.directory.group.member.readonly,
+   https://www.googleapis.com/auth/admin.directory.user.readonly
+   ```
+5. Click **Authorize**
+
+<Note>
+Directory access is granted by **impersonating an admin**. In NeuralTrust you provide a
+**delegation subject** — the email of a Google Workspace admin the service account acts
+as when reading the directory.
+</Note>
+
+---
+
+## Part 3: Configure NeuralTrust
+
+### Step 1: Open SSO settings
+
+1. Log in to <a href="https://app.neuraltrust.ai" target="_blank">NeuralTrust</a> as Owner or Admin
+2. Open the sidebar gear → **Platform settings → SSO Configuration**
+3. Select **Google Workspace**
+
+### Step 2: Enter your credentials
+
+| Field | Value |
+|-------|-------|
+| **Client ID** | The OAuth client ID from Part 1 |
+| **Client Secret** | The OAuth client secret from Part 1 (paste to set or rotate) |
+| **Service account JSON** | The full JSON key from Part 2, Step 2 |
+| **Delegation subject** | A Google Workspace **admin email** for domain-wide delegation |
+
+<Note>
+**Login only?** You can leave the service account JSON and delegation subject empty.
+Login works with just the OAuth client; directory group sync stays off until you add them.
+</Note>
+
+<Note>
+**Rotating the service account.** When editing an existing connection, leave the service
+account JSON blank to keep the stored value. Paste a new JSON only to rotate it.
+</Note>
+
+### Step 3: Test and save
+
+1. Click **Test Connection** — this validates the OAuth client and, if provided, the
+   service account and delegation
+2. On success, click **Save**
+
+---
+
+## Part 4: Verify your email domain
+
+Domain verification ensures only members of your organization's domain can use SSO.
+
+1. Open **Platform settings → SSO Configuration → Domains**
+2. Click **Add Domain** and enter your company domain (e.g. `yourcompany.com`)
+3. Copy the verification token (e.g. `neuraltrust-verify-abc123-def456`)
+4. In your DNS provider, add a **TXT** record with the token as its value (Name `@`, TTL default)
+5. Back in NeuralTrust, click **Verify**
+
+<Note>
+DNS changes can take up to 48 hours to propagate. If verification fails immediately, try
+again later.
+</Note>
+
+---
+
+## Part 5: Map Google groups to roles
+
+Role mapping assigns NeuralTrust roles automatically from Google Workspace group
+membership. It requires directory group sync (Part 2) to be configured.
+
+### Step 1: Add group mappings
+
+1. Go to **Platform settings → SSO Configuration → Users & groups**
+2. Click **Add Group Mapping**
+3. Select a Google group and choose the NeuralTrust role to assign:
+
+| Role | Access Level |
+|------|--------------|
+| **Global Admin** | Full admin across products and platform settings; billing visibility |
+| **Admin** | Manage members, most settings |
+| **Editor** / **Viewer** | Product permission levels — see [User &amp; Roles](/platform/users) |
+
+<Note>
+Do **not** map IdP groups to **Owner**. There is exactly one Owner per organization;
+transfer ownership in [User &amp; Roles](/platform/users) instead.
+</Note>
+
+4. For Editor / Viewer mappings, set **Product Access** — which products the group can use
+5. Enable **Auto Sync** to include the group in synchronization
+6. Click **Save**
+
+### Step 2: Review synced groups
+
+The **Groups** tab under **Users & groups** lists every group in your unified directory
+with its **source** (SCIM, directory, or login) and **member count**, so you can confirm
+the sync is working before you rely on a mapping.
+
+<Note>
+Users are assigned the role from the **first matching group mapping**. If a user belongs
+to multiple mapped groups, the highest-priority mapping (by creation order) wins.
+</Note>
+
+---
+
+## Part 6: How directory sync stays fresh
+
+Once configured, group membership is kept current from three sources, so a mapping always
+reflects reality:
+
+| When | What happens |
+|------|--------------|
+| **On login** | The signing-in user's group membership is resolved from the Directory API and applied immediately. |
+| **Scheduled** | A background job refreshes every team's directory (groups + members) on a schedule, so membership for **all** users stays fresh between logins. |
+| **On demand** | An admin can trigger a sync from the settings UI. |
+
+<Note>
+A Google Workspace user's login token does **not** carry group claims. NeuralTrust resolves
+groups from the Directory API instead — which is why directory sync (Part 2) is required
+for any group-based access, including [gateway and MCP](/trustgate/concepts/roles) role
+gates.
+</Note>
+
+<Warning>
+Directory sync **never grants more than the directory says**. If the directory is
+temporarily unreachable, group-based access **fails closed** (denied), never open, and a
+role that depends on an unknown group stays denied.
+</Warning>
+
+---
+
+## Part 7: Enforce SSO-only mode (optional)
+
+1. Open **Platform settings → SSO Configuration**
+2. Toggle **Enforce SSO** to ON and confirm
+
+<Note>
+When enabled, members on a **verified** domain must authenticate through Google.
+Exceptions:
+
+- **Break the Glass** accounts sign in with **password only**.
+- **External-domain guests** (an invited email whose domain is *not* verified) sign in
+  with a **magic link**, even when Enforce SSO is on.
+
+**Prerequisites:** add at least one [Break the Glass](/platform/break-glass) account and
+configure your **Email Domain** first.
+</Note>
+
+---
+
+## User experience
+
+Once configured, users see a **Sign in with Google** button on the login page. After
+clicking it they are redirected to Google, authenticate, and return signed in. For new
+users on a verified domain, accounts are created automatically on first login.
+
+---
+
+## Troubleshooting
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `redirect_uri_mismatch` | Redirect URI doesn't match | Ensure the OAuth client lists `https://app.neuraltrust.ai/api/auth/callback/google-workspace` exactly |
+| `access_denied` / `admin_policy_enforced` | Consent screen or app blocked | Set the consent screen to **Internal**; confirm the app is allowed for your org |
+| "Directory not connected" | Service account or delegation missing | Add the **Service account JSON** and **Delegation subject** in NeuralTrust |
+| "Directory not authorized" | Delegation or scopes rejected by Google | Re-check domain-wide delegation: the service account's Client ID and all three `admin.directory.*.readonly` scopes must be authorized, and the delegation subject must be a valid admin |
+| Groups don't appear | Admin SDK API disabled, or delegation not propagated | Enable the **Admin SDK API**; delegation changes can take a few minutes to apply |
+| "Connection failed" | Invalid OAuth credentials | Verify the Client ID and Client Secret |
+
+---
+
+## Security best practices
+
+1. **Keep the consent screen Internal** so only your Workspace users can sign in
+2. **Grant read-only scopes only** — the directory scopes above are all `.readonly`
+3. **Rotate the service account key** periodically (paste a new JSON to rotate)
+4. **Enforce SSO-only mode** once all users are onboarded, keeping a
+   [Break the Glass](/platform/break-glass) account for outages
+5. **Verify every email domain** your organization uses
+6. **Monitor [audit logs](/platform/audit-logs)** for suspicious login patterns
+
+## Next steps
+
+- [Microsoft Entra ID SSO](/platform/sso) — Configure SSO with Microsoft Entra ID
+- [Generic OIDC SSO](/platform/generic-oidc-sso) — Okta, Auth0, and other providers
+- [Configure Break the Glass](/platform/break-glass) — Emergency access for IdP outages
+- [Configure SCIM Provisioning](/platform/scim) — Automate user account lifecycle
+- [Set Up Audit Logs](/platform/audit-logs) — Monitor SSO-related security events
