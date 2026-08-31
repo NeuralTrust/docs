@@ -1,150 +1,93 @@
 ---
 title: Manual User Sync
-description: "Synchronize users from Microsoft Entra ID groups on-demand. Import users with role assignments based on group mappings."
+description: "Provision users from Microsoft Entra ID groups without SCIM, using group-to-role mapping in Role Provisioning."
 ---
 
 # Manual User Sync
 
-Manual User Sync allows you to import users from Microsoft Entra ID groups with a single click. Unlike SCIM (which syncs automatically), Manual Sync gives you full control over when users are imported.
+Manual User Sync provisions users from **Microsoft Entra ID** groups **without** a separate
+SCIM Enterprise Application — it reuses your existing SSO app registration's Graph
+permissions. Users are admitted and assigned roles from your group mappings when they sign
+in, according to the **enforcement mode** you choose.
 
-## Benefits
+<Note>
+**Group-to-role mapping now lives in [Role Provisioning](/platform/role-provisioning).**
+That single section replaces the old *Role mapping*, *User provisioning*, *SCIM*, and
+*Trust identity provider* screens. This page covers the Entra-specific prerequisites and
+how manual (non-SCIM) provisioning behaves.
+</Note>
 
-- **On-demand import**: Sync users when you're ready
-- **Preview before sync**: Review which users will be imported
-- **Role-based access**: Users get roles based on group mappings
-- **No Azure Enterprise App needed**: Uses your existing SSO app registration
+## When to use it
+
+| Use Manual (non-SCIM) provisioning when… | Use [SCIM](/platform/scim) when… |
+|------------------------------------------|----------------------------------|
+| You don't want a separate Azure Enterprise App | You want a fully automated user lifecycle |
+| You handle offboarding yourself | Auto-deprovisioning is required |
+| Roles should apply at sign-up / login | Your IdP should create and deactivate users directly |
+
+<Warning>
+Manual provisioning and SCIM are **alternative approaches** for the same goal. SCIM is
+available **only with Microsoft Entra ID**, and only one identity provider can be active at
+a time. Don't run both against the same users.
+</Warning>
 
 ## Prerequisites
 
-Before using Manual User Sync:
-
-1. [SSO must be configured](/platform/sso) and working
-2. [Role mappings must be set up](/platform/sso#part-4-configure-role-mapping-optional)
-3. API permissions must be granted:
+1. [Microsoft Entra ID SSO is configured](/platform/sso) and working
+2. At least one **verified email domain**
+3. Your app registration has these **Application** Graph permissions, with admin consent:
    - `User.Read.All`
    - `GroupMember.Read.All`
    - `Group.Read.All`
 
+<Note>
+Without `Group.Read.All` (and consent), no groups appear in the Role Provisioning picker.
+</Note>
+
+## Configure it in Role Provisioning
+
+1. Log in as Owner or Admin → **Platform settings → Role Provisioning**
+2. Turn on **User provisioning & role mapping**
+3. Set a **Default Access** role for users who match no mapped group (or **No NeuralTrust
+   access**)
+4. Choose an **Enforcement** mode:
+
+| Mode | Behavior |
+|------|----------|
+| **At sign-up only** | Role assigned on first sign-in; never overwritten afterwards |
+| **At sign-up and login** | Role re-applied every sign-in; a manual edit in [Users & groups](/platform/users) is overwritten on next login |
+
+5. Under **Role Mapping**, add a row per Entra group and choose its platform role:
+
+| Role | Access Level |
+|------|--------------|
+| **Global Admin** | Full admin across products and platform settings; billing visibility |
+| **Admin** | Manage members, most settings |
+| **Editor** / **Viewer** | Product permission levels — see [Users & groups](/platform/users) |
+
 <Warning>
-Manual User Sync and SCIM Provisioning are **alternative approaches**. You can use either one, but using both simultaneously may cause conflicts. Choose the method that best fits your workflow.
+A user in **several** mapped groups gets the **highest-privilege** role among them — not
+the first match. Do **not** map IdP groups to **Owner**; transfer ownership in
+[Users & groups](/platform/users) instead.
 </Warning>
 
----
+## What manual provisioning does not do
 
-## Part 1: Set Up Group Mappings
+- It does **not** auto-deprovision. Removing a user from an Entra group does not remove them
+  from NeuralTrust — remove them in [Users & groups](/platform/users), or use
+  [SCIM](/platform/scim) for automatic offboarding.
 
-Before syncing users, you need to map Azure AD groups to NeuralTrust roles.
+## Verify
 
-### Step 1: Open User Sync Settings
+1. Open **Platform settings → Users & groups**
+2. Confirm the expected members appear with the correct roles
+3. The **Groups** tab shows each synced group with its **source** and **member count**
 
-1. Log in to <a href="https://app.neuraltrust.ai" target="_blank">NeuralTrust</a> as Owner or Admin
-2. Open the sidebar gear → **Platform settings → SSO Configuration**
-3. Click the **Entra ID User Sync** tab
+All provisioning actions are recorded in [Audit Logs](/platform/audit-logs).
 
-### Step 2: Add Group Mappings
+## Related documentation
 
-1. Click **Add Group Mapping**
-2. Select an Azure AD group from the dropdown
-3. Choose the role to assign (Owner, Admin, or Member)
-4. For Member role, optionally configure product access
-5. Enable **Auto Sync** to include in sync operations
-6. Click **Save**
-
-Repeat for each group you want to sync.
-
-<Note>
-If no groups appear in the dropdown, verify that your app registration has `Group.Read.All` permission with admin consent granted.
-</Note>
-
----
-
-## Part 2: Preview and Sync Users
-
-### Step 1: Preview Sync
-
-1. Go to **Settings** → **SSO** → **Sync Users** tab
-2. Click **Preview Sync**
-3. Review the list showing:
-   - User email and name
-   - Source Azure AD group(s)
-   - Role that will be assigned
-   - Action: **Create** (new user) or **Update** (existing user)
-
-### Step 2: Execute Sync
-
-1. Review the preview carefully
-2. Click **Sync Now**
-3. Wait for the sync to complete
-4. Check the **Synced Users** tab to verify imported users
-
-### What Happens During Sync
-
-| Scenario | Action |
-|----------|--------|
-| New user (not in NeuralTrust) | Account created with mapped role |
-| Existing user (already in team) | Role updated if different |
-| User removed from Azure group | **Not automatically removed** — use SCIM for auto-deprovisioning |
-| User in multiple mapped groups | Gets role from first matching mapping |
-
-<Note>
-A manual role change made in **User & Roles** stays in place until you run sync again. Because Manual Sync only runs when you click **Sync Now**, a manual edit is only overwritten by the mapped group role at that point — not automatically in between.
-</Note>
-
----
-
-## Part 3: View Imported Users
-
-### Step 1: Check Synced Users
-
-1. Go to **Settings** → **SSO** → **Synced Users** tab
-2. View all users imported via Manual Sync
-3. See their assigned roles and source groups
-
-### Step 2: Verify in Team Members
-
-1. Open **Platform settings → User & Roles**
-2. Confirm users appear with correct roles
-3. Verify they can sign in via SSO
-
----
-
-## Comparison: Manual Sync vs SCIM
-
-| Feature | Manual Sync | SCIM |
-|---------|-------------|------|
-| **Sync trigger** | Manual (on-demand) | Automatic (every 40 min) |
-| **User creation** | ✓ | ✓ |
-| **User updates** | ✓ | ✓ |
-| **User deprovisioning** | ✗ Manual removal | ✓ Automatic |
-| **Azure setup** | SSO app only | Separate Enterprise App |
-| **Best for** | Controlled onboarding | Fully automated lifecycle |
-
----
-
-## Troubleshooting
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| No groups in dropdown | Missing API permissions | Add `Group.Read.All` and grant admin consent |
-| "No users to sync" | No users in mapped groups | Add users to Azure AD groups, or check group mappings |
-| User not synced | Not in any mapped group | Verify user is member of a group with Auto Sync enabled |
-| Wrong role assigned | Multiple group memberships | Check mapping order; first match wins |
-| Sync failed | Token expired or invalid | Re-test SSO connection, regenerate client secret if needed |
-
----
-
-## Security Best Practices
-
-1. **Review before syncing** — Always use Preview to verify which users will be imported
-2. **Use Azure AD groups** — Manage access through groups, not individual assignments
-3. **Regular audits** — Check imported users periodically in the Synced Users tab
-4. **Monitor audit logs** — All sync operations are logged in [Audit Logs](/platform/audit-logs)
-
----
-
-## Related Documentation
-
-- [Configure SSO](/platform/sso) — Set up SSO and role mappings
-- [Configure SCIM Provisioning](/platform/scim) — For fully automated user lifecycle
+- [Role Provisioning](/platform/role-provisioning) — Group-to-role mapping and enforcement
+- [Microsoft Entra ID SSO](/platform/sso) — Connect Entra ID
+- [SCIM Provisioning](/platform/scim) — Fully automated user lifecycle
 - [Audit Logs](/platform/audit-logs) — Monitor sync and access events
-- [Integrations](/platform/alert-integrations) — Forward alert findings to your security platform
