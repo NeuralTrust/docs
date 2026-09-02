@@ -1,0 +1,124 @@
+---
+title: "Browser extension"
+description: "Discover by NeuralTrust — a managed browser extension that finds shadow AI, records what employees send to third-party AI services, and blocks or masks prompts before they leave the browser."
+---
+
+**Discover by NeuralTrust** is a managed browser extension for the surface nothing
+else reaches: employees using third-party AI in a browser. No SDK to add, no
+gateway in the path, and no cooperation needed from the AI vendor.
+
+It answers two questions an org usually cannot: **which AI services are people
+actually using**, and **what are they pasting into them**.
+
+<Note>
+This is not a [TrustGuard collector](/trustguard/concepts/collectors). Collectors
+call [`/v1/evaluate`](/trustguard/api/evaluate) with a `tgk_…` key and enforce a
+runtime policy. The extension is a separate integration: it reports discovery and
+activity to the AISPM and Data Plane APIs, and checks prompts against the Actions
+API. It is configured entirely through managed browser policy — there is no
+collector to create for it.
+</Note>
+
+## What it covers
+
+| | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| Prompt, before it is sent | ✅ | ✅ | ✅ |
+| Attachments, before upload | ✅ | ✅ | ➖ |
+| Model response | ✅ | ❌ | ❌ |
+
+**Use it when** you need visibility and control over employee use of AI services
+you do not operate — ChatGPT, Claude, Gemini and whatever appears next quarter.
+**Not when** you want to protect your own AI product: that is a
+[TrustGuard collector](/trustguard/integrations/coverage), and the two are
+complementary rather than alternatives.
+
+**Limits.**
+
+- **Managed browsers only.** A personal device, a personal browser profile, or
+  the native desktop app of the same AI service is outside the perimeter. This is
+  the defining boundary — plan for it rather than around it.
+- **Model responses are recorded, not enforced.** They reach activity so you can
+  see what came back, but no policy decision is applied to them.
+- **Chrome and Edge only.** The extension ships as a single Chrome Manifest V3
+  package. Edge is Chromium and loads it. **There is no Firefox build**, and
+  Firefox's MV3 implementation differs enough that the same package is not
+  expected to load.
+- Site-level blocking through `declarativeNetRequest` is not driven by policy
+  today; enforcement happens per prompt, at submit time.
+
+## How it works
+
+The extension runs three layers in the browser:
+
+| Layer | What it does |
+| --- | --- |
+| **Injected** | Page-context interceptors over `fetch`, `XHR` and `WebSocket`, plus a prompt extractor that knows the shape of each AI app |
+| **Content** | Policy bridge, DOM monitor and the toast notifications the user sees |
+| **Background** | Service worker: identity, config and policy sync, event buffering, and the moderation call |
+
+When a user submits a prompt, the extension extracts it, sends it for evaluation,
+and acts on the verdict **before the request leaves the browser**:
+
+- **Allowed** — the request proceeds and the interaction is recorded.
+- **Masked** — sensitive spans are replaced and the masked text is submitted
+  instead. When the PII mode is set to enforce, the same finding blocks instead
+  of masking.
+- **Blocked** — the request never leaves; the user gets an *Access Blocked* page
+  with your `customBlockMessage`, your support email and a link to your IT
+  portal, so the outcome is a route to permission rather than a dead end.
+
+Attachments are checked on the same path before upload.
+
+## Identity
+
+The extension attributes activity to a real person rather than a device.
+
+`userId` and `userEmail` can be pushed through managed policy. Where you want the
+browser to establish identity itself, enable **Microsoft Entra ID** sign-in with
+`entraLoginEnabled`, `entraTenantId` and `entraClientId`. Sessions are grouped
+automatically, so no per-site configuration is needed.
+
+## Deploy
+
+Push the extension to managed endpoints with Chrome or Edge enterprise policy —
+MDM, GPO or Intune. Force-install it; an extension that is merely allowed is not
+a control.
+
+Configuration arrives through the browser's **managed storage**, not through a
+console. Four keys are required:
+
+| Key | Required | What it is |
+| --- | :--: | --- |
+| `teamId` | ✅ | Your organization identifier |
+| `integrationId` | ✅ | The shadow-extension integration identifier |
+| `aispmEndpoint` · `aispmToken` | ✅ | AISPM API — discovery and inventory |
+| `dataPlaneEndpoint` · `dataPlaneToken` | | Data Plane API for activity ingestion (JWT bearer) |
+| `actionsEndpoint` · `actionsApiKey` | | Actions API for prompt checks, sent as `X-TG-API-Key` |
+
+Without the Actions keys the extension observes and reports but does not enforce,
+which is a reasonable first phase.
+
+### Behavior
+
+| Key | What it controls |
+| --- | --- |
+| `syncInterval` | How often buffered activity is flushed, in minutes |
+| `policyRefreshInterval` | How often policy is re-fetched, in minutes |
+| `bufferSize` · `offlineBufferSize` | Events held before a flush, and while offline |
+| `allowUserOverride` | Whether users may override certain policies |
+| `notificationsEnabled` | Desktop notifications |
+| `customBlockMessage` · `supportEmail` · `portalUrl` | What the *Access Blocked* page tells the user |
+| `debugMode` | Verbose logging for troubleshooting |
+
+### Rollout
+
+1. Force-install the extension and push `teamId`, `integrationId` and the AISPM
+   keys. Let discovery run and look at what appears — most orgs find services
+   they did not know were in use.
+2. Add the Data Plane keys so interactions land in activity.
+3. Add the Actions keys with a report-oriented policy, review findings over a
+   representative period, then enable blocking and PII enforcement.
+4. Set `customBlockMessage`, `supportEmail` and `portalUrl` **before** enforcing.
+   A block with no route to permission turns into a support ticket, or into
+   someone switching to their phone.
