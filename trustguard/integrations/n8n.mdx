@@ -40,7 +40,7 @@ Full comparison: [Coverage](/trustguard/integrations/coverage).
 | Requirement | Notes |
 |---|---|
 | A collector and its API key | Created in the console under **TrustGuard** → **Collectors**. The collector is resolved from the key, so nothing else identifies it. |
-| A policy bound to that collector | With Input **and** Output phase rules if you want both directions evaluated. **No Ask gates** — see [how each verdict lands](#5-know-how-each-verdict-lands). |
+| A policy bound to that collector | With Input **and** Output phase rules if you want both directions evaluated. Ask gates are supported from **0.2.0** — see [how each verdict lands](#5-know-how-each-verdict-lands). |
 | Egress from n8n to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. |
 | An n8n instance you can install community nodes on | Self-hosted installs any npm package. **n8n Cloud installs only community nodes n8n has verified** — see [Templates](#templates) for instances where a node install is not an option. |
 | Node 20–24 on the n8n host | The package declares `engines: node >=20 <25`. On Node 25+ `npm install` warns, and fails outright under `engine-strict`. |
@@ -140,11 +140,14 @@ have gone and the verdict is detection after the fact.
 | `report` | **Report** | Passes the text through unchanged. Wire this to the same place as Allow unless you want a separate audit path. |
 | `transform` | **Transform** | Rewrites the text — see the field table below for where the masked version lands. |
 | `block` | **Block** | TrustGuard answered `200`, so this is a branch, not a node error. **Nothing on the item is redacted:** `chatInput` and `messages` still hold the original content. |
-| `ask` | — | **Not supported.** n8n has no confirmation surface, so the node treats `ask` as an unknown verdict and the item fails closed. Do not bind a policy with Ask gates to an n8n collector — use Block instead. See [How it works](/trustguard/how-it-works). |
+| `ask` | **Block** | A workflow cannot prompt anyone mid-run, so the node applies the most restrictive verdict it can express rather than honouring the ask. `trustguard.status` stays `ask` if you want a separate path off Block. [Ask gates](/trustguard/how-it-works) match the input phase only. Nothing on the item is redacted. |
+
+Only `allow` and `skip` reach Allow. Anything else reaches Block, so a verdict a future TrustGuard
+release adds is denied rather than forwarded while you wait for a node update.
 
 `guardrailsInput` is the field the node writes the evaluated text to, on every branch: the masked
-text on **Transform**, `Blocked by NeuralTrust TrustGuard. trace_id=…` on **Block**, and the
-original text otherwise. It is the field to read downstream.
+text on **Transform**, `Blocked by NeuralTrust TrustGuard. trace_id=…` on **Block** and on `ask`,
+and the original text otherwise. It is the field to read downstream.
 
 | Mode | On `transform`, the masked text is written to | Left as it arrived |
 |---|---|---|
@@ -228,7 +231,7 @@ Everything else fails closed even with fail-open on:
 
 - HTTP 401/403, and 503 entitlement failures
 - any other 4xx/5xx
-- a non-JSON `200`, or an unknown verdict — including `ask`, which the node does not accept
+- a non-JSON `200`, or a verdict this version of the node does not recognise
 - a `transformed_payload` that cannot be applied safely
 - an empty or unresolved **Text** expression
 - **TLS and certificate failures** — an untrusted certificate looks like a connect error, but it is
