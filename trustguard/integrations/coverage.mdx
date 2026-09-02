@@ -35,6 +35,8 @@ exist for this collector.
 | --- | --- | --- | --- | --- |
 | Gateway | [TrustGate](/trustguard/integrations/trustgate) | Your gateway (self-hosted or SaaS) | LLM and MCP traffic on guarded routes | Platform team, in the gateway |
 | Gateway | [Portkey](/trustguard/integrations/portkey), [LiteLLM](/trustguard/integrations/litellm), [Kong](/trustguard/integrations/kong), [Apigee](/trustguard/integrations/apigee), [Azure APIM](/trustguard/integrations/azure-apim) | Gateway infrastructure | LLM API traffic | Platform team, in the gateway config |
+| Agent frameworks | [LangChain](/trustguard/integrations/langchain) | Your agent process | Prompts, responses and tool calls in the agent loop | Application developers |
+| Agent frameworks | [n8n](/trustguard/integrations/n8n) | Your n8n instance | The workflows you place the node in | Whoever builds the workflow |
 | IDE & coding agents | [Claude Enterprise](/trustguard/integrations/claude-enterprise) | Anthropic, server-side | Every model request from Claude chat, Claude Code and Cowork | Anthropic org admin (`organization:manage`) |
 | IDE & coding agents | [Claude Code](/trustguard/integrations/claude-code), [Cursor](/trustguard/integrations/cursor), [Codex](/trustguard/integrations/codex), [GitHub Copilot](/trustguard/integrations/copilot) | Developer machines | Prompts, tool calls and tool results | IT, by MDM — developers need no NeuralTrust account |
 | Application | [Python](/trustguard/integrations/python-sdk), [Node](/trustguard/integrations/node-sdk), [REST](/trustguard/integrations/rest) | Your code | Any model provider your code calls | Application developers |
@@ -58,6 +60,8 @@ tool call arguments and tool results. **Output** is the model's response.
 | Claude Enterprise | ✅ | ✅ | ❌ | ➖ | ➖ | ➖ |
 | Claude Code, Cursor, Codex | ✅ | ✅ | ❌ | ➖ | ➖ | ➖ |
 | GitHub Copilot | ✅ | ❌ | ❌ | ➖ | ➖ | ➖ |
+| LangChain | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ |
+| n8n | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
 | Application (SDK, REST, middleware) | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
 | Edge / WAF (all) | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 
@@ -86,6 +90,8 @@ parameter schemas, which is where
 | Claude Enterprise | ✅ | ⚠️ | ✅ | ⚠️ | ❌ | ✅ | ⚠️ | ❌ |
 | Claude Code, Cursor, Codex | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
 | GitHub Copilot | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ⚠️ | ❌ |
+| LangChain | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅ | ⚠️ |
+| n8n | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
 | Application (SDK, REST) | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
 | Portkey, Kong, Apigee, Azure APIM | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | LiteLLM | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
@@ -131,6 +137,16 @@ system prompts, token usage or extended thinking: they capture what passes
 through hook events. None supports redaction — `transform` becomes a permission
 decision, so a masking policy warns or blocks instead of masking. Codex does not
 honour `ask`, and Cursor has no confirmation dialog for prompts.
+
+**Agent frameworks** — both hook the agent rather than the network, so they see
+only the agent they are installed in. **LangChain** applies `transform` by
+rewriting messages in place, and `check_tool_calls` is the one hook anywhere that
+stops a tool call *before* it executes; output redaction is conditional because a
+streamed response has already reached the client. **n8n** routes the verdict to a
+named output instead of enforcing it, so every capability past monitoring depends
+on how the workflow is wired — a **Block** branch reconnected to the agent is
+monitoring. It has no hook inside an AI Agent node's loop, so tool coverage is
+only what the graph makes explicit.
 
 **Application** — every capability is reachable because you hold the payload, and
 none is automatic. Code that logs a `block` and calls the model anyway is
