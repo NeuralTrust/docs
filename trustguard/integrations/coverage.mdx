@@ -53,7 +53,8 @@ tool call arguments and tool results. **Output** is the model's response.
 | Collector | In · monitor | In · block | In · redact | Out · monitor | Out · block | Out · redact |
 | --- | :--: | :--: | :--: | :--: | :--: | :--: |
 | TrustGate | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Portkey, LiteLLM, Kong, Apigee, Azure APIM | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
+| Portkey, Kong, Apigee, Azure APIM | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
+| LiteLLM | ✅ | ✅ | ⚠️ | ✅ | ✅ | ⚠️ |
 | Claude Enterprise | ✅ | ✅ | ❌ | ➖ | ➖ | ➖ |
 | Claude Code, Cursor, Codex | ✅ | ✅ | ❌ | ➖ | ➖ | ➖ |
 | GitHub Copilot | ✅ | ❌ | ❌ | ➖ | ➖ | ➖ |
@@ -63,6 +64,10 @@ tool call arguments and tool results. **Output** is the model's response.
 **TrustGate is the only collector that inspects streaming responses.** Its
 `post_response` stage buffers the stream and inspects it after the client drain.
 On the other gateways, output coverage is over non-streaming completions.
+
+**LiteLLM redaction is version-gated.** It needs the native `neuraltrust`
+guardrail, which is contributed but not yet in a LiteLLM release. The custom
+guardrail file that works today enforces `block` and does not apply `transform`.
 
 **Copilot prompts are audit-only.** Copilot discards command-hook output at
 `userPromptSubmitted`, so a prompt is recorded but cannot be stopped there.
@@ -82,7 +87,8 @@ parameter schemas, which is where
 | Claude Code, Cursor, Codex | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
 | GitHub Copilot | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ⚠️ | ❌ |
 | Application (SDK, REST) | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
-| Portkey, LiteLLM, Kong, Apigee, Azure APIM | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| Portkey, Kong, Apigee, Azure APIM | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+| LiteLLM | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
 | Edge / WAF | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 
 Tool declarations are scored by
@@ -103,11 +109,18 @@ decision point. There is no per-tool verdict.
 failures always block. In observe mode a `transform` is logged, not applied. A
 `transform` that cannot be applied safely blocks rather than forwarding unmasked.
 
-**Other gateways** — all five map the verdict onto a boolean, so redaction cannot
-travel. Portkey is advisory without `deny: true`. Kong needs AI Proxy on the
-route. Apigee coverage is per proxy unless you attach the Shared Flow with an
-environment flow hook. Azure APIM is input-only until you add the outbound
-policy.
+**Other gateways** — Portkey, Kong, Apigee and Azure APIM map the verdict onto a
+boolean, so redaction cannot travel. Portkey is advisory without `deny: true`.
+Kong needs AI Proxy on the route. Apigee coverage is per proxy unless you attach
+the Shared Flow with an environment flow hook. Azure APIM is input-only until you
+add the outbound policy.
+
+**LiteLLM** — the native guardrail consumes `transformed_payload`, so it is the
+only gateway besides TrustGate that can redact, on non-streaming completions and
+once the release carrying it ships. Tool declarations and tool calls reach the
+payload where LiteLLM populates them and a transformed tool call is written back,
+but every verdict is request-level, so a tool-level finding blocks the whole
+request. Auth and entitlement failures stay fail-closed even under `fail_open`.
 
 **Claude Enterprise** — allow or deny on a whole inference, and nothing else. No
 redaction, no `ask`, no output coverage. Attachments arrive as metadata and
@@ -135,7 +148,7 @@ prompt is evaluated only in part.
 
 | If you need | Use |
 | --- | --- |
-| Masking sensitive data in flight | [TrustGate](/trustguard/integrations/trustgate) — the only collector that rewrites payloads |
+| Masking sensitive data in flight | [TrustGate](/trustguard/integrations/trustgate) — the only collector that rewrites payloads on every surface, including streams. [LiteLLM](/trustguard/integrations/litellm) rewrites non-streaming completions once the native guardrail ships |
 | Coverage of streaming completions | [TrustGate](/trustguard/integrations/trustgate) |
 | Org-wide Claude coverage nobody can disable | [Claude Enterprise](/trustguard/integrations/claude-enterprise) |
 | Stopping a specific shell command or MCP call | [Claude Code](/trustguard/integrations/claude-code), [Cursor](/trustguard/integrations/cursor), [Codex](/trustguard/integrations/codex), [Copilot](/trustguard/integrations/copilot) |
