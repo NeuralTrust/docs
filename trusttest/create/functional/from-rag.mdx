@@ -43,21 +43,19 @@ TrustTest automatically:
 ### Using In-Memory Knowledge Base
 
 ```python
-from trusttest.knowledge_base import InMemoryKnowledgeBase
+from trusttest.knowledge_base import InMemoryKnowledgeBase, Document
 from trusttest.probes.rag import RAGProbe
 from trusttest.targets.http import HttpTarget, PayloadConfig
 from trusttest.evaluators import CorrectnessEvaluator
 from trusttest.evaluator_suite import EvaluatorSuite
 from trusttest.evaluation_scenarios import EvaluationScenario
 
-# Your document chunks
 documents = [
-    "TrustTest is a framework for testing AI models for safety and reliability.",
-    "TrustTest supports multiple knowledge base connectors including Azure, Neo4j, and PostgreSQL.",
-    "Probes in TrustTest generate test cases to evaluate model behavior.",
+    Document(id="1", content="TrustTest is a framework for testing AI models for safety and reliability.", topic="product"),
+    Document(id="2", content="TrustTest supports Azure, Neo4j, PostgreSQL, and Upstash knowledge bases.", topic="connectors"),
+    Document(id="3", content="Probes in TrustTest generate test cases to evaluate model behavior.", topic="probes"),
 ]
 
-# Create knowledge base
 kb = InMemoryKnowledgeBase(documents=documents)
 
 # Configure target
@@ -90,12 +88,13 @@ results.display_summary()
 ### Using Azure AI Search
 
 ```python
-from trusttest.knowledge_base import AzureSearchKnowledgeBase
+from azure.core.credentials import AzureKeyCredential
+from trusttest.knowledge_base.azure_search import AzureKnowledgeBase
 
-kb = AzureSearchKnowledgeBase(
-    endpoint="https://your-search.search.windows.net",
+kb = AzureKnowledgeBase(
+    credentials=AzureKeyCredential("your-api-key"),
+    service_endpoint="https://your-search.search.windows.net",
     index_name="your-index",
-    api_key="your-api-key",
 )
 
 probe = RAGProbe(
@@ -108,13 +107,16 @@ probe = RAGProbe(
 ### Using PostgreSQL with pgvector
 
 ```python
-from trusttest.knowledge_base import PgVectorKnowledgeBase
+from trusttest.knowledge_base.pgvector import PgVectorKnowledgeBase
 
 kb = PgVectorKnowledgeBase(
     connection_string="postgresql://user:pass@localhost/db",
     table_name="documents",
-    embedding_column="embedding",
-    content_column="content",
+    fields_mapping={
+        "id": "id",
+        "content": "content",
+        "embeddings": "embedding",
+    },
 )
 
 probe = RAGProbe(
@@ -170,8 +172,24 @@ evaluators = [
 
 ---
 
+## Gold answers from retrieved docs
+
+Use `RagContextBuilder` when you want an `ExpectedResponseContext` dataset grounded in retrieved chunks:
+
+```python
+from trusttest.dataset_builder import RagContextBuilder, QuestionTopic
+
+builder = RagContextBuilder(questions=[QuestionTopic(question="...", topic="...")], knowledge_base=kb)
+dataset = builder.build()
+```
+
+See [Automatic test generation](/trusttest/create/automatic-test-generation#ragcontextbuilder).
+
+Configure `embeddings` and `topic_summarizer` with `set_config` before clustering unlabeled documents. Clustering (UMAP / HDBSCAN) is not Azure-only.
+
 ## Related Topics
 
 - [Knowledge Base Connectors](/trusttest/create/knowledge-base/overview)
 - [Automatic Test Generation](/trusttest/create/automatic-test-generation)
+- [Answer Relevance](/trusttest/evaluate-result/llm-as-a-judge/answer-relevance)
 - [RAG Poisoning Evaluation](/trusttest/evaluate-result/llm-as-a-judge/rag-poisoning)

@@ -17,36 +17,58 @@ Each implementation handles provider-specific details while exposing a unified i
 
 ### Supported Providers
 
-TrustTest currently supports the following LLM providers:
+`get_llm_client(provider=..., model=..., **kwargs)` supports: `openai`, `azure`, `google`, `anthropic`, `ollama`, `vllm`, `groq`, `deepseek`, `http`.
 
-- **OpenAI**  
-```python 
+| Provider | Extra | Notes |
+|----------|-------|-------|
+| `openai` | `trusttest[openai]` | Default models in `set_config` |
+| `azure` | `trusttest[azure]` or `trusttest[openai]` | Azure OpenAI judge / generator |
+| `google` | `trusttest[google]` | |
+| `anthropic` | `trusttest[anthropic]` | |
+| `ollama` | `trusttest[ollama]` | Local |
+| `vllm` | `trusttest[vllm]` | OpenAI-compatible |
+| `groq` | `trusttest[openai]` | Uses `OpenAiClient` against Groq |
+| `deepseek` | `trusttest[deepseek]` | |
+| `http` | none | Judge/generator against any HTTP endpoint — **not** the same as `HttpTarget` (the system under test) |
+
+```shell
 uv add "trusttest[openai]"
-```
-- **Anthropic**
-```python 
 uv add "trusttest[anthropic]"
-```
-- **Google**
-```python 
 uv add "trusttest[google]"
-```
-- **Ollama**
-```python 
 uv add "trusttest[ollama]"
-```
-- **vLLM**
-```python 
 uv add "trusttest[vllm]"
-```
-- **Azure OpenAI**
-```python 
-uv add "trusttest[openai]"
-```
-- **Deepseek**
-```python 
+uv add "trusttest[azure]"
 uv add "trusttest[deepseek]"
 ```
+
+#### HTTP judge / generator
+
+`HTTPClient` is an LLM client. `HttpTarget` is the model you are testing. Do not mix them.
+
+```python
+from trusttest.llm_clients import get_llm_client
+from trusttest.evaluators import TrueFalseEvaluator
+
+judge = get_llm_client(
+    provider="http",
+    model="ignored",
+    url="https://your-judge.example.com/v1/complete",
+    payload_config={
+        "messages": [
+            {"role": "system", "content": "{{ system_prompt }}"},
+            {"role": "user", "content": "{{ instructions }}"},
+        ]
+    },
+    concatenate_field="choices.0.message.content",
+    headers={"Authorization": "Bearer ..."},
+)
+
+evaluator = TrueFalseEvaluator(llm_client=judge)
+```
+
+`concatenate_field` supports dot paths. Placeholders default to `{{ instructions }}` and `{{ system_prompt }}`.
+
+You can also pass `llm_client=` on individual probes and evaluators instead of changing global config.
 
 ### Usage Example
 
@@ -83,11 +105,18 @@ Each implementation handles provider-specific details while exposing a unified i
 
 ### Supported Providers
 
-TrustTest currently supports the following embedding providers:
+`get_embeddings_model(provider=..., model=...)` supports `openai`, `azure`, `google`, and `ollama`.
 
-- **OpenAI**
-- **Google**
-- **Ollama**
+```python
+from trusttest.embeddings import get_embeddings_model
+
+embeddings = get_embeddings_model(
+    provider="azure",
+    model="text-embedding-3-small",
+)
+```
+
+Use `trusttest[azure]` (or `trusttest[rag-azure]`) for Azure embeddings. Vector knowledge bases need embeddings plus a `topic_summarizer` LLM via `set_config`.
 
 ### Usage Example
 
@@ -116,40 +145,59 @@ TrustTest provides a global configuration system to manage LLM and embeddings se
 
 ```python
 import trusttest
+from trusttest.config import get_config, load_config, TrustTestConfigError
 
 trusttest.set_config({
     "evaluator": {
         "provider": "openai",
-        "model": "gpt-4",
-        "temperature": 0.2
+        "model": "gpt-4o-mini",
+        "temperature": 0.2,
+        "retry_config": {"attempts": 3, "initial_delay": 1.0, "max_delay": 10.0, "exp_base": 2.0},
+        "extra_args": {},
     },
     "question_generator": {
         "provider": "openai",
-        "model": "gpt-4",
-        "temperature": 0.5
+        "model": "gpt-4o-mini",
+        "temperature": 0.5,
+    },
+    "translation": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "temperature": 0.2,
     },
     "embeddings": {
         "provider": "openai",
-        "model": "text-embedding-3-small"
+        "model": "text-embedding-3-small",
     },
     "topic_summarizer": {
         "provider": "openai",
-        "model": "gpt-4",
-        "temperature": 0.2
-    }
+        "model": "gpt-4o-mini",
+        "temperature": 0.2,
+    },
 })
 ```
 
-The configuration supports the following components:
-- `evaluator`: LLM settings for evaluation tasks
-- `question_generator`: LLM settings for generating test questions
-- `embeddings`: Settings for the embeddings model
-- `topic_summarizer`: LLM settings for topic summarization
+**Tasks:** `evaluator`, `question_generator`, `translation` (used by `StaticDatasetProbe.translate_into_language`), `topic_summarizer`, `embeddings`.
 
-Each component accepts:
-- `provider`: One of "openai", "azure", "google", "anthropic", "ollama" (for LLMs) or "openai", "azure", "google", "ollama" (for embeddings)
-- `model`: The specific model name for the chosen provider
-- `temperature`: (LLMs only) Controls randomness in model outputs (0.0 to 1.0)
+**LLM fields:** `provider`, `model`, `temperature`, optional `retry_config` (`attempts`, `initial_delay`, `max_delay`, `exp_base`), optional `extra_args`. Config `provider` literals are `openai`, `azure`, `deepseek`, `vllm`, `google`, `anthropic`, `ollama`, `http`. Use `get_llm_client(provider="groq", ...)` for Groq.
+
+**Embeddings fields:** `provider` (`openai`, `azure`, `google`, `ollama`) and `model`.
+
+**Defaults** when you do not set config: `gpt-4o-mini` (all LLM tasks) and `text-embedding-3-small`.
+
+### Config files
+
+On import, TrustTest looks in the current working directory for `.trusttest_config.json`, then `trusttest_config.json`. The JSON object uses the same keys as `set_config`. If neither file exists and you never called `set_config`, `get_config()` raises `TrustTestConfigError`.
+
+```python
+from trusttest.config import get_config, load_config, TrustTestConfigError
+
+load_config()  # re-read CWD files
+try:
+    cfg = get_config()
+except TrustTestConfigError:
+    trusttest.set_config({...})
+```
 
 ## Implementing Custom Clients
 

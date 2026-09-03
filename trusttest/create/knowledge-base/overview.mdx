@@ -1,23 +1,31 @@
 ---
 title: Overview
+description: Knowledge base connectors used to generate RAG and functional tests
 ---
 
-`KnowledgeBase` is a collection of documents that are used to generate test cases for a specific domain or task. Usually refered as the Vector Database for retrieval augmented generation (RAG).
+A `KnowledgeBase` is a collection of documents used to generate test cases for a domain or task — typically the vector store behind retrieval-augmented generation (RAG).
 
-This documents are grouped by topics, if not defined the `KnowledgeBase` will generate automatically the topics.
+Documents are grouped by topics. If you do not pass `seed_topics`, the connector clusters embeddings and names topics with an LLM.
 
+`trusttest.knowledge_base` only re-exports `KnowledgeBase`, `InMemoryKnowledgeBase`, and `Document`. Azure, Neo4j, Postgres, and Upstash must be imported from their submodules.
 
 ## Connectors
 
 ### AzureKnowledgeBase
 
-Leverages **Azure Cognitive Search** and is best suited for:
+Import: `from trusttest.knowledge_base.azure_search import AzureKnowledgeBase`
+
+Leverages **Azure AI Search** and is best suited for:
 
 - Cloud-based document indexing and storage
 - Full-text search with advanced filtering and ranking
 - Integration with Microsoft’s AI-powered search stack
 
+[Azure connector →](/trusttest/create/knowledge-base/connectors/azure)
+
 ### Neo4jKnowledgeBase
+
+Import: `from trusttest.knowledge_base.neo4j import Neo4jKnowledgeBase`
 
 Built on **Neo4j**, this connector excels at:
 
@@ -25,14 +33,33 @@ Built on **Neo4j**, this connector excels at:
 - Graph-based querying and clustering
 - Constructing dynamic knowledge graphs
 
-### PostgresKnowledgeBase
+[Neo4j connector →](/trusttest/create/knowledge-base/connectors/neo4j)
 
-Leverages **Postgres** with **pgvector** and is best suited for:
+### PgVectorKnowledgeBase
 
-   - Full-text search with advanced filtering and ranking
-   - Graph-based querying and clustering
+Import: `from trusttest.knowledge_base.pgvector import PgVectorKnowledgeBase`
+
+Leverages **PostgreSQL** with **pgvector**:
+
+- Semantic vector search on your existing Postgres tables
+- Configurable `connection_string`, `table_name`, and `fields_mapping`
+
+[PostgreSQL connector →](/trusttest/create/knowledge-base/connectors/postgres)
+
+### UpstashKnowledgeBase
+
+Import: `from trusttest.knowledge_base.upstash import UpstashKnowledgeBase`
+
+Serverless **Upstash Vector** store for:
+
+- Managed similarity search without operating a cluster
+- URL + token authentication (`UPSTASH_URL` / `UPSTASH_TOKEN`)
+
+[Upstash connector →](/trusttest/create/knowledge-base/connectors/upstash)
 
 ### InMemoryKnowledgeBase
+
+Import: `from trusttest.knowledge_base import InMemoryKnowledgeBase, Document`
 
 A minimal, no-dependency implementation designed for:
 
@@ -40,34 +67,32 @@ A minimal, no-dependency implementation designed for:
 - Lightweight, quick-start environments
 - Small-scale document classification
 
+[In-memory connector →](/trusttest/create/knowledge-base/connectors/in-memory)
+
 ## Topic Creation Process
 
-The topic creation pipeline groups unlabeled documents into coherent topics using embeddings, dimensionality reduction, clustering, and LLM-based summarization. 
+The topic creation pipeline groups unlabeled documents using embeddings, UMAP, HDBSCAN, and an LLM summarizer. It is **not** Azure-only — any vector connector that embeds documents can run it.
 
-<Note>This process is triggered when no predefined (seed) topics are provided.</Note>
+<Note>This process is triggered when no predefined (`seed_topics`) list is provided. Configure `embeddings` and `topic_summarizer` with `set_config` (or pass `embeddings_model` / `llm_client`).</Note>
 
 1. **Document Retrieval**
-   - Pulls all documents from Azure Cognitive Search using the mapped `id` and `content` fields.
+   - Pulls documents using the mapped `id` and `content` fields.
    - Filters out empty or whitespace-only content.
+   - Optionally detects language on ingested documents (`trusttest[language-detection]`).
 
 2. **Embedding Generation**
    - Applies an embedding model to each document’s content (truncated to `3 * max_tokens`).
    - Produces high-dimensional semantic vectors for clustering.
 
 3. **Dimensionality Reduction**
-   - Uses **UMAP** to reduce embedding vectors to a lower-dimensional space for clustering.
-   - Parameters such as `n_neighbors`, `n_components`, and initialization strategy are tuned based on document count.
+   - Uses **UMAP** to reduce embedding vectors. `n_neighbors`, `n_components`, and initialization scale with document count.
 
 4. **Topic Clustering**
-   - Runs **HDBSCAN** over the reduced vectors to group documents into topic clusters.
-   - Noise and outliers are discarded (`label = -1`).
+   - Runs **HDBSCAN** over the reduced vectors. Noise and outliers are discarded (`label = -1`).
 
 5. **LLM-based Topic Naming**
-   - For each valid topic cluster, generates a name using a language target.
-   - Uses up to `max_docs` samples per topic and truncates each sample to `max_doc_length`.
+   - Names each cluster with the `topic_summarizer` client.
+   - Uses up to `max_docs` samples per topic, truncated to `max_doc_length`.
 
 6. **Return Structure**
-   - Returns:
-     - A dictionary mapping topic names to associated documents.
-     - A flat list of all topic names.
-     - A flat list of all processed documents.
+   - A dictionary mapping topic names to documents, plus flat lists of topic names and documents.
