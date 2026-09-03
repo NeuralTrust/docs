@@ -1,31 +1,58 @@
-The `AzureKnowledgeBase` class provides a was to access documents in Azure Knowledgebase with Azure Search functionality. The class facilitates document indexing, searching, and topic-based organization. In this implementation, Azure Search serves as the backend for indexing and querying documents, while an embedding model and an LLM client assist in document categorization and topic summarization.
+---
+title: Azure AI Search
+description: Connect Azure AI Search as a TrustTest knowledge base
+---
 
+`AzureKnowledgeBase` reads documents from an Azure AI Search index. Import it from the connector submodule — it is **not** re-exported from `trusttest.knowledge_base`.
 
-## Dependencies
-The following external dependencies are required:
+```python
+from trusttest.knowledge_base.azure_search import AzureKnowledgeBase
 ```
+
+The constructor takes `credentials` (`TokenCredential` or `AzureKeyCredential`), not `key=`.
+
+## Installation
+
+```bash
 uv add "trusttest[rag-azure]"
 ```
 
-## Usage Example
+`trusttest[azure]` covers Azure identity / Azure OpenAI only. Use `rag-azure` for this connector.
+
+## Constructor
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `credentials` | `TokenCredential \| AzureKeyCredential` | Required. API key or Azure AD credential |
+| `service_endpoint` | `str` | Or `AZURE_SEARCH_SERVICE_ENDPOINT` |
+| `index_name` | `str` | Or `AZURE_SEARCH_INDEX_NAME` |
+| `fields_mapping` | `dict[str, str]` | Defaults to `{"id": "id", "content": "content"}` |
+| `language` | `LanguageType` | Optional; otherwise detected from documents |
+| `embeddings_model` | `EmbeddingsModel` | From `set_config` if omitted |
+| `llm_client` | `LLMClient` | Topic summarizer |
+| `seed_topics` | `list[str]` | Skip auto-clustering when set |
+| `max_doc_count` | `int` | Cap on retrieved documents |
+
+## Example
 
 ```python
 import os
 
+from azure.core.credentials import AzureKeyCredential
 from dotenv import load_dotenv
 
-from trusttest.knowledge_base.azure_search import AzureKnowledgeBase
-from trusttest.probes.rag import RAGProbe, BenignQuestion
 from trusttest.evaluation_scenarios import EvaluationScenario
 from trusttest.evaluator_suite import EvaluatorSuite
 from trusttest.evaluators import AnswerRelevanceEvaluator
+from trusttest.knowledge_base.azure_search import AzureKnowledgeBase
+from trusttest.probes.rag import RAGProbe, BenignQuestion
 from trusttest.targets.testing import DummyTarget
 
 load_dotenv(override=True)
 
 knowledge_base = AzureKnowledgeBase(
+    credentials=AzureKeyCredential(os.getenv("AZURE_SEARCH_KEY")),
     service_endpoint=os.getenv("AZURE_SEARCH_SERVICE_ENDPOINT"),
-    key=os.getenv("AZURE_SEARCH_KEY"),
     index_name=os.getenv("AZURE_SEARCH_INDEX_NAME"),
     fields_mapping={"content": "chunk", "id": "chunk_id"},
     language="Spanish",
@@ -40,7 +67,10 @@ probe = RAGProbe(
 
 scenario = EvaluationScenario(
     name="RAG Functional",
-    evaluator_suite=EvaluatorSuite(evaluators=[AnswerRelevanceEvaluator()], criteria="any_fail"),
+    evaluator_suite=EvaluatorSuite(
+        evaluators=[AnswerRelevanceEvaluator()],
+        criteria="any_fail",
+    ),
 )
 
 test_set = probe.get_test_set()

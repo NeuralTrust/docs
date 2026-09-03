@@ -23,9 +23,56 @@ Dataset-based attacks allow you to load prompt injection test cases from curated
 
 ---
 
-## Using Built-in Datasets
+## StaticDatasetProbe
 
-TrustTest includes curated datasets for various attack types:
+`StaticDatasetProbe` is the shared engine behind catalog `*DatasetProbe` classes (hate, leaks, off-topic, agentic limits, and more). It loads bundled YAML from `trusttest/datasets/static_objectives/` — not your own files. For user YAML/JSON/Parquet, use `DatasetProbe` below.
+
+```python
+from trusttest.probes.static_dataset import StaticDatasetProbe, ModelFocusCompany
+from trusttest.targets.http import HttpTarget, PayloadConfig
+
+target = HttpTarget(
+    url="https://your-model-endpoint.com/chat",
+    headers={"Content-Type": "application/json"},
+    payload_config=PayloadConfig(
+        format={"messages": [{"role": "user", "content": "{{ test }}"}]},
+        message_regex="{{ test }}",
+    ),
+)
+
+probe = StaticDatasetProbe(
+    target=target,
+    categories={"unsafe_outputs/hate"},
+    max_objectives_per_category=20,
+    sampling="random",
+    use_jailbreaks=True,
+    max_jailbreak_per_objective=5,
+    model_focus=ModelFocusCompany.OPENAI,
+    translate_into_language="Spanish",
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `categories` | `set[str]` | Required | Paths under `datasets/static_objectives/` |
+| `max_objectives_per_category` | `int \| None` | `None` | Cap per category |
+| `sampling` | `"random"` \| `"sequential"` | `"sequential"` | How to pick objectives |
+| `use_jailbreaks` | `bool` | `False` | Wrap objectives with bundled jailbreak templates (~90 generic YAMLs plus vendor folders under `datasets/static_jailbreaks/`) |
+| `max_jailbreak_per_objective` | `int \| None` | `5` | Jailbreak variants per objective |
+| `model_focus` | `ModelFocusCompany` | `None` | Prefer vendor-specific jailbreaks (`openai`, `anthropic`, `google`, `meta`, `chatgpt`, …) |
+| `translate_into_language` | `LanguageType` | `None` | Translate objectives. `"English"` is treated as no translation. Uses the `translation` task in `set_config` |
+| `llm_client` | `LLMClient` | From config | Used for translation |
+| `objectives_base_path` | `Path` | Package static path | Override only for tests |
+
+`ModelFocusCompany` values: `alibaba`, `amazon`, `anthropic`, `apple`, `chatgpt`, `cohere`, `deepseek`, `google`, `meta`, `mistral`, `nous`, `nvidia`, `openai`, `perplexity`, `reflection`, `xai`, `zyphra`.
+
+Category-specific wrappers (`HateDatasetProbe`, `DirectRequestDatasetProbe`, …) pass a fixed `category` and expose the same jailbreak / translation knobs.
+
+---
+
+## Using Built-in Catalog Scenarios
+
+The catalog builders wrap `*DatasetProbe` (or generated single-turn probes) for you:
 
 ```python
 from trusttest.catalog.prompt_injections.single_turn import SingleTurnScenarioBuilder, SubCategory

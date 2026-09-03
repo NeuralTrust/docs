@@ -1,0 +1,86 @@
+---
+title: "TrustGate"
+description: "Native TrustGuard collector — bind a TrustGate collector and enable the TrustGuard policy on routes. No API key."
+---
+
+[TrustGate](/trustgate/overview) is the **native** TrustGuard collector. The gateway calls
+TrustGuard for you, sets `direction` (`input` / `output`) on the request and response path,
+and applies the verdict inline. Findings show up in TrustGuard **Activity** and as spans on
+TrustGate traces.
+
+You do **not** create or paste a collector API key. The platform authenticates the gateway
+to TrustGuard. Other gateways (Portkey, LiteLLM, Kong, …) still use a collector key.
+
+## Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ✅ |
+| LLM output | ✅ | ✅ | ✅ |
+| Tool listing | ✅ | ✅ | ➖ |
+| Tool call | ✅ | ✅ | ✅ |
+| Tool result | ✅ | ✅ | ✅ |
+
+**Ask** — a gateway has nobody to prompt, so an `ask` gate is enforced like a
+block: denied in enforce mode, recorded in observe.
+
+**Use it when** you already route through TrustGate, or when you need any of the
+three things no other collector gives you: real in-flight masking, inspection of
+**streaming** responses, or MCP coverage. **Not when** you have no gateway and do
+not want one in the data path — see the
+[application](/trustguard/integrations/python-sdk) or
+[edge](/trustguard/integrations/cloudflare) collectors.
+
+**Limits.** Redaction applies to [data-loss](/trustguard/detectors/data-loss-prevention)
+outcomes only. In observe mode a `transform` is logged, not applied.
+
+### Tool declarations
+
+The **Tool listing** row is the one surface almost nothing else covers, and it is
+the reason to route MCP through the gateway.
+
+A tool *declaration* is the tool's description and parameter schema — not a call,
+not a result. It is what an agent reads before deciding to act, which makes it
+where [tool poisoning](/trustguard/detectors/agent-mcp-security) hides: a server
+that describes a benign-looking tool in language crafted to steer the agent.
+Declarations are scored by indirect prompt injection over LLM `tools[]` and MCP
+[`tools/list`](/trustgate/mcp/overview).
+
+TrustGate sees them because the declarations pass through it. The
+developer-machine plugins — Claude Code, Cursor, Codex, Copilot — send tool
+*calls* and *results* and never the list, so tool-poisoning detection does not
+apply on the surface closest to the developer. That is the gap this closes.
+
+Redaction is `➖` rather than `❌`: a declaration is not a payload to mask. A
+poisoned one is blocked, not rewritten.
+
+Full comparison: [Coverage](/trustguard/integrations/coverage).
+
+## Setup
+
+1. In TrustGuard, create a **TrustGate** collector and bind it to your Agent Gateway (one
+   collector per gateway).
+2. On that collector, assign a **default** runtime policy (and optional per-consumer
+   overrides). Without a matching policy, evaluate allows traffic unguarded.
+3. In TrustGate, add the **TrustGuard** guardrail (`trustguard`) on the routes to protect
+   and select that collector. You can also create the gateway-bound collector from the
+   policy UI when prompted.
+4. Choose **enforce** or **observe**, and whether to inspect request, response, or both
+   (`request` / `response` / `request_response`).
+5. Send a test request — it should appear in TrustGuard **Activity**.
+
+Policy settings are only `collector_id` and direction. TrustGuard base URL and credentials
+come from the gateway deployment, not the policy form.
+
+See also [TrustGate guardrails](/trustgate/policies/guardrails#trustguard).
+
+## Verdict behavior
+
+| TrustGuard `status` | **Enforce** | **Observe** |
+| --- | --- | --- |
+| `block` | Deny request or response | Log; traffic continues |
+| `transform` | Forward masked/rewritten payload (if rewrite cannot be applied safely → block) | Log only; no rewrite |
+| `report` / `allow` | Continue | Continue |
+
+On most evaluate transport/timeouts errors the gateway **fails open** (traffic continues).
+Rate-limit and entitlement failures **block**.

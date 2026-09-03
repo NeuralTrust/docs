@@ -1,0 +1,59 @@
+---
+title: "Node.js middleware"
+description: "TrustGuard on the request path in Express (same pattern in Next.js)."
+---
+
+Middleware for **input**. Call `guard` again with `direction: "output"` after the model
+([Node.js SDK](/trustguard/integrations/node-sdk)).
+
+## Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ⚠️ | ⚠️ |
+| LLM output | ✅ | ⚠️ | ⚠️ |
+| Tool-level | ⚠️ | ⚠️ | ⚠️ |
+
+**Ask** — `status` is advisory: nothing prompts anyone unless your code does.
+A middleware has no user to prompt on the HTTP path either.
+
+**Use it when** you want every new AI route covered by configuration rather than
+by each developer's discipline. **Not as your only defence when** traffic reaches
+a model without an HTTP request — jobs, queues and internal calls bypass it.
+
+**Limits.** In Next.js the middleware runs on the Edge runtime by default;
+confirm your deployment target supports the SDK or move the check into the route
+handler. Output coverage needs a second evaluation on the response.
+
+Full comparison: [Coverage](/trustguard/integrations/coverage).
+
+```ts
+import express from "express";
+import { TrustGuard } from "@neuraltrust/trustguard-sdk";
+
+const app = express();
+app.use(express.json());
+
+const client = new TrustGuard({
+  baseUrl: "<your-trustguard-url>",
+  apiKey: "<collector-api-key>",
+});
+
+app.use(async (req, res, next) => {
+  if (req.method !== "POST") return next();
+  const response = await client.guard({
+    payload: { input: JSON.stringify(req.body) },
+    direction: "input",
+    consumerId: req.get("x-user-id") ?? "",
+    sessionId: req.cookies?.session_id ?? "",
+  });
+  if (response.isBlocked) {
+    return res.status(403).json({ detail: "Blocked by TrustGuard" });
+  }
+  if (response.transformedPayload) {
+    req.body = response.transformedPayload;
+  }
+  next();
+});
+```
+

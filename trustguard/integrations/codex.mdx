@@ -1,0 +1,193 @@
+---
+title: "Codex"
+description: "Block prompts, deny commands, and replace poisoned tool results in OpenAI Codex with TrustGuard lifecycle hooks — one org API key."
+---
+
+Codex runs shell commands, applies patches, and calls MCP tools on the
+developer machine. The
+[TrustGuard Codex plugin](https://github.com/NeuralTrust/trustguard-codex-plugin)
+puts your org's policy check at each of those moments:
+
+| Moment | What you can stop | Enforcement |
+|---|---|---|
+| Prompt, before submit | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII pasted into the agent ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** |
+| Tool call, before it runs (`Bash`, `apply_patch`, MCP) | Dangerous or out-of-policy commands and patches; risky MCP tool calls | **Deny** (Codex does not honour Ask — an Ask gate becomes allow + a warning the agent sees) |
+| Tool result, after it runs | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) in MCP / tool output | **Block** — the tool result is replaced before the model consumes it |
+
+Every decision lands in **Activity** with `consumer_id` prefixed `codex:`, so
+you also get a per-developer audit trail; start in **Report** policy mode to
+observe before enforcing. With `allow_managed_hooks_only`, developers cannot
+switch the hooks off.
+
+Under the hood the plugin uses Codex **lifecycle hooks** (not Codex External
+guardrails, which is a different extension point) calling
+[`POST /v1/evaluate`](/trustguard/api/evaluate). One org collector API key is
+shared across the company. Codex has **no** “import plugin from GitHub”
+marketplace flow like Cursor: you install from the repo (local) or IT deploys
+hooks + config (enterprise).
+
+## Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ➖ | ➖ | ➖ |
+| Tool call | ✅ | ✅ | ❌ |
+| Tool result | ✅ | ✅ | ❌ |
+
+**Ask** — Codex has no dialog: an `ask` gate is **allowed**, plus a warning
+injected as context the agent sees. Treat it as advisory here.
+
+**Use it when** your developers use Codex and you can deploy the hook scripts by
+MDM alongside the config. **Not when** your policy leans on `ask` gates — Codex
+does not honour them.
+
+**Limits.** Codex collapses `ask` to allow plus injected context, so treat `ask`
+as report-only here and use `block` where you need a stop. Config alone is not
+enough: without the bootstraps on disk the collector is inert. No redaction, no
+coverage of the model's response, and tool declarations are not evaluated.
+
+Full comparison: [Coverage](/trustguard/integrations/coverage).
+
+## Console setup
+
+1. Create a **Codex** collector (Catalog → IDE & coding agents).
+2. Mint a `tgk_…` API key on the **Auth** tab (shown once — store it).
+3. Assign a default [policy](/trustguard/concepts/policies) on the **Policies** tab.
+
+## Local / pilot
+
+```bash
+git clone https://github.com/NeuralTrust/trustguard-codex-plugin.git
+cd trustguard-codex-plugin
+make build
+make install-local
+```
+
+`make install-local`:
+
+- Builds `trustguard-codex` and installs it under `~/.trustguard/bin`
+- Copies the plugin to `~/.codex/plugins/trustguard`
+- Writes `~/.codex/hooks.json` with **absolute** paths to the bootstrap scripts  
+  (Codex runs hooks from the session cwd, so relative paths are unreliable)
+
+Then write the API key config:
+
+```json
+// ~/.trustguard/codex.json  (chmod 600)
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "closed"
+}
+```
+
+In Codex run `/hooks`, trust the TrustGuard definitions, and send a test prompt.
+
+## Enterprise
+
+IT deploys **more than the API key file**. Codex does not pull hooks from a marketplace;
+managed hooks must already exist on disk.
+
+| Piece | What to deploy |
+| --- | --- |
+| **Hook bootstraps** | `trustguard-hook.sh` / `.ps1` / `.cmd` from the repo under a fixed directory (e.g. `/Library/Application Support/TrustGuard/codex-hooks`) |
+| **Binary** | Optional: put `trustguard-codex` on `PATH` or `~/.trustguard/bin`. If missing, the bootstrap downloads the pinned release from GitHub Releases (checksum-verified) on first use |
+| **API key config** | MDM-managed `codex.json` (paths below) |
+| **Codex policy** | `requirements.toml` (or MDM equivalent) so hooks stay on and point at those scripts |
+
+### 1. Managed API key config
+
+```json
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "closed",
+  "transform_action": "deny"
+}
+```
+
+| OS | Managed config path |
+| --- | --- |
+| macOS | `/Library/Application Support/TrustGuard/codex.json` |
+| Linux | `/etc/trustguard/codex.json` |
+| Windows | `%ProgramData%\TrustGuard\codex.json` |
+
+When this file includes `api_key`, that key, `data_url`, and `fail_mode` are **locked**
+(user `~/.trustguard/codex.json` and env cannot override them). Soft prefs
+(`timeout_ms`, `transform_action`, `events`, `consumer_id`) still layer from the user file.
+
+### 2. Enforce hooks (`requirements.toml`)
+
+Example (see the full file in the plugin repo):
+
+```toml
+[features]
+hooks = true
+allow_managed_hooks_only = true
+
+[hooks]
+managed_dir = "/Library/Application Support/TrustGuard/codex-hooks"
+windows_managed_dir = 'C:\ProgramData\TrustGuard\codex-hooks'
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = '/Library/Application Support/TrustGuard/codex-hooks/trustguard-hook.sh'
+timeout = 30
+statusMessage = "TrustGuard evaluating prompt"
+
+# Same command for PreToolUse and PostToolUse — see enterprise-requirements.toml
+```
+
+Source:
+[`docs/enterprise-requirements.toml`](https://github.com/NeuralTrust/trustguard-codex-plugin/blob/main/docs/enterprise-requirements.toml)
+in the plugin repo. Exact keys can vary by Codex version — confirm against
+[Codex hooks docs](https://developers.openai.com/codex/hooks).
+
+With `allow_managed_hooks_only = true`, developers cannot disable managed hooks from
+`/hooks`.
+
+Codex has **no Ask permission dialog**. A gate **Ask** (and transform-as-ask)
+becomes **allow** plus `additionalContext`:
+`A TrustGuard policy needs your approval to continue.` Use **Block** when you
+need a hard stop.
+
+## Verify
+
+1. In Codex run `/hooks` and confirm TrustGuard hooks are listed (and **managed** under
+   enterprise policy).
+2. Send a test prompt.
+3. Confirm the event in TrustGuard **Activity** (`consumer_id` is typically `codex:<user>`
+   or `codex:<email>` when the payload includes email).
+
+Smoke-test the binary (optional):
+
+```bash
+echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"},"session_id":"thr_1"}' \
+  | trustguard-codex hook
+```
+
+## What is evaluated
+
+| Codex event | TrustGuard protocol | Direction | Notes |
+| --- | --- | --- | --- |
+| `UserPromptSubmit` | `llm` | input | Block with `decision: "block"` |
+| `PreToolUse` (`Bash` / `apply_patch`) | `all` | input | Deny with `permissionDecision: "deny"` |
+| `PreToolUse` (MCP / other tools) | `mcp` tools/call | input | `params.name` = last MCP segment |
+| `PostToolUse` | `mcp` result | output | `decision: "block"` replaces the tool result for the model |
+
+## Attributes
+
+- `attributes.collector.type = "ide"`
+- `attributes.source.application = "codex-plugin"`
+- `attributes.codex.event`, cwd, model, turn
+- `consumer_id` prefixed `codex:` (email from payload when present, else configured / OS fallback)
+
+Gate on `tool.name` from `payload.params.name` for MCP. Ask is context-only (see above).
+
+## Related
+
+- [Plugin README](https://github.com/NeuralTrust/trustguard-codex-plugin)
+- [Policies — Gates](/trustguard/concepts/policies#gates)
+- [Evaluate API](/trustguard/api/evaluate)

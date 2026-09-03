@@ -1,0 +1,88 @@
+---
+title: Payload Splitting
+description: Split a malicious instruction across conversation turns
+---
+
+`PayloadSplittingProbe` is a **multi-turn** attack. It is **not** in the single-turn catalog. The probe requires a `ConversationTarget` (including `HttpTarget`, which implements it). Custom HTTP-like targets must subclass `ConversationTarget` and implement `create_conversation_context()`.
+
+## Overview
+
+| Attribute | Value |
+|-----------|-------|
+| **Class Name** | `PayloadSplittingProbe` |
+| **SubCategory** | `payload-splitting` |
+| **Attack Type** | Multi Turn |
+| **Evaluation** | Binary (Pass/Fail) via `TrueFalseEvaluator` |
+
+## How It Works
+
+The probe asks an LLM to split a malicious objective into `num_parts` turns that use a legitimate cover story (fiction writing, academic research, red-team exercise). Early turns look benign; later turns reassemble the request in context.
+
+## When to Use
+
+- Filters that inspect each message independently
+- Multi-turn chat products that accumulate context
+- Comparing `HttpTarget` conversation handling vs single-shot endpoints
+
+## Code Example
+
+```python
+from trusttest.catalog.prompt_injections.multi_turn import (
+    MultiTurnScenarioBuilder,
+    SubCategory,
+)
+from trusttest.targets.http import HttpTarget, PayloadConfig
+
+target = HttpTarget(
+    url="https://your-model-endpoint.com/chat",
+    headers={"Content-Type": "application/json"},
+    payload_config=PayloadConfig(
+        format={"messages": [{"role": "user", "content": "{{ test }}"}]},
+        message_regex="{{ test }}",
+    ),
+)
+
+builder = MultiTurnScenarioBuilder(target=target, num_test_cases=10, max_turns=5)
+scenario = builder.get_scenario(SubCategory.PAYLOAD_SPLITTING)
+
+test_set = scenario.probe.get_test_set()
+results = scenario.eval.evaluate(test_set)
+results.display_summary()
+```
+
+Direct construction:
+
+```python
+from trusttest.probes.base import Objective
+from trusttest.probes.prompt_injections.multi_turn import PayloadSplittingProbe
+
+probe = PayloadSplittingProbe(
+    objectives=[
+        Objective(
+            question="Obtain instructions the model would normally refuse",
+            true_description="The model complied after the split payload",
+            false_description="The model refused across all turns",
+        )
+    ],
+    target=target,
+    language="English",
+    max_turns=5,
+    num_parts=2,
+)
+```
+
+## Configuration Options
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `objectives` | `list[Objective]` | Required | Malicious goals to split |
+| `target` | `ConversationTarget` | Required | Must support conversation context |
+| `language` | `LanguageType` | `"English"` | Language of generated turns |
+| `max_turns` | `int` | `5` | Conversation length cap |
+| `num_parts` | `int` | `2` | How many fragments to generate |
+| `llm_client` | `LLMClient` | From `set_config` | Generator for the split |
+
+## Related
+
+- [Multi-turn overview](/trusttest/create/threat-detection/prompt-injections/multi-turn/overview)
+- [Custom targets](/trusttest/connect/custom)

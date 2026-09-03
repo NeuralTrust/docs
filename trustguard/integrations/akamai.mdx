@@ -1,0 +1,80 @@
+---
+title: "Akamai EdgeWorkers"
+description: "TrustGuard from EdgeWorkers responseProvider."
+---
+
+Sub-requests only reach hosts on your Akamai property. Map TrustGuard under a path first.
+
+## Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ❌ | ❌ | ❌ |
+| Tool-level | ➖ | ➖ | ➖ |
+
+**Ask** — the EdgeWorker returns 403 on `block` and forwards everything else, so
+an `ask` gate is **allowed**. Write the rule as **Block** if you need a hard stop.
+
+**Use it when** you serve through Akamai and can map the TrustGuard endpoint
+behind your property in Property Manager. **Not when** you cannot: EdgeWorkers
+sub-requests only reach Akamai-served hostnames, and everything else fails with a
+400.
+
+**Limits.** The 4-second wall-time budget covers the guard call **and** the origin
+sub-request — tune the sub-request timeout against real latency and decide
+whether it fails open or closed. Input only, no redaction.
+
+Full comparison: [Coverage](/trustguard/integrations/coverage).
+
+1. Property Manager: route e.g. `/trustguard/*` to the TrustGuard origin.
+2. EdgeWorker `responseProvider` after App & API Protector.
+3. Stay inside the ~4s wall clock — set a sub-request timeout and pick fail-open vs closed.
+4. Activate and test.
+
+```js
+import { httpRequest } from "http-request";
+import { createResponse } from "create-response";
+
+export async function responseProvider(request) {
+  if (request.method === "POST") {
+    const text = await request.text();
+    const guardResponse = await httpRequest("/trustguard/v1/evaluate", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer <collector-api-key>",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        protocol: "llm",
+        direction: "input",
+        payload: { input: text },
+        consumer_id: request.getHeader("X-User-Id")?.[0] ?? "",
+        session_id: request.getHeader("X-Session-Id")?.[0] ?? "",
+      }),
+      timeout: 3000,
+    });
+    const result = await guardResponse.json();
+
+    if (result.status === "block") {
+      return createResponse(403, {}, "Blocked by TrustGuard");
+    }
+
+    const forwardBody =
+      result.status === "transform" && result.transformed_payload
+        ? JSON.stringify(result.transformed_payload)
+        : text;
+
+    const originResponse = await httpRequest(request.url, {
+      method: "POST",
+      headers: { "Content-Type": request.getHeader("Content-Type") ?? "" },
+      body: forwardBody,
+    });
+    return createResponse(originResponse.status, {}, originResponse.body);
+  }
+
+  const originResponse = await httpRequest(request.url);
+  return createResponse(originResponse.status, {}, originResponse.body);
+}
+```
+
