@@ -1,6 +1,6 @@
 ---
 title: "Coverage"
-description: "What each collector monitors, blocks, and redacts — for LLM traffic and for tool-level traffic — and what it does not cover."
+description: "What each collector monitors, asks about, blocks, and redacts — for LLM traffic and for tool-level traffic — and what it does not cover."
 ---
 
 Every collector calls the same [evaluate API](/trustguard/api/evaluate), but they
@@ -11,73 +11,154 @@ masked payload; a provider hook whose response schema is `allow` / `deny` cannot
 This page is the comparison. Each integration page repeats its own row, with the
 detail, so you do not have to come back here mid-setup.
 
-## The three capabilities
+## What a collector can apply
 
-TrustGuard resolves every evaluation into a
-[policy](/trustguard/concepts/policies) status. Three of them decide coverage:
+TrustGuard resolves every evaluation into one
+[policy](/trustguard/concepts/policies) status. Four of them ask something of the
+collector, listed most restrictive first — the order the reducer itself uses,
+`block` > `ask` > `transform` > `report` > `allow`:
 
-| Capability | Status | What it means |
+| Action | Status | What it means |
 | --- | --- | --- |
-| **Monitor** | `report` | The interaction is recorded with findings and continues. |
 | **Block** | `block` | The interaction is stopped before it reaches the model, the tool, or the user. |
-| **Redact** | `transform` | The content is **rewritten** and continues masked. [Data-loss](/trustguard/detectors/data-loss-prevention) outcomes only. |
+| **Ask** | `ask` | The user is asked to confirm. **Input only** — on output the gate does not match. Needs a human in the loop, so most collectors cannot honour it. |
+| **Redact** | `transform` | The content is **rewritten** and continues masked. [DLP](/trustguard/detectors/data-loss-prevention) (`data_loss_prevention`) outcomes only. |
+| **Monitor** | `report` | The interaction is recorded with findings and continues. |
 
 **Redaction is the scarce one.** To honour `transform`, the host has to own the
 payload *and* be able to write it back. Most integration contracts return a
 boolean verdict, so `transform` collapses to allow or deny there.
 
-Legend: ✅ supported · ⚠️ conditional · ❌ not supported · ➖ the surface does not
-exist for this collector.
+**Ask is the one that collapses.** It needs a person at a keyboard, which only
+the developer-machine plugins have. It is not a column in the matrices below,
+because it does not vary by surface the way the other three do — it varies by
+whether the collector can prompt anyone at all, and it never applies on output.
+Where there is nobody to ask, each integration resolves it differently, and the
+difference matters:
 
-## Deployment scope
+| Collector | What an `ask` gate actually does |
+| --- | --- |
+| [Claude Code](/trustguard/integrations/claude-code) | **Honoured** — the native permission dialog, on prompts and on tool calls. |
+| [Cursor](/trustguard/integrations/cursor) | **Honoured on tool calls** — Cursor's approval prompt. There is no dialog at the prompt event, so an `ask` on a prompt is enforced as a block. |
+| [GitHub Copilot](/trustguard/integrations/copilot) | **Honoured on tool calls** — Copilot's approval prompt. In Copilot cloud there is no user present, so `ask` becomes deny. |
+| [Codex](/trustguard/integrations/codex) | **Allowed**, plus a warning injected as context the agent sees. Codex has no dialog, so treat `ask` as advisory here. |
+| [n8n](/trustguard/integrations/n8n) | **Blocked** — a workflow cannot prompt anyone mid-run. `trustguard.status` stays `ask` so you can branch off it; from 0.2.0 the node no longer fails on it. |
+| [LangChain](/trustguard/integrations/langchain) | **Blocked** — the middleware has no case for `ask`, and an unknown verdict fails closed. |
+| [Claude Enterprise](/trustguard/integrations/claude-enterprise) | **Allowed** — the Claude dialect answers allow or deny only, and there is no IDE prompt on this path. |
+| Gateways and Edge / WAF | **Allowed**, and recorded. There is no user to prompt and the verdict is not `block`, so the request passes through. |
+| Application collectors | **Yours to implement.** `status` is advisory; nothing prompts anyone unless your code does. |
 
-| Group | Collectors | Runs on | Protects | Deployed by |
+Legend for the matrices: ✅ supported · ⚠️ conditional · ❌ not supported · ➖ the
+surface does not exist for this collector.
+
+## Every collector
+
+One row per collector, in the same order in all three tables on this page.
+**Category** is the group it sits under in these docs.
+
+| Collector | Category | Runs on | Protects | Deployed by |
 | --- | --- | --- | --- | --- |
-| Gateway | [TrustGate](/trustguard/integrations/trustgate) | Your gateway (self-hosted or SaaS) | LLM and MCP traffic on guarded routes | Platform team, in the gateway |
-| Gateway | [Portkey](/trustguard/integrations/portkey), [LiteLLM](/trustguard/integrations/litellm), [Kong](/trustguard/integrations/kong), [Apigee](/trustguard/integrations/apigee), [Azure APIM](/trustguard/integrations/azure-apim) | Gateway infrastructure | LLM API traffic | Platform team, in the gateway config |
-| Agent frameworks | [LangChain](/trustguard/integrations/langchain) | Your agent process | Prompts, responses and tool calls in the agent loop | Application developers |
-| Agent frameworks | [n8n](/trustguard/integrations/n8n) | Your n8n instance | The workflows you place the node in | Whoever builds the workflow |
-| IDE & coding agents | [Claude Enterprise](/trustguard/integrations/claude-enterprise) | Anthropic, server-side | Every model request from Claude chat, Claude Code and Cowork | Anthropic org admin (`organization:manage`) |
-| IDE & coding agents | [Claude Code](/trustguard/integrations/claude-code), [Cursor](/trustguard/integrations/cursor), [Codex](/trustguard/integrations/codex), [GitHub Copilot](/trustguard/integrations/copilot) | Developer machines | Prompts, tool calls and tool results | IT, by MDM — developers need no NeuralTrust account |
-| Application | [Python](/trustguard/integrations/python-sdk), [Node](/trustguard/integrations/node-sdk), [REST](/trustguard/integrations/rest) | Your code | Any model provider your code calls | Application developers |
-| Application | [Python middleware](/trustguard/integrations/python-middleware), [Node middleware](/trustguard/integrations/node-middleware) | Your service | Every AI route it wraps | Application developers |
-| Edge / WAF | [Cloudflare](/trustguard/integrations/cloudflare), [CloudFront](/trustguard/integrations/aws-cloudfront), [Fastly](/trustguard/integrations/fastly), [Akamai](/trustguard/integrations/akamai) | CDN edge | Requests to your own AI endpoints | Platform team, in the CDN |
+| [TrustGate](/trustguard/integrations/trustgate) | Gateway | Your gateway, self-hosted or SaaS | LLM and MCP traffic on guarded routes | Platform team, in the gateway |
+| [Portkey](/trustguard/integrations/portkey) | Gateway | Portkey Cloud or self-hosted | LLM API traffic through Portkey | Platform team, in the gateway config |
+| [LiteLLM](/trustguard/integrations/litellm) | Gateway | Your LiteLLM proxy | LLM API traffic through the proxy | Platform team, in the gateway config |
+| [Kong](/trustguard/integrations/kong) | Gateway | Kong Gateway, on routes running AI Proxy | LLM API traffic on those routes | Platform team, in the gateway config |
+| [Apigee](/trustguard/integrations/apigee) | Gateway | Apigee, per proxy or per environment | LLM API traffic on the attached proxies | Platform team, in the gateway config |
+| [Azure APIM](/trustguard/integrations/azure-apim) | Gateway | Azure API Management | LLM API traffic on the API | Platform team, in the gateway config |
+| [LangChain](/trustguard/integrations/langchain) | Agent frameworks | Your agent process | Prompts, responses and tool calls in the agent loop | Application developers |
+| [n8n](/trustguard/integrations/n8n) | Agent frameworks | Your n8n instance | The workflows you place the node in | Whoever builds the workflow |
+| [Claude Enterprise](/trustguard/integrations/claude-enterprise) | IDE & coding agents | Anthropic, server-side — nothing installed | Every model request from Claude chat, Claude Code and Cowork | Anthropic org admin (`organization:manage`) |
+| [Claude Code](/trustguard/integrations/claude-code) | IDE & coding agents | Developer machines | Prompts, tool calls and tool results | IT, by MDM — developers need no NeuralTrust account |
+| [Cursor](/trustguard/integrations/cursor) | IDE & coding agents | Developer machines | Prompts, tool calls and tool results | IT, by MDM |
+| [Codex](/trustguard/integrations/codex) | IDE & coding agents | Developer machines | Prompts, tool calls and tool results | IT, by MDM |
+| [GitHub Copilot](/trustguard/integrations/copilot) | IDE & coding agents | Developer machines, and Copilot cloud | Tool calls and tool results; prompts are audit-only | IT, by MDM or org policy |
+| [Python SDK](/trustguard/integrations/python-sdk) | Application | Your code | Any model provider your code calls | Application developers |
+| [Node.js SDK](/trustguard/integrations/node-sdk) | Application | Your code | Any model provider your code calls | Application developers |
+| [REST](/trustguard/integrations/rest) | Application | Your code, any language or runtime | Any model provider your code calls | Application developers |
+| [Python middleware](/trustguard/integrations/python-middleware) | Application | Your FastAPI, Django or Flask service | Every AI route it wraps | Application developers |
+| [Node.js middleware](/trustguard/integrations/node-middleware) | Application | Your Express or Next.js service | Every AI route it wraps | Application developers |
+| [Cloudflare](/trustguard/integrations/cloudflare) | Edge / WAF | A Cloudflare Worker on your AI routes | Requests to your own AI endpoints | Platform team, in the CDN |
+| [CloudFront](/trustguard/integrations/aws-cloudfront) | Edge / WAF | Lambda@Edge on viewer request | Requests to your own AI endpoints | Platform team, in the CDN |
+| [Fastly](/trustguard/integrations/fastly) | Edge / WAF | A Fastly Compute service | Requests to your own AI endpoints | Platform team, in the CDN |
+| [Akamai](/trustguard/integrations/akamai) | Edge / WAF | Akamai EdgeWorkers, `responseProvider` | Requests to your own AI endpoints | Platform team, in the CDN |
 
-Groups are not exclusive, and most deployments need more than one. A gateway
+Categories are not exclusive, and most deployments need more than one. A gateway
 collector covers your own AI products; an IDE collector covers what developers
 and their agents do; neither sees the other.
 
 ## LLM interactions
 
 **Input** is the request sent to the model provider — prompts, tool definitions,
-tool call arguments and tool results. **Output** is the model's response.
+tool call arguments and tool results. **Output** is the model's response. One
+table each, so neither needs scrolling sideways to read.
 
-| Collector | In · monitor | In · block | In · redact | Out · monitor | Out · block | Out · redact |
-| --- | :--: | :--: | :--: | :--: | :--: | :--: |
-| TrustGate | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Kong, Apigee, Azure APIM | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
-| Portkey | ✅ | ✅ | ⚠️ | ✅ | ✅ | ⚠️ |
-| LiteLLM | ✅ | ✅ | ⚠️ | ✅ | ✅ | ⚠️ |
-| Claude Enterprise | ✅ | ✅ | ❌ | ➖ | ➖ | ➖ |
-| Claude Code, Cursor, Codex | ✅ | ✅ | ❌ | ➖ | ➖ | ➖ |
-| GitHub Copilot | ✅ | ❌ | ❌ | ➖ | ➖ | ➖ |
-| LangChain | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ |
-| n8n | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
-| Application (SDK, REST, middleware) | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ |
-| Edge / WAF (all) | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
+### Input
+
+| Collector | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| TrustGate | ✅ | ✅ | ✅ |
+| Portkey | ✅ | ✅ | ⚠️ |
+| LiteLLM | ✅ | ✅ | ⚠️ |
+| Kong | ✅ | ✅ | ❌ |
+| Apigee | ✅ | ✅ | ❌ |
+| Azure APIM | ✅ | ✅ | ❌ |
+| LangChain | ✅ | ✅ | ✅ |
+| n8n | ✅ | ⚠️ | ⚠️ |
+| Claude Enterprise | ✅ | ✅ | ❌ |
+| Claude Code | ✅ | ✅ | ❌ |
+| Cursor | ✅ | ✅ | ❌ |
+| Codex | ✅ | ✅ | ❌ |
+| GitHub Copilot | ✅ | ❌ | ❌ |
+| Python SDK | ✅ | ⚠️ | ⚠️ |
+| Node.js SDK | ✅ | ⚠️ | ⚠️ |
+| REST | ✅ | ⚠️ | ⚠️ |
+| Python middleware | ✅ | ⚠️ | ⚠️ |
+| Node.js middleware | ✅ | ⚠️ | ⚠️ |
+| Cloudflare | ✅ | ✅ | ❌ |
+| CloudFront | ⚠️ | ✅ | ❌ |
+| Fastly | ✅ | ✅ | ❌ |
+| Akamai | ✅ | ✅ | ❌ |
+
+### Output
+
+| Collector | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| TrustGate | ✅ | ✅ | ✅ |
+| Portkey | ✅ | ✅ | ⚠️ |
+| LiteLLM | ✅ | ✅ | ⚠️ |
+| Kong | ✅ | ✅ | ❌ |
+| Apigee | ✅ | ✅ | ❌ |
+| Azure APIM | ⚠️ | ⚠️ | ❌ |
+| LangChain | ✅ | ✅ | ⚠️ |
+| n8n | ✅ | ⚠️ | ⚠️ |
+| Claude Enterprise | ➖ | ➖ | ➖ |
+| Claude Code | ➖ | ➖ | ➖ |
+| Cursor | ➖ | ➖ | ➖ |
+| Codex | ➖ | ➖ | ➖ |
+| GitHub Copilot | ➖ | ➖ | ➖ |
+| Python SDK | ✅ | ⚠️ | ⚠️ |
+| Node.js SDK | ✅ | ⚠️ | ⚠️ |
+| REST | ✅ | ⚠️ | ⚠️ |
+| Python middleware | ✅ | ⚠️ | ⚠️ |
+| Node.js middleware | ✅ | ⚠️ | ⚠️ |
+| Cloudflare | ❌ | ❌ | ❌ |
+| CloudFront | ❌ | ❌ | ❌ |
+| Fastly | ❌ | ❌ | ❌ |
+| Akamai | ❌ | ❌ | ❌ |
 
 **TrustGate is the only collector that inspects streaming responses.** Its
 `post_response` stage buffers the stream and inspects it after the client drain.
 On the other gateways, output coverage is over non-streaming completions.
 
-**LiteLLM redaction is version-gated.** It needs the native `neuraltrust`
-guardrail, which is contributed but not yet in a LiteLLM release. The custom
-guardrail file that works today enforces `block` and does not apply `transform`.
+**LiteLLM and Portkey redaction is version-gated.** Both need their native
+`neuraltrust` guardrail, contributed but not yet in a release. What ships today —
+LiteLLM's custom guardrail file, Portkey's BYOG webhook — enforces `block` and
+does not apply `transform`.
 
-**Portkey redaction is version-gated too.** It needs the native `neuraltrust`
-plugin, which is contributed but not yet in a Portkey release. The BYOG webhook
-that works on Portkey Cloud today returns a boolean, so `transform` becomes allow
-or deny there.
+**Azure APIM is input-only** until you add the outbound policy, which is why its
+output column is conditional rather than supported.
+
+**CloudFront truncates** an oversized viewer-request body silently, so a long
+prompt is evaluated only in part — monitoring is partial, not absent.
 
 **Copilot prompts are audit-only.** Copilot discards command-hook output at
 `userPromptSubmitted`, so a prompt is recorded but cannot be stopped there.
@@ -86,34 +167,80 @@ Enforcement happens at the tool events.
 ## Tool-level interactions
 
 These collectors apply policy between an agent and its tools — MCP servers,
-shell, patches. **Tool listing** means the tool *declarations*: descriptions and
-parameter schemas, which is where
-[tool poisoning](/trustguard/detectors/agent-mcp-security) hides.
+shell, patches. The **call** is what the agent is about to do; the **result** is
+what the tool sends back.
 
-| Collector | Listing · monitor | Listing · block | Call · monitor | Call · block | Call · redact | Result · monitor | Result · block | Result · redact |
-| --- | :--: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
-| TrustGate | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Claude Enterprise | ✅ | ⚠️ | ✅ | ⚠️ | ❌ | ✅ | ⚠️ | ❌ |
-| Claude Code, Cursor, Codex | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
-| GitHub Copilot | ❌ | ❌ | ✅ | ✅ | ❌ | ✅ | ⚠️ | ❌ |
-| LangChain | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅ | ⚠️ |
-| n8n | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
-| Application (SDK, REST) | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
-| Kong, Apigee, Azure APIM | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
-| Portkey | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
-| LiteLLM | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ | ⚠️ |
-| Edge / WAF | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
+### Tool call
 
-Tool declarations are scored by
-[indirect prompt injection](/trustguard/detectors/agent-mcp-security) over LLM
-`tools[]` and MCP `tools/list` — but only where the integration actually sends
-them. The developer-machine plugins send tool *calls* and *results*, not the tool
-list, so tool-poisoning detection does not apply on the surface closest to the
-developer. Route MCP through [TrustGate](/trustgate/mcp/overview) to cover it.
+| Collector | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| TrustGate | ✅ | ✅ | ✅ |
+| Portkey | ⚠️ | ⚠️ | ⚠️ |
+| LiteLLM | ⚠️ | ⚠️ | ⚠️ |
+| Kong | ➖ | ➖ | ➖ |
+| Apigee | ➖ | ➖ | ➖ |
+| Azure APIM | ➖ | ➖ | ➖ |
+| LangChain | ✅ | ✅ | ⚠️ |
+| n8n | ⚠️ | ⚠️ | ⚠️ |
+| Claude Enterprise | ✅ | ⚠️ | ❌ |
+| Claude Code | ✅ | ✅ | ❌ |
+| Cursor | ✅ | ✅ | ❌ |
+| Codex | ✅ | ✅ | ❌ |
+| GitHub Copilot | ✅ | ✅ | ❌ |
+| Python SDK | ⚠️ | ⚠️ | ⚠️ |
+| Node.js SDK | ⚠️ | ⚠️ | ⚠️ |
+| REST | ⚠️ | ⚠️ | ⚠️ |
+| Python middleware | ➖ | ➖ | ➖ |
+| Node.js middleware | ➖ | ➖ | ➖ |
+| Cloudflare | ➖ | ➖ | ➖ |
+| CloudFront | ➖ | ➖ | ➖ |
+| Fastly | ➖ | ➖ | ➖ |
+| Akamai | ➖ | ➖ | ➖ |
 
-On Claude Enterprise, tool content is visible in the transcript and can be
-blocked, but only by denying the whole inference at the single pre-inference
-decision point. There is no per-tool verdict.
+### Tool result
+
+| Collector | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| TrustGate | ✅ | ✅ | ✅ |
+| Portkey | ⚠️ | ⚠️ | ⚠️ |
+| LiteLLM | ⚠️ | ⚠️ | ⚠️ |
+| Kong | ➖ | ➖ | ➖ |
+| Apigee | ➖ | ➖ | ➖ |
+| Azure APIM | ➖ | ➖ | ➖ |
+| LangChain | ✅ | ✅ | ⚠️ |
+| n8n | ⚠️ | ⚠️ | ⚠️ |
+| Claude Enterprise | ✅ | ⚠️ | ❌ |
+| Claude Code | ✅ | ✅ | ❌ |
+| Cursor | ✅ | ✅ | ❌ |
+| Codex | ✅ | ✅ | ❌ |
+| GitHub Copilot | ✅ | ⚠️ | ❌ |
+| Python SDK | ⚠️ | ⚠️ | ⚠️ |
+| Node.js SDK | ⚠️ | ⚠️ | ⚠️ |
+| REST | ⚠️ | ⚠️ | ⚠️ |
+| Python middleware | ➖ | ➖ | ➖ |
+| Node.js middleware | ➖ | ➖ | ➖ |
+| Cloudflare | ➖ | ➖ | ➖ |
+| CloudFront | ➖ | ➖ | ➖ |
+| Fastly | ➖ | ➖ | ➖ |
+| Akamai | ➖ | ➖ | ➖ |
+
+The middleware collectors see HTTP routes, not model or tool calls, which is why
+they have no tool surface at all while the SDKs do.
+
+<Note>
+**Tool declarations are a TrustGate and MCP concern.** Tool *listings* —
+descriptions and parameter schemas, where
+[tool poisoning](/trustguard/detectors/agent-mcp-security) hides — are scored by
+indirect prompt injection over LLM `tools[]` and MCP `tools/list`, but only where
+the integration actually sends them: [TrustGate](/trustgate/mcp/overview),
+[LangChain](/trustguard/integrations/langchain) over the agent's bound tools, and
+[Claude Enterprise](/trustguard/integrations/claude-enterprise), where the
+declarations are visible in the transcript but can only be stopped by denying the
+whole inference. The developer-machine plugins send tool *calls* and *results*,
+not the tool list, so tool-poisoning detection does not apply on the surface
+closest to the developer. Route MCP through
+[TrustGate](/trustgate/mcp/overview) to cover it.
+</Note>
 
 ## Considerations
 
@@ -121,11 +248,6 @@ decision point. There is no per-tool verdict.
 5xx it **fails open** unless the policy sets fail-closed; auth and entitlement
 failures always block. In observe mode a `transform` is logged, not applied. A
 `transform` that cannot be applied safely blocks rather than forwarding unmasked.
-
-**Other gateways** — Kong, Apigee and Azure APIM map the verdict onto a boolean,
-so redaction cannot travel. Kong needs AI Proxy on the route. Apigee coverage is
-per proxy unless you attach the Shared Flow with an environment flow hook. Azure
-APIM is input-only until you add the outbound policy.
 
 **Portkey** — the native plugin holds the request body, so it consumes
 `transformed_payload` on chat completions, text completions and Anthropic
@@ -145,29 +267,39 @@ payload where LiteLLM populates them and a transformed tool call is written back
 but every verdict is request-level, so a tool-level finding blocks the whole
 request. Auth and entitlement failures stay fail-closed even under `fail_open`.
 
+**Kong** — needs AI Proxy on the route. The verdict maps onto a boolean, so
+redaction cannot travel.
+
+**Apigee** — coverage is per proxy unless you attach the Shared Flow with an
+environment flow hook. The verdict maps onto a boolean, so redaction cannot
+travel.
+
+**Azure APIM** — input-only until you add the outbound policy. The verdict maps
+onto a boolean, so redaction cannot travel.
+
 **Claude Enterprise** — allow or deny on a whole inference, and nothing else. No
-redaction, no `ask`, no output coverage. Attachments arrive as metadata and
-extracted text, never raw bytes.
+redaction, no `ask`, no output coverage. Tool content is visible in the
+transcript and can be blocked, but only by denying the whole inference at the
+single pre-inference decision point: there is no per-tool verdict. Attachments
+arrive as metadata and extracted text, never raw bytes.
 
 **Claude Code, Cursor, Codex, Copilot** — none of them sees the model's response,
 system prompts, token usage or extended thinking: they capture what passes
 through hook events. None supports redaction — `transform` becomes a permission
-decision, so a masking policy warns or blocks instead of masking. Codex does not
-honour `ask`, and Cursor has no confirmation dialog for prompts. The n8n node
-does not honour it either — it denies instead.
+decision, so a masking policy warns or blocks instead of masking. They differ on
+`ask`, which is where the choice between them usually lands — see the table
+above.
 
-**Agent frameworks** — both run inside your agent or workflow rather than on
-the network, so they see only what they are installed in. **LangChain** applies
-`transform` by rewriting messages in place, and `check_tool_calls` is the one
-hook anywhere that stops a tool call *before* it executes; output redaction is
-conditional because a streamed response has already reached the client. **n8n**
-routes the verdict to a named output instead of enforcing it, so every
-capability past monitoring depends on how the workflow is wired — a **Block**
-branch reconnected to the agent is monitoring. It has no hook inside an AI
-Agent node's loop, so tool coverage is only what the graph makes explicit. An
-`ask` lands on Block with `trustguard.status` preserved: from 0.2.0 the node no
-longer fails on it, but a workflow cannot prompt anyone, so it is degraded to a
-deny rather than honoured.
+**LangChain** — runs inside your agent rather than on the network, so it sees
+only what it is installed in. It applies `transform` by rewriting messages in
+place, and `check_tool_calls` is the one hook anywhere that stops a tool call
+*before* it executes; output redaction is conditional because a streamed response
+has already reached the client.
+
+**n8n** — routes the verdict to a named output instead of enforcing it, so every
+capability past monitoring depends on how the workflow is wired: a **Block**
+branch reconnected to the agent is monitoring. It has no hook inside an AI Agent
+node's loop, so tool coverage is only what the graph makes explicit.
 
 **Application** — every capability is reachable because you hold the payload, and
 none is automatic. Code that logs a `block` and calls the model anyway is
@@ -177,9 +309,7 @@ queue consumers bypass them.
 
 **Edge / WAF** — the documented integrations inspect the request body and return
 403 on `block`; the response path is not inspected. They protect your own
-applications, not employee use of third-party AI. Watch the runtime limits:
-CloudFront **truncates** an oversized viewer-request body silently, so a long
-prompt is evaluated only in part.
+applications, not employee use of third-party AI.
 
 ## Choosing
 
@@ -187,10 +317,12 @@ prompt is evaluated only in part.
 | --- | --- |
 | Masking sensitive data in flight | [TrustGate](/trustguard/integrations/trustgate) — the only collector that rewrites payloads on every surface, including streams. [LiteLLM](/trustguard/integrations/litellm) and [Portkey](/trustguard/integrations/portkey) rewrite non-streaming completions once their native guardrails ship |
 | Coverage of streaming completions | [TrustGate](/trustguard/integrations/trustgate) |
+| A confirmation dialog in front of the developer | [Claude Code](/trustguard/integrations/claude-code), [Cursor](/trustguard/integrations/cursor) or [GitHub Copilot](/trustguard/integrations/copilot) — the only collectors that honour `ask` |
+| Inspection of tool declarations, for tool poisoning | [TrustGate](/trustgate/mcp/overview) on MCP, or [LangChain](/trustguard/integrations/langchain) inside the agent |
 | Enforcement as a visible step in a low-code workflow | [n8n](/trustguard/integrations/n8n) — the verdict becomes a branch on the canvas, enforced by how you wire it |
 | Org-wide Claude coverage nobody can disable | [Claude Enterprise](/trustguard/integrations/claude-enterprise) |
 | Stopping a specific shell command or MCP call | [Claude Code](/trustguard/integrations/claude-code), [Cursor](/trustguard/integrations/cursor), [Codex](/trustguard/integrations/codex), [Copilot](/trustguard/integrations/copilot) |
-| A policy decision that needs application context | [Application](/trustguard/integrations/python-sdk) collectors |
+| A policy decision that needs application context | The [SDK](/trustguard/integrations/python-sdk) or [REST](/trustguard/integrations/rest) collectors |
 | Coverage without touching application code | A [gateway](/trustguard/integrations/trustgate) or [edge](/trustguard/integrations/cloudflare) collector |
 
 <Note>
