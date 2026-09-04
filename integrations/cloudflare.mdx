@@ -1,0 +1,230 @@
+---
+title: "Cloudflare"
+description: "Evaluate request bodies at the Cloudflare edge with Workers"
+---
+
+Cloudflare provides DNS, CDN caching, DDoS protection, and WAF services in front
+of websites and APIs. **Cloudflare Workers** let you run JavaScript at the edge
+for matching requests before Cloudflare forwards them to the origin.
+
+This integration evaluates requests to AI routes that you operate without
+changing application code. It does not cover direct calls that bypass the
+Cloudflare zone, model responses, or employee access to third-party AI services.
+
+## Integration capabilities
+
+| Product | What it does in Cloudflare | What you can enforce |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Runs inside a Worker on your AI routes, evaluating the request body against the assigned [policy](/trustguard/concepts/policies) before Cloudflare forwards it to your origin | Monitor · Block |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| A Cloudflare collector, API key, and assigned policy | Go to **Runtime → Collectors → Catalog → Edge / WAF → Cloudflare**. Create the collector, create the `tgk_…` key on its **Auth** tab, and assign an Input-phase policy on the **Policies** tab. The key is shown once and identifies the collector. |
+| Egress from the Worker to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. |
+| A Cloudflare zone you control, with the AI routes proxied through it | The Worker only runs on requests Cloudflare is already terminating. |
+| `wrangler`, authenticated to that account | Used to scaffold, store the secret and deploy. |
+| Route patterns for your AI endpoints | Add a pattern for each path you want to evaluate. |
+
+<Note>
+Start with the policy in **Observe** mode. Findings appear in **Activity** without
+affecting traffic. Switch to **Enforce** after reviewing the results. See
+[Policies](/trustguard/concepts/policies).
+</Note>
+
+The Worker does not read the response, so configure rules for this collector in
+the Input phase.
+
+## 1. Create a collector API key
+
+On the Cloudflare collector, open **Auth** and create a key. It is shown once. The
+key identifies the collector and its assigned policy; the request body does not
+need a collector ID.
+
+## 2. Scaffold the Worker
+
+```bash
+npm create cloudflare@latest
+```
+
+Put the handler in `src/index.js`. The remaining configuration goes in
+`wrangler.toml`.
+
+## 3. Store the key as a secret
+
+```bash
+wrangler secret put TRUSTGUARD_API_KEY
+```
+
+A secret reaches the handler as `env.TRUSTGUARD_API_KEY` and never appears in
+`wrangler.toml`, so the config file stays committable. Do not use a plain `vars`
+entry for it.
+
+## 4. Evaluate the request body
+
+The handler clones the request, sends the body to
+[`POST /v1/evaluate`](/trustguard/api/evaluate) with the collector key as a
+bearer token, and forwards to the origin only if the verdict is not `block`:
+
+```js
+// src/index.js
+export default {
+  async fetch(request, env) {
+    if (request.method === "POST") {
+      const text = await request.clone().text();
+      const result = await fetch("{TRUSTGUARD_URL}/v1/evaluate", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.TRUSTGUARD_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          protocol: "llm",
+          direction: "input",
+          payload: { input: text },
+          consumer_id: request.headers.get("x-user-id") ?? "",
+          session_id: request.headers.get("x-session-id") ?? "",
+        }),
+      }).then((r) => r.json());
+      if (result.status === "block") {
+        return new Response("Blocked by TrustGuard", { status: 403 });
+      }
+    }
+    return fetch(request);
+  },
+};
+```
+
+The following details determine what the handler evaluates:
+
+- **`request.clone()`**: read the clone, not the request. Consuming the original
+  body stream leaves nothing to forward to the origin.
+- **`request.method === "POST"`**: other methods pass through without
+  evaluation. Update the condition if an endpoint accepts prompts through
+  another method.
+- **`payload.input` is the complete body**: the raw POST body as a string, JSON
+  scaffolding, model name and message roles included.
+  [Detectors](/trustguard/concepts/detectors) see one blob with no role
+  boundaries: retrieved text, your system prompt and the user's turn are
+  indistinct. Parse the body and send the user turn if you need that distinction.
+
+<Warning>
+**This sample does not implement redaction.** A `transform` verdict contains
+TrustGuard's `{ "input": … }` payload rather than your origin's request schema.
+Applying it requires custom, schema-aware code that inserts the rewritten text
+into the original body. Use **Block** rules unless you have implemented and
+tested that conversion.
+</Warning>
+
+There is no `try`/`catch` around the request to TrustGuard. Catch failures and
+choose explicitly whether to return `fetch(request)` (fail open) or a 403 (fail
+closed). Without a catch, Cloudflare returns its own error page.
+
+## 5. Route the Worker at your AI paths
+
+Bind the Worker to the specific paths that carry prompts, not to the whole zone:
+
+```toml
+# wrangler.toml
+name = "trustguard-waf"
+main = "src/index.js"
+routes = [
+  { pattern = "app.example.com/api/chat*", zone_name = "example.com" }
+]
+```
+
+```bash
+wrangler deploy
+```
+
+The `routes` list defines coverage. A narrow pattern can omit an AI path; a broad
+pattern adds an evaluation round trip to unrelated requests.
+
+Zone-level WAF rules run before the Worker. You can add repeat offenders to a
+Cloudflare **IP List** and block them in WAF before they reach the Worker.
+
+## 6. Verify
+
+1. Put the policy in **Enforce** and `POST` a prompt to a guarded path that trips
+   a rule.
+2. Confirm that the caller receives `403` with the body
+   `Blocked by TrustGuard`.
+3. Confirm the event in TrustGuard **Activity**, under the `consumer_id` you sent
+   as `x-user-id`.
+4. Send the same prompt to a path not listed in `routes` and confirm that no
+   event is recorded.
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ❌ | ❌ | ❌ |
+| Tool-level | ➖ | ➖ | ➖ |
+
+The Worker evaluates POST bodies on matched routes. It does not inspect model
+responses or support redaction. Each evaluated request adds one round trip from
+the edge to `{TRUSTGUARD_URL}`.
+
+### What is evaluated
+
+| Worker path | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| `POST` on a matched route | `protocol: llm`, `direction: input`; `payload.input` contains the raw request body as a string | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII in prompts ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** returns `403` and prevents the origin call |
+| Any other method, or a path not in `routes` | Not evaluated | Not evaluated | Forwarded unchanged |
+| The origin's response | Not evaluated; the handler returns `fetch(request)` without reading it | Not evaluated | Not evaluated |
+| Tool calls and tool results | Not available. The edge sees one HTTP body, not an agent loop | Not evaluated | Not evaluated |
+
+Every call is [`POST /v1/evaluate`](/trustguard/api/evaluate) with the collector
+key as a bearer token, and the policy's detectors decide the verdict.
+`/v1/evaluate` answers `200` for every verdict including `block`, so the handler
+must read `result.status`. A successful HTTP response does not imply an allow
+verdict.
+
+### Configuration
+
+| Where | What | Notes |
+|---|---|---|
+| `wrangler secret put TRUSTGUARD_API_KEY` | The collector `tgk_…` key | Reaches the handler as `env.TRUSTGUARD_API_KEY`. Do not use a `vars` entry because those values are plaintext in `wrangler.toml` |
+| `wrangler.toml` → `routes` | Which requests run the Worker | Add one `{ pattern, zone_name }` per guarded path |
+| `wrangler.toml` → `main` | `src/index.js` | The handler above |
+| The evaluate URL in the handler | `{TRUSTGUARD_URL}/v1/evaluate` | The full endpoint, not the host |
+| Zone WAF rules and IP Lists | Run before the Worker | Drop known-bad traffic there so it never costs an evaluation |
+| The evaluate `fetch` in `src/index.js` | Fail-open or fail-closed | Controlled by whether you wrap the `fetch` in a `try`/`catch` and what the catch returns. See [step 4](#4-evaluate-the-request-body) |
+
+### Attributes
+
+- `consumer_id`: read from the `x-user-id` request header, `""` when absent. It
+  is what per-consumer policy routing keys on, so without it every caller shares
+  the collector's default policy, and gates matching `consumer.id` never fire.
+- `session_id`: read from `x-session-id`. The sample sends `""` when the header
+  is absent. Send a stable, verified conversation ID if you need reliable
+  grouping in **Activity**.
+- Both values are caller-controlled headers. If policy decisions depend on them,
+  replace them in the Worker with values derived from an authenticated identity.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| No events in **Activity** | The path is not covered by a `routes` pattern, no policy is assigned to the collector, or the Worker cannot reach `{TRUSTGUARD_URL}` |
+| Some prompts are evaluated, some are not | The handler only inspects `POST`. Anything else is forwarded unevaluated |
+| A blocking prompt still reaches the origin | The policy is in Observe rather than Enforce, or the handler is not reading `result.status`. `/v1/evaluate` also returns `200` for a `block` verdict |
+| A masking policy records but does not mask | Expected. The sample forwards the original request on a `transform` verdict. Use a **Block** rule unless you implement schema-aware reconstruction |
+| An `ask` gate does not block | Expected. The edge cannot prompt a user, so `ask` is allowed and recorded |
+| Turns appear in separate sessions, or events have no consumer | The client is not sending `x-user-id` / `x-session-id`, so both are `""` |
+| The origin receives an empty body | The request was read without `.clone()`, consuming the stream |
+| Cloudflare returns its own error page | The sample omits error handling, and the evaluation request threw. Add `try`/`catch` and implement fail-open or fail-closed behavior |
+| A detector fires on your system prompt or on retrieved text | `payload.input` is the whole raw body, so the detector sees one blob with no role boundaries. Parse the body and send the user turn |
+
+## Related
+
+- [Evaluate API](/trustguard/api/evaluate): request and response contract for the endpoint the Worker calls
+- [Policies](/trustguard/concepts/policies): Observe and Enforce modes, including gate configuration
+- [Collectors](/trustguard/concepts/collectors): collector keys and policy resolution
+- Other edge collectors: [CloudFront](/integrations/aws-cloudfront) · [Fastly](/integrations/fastly) · [Akamai](/integrations/akamai)
+- [Cloudflare Workers docs](https://developers.cloudflare.com/workers/): Cloudflare reference
+- [Wrangler configuration](https://developers.cloudflare.com/workers/wrangler/configuration/): `routes`, `vars`, and secrets

@@ -1,0 +1,265 @@
+---
+title: "Amazon CloudFront"
+description: "Evaluate request bodies at the CloudFront edge with Lambda@Edge"
+---
+
+Amazon CloudFront is AWS's content delivery network. It serves requests from
+edge locations or forwards them to your origin. **Lambda@Edge** runs a function,
+authored in `us-east-1`, at those edge locations.
+
+This integration evaluates inbound request bodies before CloudFront forwards
+them to an AI endpoint you operate. It does not inspect model responses,
+individual tool calls inside an agent, or employee access to third-party AI
+services.
+
+## Integration capabilities
+
+| Product | What it does in CloudFront | What you can enforce |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Runs inside a Lambda@Edge function on **viewer request** or **origin request**, evaluating the request body against the assigned [policy](/trustguard/concepts/policies) before it reaches your origin | Monitor · Block |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| A CloudFront collector, API key, and assigned policy | Go to **Runtime → Collectors → Catalog → Edge / WAF → CloudFront**. Create the collector, create a key on its **Auth** tab, and assign an Input-phase policy on the **Policies** tab. The key is shown once and identifies the collector. |
+| Egress from Lambda@Edge to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. |
+| A CloudFront distribution in front of an AI endpoint you operate | Requests that bypass the distribution are not evaluated. |
+| A Node.js Lambda function in **us-east-1** | Lambda@Edge functions are authored in that region and replicated by CloudFront. A function in any other region cannot be associated with a distribution. |
+| Secrets Manager or SSM Parameter Store | Lambda@Edge has no environment variables. See [step 3](#3-configure-the-collector-key) for key-storage options. |
+| A trigger choice and a policy for oversized requests | CloudFront exposes up to 40 KB on viewer request and 1 MB on origin request. Both require **Include Body**. The sample returns 413 when `inputTruncated` is true. See [steps 5](#5-choose-a-request-trigger-and-enable-include-body) and [6](#6-account-for-request-body-truncation). |
+
+<Note>
+Start with the policy in **Observe** mode. Findings appear in **Activity** without
+affecting traffic. Switch to **Enforce** after reviewing the results. See
+[Policies](/trustguard/concepts/policies).
+</Note>
+
+## 1. Create a collector API key
+
+On the CloudFront collector, open **Auth** and create a key. It is shown once.
+
+## 2. Write the request handler
+
+The function decodes the exposed body, calls
+[`POST /v1/evaluate`](/trustguard/api/evaluate) with the collector key as a
+bearer token, and returns either a 403 response or the original request:
+
+```js
+export const handler = async (event) => {
+  const request = event.Records[0].cf.request;
+
+  if (request.method === "POST" && request.body?.data) {
+    if (request.body.inputTruncated) {
+      return {
+        status: "413",
+        statusDescription: "Payload Too Large",
+        body: "Request body exceeds the Lambda@Edge inspection limit",
+      };
+    }
+
+    const text = Buffer.from(request.body.data, "base64").toString();
+    const result = await fetch("{TRUSTGUARD_URL}/v1/evaluate", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer <collector-api-key>",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        protocol: "llm",
+        direction: "input",
+        payload: { input: text },
+        consumer_id: request.headers["x-user-id"]?.[0]?.value ?? "",
+        session_id: request.headers["x-session-id"]?.[0]?.value ?? "",
+      }),
+    }).then((r) => r.json());
+
+    if (result.status === "block") {
+      return { status: "403", statusDescription: "Forbidden", body: "Blocked by TrustGuard" };
+    }
+  }
+
+  return request;
+};
+```
+
+Returning an object with a `status` short-circuits the request: CloudFront
+answers the viewer and your origin is never called. Returning `request`
+forwards it. The `allow`, `report`, `ask`, and `transform` verdicts reach the
+origin. An `ask` verdict is recorded and allowed because the edge cannot prompt
+a user.
+
+The key is inline above for readability only. [Step 3](#3-configure-the-collector-key)
+replaces it.
+
+<Warning>
+This sample does not implement redaction. A `transform` verdict contains
+TrustGuard's `{ "input": … }` payload rather than your origin's request schema.
+Applying it requires custom, schema-aware code that reconstructs the complete
+body. Use **Block** rules unless you have implemented and tested that conversion.
+</Warning>
+
+## 3. Configure the collector key
+
+Lambda@Edge does not support environment variables, so `process.env` is not an
+option. There are two ways to supply the collector key:
+
+| Approach | How it works |
+|---|---|
+| **Secrets Manager or SSM Parameter Store** | Fetch the key at cold start, outside the handler, and cache it in module scope so warm invocations do not re-fetch. Costs one extra call per cold container and needs read permission on the execution role. |
+| **Baked at deploy** | Your build substitutes the key into the bundle before publishing. No runtime dependency and no extra latency; rotating the key means republishing and re-associating the function. |
+
+Either way the key never travels in the request body.
+
+## 4. Publish the function and deploy it as Lambda@Edge
+
+Author the Node.js function in **us-east-1** and publish a numbered version;
+Lambda@Edge associates a version, never `$LATEST`. CloudFront then replicates
+that version to its edge locations. Allow several minutes for changes to
+propagate.
+
+## 5. Choose a request trigger and enable Include Body
+
+Attach the function to either the **Viewer request** or **Origin request** event
+of the cache behavior that carries your AI paths, and enable **Include Body**.
+
+Include Body exposes the payload. Without it, `request.body` is not
+populated, the handler's `request.body?.data` guard is false, and requests are
+forwarded without evaluation or an error. CloudFront supports this option on
+both request events.
+
+CloudFront first selects the matching cache behavior. The trigger then
+determines when the function runs and how much of the body it can inspect:
+
+| Trigger | When it runs | Exposed body | Cache coverage |
+|---|---|---|---|
+| **Viewer request** | Before CloudFront checks the cache | Up to 40 KB | Runs for cache hits and requests sent to the origin |
+| **Origin request** | After the cache check, when CloudFront is about to forward the request | Up to 1 MB | Runs only for requests sent to the origin; cache hits do not invoke it |
+
+Use viewer request when you need to evaluate cache hits. Use origin request when
+you need the higher body limit and do not need to evaluate cache hits.
+Scope the association to the behavior that serves AI routes. A
+default-behavior association also applies to unrelated assets in the
+distribution.
+
+## 6. Account for request-body truncation
+
+CloudFront exposes up to 40 KB of the body to a viewer-request function and up
+to 1 MB to an origin-request function. When a body exceeds the applicable
+limit, CloudFront sets `request.body.inputTruncated` to `true` and provides only
+the prefix within that limit.
+
+<Warning>
+Do not evaluate a truncated prefix as though it were the complete prompt. The
+sample checks `inputTruncated` and returns `413 Payload Too Large` before calling
+TrustGuard. If your application must accept larger requests, evaluate them at a
+point that receives the complete body.
+</Warning>
+
+## 7. Verify
+
+1. Put the policy in **Enforce** and POST a prompt that trips a rule to a path
+   on the guarded behavior.
+2. Confirm that the caller receives `403 Forbidden` with the body
+   `Blocked by TrustGuard`.
+3. Confirm the event in TrustGuard **Activity**, under the `consumer_id` taken
+   from `x-user-id`.
+
+Then send a request larger than the selected trigger's limit: over 40 KB for
+viewer request or over 1 MB for origin request. Confirm that the function
+returns 413 and does not forward the truncated request to the origin.
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ⚠️ | ⚠️ | ❌ |
+| LLM output | ❌ | ❌ | ❌ |
+| Tool-level | ➖ | ➖ | ➖ |
+
+The function evaluates input bodies up to the selected trigger's limit: 40 KB
+on viewer request or 1 MB on origin request. It returns 413 when CloudFront
+marks a body as truncated. It does not inspect responses, expose individual
+tool calls, or support redaction. Each evaluated request adds one round trip
+from the edge to `{TRUSTGUARD_URL}`.
+
+### What is evaluated
+
+| CloudFront event | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| Viewer request, `POST` with a body of 40 KB or less | `protocol: llm`, `direction: input`; `payload.input` is the base64-decoded body | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII in inbound prompts ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** returns 403 and prevents the origin call |
+| Origin request, `POST` with a body of 1 MB or less | Same evaluation, but only when CloudFront forwards the request to the origin | Same request-level checks | **Block** returns 403 and prevents the origin call |
+| Configured request trigger with `inputTruncated: true` | Not evaluated | Oversized requests | The sample returns `413 Payload Too Large` |
+| Configured request trigger, `GET` or no body | Not evaluated; the handler forwards it | Not evaluated | Not evaluated |
+| Unconfigured request event, origin response, or viewer response | No trigger configured | Not evaluated | Not evaluated |
+| Tool calls and tool results | Not available. The edge sees an HTTP request, not an agent loop | Not evaluated | Not evaluated |
+
+Every call is [`POST /v1/evaluate`](/trustguard/api/evaluate) with the collector
+key as a bearer token, and the policy's
+[detectors](/trustguard/concepts/detectors) decide the verdict. Verdicts are
+request-level: a `block` stops the whole request, never one field of it. The
+handler sends `direction: input` only, so Output-phase rules on the policy never
+evaluate, however many of them you write.
+
+### Configuration
+
+Configure the integration across CloudFront, Lambda, and the handler body:
+
+| Setting | Where | Notes |
+|---|---|---|
+| Trigger event | Cache behavior → **Viewer request** or **Origin request** | Viewer request runs before the cache lookup with a 40 KB body limit. Origin request runs after the cache lookup with a 1 MB limit and does not run for cache hits. |
+| **Include Body** | Same association | Off by default. See [step 5](#5-choose-a-request-trigger-and-enable-include-body). |
+| Function region | Lambda, **us-east-1** | Authored there, replicated by CloudFront. Associate a published version, not `$LATEST`. |
+| Which paths are covered | Cache behavior selection | Scope to AI routes; a default-behavior trigger runs on every asset. |
+| Collector key | Secrets Manager / SSM at cold start, or baked at deploy | See [step 3](#3-configure-the-collector-key). |
+| Truncated bodies | `request.body.inputTruncated` | The sample returns 413 instead of evaluating a partial body. The limit is 40 KB on viewer request and 1 MB on origin request. |
+| Endpoint | `{TRUSTGUARD_URL}/v1/evaluate` in the handler | The full endpoint, not the host. |
+| Request body fields | `protocol`, `direction`, `payload.input`, `consumer_id`, `session_id` | Optional `attributes` are also accepted. See the [Evaluate API](/trustguard/api/evaluate). |
+
+The sample does not define failure behavior. Without `try`/`catch`, an
+unreachable or slow TrustGuard call throws and CloudFront returns an error. Wrap
+the call and choose explicitly: return `request` to fail open, or return your
+own 403 to fail closed.
+
+### Attributes
+
+- `consumer_id`: read from the `x-user-id` request header, empty string when
+  absent. It is what per-consumer policy routing keys on, so without it every
+  caller shares the collector's default policy.
+- `session_id`: read from the `x-session-id` request header. The sample sends
+  `""` when the header is absent. Send a stable, verified conversation ID if you
+  need reliable grouping in **Activity**.
+- The function reads the header values present at the selected trigger.
+  CloudFront does not derive either value for you. If your front end does not
+  send those headers, map them from another source, such as a session cookie or
+  a claim your edge authentication already validates. For an origin-request
+  trigger, ensure that your cache or origin request policy preserves the
+  identity headers.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| No events in **Activity** | No policy is assigned to the collector, Lambda@Edge cannot reach `{TRUSTGUARD_URL}`, or the function is not associated with the behavior serving those paths |
+| Requests are forwarded without events | **Include Body** is off, so `request.body` is empty and the handler skips evaluation |
+| Requests over the trigger's body limit receive 413 | Expected. The sample rejects the request when `inputTruncated` is true. The limit is 40 KB on viewer request and 1 MB on origin request |
+| The function will not associate with the distribution | It is not in **us-east-1**, or you pointed at `$LATEST` instead of a published version |
+| A config change had no effect | Replication to edge locations has not finished, or you associated an older version |
+| Deployment rejected an environment variable | Lambda@Edge does not support them. Load the key from Secrets Manager / SSM at cold start, or bake it at deploy |
+| A masking policy records but does not mask | Expected. The sample does not apply `transformed_payload`. Use a **Block** rule unless you implement schema-aware reconstruction |
+| An `ask` gate does not block | Expected. The edge cannot prompt a user, so `ask` is allowed and recorded |
+| The model response was not evaluated | There is no response-side trigger |
+| Viewers see a CloudFront error under load | The unwrapped `fetch` threw after a TrustGuard timeout. Add explicit failure handling and choose whether to fail open or closed |
+| Events share one session or have no consumer | The client is not sending `x-user-id` / `x-session-id` |
+| Traffic reaches the origin unevaluated | It did not come through the distribution, or it hit a behavior with no function attached |
+
+## Related
+
+- [Evaluate API](/trustguard/api/evaluate): request and response contract for the endpoint the function calls
+- [Policies](/trustguard/concepts/policies): Observe and Enforce modes, including gate configuration
+- [Collectors](/trustguard/concepts/collectors): collector keys and policy resolution
+- Other edge collectors: [Cloudflare](/integrations/cloudflare) · [Fastly](/integrations/fastly) · [Akamai](/integrations/akamai)
+- [Lambda@Edge trigger events](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/lambda-cloudfront-trigger-events.html): when viewer-request and origin-request functions run
+- [Lambda@Edge request-body restrictions](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/lambda-at-edge-function-restrictions.html): **Include Body** limits for each request event

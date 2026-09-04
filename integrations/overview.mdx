@@ -1,0 +1,137 @@
+---
+title: "Overview"
+description: "Connect NeuralTrust to AI gateways, coding agents, agent frameworks, applications, and edge platforms"
+---
+
+NeuralTrust integrates with the tools already in your AI stack, including
+gateways, coding agents, agent frameworks, applications, and edge platforms. Use
+this catalog to find the supported connection points and setup instructions for
+each tool.
+
+## Products
+
+An integration may support TrustGuard, TrustGate, or both.
+
+| Product | Purpose | Integration capability |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Runtime security for prompts, responses, tool calls, and tool results. It returns an `allow`, `report`, `transform`, `ask`, or `block` verdict. | Applies policy to traffic at the integration point. The host tool enforces the verdict. |
+| **[TrustGate](/trustgate/overview)** | An AI gateway for model provider and MCP traffic. | Centralizes routing, credentials, rate limits, and in-flight payload transformation. |
+
+TrustGuard evaluates individual interactions. TrustGate controls how applications
+and agents reach model providers and MCP servers. Some coding-agent plugins
+configure both products.
+
+## Find your tool
+
+### AI coding agents
+
+Developer tools and managed coding environments that can read repositories,
+execute commands, and call external tools.
+
+| Tool | TrustGuard | TrustGate |
+| --- | --- | --- |
+| [Claude](/integrations/claude) | Server-side organization screening and local Claude Code hooks | Organization connector for claude.ai, Desktop, Cowork, and Claude Code |
+| [Cursor](/integrations/cursor) | A plugin evaluates prompts, tool calls, and tool results | Organization-managed MCP endpoint in place of per-machine server configuration |
+| [Codex](/integrations/codex) | Lifecycle hooks evaluate prompts, shell commands, patches, and tool results | TrustGate MCP server configuration for the CLI, desktop app, and IDE extension |
+| [GitHub Copilot](/integrations/github-copilot) | Tool calls and tool results in Copilot CLI and VS Code Agent mode; prompts are audit-only | An HTTP MCP server for Copilot Chat |
+
+### AI gateways
+
+Gateway integrations apply policy to model traffic that already passes through
+the gateway, without changes to each client application.
+
+| Gateway | Integration method |
+| --- | --- |
+| [TrustGate](/integrations/trustgate) | Native integration with no collector API key; covers LLM and MCP traffic; streamed output is monitor-only after delivery |
+| [Portkey](/integrations/portkey) | BYOG webhook for Portkey Cloud and self-hosted gateways |
+| [LiteLLM](/integrations/litellm) | Custom guardrail file loaded by the LiteLLM proxy |
+| [Kong](/integrations/kong) | `ai-custom-guardrail`, on routes running AI Proxy |
+| [Apigee](/integrations/apigee) | A Shared Flow, per proxy or per environment |
+| [Azure APIM](/integrations/azure-apim) | `send-request` policies |
+
+### Agent frameworks
+
+These integrations connect at the agent, workflow, or tool boundary.
+
+| Framework | Integration method |
+| --- | --- |
+| [LangChain](/integrations/langchain) | `langchain-neuraltrust`, an `AgentMiddleware` that hooks the agent loop and can stop a tool call before it executes |
+| [n8n](/integrations/n8n) | `@neuraltrust/n8n-nodes-trustguard`, a node whose verdict becomes a branch on the canvas |
+| [Microsoft Copilot Studio](/integrations/copilot-studio) | An MCP tool pointed at a TrustGate consumer |
+
+### Edge / WAF
+
+These integrations run in front of AI endpoints you operate. They inspect the
+request body and return `403` for blocked requests. They do not inspect responses.
+
+[Cloudflare](/integrations/cloudflare) ·
+[CloudFront](/integrations/aws-cloudfront) ·
+[Fastly](/integrations/fastly) ·
+[Akamai](/integrations/akamai)
+
+### Build your own
+
+Use an SDK, middleware package, or the REST API for custom applications and
+unsupported platforms.
+
+| Integration | Package |
+| --- | --- |
+| [Python SDK](/integrations/python-sdk) | `trustguard-sdk` |
+| [Node.js SDK](/integrations/node-sdk) | `@neuraltrust/trustguard-sdk` |
+| [REST](/integrations/rest) | Any HTTP client, any language |
+| [Python middleware](/integrations/python-middleware) | FastAPI · Django · Flask |
+| [Node.js middleware](/integrations/node-middleware) | Express · Next.js |
+| [Go SDK](https://github.com/NeuralTrust/trustguard-sdk/tree/main/go) | `github.com/NeuralTrust/trustguard-sdk/go` |
+
+## Compare coverage
+
+Enforcement depends on the host platform. A gateway that owns the request body
+can forward a masked payload, while a provider hook limited to `allow` or `deny`
+cannot. The `ask` action also requires an interactive client.
+
+See [Coverage](/integrations/coverage) to compare monitoring, blocking,
+redaction, and approval support for LLM and tool-level traffic.
+
+## Employee access to third-party AI
+
+For employee access to AI services your organization does not operate, use the
+[browser extension](/platform/browser-extension) on managed Chrome and Edge. The
+extension is configured through managed browser policy rather than the collector
+catalog.
+
+## How TrustGuard integrations work
+
+Most TrustGuard integrations call the evaluate API. [TrustGate](/integrations/trustgate)
+uses a native connection and does not require a collector API key.
+
+```http
+POST {TRUSTGUARD_URL}/v1/evaluate
+Authorization: Bearer <collector API key>
+Content-Type: application/json
+
+{
+  "protocol": "llm",
+  "direction": "input",
+  "payload": { "input": "…" },
+  "session_id": "sess-123",
+  "consumer_id": "alex@acme.com"
+}
+```
+
+```text
+block → deny · ask → apply the host's approval behavior · transform → forward transformed_payload · else → forward
+```
+
+Set `direction` to `"input"` before the model call and `"output"` after it. TrustGate
+sets the direction automatically. See the [Evaluate API](/trustguard/api/evaluate)
+for the full contract.
+
+Create the API key from **Runtime → Collectors → Catalog** in the console. The
+selected [collector](/trustguard/concepts/collectors) also provides setup
+instructions and a configuration snippet.
+
+<Note>
+Create the policy in **Observe** mode. Observe records decisions in **Activity**
+without enforcing them. Review the results, then switch the policy to **Enforce**.
+See [Policies](/trustguard/concepts/policies).
+</Note>

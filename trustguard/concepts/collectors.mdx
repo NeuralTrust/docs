@@ -1,21 +1,22 @@
 ---
 title: "Collectors"
-description: "A collector is a traffic tap — gateway, SDK, IDE, or WAF — that routes traffic to a policy. TrustGate is native; other integrations use a collector API key."
+description: "How TrustGuard collectors receive traffic, authenticate requests, select policies, and attribute activity"
 ---
 
-A **collector** is where TrustGuard receives traffic. It represents one
-integration point — an [AI gateway](/trustgate/overview), an application SDK, an
-IDE plugin, or an edge/WAF worker — that calls
-[`POST /v1/evaluate`](/trustguard/api/evaluate) (or the Claude dialect) on every
-request it wants inspected.
+A **collector** represents an integration point, such as an
+[AI gateway](/trustgate/overview), application SDK, coding-agent plugin, or
+edge/WAF worker. Most collectors call
+[`POST /v1/evaluate`](/trustguard/api/evaluate). Claude Enterprise uses the
+specialized endpoint described in its
+[integration guide](/integrations/claude#claude-enterprise).
 
 You create and manage collectors under **Runtime → Collectors**. The page has two
 tabs:
 
 | Tab | What it is |
 |---|---|
-| **Collectors** | Installed taps and their policy counts. |
-| **Catalog** | Providers grouped as Gateway, Application, **IDE & coding agents**, WAF. **Add collector** opens the create flow. |
+| **Collectors** | Configured integration points and their policy counts. |
+| **Catalog** | Collector types grouped as Gateway, Agent frameworks, **IDE & coding agents**, Application, and Edge / WAF. **Add collector** opens the create flow. |
 
 Opening a collector is a side panel with:
 
@@ -27,10 +28,10 @@ Opening a collector is a side panel with:
 
 Each collector owns:
 
-1. **Authentication** — [TrustGate](/trustguard/integrations/trustgate) is
+1. **Authentication:** [TrustGate](/integrations/trustgate) is
    native (no customer API key; the gateway authenticates via the platform). Other
    integrations use one or more **API keys** that resolve the collector at runtime.
-2. **Policy routing** — which [policy](/trustguard/concepts/policies) evaluates its
+2. **Policy routing:** which [policy](/trustguard/concepts/policies) evaluates its
    traffic (a default policy, and optionally per‑consumer overrides).
 
 ## Integration types
@@ -38,46 +39,38 @@ Each collector owns:
 Collectors are created from a catalog grouped by integration type. The
 integration determines the setup snippet you get and where enforcement happens.
 
-| Category | Where it runs | What it can see | Collectors |
-|---|---|---|:--:|
-| **Gateway** | The AI gateway path | Every request the gateway proxies, LLM and MCP | 6 |
-| **Agent frameworks** | Inside your agent loop or workflow | Prompts, responses and tool calls in the graph | 2 |
-| **IDE & coding agents** | The Anthropic organisation server-side, or developer machines | Prompts, and agent actions — shell, patches, MCP calls | 5 |
-| **Application** | Your own code, around model calls or on the request path | Whatever you pass it | 5 |
-| **Edge / WAF** | The CDN edge, in front of your application | Inbound requests to your own AI endpoints | 4 |
+| Category | Where it runs | What it can see |
+|---|---|---|
+| **Gateway** | The AI gateway path | Every LLM and MCP request the gateway proxies |
+| **Agent frameworks** | Inside your agent loop or workflow | Prompts, responses, and tool calls in the graph |
+| **IDE & coding agents** | Anthropic's organization-level service or developer machines | Prompts and agent actions, including shell commands, patches, and MCP calls |
+| **Application** | Your own code, around model calls or on the request path | Whatever you pass it |
+| **Edge / WAF** | The CDN edge, in front of your application | Inbound requests to your own AI endpoints |
 
-Twenty-two collectors across five categories.
-[Integrations](/trustguard/integrations/overview) lists every one with its setup
-path; [Coverage](/trustguard/integrations/coverage) is the per-collector table of
-what each one can actually enforce.
+Browse [Integrations](/integrations/overview) for setup instructions and use
+[Coverage](/integrations/coverage) to compare enforcement capabilities.
 
 Employee use of AI services you do **not** operate is covered by the
 [browser extension](/platform/browser-extension), which is configured through
 managed browser policy rather than as a collector.
 
 <Note>
-**A model provider is not a collector.** The
-[provider catalog](/trustgate/endpoints/models) answers *who you call* — OpenAI,
-Anthropic, Moonshot, Databricks. A collector answers *where we plug in to see the
-call*. Adding a provider does not add a collector: traffic to a new provider is
-already covered by whichever collector sits on that path.
+**Model providers and collectors are separate.** The
+[provider catalog](/trustgate/endpoints/models) configures which upstream models
+TrustGate calls. A collector defines where TrustGuard evaluates traffic. Adding
+a provider does not create a collector or change the enforcement path.
 </Note>
 
-See [Claude Enterprise](/trustguard/integrations/claude-enterprise) (`POST /v1/evaluate/claude`),
-and [Claude Code](/trustguard/integrations/claude-code), [Cursor](/trustguard/integrations/cursor),
-[Codex](/trustguard/integrations/codex) (`POST /v1/evaluate` with a `tgk_…` key).
-
-See [Integrations](/trustguard/integrations/overview) for every provider, and
-[Coverage](/trustguard/integrations/coverage) for what each one can enforce and
-what it cannot.
+Claude Enterprise uses `/v1/evaluate/claude`. The Claude Code, Cursor, Codex,
+and GitHub Copilot plugins use `/v1/evaluate` with a `tgk_…` key.
 
 <Note>
 **TrustGate is native.** Bind a TrustGate collector to the gateway, assign a
-runtime policy, and enable the TrustGuard guardrail on routes. No collector API
-key. The gateway sets `direction` and enforces the verdict. Other collectors call
-`/v1/evaluate` with a key, send `direction` themselves, and enforce the verdict
-themselves — see the [Python SDK](/trustguard/integrations/python-sdk) or
-[REST](/trustguard/integrations/rest).
+runtime policy, and enable the TrustGuard guardrail on routes. The gateway does
+not need a collector API key; it sets `direction` and enforces the verdict.
+Other collectors call `/v1/evaluate` with a key, send `direction`, and apply the
+verdict. See the [Python SDK](/integrations/python-sdk) or
+[REST](/integrations/rest) for examples.
 </Note>
 
 ## Authentication & API keys
@@ -85,10 +78,10 @@ themselves — see the [Python SDK](/trustguard/integrations/python-sdk) or
 Except for TrustGate, a collector authenticates with a bearer **API key**, created
 on the collector in the console (TrustGate collectors have no Auth key step).
 
-- The raw secret is shown **once**, at creation — store it immediately.
+- The raw secret is shown **once** at creation. Store it immediately.
   Afterwards only a non‑secret prefix hint is shown.
 - Keys support an optional expiry and can be revoked.
-- The key carries the collector identity — the runtime resolves the collector
+- The key carries the collector identity. The runtime resolves the collector
   from the key, so the request body never needs a collector id.
 
 ```bash
@@ -102,13 +95,13 @@ Content-Type: application/json
 A collector decides which [policy](/trustguard/concepts/policies) evaluates a
 request:
 
-- **Default policy** — the fallback used for all of the collector's traffic.
-- **Per‑consumer policy** — an override keyed on `consumer_id`, so one collector
+- **Default policy:** the fallback used for all of the collector's traffic.
+- **Per-consumer policy:** an override keyed on `consumer_id`, so one collector
   can send different consumers to different policies.
 
 Resolution is: if the request's `consumer_id` has a per‑consumer policy, use it;
 otherwise use the default policy. A collector with **no** matching policy leaves
-that request **unguarded** — it returns `allow` with no findings.
+that request **unguarded**. It returns `allow` with no findings.
 
 <Warning>
 Unguarded traffic is not inspected. Set a default policy (and per-consumer overrides if needed) before relying on TrustGuard in production.
@@ -121,10 +114,10 @@ mode **Default** or **Consumer ID**).
 
 Each integration should send, when available:
 
-- **`consumer_id`** — who made the request (user id, email, or device
+- **`consumer_id`:** who made the request (user ID, email, or device
   fingerprint). Used for per‑consumer policy routing.
-- **`session_id`** — which conversation the message belongs to. Synthesised if omitted.
-- **`attributes`** — optional context (`consumer.name`, `consumer.tag`,
+- **`session_id`:** which conversation the message belongs to. Synthesized if omitted.
+- **`attributes`:** optional context (`consumer.name`, `consumer.tag`,
   `consumer.type`, `model.name`, `model.provider`, `collector.type`,
   `source.application`) that gates and detector rules can match on.
   MCP **`tool.name`** is taken from `payload.params.name`, not from attributes.
