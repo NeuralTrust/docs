@@ -1,0 +1,283 @@
+---
+title: "REST API"
+description: "Call the TrustGuard evaluation API from any HTTP client and handle verdicts, retries, and failures in your application"
+---
+
+The TrustGuard REST API accepts an HTTP `POST` with a JSON body and bearer token
+and returns a JSON verdict. Use it from runtimes that do not have a supported SDK
+or where adding a dependency is not practical.
+
+Direct API calls are useful when the policy needs application context such as
+the authenticated user, tenant, or source document.
+
+## Integration capabilities
+
+| Product | What it does over REST | What you can enforce |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates prompt, completion, or tool payloads against the assigned [policy](/trustguard/concepts/policies) and returns a verdict with its findings. | Monitor · Block · Redact, enforced by your code |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| A [collector](/trustguard/concepts/collectors) and its API key | Create one under **TrustGuard** → **Collectors** in the console. Store the `tgk_…` key with your model provider credentials. |
+| A policy bound to that collector | With Input **and** Output phase rules if you want both directions evaluated. |
+| Egress from your runtime to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. |
+| An HTTP client that can set two headers | The request is a JSON `POST` with no callbacks or persistent connection. |
+| A decision on fail mode | Decide whether a request proceeds when TrustGuard is unreachable. See [5. Handle failures yourself](#5-handle-failures-yourself). |
+
+<Note>
+Create the policy in **Observe** mode. Observe records decisions in **Activity** without enforcing
+them. Review the results, then switch the policy to Enforce. See
+[Policies](/trustguard/concepts/policies).
+</Note>
+
+## 1. Create a collector and API key
+
+1. Open **Runtime → Collectors → Catalog** and create a collector from the
+   **Application** group.
+2. On the collector's **Auth** tab, create an API key. The raw `tgk_…` secret is
+   shown **once** at creation. Store it immediately; afterward only a
+   non-secret prefix hint is shown. Keys support an optional expiry and can be
+   revoked.
+3. On the **Policies** tab, set the default policy, and per-consumer overrides if
+   one collector serves consumers that need different policies.
+
+A collector with no matching policy returns `allow` with no findings. Assign a
+default policy or a matching per-consumer policy before enforcement.
+
+## 2. Evaluate the input
+
+Send this before the model call and handle the verdict before forwarding the
+request:
+
+```bash
+curl -X POST "{TRUSTGUARD_URL}/v1/evaluate" \
+  -H "Authorization: Bearer <collector-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "protocol": "llm",
+    "direction": "input",
+    "payload": { "input": "summarize this customer call" },
+    "session_id": "sess-123",
+    "consumer_id": "alex@acme.com"
+  }'
+```
+
+`payload` accepts the minimal `{ "input": "…" }` shape above or a full OpenAI,
+Anthropic, Gemini, or MCP provider body.
+
+<Note>
+**Set `direction` on every call.** It selects which policy
+[detector](/trustguard/concepts/detectors) phase runs, `Input` or `Output`. It
+defaults to `input`, so a client that never sends the field never evaluates an
+Output-phase rule.
+</Note>
+
+## 3. Enforce the verdict
+
+A detection returns HTTP `200`, **including a `block` status**. TrustGuard
+returns the verdict; your application enforces it:
+
+```text
+status == "block"      → stop the request yourself, 4xx your caller
+status == "ask"        → implement an approval flow or map it explicitly to allow or block
+status == "transform"  → forward transformed_payload instead of your payload
+status == "report"     → forward unchanged, record the finding
+status == "allow"      → forward unchanged
+```
+
+If the application logs a `block` and continues, the integration provides
+monitoring only.
+
+## 4. Evaluate the output
+
+The same endpoint and the same key, with the model's completion in `payload` and
+`direction` flipped:
+
+```bash
+curl -X POST "{TRUSTGUARD_URL}/v1/evaluate" \
+  -H "Authorization: Bearer <collector-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "protocol": "llm",
+    "direction": "output",
+    "payload": { "input": "Here is a summary…" },
+    "session_id": "sess-123",
+    "consumer_id": "alex@acme.com"
+  }'
+```
+
+```text
+{ "status": "allow", "findings": [], "transformed_payload": null, "trace_id": "…", "request_id": "…" }
+```
+
+Reuse the `session_id` across both halves of a turn so the prompt and the
+completion correlate in **Activity**. `transformed_payload` is `null` or absent
+unless a Transform rule rewrote something.
+
+## 5. Handle failures yourself
+
+Implement these behaviors in your HTTP client:
+
+- **Fail mode.** Decide whether an unreachable TrustGuard allows or denies the
+  request. The REST API does not define a client-side default.
+- **Timeouts and retries.** Set explicit timeout and retry limits for the call.
+- **Non-2xx is not a verdict.** `401` and `403` are authentication problems, and
+  `400` indicates a malformed body. None means `allow`. A `500` means a
+  detector errored *and* the deployment is fail-closed; the same request returns
+  `200` on a fail-open deployment.
+
+## 6. Verify
+
+1. Post the [input call](#2-evaluate-the-input) with a prompt that should trip a
+   rule in your policy.
+2. Confirm the finding in TrustGuard **Activity**, under the `consumer_id` you
+   sent.
+3. Repeat with `direction: "output"` to confirm that the Output phase runs. The
+   output evaluation requires a separate request.
+
+The policy's **Test** tab evaluates a sample against the last **saved** policy
+without emitting an **Activity** event. Use it to test the policy separately from
+the client request.
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ⚠️ | ⚠️ |
+| LLM output | ✅ | ⚠️ | ⚠️ |
+| Tool call | ⚠️ | ⚠️ | ⚠️ |
+| Tool result | ⚠️ | ⚠️ | ⚠️ |
+
+Use the REST API when no SDK is available for the runtime or adding a dependency
+is not practical. The Python, Node.js, and Go SDKs provide a client, types, and
+payload handling for their respective runtimes.
+
+⚠️ The client must implement enforcement, retries, timeouts, and failure
+behavior. Tool coverage requires an evaluation around the tool dispatch.
+
+**Limits.** Coverage is per call site. A code path that skips the evaluation is
+not inspected. To protect the request path by configuration, use
+[Python middleware](/integrations/python-middleware) or
+[Node.js middleware](/integrations/node-middleware). To protect traffic across
+services, use a [gateway](/integrations/trustgate).
+
+### What is evaluated
+
+The REST API evaluates only the payloads your application sends. Common call
+sites include:
+
+| What you are guarding | What to send | What you can stop |
+| --- | --- | --- |
+| The prompt, before the model call | `protocol: "llm"`, `direction: "input"` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII in the prompt ([DLP](/trustguard/detectors/data-loss-prevention)) |
+| The completion, after it | `protocol: "llm"`, `direction: "output"` | Sensitive data leaving in the response; policy-violating content reaching the user |
+| A tool call, before you dispatch it | `protocol: "mcp"`, `direction: "input"`, the MCP `tools/call` body as `payload` | Out-of-policy tool calls the model chose |
+| A tool result, before it re-enters the prompt | `protocol: "mcp"`, `direction: "output"` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) riding back in tool output |
+
+`protocol` is available as a gate and rule condition (`all` · `llm` · `mcp` ·
+`a2a`), so one policy can treat model traffic and tool traffic differently. For
+MCP `tools/call`, `tool.name` is read first from **`payload.params.name`**, which
+is the last segment of `mcp__server__tool`, rather than from `attributes`.
+
+### Configuration
+
+**Endpoint**
+
+```http
+POST /v1/evaluate
+Authorization: Bearer <collector-api-key>
+Content-Type: application/json
+```
+
+The collector is resolved from the key, so you do **not** send a collector id in
+the body.
+
+**Request fields.**
+
+| Field | Required | Notes |
+|---|---|---|
+| `payload` | ✅ | The content to inspect. A minimal `{ "input": "…" }` or a full provider body (OpenAI, Anthropic, Gemini, MCP). `payload.attachments` is extracted separately and not sent to text detectors. |
+| `direction` | No | `input` (default) or `output`. Selects the policy detector phase. TrustGate sets it automatically; direct API clients should set it on each call, usually twice per turn. |
+| `protocol` | No | `all` (default) · `llm` · `mcp` · `a2a`. |
+| `session_id` | No | Conversation or correlation key. Synthesized if omitted. |
+| `consumer_id` | No | Actor identifier and key for per-consumer policy routing. |
+| `attributes` | No | Extra dimensions for gate and detector conditions. See [Attributes](#attributes). |
+
+**Strict decoding.** Unknown top-level fields are rejected with `400`. Do **not**
+send `input`, `metadata`, `collector_id`, or `detector_id` at the top level. The
+content belongs inside `payload`.
+
+**Response fields.** `status` is the reduced verdict, most restrictive wins:
+`block` > `ask` > `transform` > `report` > `allow`. `findings[]` carries one
+entry per gate or detector that fired, `transformed_payload` the rewritten
+payload, and `trace_id` / `request_id` the correlation IDs that also appear in
+logs and telemetry. Full finding shape:
+[Evaluate API](/trustguard/api/evaluate).
+
+**Attachments.** Each entry in `payload.attachments` provides **either** base64
+`data` **or** a `url`. URL fetches are HTTPS-only and bounded by timeout, size
+cap and redirect limit, and a strict SSRF guard resolves DNS before dialing,
+rejecting loopback, private, link-local, multicast, CGNAT (`100.64/10`),
+`0.0.0.0/8` and cloud-metadata (`169.254.169.254`) targets. Attachment bytes are
+never persisted.
+
+**Status codes.**
+
+| Code | When |
+|---|---|
+| `200` | Any detection, **including a `block` status**. The caller enforces. |
+| `400` | Invalid body, unknown fields, bad `direction`/`protocol`, or a bad collector reference. |
+| `401` | Missing or invalid API key. |
+| `403` | Key found but inactive or expired. |
+| `500` | A detector errored **and** the deployment is fail-closed. Fail-open returns `200`. |
+
+Error responses carry `{ "error", "trace_id", "request_id" }`.
+
+**Service tokens.** A caller that authenticates with a service token instead of
+a collector API key must also send exactly one of `gateway_id` or
+`collector_key` to select the collector. With a collector API key, the collector
+is identified by the key.
+
+### Attributes
+
+Include the application context required by your policy:
+
+| Field | What it does |
+|---|---|
+| `consumer_id` | Who made the request, such as a user ID, email, or device fingerprint. Drives per-consumer policy routing, and gates match it as `consumer.id`. |
+| `session_id` | Which conversation the message belongs to. Synthesized if omitted, which breaks correlation between the two halves of a turn. |
+| `attributes` | Nested context for gate and detector conditions: `consumer.{name,tag,type}`, `model.{name,provider}`, `collector.type`, `source.application`, `tool.{name,command,arguments}`. |
+
+```json
+"attributes": { "consumer": { "type": "guest" }, "model": { "name": "gpt-4o" } }
+```
+
+Every decision appears in **Activity** under that `consumer_id`. Set
+`source.application` when several services share a collector so events can be
+filtered by service.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `400` on a body that looks correct | An unknown top-level field. `input`, `metadata`, `collector_id`, and `detector_id` do not belong there; content goes inside `payload` |
+| `401` or `403` | Missing, invalid, inactive, or expired API key. These responses are not verdicts and must not be treated as `allow` |
+| `500` on some requests only | A detector errored on a fail-closed deployment. The same request returns `200` where the deployment is fail-open |
+| Output-phase rules never fire | `direction` omitted or always `input`. It defaults to `input`, so the Output phase never runs |
+| No events in **Activity** | No policy is assigned to the collector, unmatched traffic returns `allow` with no findings, or the runtime cannot reach `{TRUSTGUARD_URL}` |
+| A `block` status but the request went through anyway | `200` is a verdict, not enforcement. Your code has to act on `status` |
+| A masking policy changes nothing | `transformed_payload` ignored. Forward it instead of your original payload |
+| Findings lack consumer attribution; per-consumer policy is not used | `consumer_id` was not sent, so routing has nothing to match |
+| The prompt is guarded and the completion is not | Only the input call was added. The output call is a second request, with the same key and `direction: "output"` |
+
+## Related
+
+- [Evaluate API](/trustguard/api/evaluate): request, response, and finding reference
+- [Collectors](/trustguard/concepts/collectors): API keys, policy routing, and attribution
+- [Policies: Gates](/trustguard/concepts/policies#gates): configure Block, Ask, and Transform actions
+- [Python SDK](/integrations/python-sdk) · [Node.js SDK](/integrations/node-sdk): use the same endpoint through an SDK
+- [Python middleware](/integrations/python-middleware) · [Node.js middleware](/integrations/node-middleware): protect HTTP routes
+- [Coverage](/integrations/coverage): compare available collectors

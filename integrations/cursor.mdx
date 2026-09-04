@@ -1,0 +1,397 @@
+---
+title: "Cursor"
+description: "Configure TrustGuard firewall hooks for Cursor and connect the Cursor agent to TrustGate over MCP"
+---
+
+Cursor is a code editor with an AI agent that can read repositories, edit files,
+run shell commands, and call external tools on a developer's machine.
+
+TrustGuard firewall hooks evaluate local prompts and actions.
+
+<span id="why-it-needs-a-guardrail"></span>
+
+<span id="what-neuraltrust-does-here"></span>
+
+## NeuralTrust controls
+
+| Product | Scope | Controls |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates prompts, tool calls, and tool results against an organization [policy](/trustguard/concepts/policies) through a plugin on the developer's machine. | Monitor · Block · Ask on tool calls |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer. MCP (Model Context Protocol) connects Cursor to systems such as trackers, databases, and internal APIs. | Tool availability · identity-based access · per-tool rate limits |
+
+The [trustguard-cursor-plugin](https://github.com/NeuralTrust/trustguard-cursor-plugin)
+package provides the firewall hooks and can also register TrustGate as an MCP
+server. Configure the two functions independently.
+
+<span id="choose-your-setup"></span>
+
+## Deployment options
+
+| Goal | Configuration | Location |
+| --- | --- | --- |
+| Evaluate prompts, tool calls, and tool results against organization policy | **TrustGuard firewall hooks** using the plugin and a managed `cursor.json` | Each developer machine; IT deploys the config by MDM |
+| Centrally manage the MCP tools available to Cursor | **TrustGate MCP** using plugin variables or `.cursor/mcp.json` | Cursor connects to the remote TrustGate endpoint |
+
+<Warning>
+**Use separate credentials for TrustGuard and TrustGate.** The hooks use a
+`tgk_…` [collector](/trustguard/concepts/collectors) key in `cursor.json`. MCP
+authenticates as a consumer with OAuth or an `ag_…` API key. A `tgk_…` key does
+not authenticate MCP, and `cursor.json` does not accept MCP settings.
+</Warning>
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| Egress from developer machines to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. |
+| The **Cursor** collector type *(firewall path)* | **Runtime → Collectors → Catalog → IDE & coding agents → Cursor**. Create the `tgk_…` key on its **Auth** tab, where it is shown once, and assign the policy on the **Policies** tab. |
+| Cursor with plugin support | Plugins live under **Customize → Plugins**. Exact labels vary by Cursor version; look for an option to add or import from GitHub or a Git URL. |
+| An [MCP consumer](/trustgate/mcp/overview) *(MCP path)* | Bind the required registries, then copy the endpoint or Cursor snippet from **Connect**. |
+| Consumer credentials *(MCP path)* | Use OAuth, which requires no pasted credential, or an `ag_…` API key. |
+| MDM *(optional)* | Use it to deploy the `cursor.json` firewall config. The plugin itself does not need to be packaged or pushed. |
+| Egress to GitHub Releases | On first plugin use the bootstrap downloads the platform `trustguard-cursor` binary, checksum-pinned. |
+
+<Note>
+Create the policy in **Observe** mode. Observe records decisions in **Activity**
+without enforcing them. Review the results, then switch the policy to
+**Enforce**. See [Policies](/trustguard/concepts/policies).
+</Note>
+
+Developers do **not** need NeuralTrust accounts for the firewall path.
+
+## Set up prompt and tool screening (TrustGuard)
+
+### Install the plugin
+
+In **Customize → Plugins**, import the
+[trustguard-cursor-plugin](https://github.com/NeuralTrust/trustguard-cursor-plugin)
+repository from GitHub or a Git URL.
+
+Exact UI labels vary by Cursor version. Teams can distribute the plugin through
+the Cursor Team Marketplace.
+
+For an offline pilot, or to use **Customize → Plugins → Add → From Local Repo**,
+clone the repository locally:
+
+```bash
+git clone https://github.com/NeuralTrust/trustguard-cursor-plugin.git
+cd trustguard-cursor-plugin
+make install-local
+```
+
+`make install-local` copies the plugin into
+`~/.cursor/plugins/local/trustguard`. Cursor rejects out-of-tree symlinks.
+
+### Deploy the managed config
+
+Deploy this file with MDM:
+
+```json
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "closed"
+}
+```
+
+| OS | Managed config path |
+| --- | --- |
+| macOS | `/Library/Application Support/TrustGuard/cursor.json` |
+| Linux | `/etc/trustguard/cursor.json` |
+| Windows | `%ProgramData%\TrustGuard\cursor.json` |
+
+On first use, the plugin bootstrap downloads the checksum-pinned
+`trustguard-cursor` binary from GitHub Releases. MDM can deploy the config file;
+distribute the plugin package separately if you need to pin a private fork.
+
+For pilots without MDM, write the same JSON shape to
+`~/.trustguard/cursor.json` and `chmod 600` it.
+
+## Set up governed tool access (TrustGate)
+
+Cursor treats TrustGate as a **remote MCP server**: one `url` per MCP consumer,
+and the agent sees the merged toolkit that consumer is routed to. Copy the
+endpoint or Cursor snippet from the consumer's **Connect** tab:
+
+```text
+https://<mcp-host>/<consumer-slug>/mcp
+```
+
+Register it from plugin variables or from `mcp.json`, but not both. Two entries
+pointing to the same URL duplicate every tool.
+
+### Option A: plugin variables
+
+The same plugin registers a remote MCP server named **TrustGate**. Values are
+Cursor [plugin variables](https://cursor.com/docs/reference/plugins)
+(**Customize → Plugins → Configure**), not `cursor.json`:
+
+| Variable | Required | Maps to |
+| --- | --- | --- |
+| `TRUSTGATE_MCP_URL` | Yes | MCP `url`, using the full URL from **Connect** |
+| `TRUSTGATE_MCP_API_KEY` | API-key consumers only | `X-AG-API-Key`. Leave empty for OAuth |
+| `TRUSTGATE_GATEWAY_SLUG` | Hybrid only | `X-AG-Gateway-Slug` |
+
+OAuth consumers need only the URL. Cursor starts the login flow on first tool
+use. A team admin can set the variables for a Team Marketplace installation.
+
+### Option B: mcp.json
+
+Write the server into `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`
+(global). Cursor loads both files; see [Configuration](#configuration) for
+precedence.
+
+**OAuth consumers (recommended).** Omit `headers` and let Cursor run the
+handshake:
+
+```json
+{
+  "mcpServers": {
+    "TrustGate": {
+      "url": "https://<mcp-host>/<consumer-slug>/mcp"
+    }
+  }
+}
+```
+
+Open **Customize** in the sidebar to find the server and complete the login.
+Cursor stores the tokens; the tools then show up under **Available Tools** in
+chat.
+
+**API-key consumers.** Send the consumer key as a header:
+
+```json
+{
+  "mcpServers": {
+    "TrustGate": {
+      "url": "https://<mcp-host>/<consumer-slug>/mcp",
+      "headers": {
+        "X-AG-API-Key": "${env:TRUSTGATE_MCP_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Cursor resolves `${env:VAR}` in `url` and `headers`, so a committed project file
+does not contain the secret. Export the variable through a shell profile or your
+secret-management tooling, then reload the window.
+
+**Private (Hybrid) data plane.** Add the
+[gateway](/trustgate/concepts/gateways) slug unless the MCP host already scopes
+the gateway:
+
+```json
+"headers": {
+  "X-AG-API-Key": "${env:TRUSTGATE_MCP_API_KEY}",
+  "X-AG-Gateway-Slug": "<gateway-slug>"
+}
+```
+
+For OAuth consumers on Hybrid, send `X-AG-Gateway-Slug` alone.
+
+After editing `mcp.json`, refresh the server (or toggle it off and on) in
+**Customize**. Editing the file alone does not reconnect an already-loaded
+server.
+
+### Team rollout
+
+For a team rollout, register the consumer in the Cursor dashboard instead of
+requiring each developer to edit `mcp.json`:
+
+| Location | Purpose |
+|---|---|
+| **Dashboard → Integrations & MCP** | Register the consumer as a Team MCP server (also reaches Cloud Agents). **Add to Team Marketplace** makes it installable from **Customize** in the Agent Window, IDE, and CLI |
+| **Team Settings → MCP Configuration** | MCP allowlist. A **URL entry** approves the MCP host pattern; a **tool allowlist** limits which of its tools may run automatically (empty allows all) |
+
+Allowlisting approves a configuration; it does not install or enable the server.
+Keep the tool scope on the consumer or role. The Cursor-side tool allowlist
+governs **automatic execution**, not what the agent can see.
+
+## Verify
+
+**Firewall.**
+
+1. Open Cursor and send a test prompt.
+2. Confirm the event in TrustGuard **Activity**.
+3. `consumer_id` is typically `cursor:<email>` when the Cursor account email is present.
+
+Smoke-test the binary (optional):
+
+```bash
+echo '{"hook_event_name":"preToolUse","tool_name":"Shell","tool_input":{"command":"echo hello"},"user_email":"you@company.com"}' \
+  | trustguard-cursor hook
+```
+
+**MCP.**
+
+1. Confirm **TrustGate** is enabled under **Customize → MCP**, and that its
+   tools appear under **Available Tools** in chat.
+2. Ask the agent to list or use a tool from a toolkit bound to that consumer.
+3. Confirm the call in TrustGate telemetry. See
+   [Metrics](/trustgate/observability/metrics).
+
+For connection or auth failures, open the Output panel (`Cmd+Shift+U`) and
+select **MCP Logs**.
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ➖ | ➖ | ➖ |
+| Tool call | ✅ | ✅ | ❌ |
+| Tool result | ✅ | ❌ | ❌ |
+
+TrustGuard evaluates Cursor prompts, tool calls, and tool results on the
+developer's machine.
+
+**Ask.** Cursor displays an approval prompt for Ask on tool calls. The prompt
+reads `A TrustGuard policy needs your approval to continue.` rather than the gate
+name. At `beforeSubmitPrompt`, Ask submits the prompt with a warning because no
+approval dialog is available. Use Block to stop a prompt.
+
+**Limits.** This collector does not support redaction. `transform` maps to `ask`
+by default, so a masking policy becomes a warning unless
+`transform_action: "deny"` is set.
+
+`postToolUse` is warn-only. A finding is added as untrusted context; no permission
+decision is emitted, and the completed tool call cannot be revoked. The hooks do
+not evaluate model responses or tool declarations. Use TrustGate to control which
+tools are available.
+
+Full comparison: [Coverage](/integrations/coverage).
+
+### What is evaluated
+
+| Cursor hook | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| `beforeSubmitPrompt` | `protocol: llm`, `direction: input` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII pasted into the agent ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** |
+| `preToolUse` (Shell) | `protocol: all`, `{ "input": "<command>" }`, `direction: input` | Dangerous or out-of-policy shell commands | **Block** or **Ask** |
+| `preToolUse` (other tools, including TrustGate MCP) | `protocol: mcp`, `tools/call` (`params.name` = last MCP segment) | Risky MCP tool calls | **Block** or **Ask** |
+| `postToolUse` | `protocol: mcp`, tool result, `direction: output` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) in MCP or tool output | **Warn only.** Finding is added as untrusted context; no permission decision is emitted. |
+
+Every hook calls [`POST /v1/evaluate`](/trustguard/api/evaluate) with the
+collector `tgk_…` key, and the policy's
+[detectors](/trustguard/concepts/detectors) decide the verdict. MCP tool calls
+pass through the hooks like any other tool call.
+
+For a hook name such as `mcp__<server>__<tool>`, `tool.name` is the final
+`<tool>` segment. It does not include the server name. Gate on the short tool
+name, not the full hook `tool_name`.
+
+### Configuration
+
+**`cursor.json` (TrustGuard firewall only).** Keys: `data_url`, `api_key`,
+`fail_mode`. It never holds MCP values. When the managed file includes
+`api_key`:
+
+- **Locked:** `api_key`, `data_url`, `fail_mode`. A user file and environment
+  variables cannot replace them.
+- **User-overridable settings** may still be loaded from
+  `~/.trustguard/cursor.json`: `timeout_ms`, `transform_action`, `events`,
+  `consumer_id`.
+
+Without a managed file, all configuration is loaded from
+`~/.trustguard/cursor.json` (`chmod 600`).
+
+**`mcp.json` (TrustGate only).** Two scopes are loaded:
+
+| Scope | Path | Use it for |
+|---|---|---|
+| **Project** | `.cursor/mcp.json` in the repo root | Available in that workspace; commit it to share the configuration with the team |
+| **Global** | `~/.cursor/mcp.json` | A consumer every project should reach |
+
+When the same server name exists in both, the **project** configuration takes
+precedence in that workspace. Cursor infers the transport from the keys: `url` means remote,
+and `command` means local. Do not mix them in one entry. TrustGate always uses
+`url`.
+
+**Auth headers.** TrustGate accepts `X-AG-API-Key`, `x-api-key`, or
+`Authorization: Bearer ag_…`. For OAuth it advertises discovery at
+`/.well-known/oauth-authorization-server` and
+`/.well-known/oauth-protected-resource` and supports dynamic client
+registration. The Cursor configuration does not require a client ID or secret.
+Cursor authenticates from two fixed callbacks:
+`https://www.cursor.com/agents/mcp/oauth/callback` (web and Cloud Agents) and
+`http://localhost:8787/callback` (desktop). TrustGate accepts both, so they do
+not need to be allowlisted per developer. Cursor's static `auth` block
+(client ID and secret) is for providers without dynamic registration and is not
+needed here. The consumer configuration determines which IdP handles the login.
+See [Auth](/trustgate/concepts/auth).
+
+<Note>
+Use OAuth for consumers that resolve tools per user. The identity used to log in
+selects the roles, and therefore the registries and tools, on
+Identity-based consumers.
+</Note>
+
+Authenticating to TrustGate is not the same as authenticating to the upstream
+servers. When a registry uses **OAuth (forwarded)**, the first call for a user
+without a stored credential returns a connect link; the user authorizes once and
+TrustGate stores and refreshes the credential.
+
+**Deployment ownership.**
+
+| Component | Owner | Configuration |
+| --- | --- | --- |
+| **Plugin** | Each developer, or Team Marketplace / standard rollout | Import from GitHub |
+| **Firewall config** | IT / MDM | `cursor.json` with the org `tgk_…` key |
+| **MCP config** | IT (team plugin variables or Team MCP server) or developer | `TRUSTGATE_MCP_URL` (+ optional API key / gateway slug), or `mcp.json` |
+
+### Tools and approvals
+
+TrustGate defines the consumer's tool set. Cursor applies additional settings on
+the local machine:
+
+| Decision | Where it lives | Notes |
+|---|---|---|
+| Which tools the consumer exposes | **NeuralTrust console**, under consumer **Routing**, or a [role](/trustgate/concepts/roles) for Identity-based consumers | Bind MCP registries. **Restrict tools** narrows a registry to named tools; leave it empty to grant the whole server |
+| The tool names Cursor sees | **TrustGate**, automatically | Unique names pass through; a collision becomes `<registry>_<tool>` |
+| Whether a call needs confirmation | **Cursor**, through the agent's Run Mode | Approval is requested by default. In **Auto-review**, allowlisted tools run immediately; Cursor's built-in review determines whether other calls need confirmation |
+| Hiding a tool from this editor | **Cursor**, through the server toggle in **Customize** | Local only; the consumer still grants it |
+
+Cursor Run Mode and server visibility apply only to the local client. Configure
+restrictions that must apply to every client on the consumer or role. To limit
+MCP tool calls, attach the [Per-Tool Rate
+Limiter](/trustgate/policies/tool-governance) policy. The Tool Injection policy
+is LLM-only and does not affect MCP.
+
+### Attributes
+
+- `attributes.collector.type = "ide"`
+- `attributes.source.application = "cursor-plugin"`
+- `attributes.cursor.event`, workspace, and related fields
+- `consumer_id` typically `cursor:<email>`
+
+Every decision appears in **Activity** under that `consumer_id`, providing
+per-developer attribution when the email is available.
+
+Gate on `source.application` and/or `tool.name` / `tool.command`. Do not rely on
+`attributes.tool` for MCP `preToolUse`; the name is on the payload.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| An `ask` gate on a prompt did not stop it | Expected. Cursor has no Ask dialog at `beforeSubmitPrompt`, so the prompt is submitted with a warning. Use a **Block** gate |
+| A masking policy only warns | `transform` maps to `ask` by default. Set `transform_action: "deny"` to block instead. This collector cannot redact |
+| A finding on a tool result did not stop anything | Expected. `postToolUse` is warn-only: it adds the finding as untrusted context and emits no permission decision |
+| No events in **Activity** | No policy assigned to the collector, or the managed `cursor.json` is missing or has the wrong `data_url` |
+| Server connects, no tools | Consumer has no bound registries, tool restrictions exclude everything, or the upstream connect link was never authorized |
+| `401` / repeated login | Wrong plane URL, revoked `ag_…` key, or `X-AG-Gateway-Slug` missing on Hybrid |
+| `mcp.json` edits ignored | Server not refreshed in **Customize**, or an enterprise MCP allowlist does not cover the URL |
+| Duplicate tools | The same consumer is registered through both plugin variables and `mcp.json` |
+| Registration rejected (`invalid_redirect_uri`) | The client presented a callback that is not `https`, an `http` loopback, or a private-use scheme |
+
+## Related
+
+- [Policies: Gates](/trustguard/concepts/policies#gates): Ask and Block configuration
+- [Evaluate API](/trustguard/api/evaluate): requests sent by the hooks
+- [MCP overview](/trustgate/mcp/overview): consumers, catalog merging, and upstream authentication
+- [Plugin repository](https://github.com/NeuralTrust/trustguard-cursor-plugin): source, releases, and the hook contract
+- [Cursor MCP documentation](https://cursor.com/docs/mcp) and [Cursor plugin variables](https://cursor.com/docs/reference/plugins)
+- [TrustGate authentication](/trustgate/concepts/auth): API key and OAuth2 authentication for MCP consumers
+- [Coverage](/integrations/coverage): comparison of Cursor with other collectors
