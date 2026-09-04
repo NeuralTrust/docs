@@ -1,0 +1,249 @@
+---
+title: "Fastly"
+description: "Evaluate request bodies at the Fastly edge with Compute"
+---
+
+Fastly provides CDN caching, DDoS protection, and WAF services in front of
+websites and APIs. **Compute** runs your code at the edge before forwarding a
+request to its declared backend.
+
+This integration evaluates inbound requests to AI endpoints served through the
+Compute service without changing application code. It does not inspect model
+responses, individual tool calls, direct provider traffic that bypasses Fastly,
+or employee access to third-party AI.
+
+## Integration capabilities
+
+| Product | What it does in Fastly | What you can enforce |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Runs inside your Compute service, evaluating the request body against the assigned [policy](/trustguard/concepts/policies) before the request is forwarded to the `origin` backend | Monitor · Block |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| A Fastly collector, API key, and assigned policy | Go to **Runtime → Collectors → Catalog → Edge / WAF → Fastly**. Create the collector, create the `tgk_…` key on its **Auth** tab, and assign an Input-phase policy on the **Policies** tab. The key is shown once and identifies the collector. |
+| Egress from the Compute service to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. Configure it as a declared backend, as described in [step 3](#3-declare-the-backends-and-store-the-key). |
+| A Fastly service already fronting the AI endpoints | The handler runs only on requests Fastly terminates. Traffic that bypasses the service is not evaluated. |
+| Rights to edit that service's backend configuration | Configure the `trustguard` and `origin` backends in [step 3](#3-declare-the-backends-and-store-the-key). |
+| A Fastly Secret Store | Where the collector key lives, so it is not a literal in the service source. |
+| Node and npm | `npm create @fastly/compute` scaffolds the service. See [step 2](#2-scaffold-the-compute-service). |
+| The Fastly CLI | Used to publish (`fastly compute publish`). |
+
+<Note>
+Start with the policy in **Observe** mode. Findings appear in **Activity** without
+affecting traffic. Switch to **Enforce** after reviewing the results. See
+[Policies](/trustguard/concepts/policies).
+</Note>
+
+## 1. Create a collector API key
+
+On the Fastly collector, open **Auth** and create a key. It is shown once. The
+key identifies the collector and its assigned policy; the request body does not
+need a collector ID.
+
+## 2. Scaffold the Compute service
+
+```bash
+npm create @fastly/compute
+```
+
+Put the handler in `src/index.js`. Configure the remaining settings on the
+service backends.
+
+## 3. Declare the backends and store the key
+
+A Compute service can fetch only declared backends. Declare two:
+
+| Backend name | Points at |
+|---|---|
+| `trustguard` | The `{TRUSTGUARD_URL}` evaluate host shown in the console |
+| `origin` | Your application, the one this service already fronts |
+
+The handler passes these names as `backend`. If a name is wrong or undeclared,
+the corresponding `fetch` does not leave the edge.
+
+Put the `tgk_…` key in a **Fastly Secret Store** and read it from there in the
+handler. The snippet uses the literal `<collector-api-key>` for clarity. Replace
+it with a Secret Store lookup.
+
+## 4. Evaluate the request body
+
+The handler clones the request, sends the body to
+[`POST /v1/evaluate`](/trustguard/api/evaluate) over the `trustguard` backend
+with the collector key as a bearer token, and forwards to `origin` only if the
+verdict is not `block`:
+
+```js
+addEventListener("fetch", (event) => event.respondWith(handler(event)));
+
+async function handler(event) {
+  const req = event.request;
+
+  if (req.method === "POST") {
+    const text = await req.clone().text();
+    const result = await fetch("{TRUSTGUARD_URL}/v1/evaluate", {
+      method: "POST",
+      backend: "trustguard",
+      headers: {
+        Authorization: "Bearer <collector-api-key>",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        protocol: "llm",
+        direction: "input",
+        payload: { input: text },
+        consumer_id: req.headers.get("x-user-id") ?? "",
+        session_id: req.headers.get("x-session-id") ?? "",
+      }),
+    }).then((r) => r.json());
+
+    if (result.status === "block") {
+      return new Response("Blocked by TrustGuard", { status: 403 });
+    }
+  }
+
+  return fetch(req, { backend: "origin" });
+}
+```
+
+The following details determine what the handler evaluates:
+
+- **`req.clone()`**: read the clone, not the request. Consuming the original body
+  stream leaves nothing to forward, and the origin receives an empty body.
+- **`req.method === "POST"`**: other methods pass through without evaluation.
+  Update the condition if an endpoint accepts prompts through another method.
+- **`payload.input` is the complete body**: the raw POST body as a string, JSON
+  scaffolding, model name and message roles included.
+  [Detectors](/trustguard/concepts/detectors) see one blob with no role
+  boundaries: retrieved text, your system prompt and the user's turn are
+  indistinct. `payload` also accepts a complete OpenAI, Anthropic, or Gemini
+  provider body, so parse and send that object if you need the distinction.
+
+`block` returns `403` with `Blocked by TrustGuard`, and the origin is not called.
+The finding is available in **Activity**. `allow`, `report`, and
+`ask` all pass through to `origin`. Use a **block** gate for enforcement.
+
+<Warning>
+**This sample does not implement redaction.** A `transform` verdict contains
+TrustGuard's `{ "input": … }` payload rather than your origin's request schema.
+Applying it requires custom, schema-aware code that inserts the rewritten text
+into the original body. Use **Block** rules unless you have implemented and
+tested that conversion.
+</Warning>
+
+The sample omits error handling around the request to TrustGuard. Catch failures and
+choose whether to return `fetch(req, { backend: "origin" })` (fail open) or a 403
+(fail closed). Without a catch, the request fails at the edge.
+
+## 5. Publish the service
+
+```bash
+fastly compute publish
+```
+
+The integration covers traffic handled by this service. AI endpoints served by
+another service or reached without Fastly are not evaluated.
+
+The Next-Gen WAF runs **first**. Requests it rejects do not reach the handler or
+trigger a TrustGuard evaluation.
+
+## 6. Verify
+
+1. Put the policy in **Enforce** and `POST` a prompt to a guarded endpoint that
+   trips a rule.
+2. Confirm that the caller receives `403` with the body
+   `Blocked by TrustGuard`.
+3. Confirm the event in TrustGuard **Activity**, under the `consumer_id` you sent
+   as `x-user-id`.
+4. Send a clean `POST` and confirm that the origin receives the original body.
+   This verifies that the handler reads the clone rather than consuming the
+   request stream.
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ❌ | ❌ | ❌ |
+| Tool-level | ➖ | ➖ | ➖ |
+
+The handler evaluates POST bodies before forwarding them to the origin. It does
+not inspect model responses, expose individual tool calls, or support redaction.
+Each evaluated request adds one round trip to `{TRUSTGUARD_URL}`.
+
+### What is evaluated
+
+| Where in the service | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| The `POST` body, before `fetch(req, { backend: "origin" })` | `protocol: llm`, `direction: input`; `payload.input` contains the raw body as text | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII in prompts ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** returns `403` and prevents the origin call |
+| Non-`POST` requests | Not evaluated | Not evaluated | Forwarded |
+| The origin's response | Not evaluated | Not evaluated | Not evaluated |
+| Tool calls and tool results | Not available. The edge sees one request body, not the agent loop | Not evaluated | Not evaluated |
+
+The call is [`POST /v1/evaluate`](/trustguard/api/evaluate) with the collector
+`tgk_…` key as a bearer token, and the policy's
+detectors decide the verdict. `direction`
+selects which detector phase runs; this handler only ever sends `input`.
+
+### Verdict handling
+
+| Verdict | What the handler does |
+|---|---|
+| `allow` | Forwards to `origin` untouched. |
+| `report` | Forwards untouched. The finding is in **Activity**, not in the response. |
+| `block` | Returns `403` with the body `Blocked by TrustGuard`. |
+| `transform` | Records the verdict and forwards the original request. Redaction requires a custom schema-aware implementation. |
+| `ask` | Forwards. The edge cannot prompt a user, so `ask` is allowed and recorded. Use a **block** gate. |
+
+### Configuration
+
+Configure the integration in the Fastly service:
+
+| What | Where | Notes |
+|---|---|---|
+| `trustguard` backend | Service backend configuration | The `{TRUSTGUARD_URL}` host. See [step 3](#3-declare-the-backends-and-store-the-key). |
+| `origin` backend | Service backend configuration | Your application. The pass-through `fetch` names it. |
+| Collector API key | Fastly Secret Store | Sent as `Authorization: Bearer …`. The snippet's literal is a placeholder for that lookup. |
+| Evaluate URL | `src/index.js` | `{TRUSTGUARD_URL}/v1/evaluate`, including the full endpoint path. |
+| Which requests are evaluated | `src/index.js` | The sample evaluates POST. Update the condition for any other method that carries prompts. |
+| Fail-open or fail-closed | `src/index.js` | The sample omits error handling. Add `try`/`catch` and return either the origin response or an error. |
+
+### Attributes
+
+- `consumer_id`: read from the `x-user-id` request header, `""` when absent. It
+  is what per-consumer policy routing keys on, so without it every caller shares
+  the collector's default policy.
+- `session_id`: read from `x-session-id`. The sample sends `""` when the header
+  is absent. Send a stable, verified conversation ID if you need reliable
+  grouping in **Activity**.
+- Both are client-supplied headers. The edge does not derive either one, and a
+  caller can set either value. Replace them with values from an
+  authenticated identity if policy decisions have to be trustworthy.
+- The sample sends no `attributes` block, so gates matching on `model`,
+  `source.application` or `collector.type` have nothing to match. Add the
+  dimensions you gate on to the evaluate body.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| Requests fail at the edge and no events appear in **Activity** | The `trustguard` backend is missing or its name does not match the handler configuration |
+| Requests fail instead of reaching the origin | The evaluation request failed and the sample has no error handling. Configure failure behavior as described in [Configuration](#configuration) |
+| The origin receives an empty body | The body was read without `clone()`, consuming the stream that was going to be forwarded |
+| A blocking prompt still reaches the origin | The policy is in Observe rather than Enforce, or the request was not a `POST` and skipped the guard entirely |
+| A masking policy records but does not mask | Expected. The sample does not apply `transformed_payload`. Use a **Block** rule unless you implement schema-aware reconstruction |
+| An `ask` gate does not block | Expected. The edge cannot prompt a user, so `ask` is allowed and recorded |
+| The response was not evaluated | This collector has no response pass |
+| Events share one session or have no consumer | The client did not send `x-user-id` / `x-session-id`, and the sample defaults both to `""` |
+| The request never reached the handler at all | The Next-Gen WAF runs first and rejected it |
+
+## Related
+
+- [Evaluate API](/trustguard/api/evaluate): request and response contract for the endpoint the handler calls
+- [Policies](/trustguard/concepts/policies): Observe and Enforce modes, including gate configuration
+- [Collectors](/trustguard/concepts/collectors): collector keys and policy resolution
+- Other edge collectors: [Cloudflare](/integrations/cloudflare) · [CloudFront](/integrations/aws-cloudfront) · [Akamai](/integrations/akamai)
+- [Fastly documentation](https://www.fastly.com/documentation/): Compute services, backends, and the Secret Store

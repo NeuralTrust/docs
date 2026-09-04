@@ -19,9 +19,10 @@ Opening a policy opens a side panel with six tabs:
 | **Test** | Sandbox against the **last saved** policy. |
 | **History** | Change log for the policy, gates, detector rules, and routing. |
 
-The list columns **Gates**, **Detectors**, and **Collectors** count what’s on those tabs. **Mode** is Observe or Enforcing.
+The list columns **Gates**, **Detectors**, and **Collectors** count what is on
+those tabs. **Mode** is **Observe** or **Enforce**.
 
-## Enforcement mode — Observe vs Enforce
+## Enforcement modes
 
 The switch is on **Basics** (and in the panel header):
 
@@ -42,15 +43,18 @@ Each gate is a name, **And**/**Or** conditions, and a **Then** action:
 |---|---|
 | **Block** | Stop immediately; **detectors are skipped**. In Observe this is recorded, not enforced. |
 | **Report** | Record a finding and continue to detection. |
-| **Skip** | Stop remaining gates and go to detectors — no finding. Use it to waive traffic. |
-| **Ask** | Ask the user to confirm in the IDE. **Input only** (missing `direction` counts as input). On **output** the gate does not match. Detectors are skipped. |
+| **Skip** | Stop remaining gates and continue to detectors without recording a gate finding. |
+| **Ask** | Request confirmation when the integration supports it. **Input only** (missing `direction` counts as input). On **output** the gate does not match. Detectors are skipped. |
 
 Block, Skip, and Ask end the gate chain. Report continues. If any matching gate **Blocks**, detection does not run.
 
-IDE plugins map **Ask** to a permission prompt. The copy is always
-`A TrustGuard policy needs your approval to continue.` — not the gate name.
-[Codex](/trustguard/integrations/codex) has no Ask dialog; it allows the call
-and injects that sentence as extra context.
+Ask behavior depends on the integration. [Claude Code](/integrations/claude#claude-code)
+and [Cursor](/integrations/cursor) display a permission prompt for tool calls,
+but prompt events continue with a warning. [GitHub Copilot](/integrations/github-copilot)
+prompts on interactive tool calls and treats Ask as denied in cloud jobs.
+[Codex](/integrations/codex) has no Ask dialog; it allows the call and adds the
+approval message to the agent context. See [Coverage](/integrations/coverage)
+for the complete mapping.
 
 ### Condition attributes
 
@@ -77,17 +81,19 @@ from `attributes.tool`. Hosts that expose tools as `mcp__<server>__<tool>` send
 the last segment (`search_threads`). Gate on that short name.
 `tool.command` is the shell line for Bash / Shell.
 
-Do not put `name` inside `{ "input": "…" }` when `protocol` is `all` — that
-body is rejected (`400`).
+Do not put `name` inside `{ "input": "…" }` when `protocol` is `all`; that
+body is rejected with `400`.
 
-#### `source.application` (Claude)
+#### `source.application` values
 
 | Value | Path |
 |---|---|
-| `claude-ai` | [Claude Enterprise](/trustguard/integrations/claude-enterprise) — claude.ai chat |
-| `claude-code` | Claude Enterprise — Claude Code seen server-side, not the laptop plugin |
-| `claude-code-plugin` | [Claude Code plugin](/trustguard/integrations/claude-code) — local lifecycle hooks |
-| `cursor-plugin` | [Cursor plugin](/trustguard/integrations/cursor) |
+| `claude-ai` | [Claude Enterprise](/integrations/claude#claude-enterprise); claude.ai chat |
+| `claude-code` | Claude Enterprise; Claude Code seen server-side, not the laptop plugin |
+| `claude-code-plugin` | [Claude Code plugin](/integrations/claude#claude-code); local lifecycle hooks |
+| `cursor-plugin` | [Cursor plugin](/integrations/cursor) |
+| `codex-plugin` | [Codex plugin](/integrations/codex) |
+| `copilot-plugin` | [GitHub Copilot plugin](/integrations/github-copilot) |
 | `config-test` | Anthropic **Test connection** |
 
 A gate on `claude-code` does **not** match the laptop plugin (`claude-code-plugin`).
@@ -96,8 +102,8 @@ A gate on `claude-code` does **not** match the laptop plugin (`claude-code-plugi
 
 The **Detectors** tab is split by **evaluation phase**:
 
-- **Input** — prompt / tool call.
-- **Output** — completion / tool result.
+- **Input:** prompt or tool call.
+- **Output:** completion or tool result.
 
 TrustGuard only runs the phase that matches the request `direction`. If the
 caller never sends `output`, Output rules never run.
@@ -105,7 +111,7 @@ caller never sends `output`, Output rules never run.
 <Note>
 **Who sets `direction`?**
 
-- **[TrustGate](/trustguard/integrations/trustgate)** sets it (`input` on
+- **[TrustGate](/integrations/trustgate)** sets it (`input` on
   the request path, `output` on the response path).
 - **IDE plugins** set it per hook (prompt and `preToolUse` → input; `postToolUse` → output).
 - **SDK / REST / browser / edge** must send it on every call. Omitting it defaults to `input`.
@@ -116,8 +122,8 @@ optional **conditions** (same attributes as gates):
 
 | Action | Console | Effect | Rewrites payload |
 |---|---|---|---|
-| `report` | **Monitor** | Record a finding only. | — |
-| `block` | **Block** | Flag for blocking; stops the remaining detector chain. | — |
+| `report` | **Monitor** | Record a finding only. | No |
+| `block` | **Block** | Flag for blocking; stops the remaining detector chain. | No |
 | `transform` | **Transform** | Mask/rewrite. Only valid for **`data_loss_prevention`**. | Yes |
 
 ## Verdict precedence
@@ -127,30 +133,31 @@ block  →  ask  →  transform  →  report  →  allow
 ```
 
 `allow` means nothing fired, or everything was waived. The caller enforces the
-verdict — see the [Evaluate API](/trustguard/api/evaluate). In **Observe**, the
+verdict; see the [Evaluate API](/trustguard/api/evaluate). In **Observe**, the
 status never goes past `report`.
 
 ## Test
 
 **Test** evaluates the **saved** policy (unsaved Gates/Detectors do not apply).
 
-1. **Test direction** — Input or Output (must match the Detectors phase you care about).
-2. **Sample** — paste text, pick a preset, or **Upload file** (forces protocol **LLM**).
-3. **Extra parameters** — same attributes as Gates. Skip, Block, and Ask only match when these are set (for example **Tool name** = `search_threads`, or **Source application** = `claude-code-plugin`).
-4. **Run test** — Decision is Blocked / Transformed / Reported / Allowed, plus findings.
+1. **Test direction:** Input or Output. It must match the detector phase you want to test.
+2. **Sample:** paste text, pick a preset, or select **Upload file**, which uses the **LLM** protocol.
+3. **Extra parameters:** the same attributes available to gates. Skip, Block, and Ask match only when these are set. For example, set **Tool name** to `search_threads` or **Source application** to `claude-code-plugin`.
+4. **Run test:** view the Blocked, Transformed, Reported, or Allowed decision and its findings.
 
 Test does not emit **Activity** and does not consume the `/v1/evaluate` plan rate limit.
 
 ## History
 
-Created / updated / deleted events for the policy, its gates, detector rules, and collector routing.
+History records create, update, and delete events for the policy, its gates,
+detector rules, and collector routing.
 
 ## Collectors tab
 
 Attach collectors with a routing mode:
 
-- **Default** — fallback for all of that collector’s traffic.
-- **Consumer ID** — only requests with that `consumer_id`.
+- **Default:** fallback for all of that collector's traffic.
+- **Consumer ID:** only requests with that `consumer_id`.
 
 You can also bind routing from the collector’s **Policies** tab. A collector
 with no matching policy leaves that request **unguarded** (`status: "allow"`, no findings).

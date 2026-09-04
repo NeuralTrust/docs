@@ -1,17 +1,18 @@
 ---
 title: "How it works"
-description: "The /v1/evaluate pipeline: resolve the collector from its API key, resolve the policy, run gates, run the detector rules, and reduce everything to a single status the caller enforces."
+description: "How POST /v1/evaluate resolves a collector and policy, runs gates and detector rules, and returns a status for the caller to enforce"
 ---
 
-Every inspection goes through one runtime endpoint, `POST /v1/evaluate`. This page
-explains what happens between the request and the verdict.
+This page explains how `POST /v1/evaluate` processes a request and returns a
+verdict. Claude Enterprise uses a specialized endpoint described in its
+[integration guide](/integrations/claude#claude-enterprise).
 
 ## 1. Authenticate and resolve the collector
 
 The caller sends `Authorization: Bearer <api-key>`. TrustGuard verifies the key,
 checks it is active and not expired, and resolves the
 [collector](/trustguard/concepts/collectors) it belongs to. The collector is
-**never** sent in the request body — it comes from the key.
+not sent in the request body; it comes from the key.
 
 A missing or invalid key returns `401`; an inactive/expired key is rejected
 before any evaluation runs.
@@ -25,7 +26,7 @@ TrustGuard picks the [policy](/trustguard/concepts/policies) for this request:
 
 If the collector has no matching policy, the request is **unguarded**: TrustGuard
 returns `status: "allow"` with no findings. The policy's **Enforcement mode**
-(Observe vs Enforce) is read here — in **Observe** every action below is
+(Observe vs Enforce) is read here. In **Observe**, every action below is
 downgraded to a non‑blocking record.
 
 ## 3. Run gates
@@ -38,7 +39,7 @@ protocol, direction, tool, session, source) and takes an action:
 |---|---|
 | **Block** | Detectors skipped. Returns `status: "block"`. |
 | **Report** | Records a finding and continues to detection. |
-| **Skip** | Stops remaining gates and proceeds to detection — no finding. |
+| **Skip** | Stops remaining gates and proceeds to detection without a gate finding. |
 | **Ask** | Detectors skipped. Returns `status: "ask"`. Matches **input** only (empty `direction` counts as input); ignored on output. |
 
 Block, Skip, and Ask end the gate chain. Report continues.
@@ -46,26 +47,26 @@ Block, Skip, and Ask end the gate chain. Report continues.
 ## 4. Run the detector rules
 
 For the request's `direction` (`input` or `output`), TrustGuard runs the
-policy's matching **detector rules** — the same **Input** / **Output** phases
+policy's matching **detector rules**, using the same **Input** and **Output** phases
 you configure on the [policy](/trustguard/concepts/policies). Rules are filtered
 by direction and by their optional conditions, then split by capability:
 
 The caller supplies `direction` on `/v1/evaluate`.
-[TrustGate](/trustguard/integrations/trustgate) sets it from the request/response
-stage; [application SDKs](/trustguard/integrations/python-sdk) and other collectors
+[TrustGate](/integrations/trustgate) sets it from the request/response
+stage; [application SDKs](/integrations/python-sdk) and other collectors
 must set it explicitly (default `input` if omitted).
 
 | Phase | Detectors | Execution |
 |---|---|---|
 | **Detect** | Every detection‑only detector | Run **concurrently**; results merged deterministically. They read the payload but never modify it. |
-| **Transform** | Mutable detectors (today `data_loss_prevention`) | Run **sequentially** after detection. With the **Transform** action they rewrite the payload, producing `transformed_payload`. |
+| **Transform** | Mutable detectors (currently `data_loss_prevention`) | Run **sequentially** after detection. With the **Transform** action they rewrite the payload, producing `transformed_payload`. |
 
-Each rule's action — **Monitor** (`report`), **Block**, or **Transform** — sets
+Each rule's **Monitor** (`report`), **Block**, or **Transform** action sets
 the `outcome.action` on the findings it produces. A `block` rule also stops the
 remaining detector chain.
 
 File attachments (`payload.attachments`) are decoded once and shared with
-detectors that consume them — today **`doc_analyzer`**. (`url_analyzer` finds
+detectors that consume them, currently **`doc_analyzer`**. (`url_analyzer` finds
 URLs in the body/messages, not in attachments.) Remote attachment URLs are
 fetched server-side under a strict SSRF guard (HTTPS only; loopback, private,
 link-local, CGNAT, and cloud-metadata addresses blocked) and are **never stored**.
@@ -103,14 +104,14 @@ exceeds `report`.
 
 | Field | Meaning |
 |---|---|
-| `status` | `allow` · `report` · `transform` · `ask` · `block` — the reduced verdict. Advisory: the caller enforces. |
+| `status` | The reduced verdict: `allow`, `report`, `transform`, `ask`, or `block`. The caller enforces it. |
 | `transformed_payload` | The rewritten payload, or absent/`null` if no Transform rule changed anything. |
 | `findings[]` | One entry per gate or detector that fired. See the [Evaluate API](/trustguard/api/evaluate) for the full shape. |
 | `trace_id` / `request_id` | Correlation IDs propagated through logs and telemetry. |
 
-A detection is **always** `HTTP 200` — including a `block` status. Your
-integration acts on `status` / `findings`; it never relies on TrustGuard to
-reject the request.
+A successful evaluation returns `HTTP 200`, including one with a `block` status.
+Your integration acts on `status` and `findings`; it does not rely on the HTTP
+status to enforce a policy verdict.
 
 ## Failure behavior
 
@@ -118,10 +119,11 @@ If a detector hits an infrastructure error (an upstream provider is down, a
 timeout, etc.), behavior follows your deployment's fail‑open / fail‑closed
 setting:
 
-- **Fail‑open** — TrustGuard drops that detector's result and the request still
-  succeeds, so a TrustGuard issue never breaks your traffic.
-- **Fail‑closed** — the request returns `500` so the caller can decide to hold
+- **Fail-open:** TrustGuard drops that detector's result and the request
+  continues.
+- **Fail-closed:** the request returns `500` so the caller can decide to hold
   traffic.
 
 A structured **block** decision (from a gate or a Block rule) always applies
-regardless of this setting. The default is **configured per deployment** — ask NeuralTrust which mode your environment uses.
+regardless of this setting. The default is **configured per deployment**.
+Confirm the setting with your NeuralTrust administrator or support contact.
