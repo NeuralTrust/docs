@@ -12,7 +12,7 @@ mask, prompt the user, or block.
 **[TrustGate](/trustgate/overview)** provides native inline enforcement for TrustGuard
 verdicts. **[TrustTest](/trusttest/getting-started/overview)** serves a separate purpose:
 it red-teams AI systems before and between releases. You can connect TrustGuard to
-another gateway, an SDK, an edge/WAF worker, or a coding-agent plugin.
+another gateway, an SDK, or a coding-agent plugin.
 
 <img
   src="/images/static/img/trustguard-product.svg"
@@ -36,13 +36,13 @@ source), followed by detector rules (**Monitor** / **Block** / **Transform**).
 
 Create a collector under **Runtime → Collectors → Catalog**.
 
-| Group | Examples |
+| Integration type | Examples |
 |---|---|
-| **Gateway** | [TrustGate](/integrations/trustgate) (native; no `tgk_…` key), Portkey, LiteLLM, Kong, Apigee, Azure APIM |
-| **IDE & coding agents** | [Claude Enterprise](/integrations/claude#claude-enterprise), [Claude Code](/integrations/claude#claude-code), [Cursor](/integrations/cursor), [Codex](/integrations/codex), [GitHub Copilot](/integrations/github-copilot) |
+| **AI gateways** | [TrustGate](/integrations/trustgate) (native; no `tgk_…` key), Portkey, LiteLLM, Kong, Apigee, Azure APIM |
+| **AI coding agents** | [Claude Code](/integrations/claude-code), [Cursor](/integrations/cursor), [Codex](/integrations/codex), [GitHub Copilot](/integrations/github-copilot) |
+| **Agent platforms** | [Claude Enterprise](/integrations/claude-enterprise) |
 | **Agent frameworks** | [LangChain](/integrations/langchain) (`langchain-neuraltrust`), [n8n](/integrations/n8n) (`@neuraltrust/n8n-nodes-trustguard`) |
 | **Application** | [Python](/integrations/python-sdk) / [Node](/integrations/node-sdk) SDK, REST, middleware |
-| **Edge / WAF** | Cloudflare, CloudFront, Fastly, Akamai |
 
 Most collectors call [`POST /v1/evaluate`](/trustguard/api/evaluate) with a collector
 API key. TrustGate authenticates as the gateway. Claude Enterprise uses
@@ -54,22 +54,23 @@ A collector with **no matching policy** is **unguarded**: TrustGuard returns
 overrides if you need them) before you rely on it.
 </Warning>
 
-## AI guardrails for IDEs and coding agents
+## AI guardrails for coding agents and agent platforms
 
-The **IDE & coding agents** catalog group covers AI assistants and developer
-tools. TrustGuard sees **prompts and tool use** (shell, MCP `tools/call`, tool
-results), not only chat.
+Coding-agent plugins evaluate lifecycle events on developer machines. Agent
+platforms can provide organization-level inference hooks. These integration
+points expose different parts of a request and support different enforcement
+actions.
 
 | Collector | Path | `source.application` | Enforcement |
 |---|---|---|---|
-| [Claude Enterprise](/integrations/claude#claude-enterprise) | Anthropic organization, server-side (`/v1/evaluate/claude`) | `claude-ai`, `claude-code` | Allow or deny only. Ask is treated as Allow because this endpoint has no interactive confirmation. |
-| [Claude Code](/integrations/claude#claude-code) | Laptop plugin + binary + `tgk_…` | `claude-code-plugin` | Block on prompts; Block or Ask on tool calls |
+| [Claude Enterprise](/integrations/claude-enterprise) | Anthropic organization, server-side (`/v1/evaluate/claude`) | `claude-ai`, `claude-code` | Allow or deny only. Ask is treated as Allow because this endpoint has no interactive confirmation. |
+| [Claude Code](/integrations/claude-code) | Laptop plugin + binary + `tgk_…` | `claude-code-plugin` | Block on prompts; Block or Ask on tool calls |
 | [Cursor](/integrations/cursor) | Plugin + MDM `cursor.json` | `cursor-plugin` | Block on prompts; Block or Ask on tool calls |
 | [Codex](/integrations/codex) | Plugin / managed hooks + `codex.json` | `codex-plugin` | Block to stop. Ask is extra context only (no dialog) |
 | [GitHub Copilot](/integrations/github-copilot) | Plugin / policy hooks + `copilot.json` | `copilot-plugin` | Block or Ask on tool calls; prompt events are audit-only |
 
 A gate on `claude-code` (Claude Enterprise, server-side) does **not** match the laptop plugin
-(`claude-code-plugin`). TrustGate MCP is an [organization connector](/integrations/claude),
+(`claude-code-plugin`). TrustGate MCP is an [organization connector](/integrations/claude-enterprise#organization-connectors),
 not one of these plugins. Do not put a `tgk_…` key on the connector.
 
 Full list: [Integrations](/integrations/overview).
@@ -85,7 +86,7 @@ Full list: [Integrations](/integrations/overview).
 
 Requests do **not** name detectors. TrustGuard resolves the collector, selects the
 policy, runs gates, then applies detector rules that match `direction`. See
-[How it works](/trustguard/how-it-works).
+[Evaluation pipeline](/trustguard/api/evaluate#evaluation-pipeline).
 
 ## Observe vs Enforce
 
@@ -102,7 +103,7 @@ block  →  ask  →  transform  →  report  →  allow
 
 The collector acts on `status`. TrustGate enforces the verdict on the route.
 Coding-agent behavior varies by event and host; see
-[Coverage](/integrations/coverage). A successful evaluation returns `HTTP 200`
+[How it works](/trustguard/how-it-works). A successful evaluation returns `HTTP 200`
 even when `status` is `block`. A non-2xx response indicates an authentication,
 request, or evaluation error.
 
@@ -135,7 +136,7 @@ before relying on the collector, then add per-consumer overrides if needed.
 ### Can TrustGuard inspect tool calls?
 
 Yes, when the collector sends tool events. Available enforcement actions depend on the
-collector and host, as shown in [Integration coverage](/integrations/coverage).
+collector and host, as shown in [TrustGuard coverage](/trustguard/how-it-works).
 
 ### Can I evaluate a policy without blocking traffic?
 
@@ -145,7 +146,7 @@ traffic. Move to **Enforce** after you validate the results in **Activity**.
 ### Do I need TrustGate to use TrustGuard?
 
 No. You can connect TrustGuard through another supported gateway, an SDK, middleware,
-an edge/WAF worker, or a coding-agent plugin.
+or a coding-agent plugin.
 
 ### How does TrustGuard choose what to evaluate?
 
@@ -156,13 +157,13 @@ then detector rules for the request's Input or Output direction.
 
 <CardGroup cols={2}>
   <Card title="How it works" icon="workflow" href="/trustguard/how-it-works">
-    Collector → policy → gates → detectors → status.
+    Compare policy actions and enforcement support across collectors.
   </Card>
   <Card title="Policies" icon="shield-check" href="/trustguard/concepts/policies">
     Tabs, Observe / Enforce, gates (including Ask), Test.
   </Card>
   <Card title="Coding agents" icon="laptop" href="/integrations/overview#ai-coding-agents">
-    Claude Enterprise, Claude Code, Cursor, Codex, and GitHub Copilot.
+    Claude Code, Cursor, Codex, and GitHub Copilot.
   </Card>
   <Card title="Detector catalog" icon="list" href="/trustguard/detectors/overview">
     Built-in detections and settings.

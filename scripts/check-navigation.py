@@ -2,8 +2,8 @@
 """Check that docs.json is valid and every page it lists exists.
 
 A page entry is any string inside a "pages" array. Group and tab names are not
-paths, so they are not checked — that distinction matters, because a group can
-legitimately be called "Edge / WAF" and would look like a path to a looser rule.
+paths, so they are not checked. A group label containing a slash is not a page
+path and must not be passed to the file-existence check.
 
 Run it before opening a PR:
 
