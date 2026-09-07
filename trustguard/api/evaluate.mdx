@@ -1,15 +1,15 @@
 ---
 title: "Evaluate API"
-description: "Request and response reference for POST /v1/evaluate, including authentication, attachments, SSRF protections, and status codes"
+description: "Request, evaluation pipeline, and response reference for POST /v1/evaluate, including authentication, attachments, and status codes"
 hidePagination: true
 ---
 
 `POST /v1/evaluate` is the standard runtime endpoint for TrustGuard collectors.
 A [collector](/trustguard/concepts/collectors) calls it to evaluate one request
 against its assigned [policy](/trustguard/concepts/policies). See
-[How it works](/trustguard/how-it-works) for the evaluation pipeline. Claude
-Enterprise uses the specialized endpoint documented in its
-[integration guide](/integrations/claude#claude-enterprise).
+[How it works](/trustguard/how-it-works) for policy actions and collector coverage.
+Claude Enterprise uses the specialized endpoint documented in its
+[integration guide](/integrations/claude-enterprise).
 
 ## Authentication
 
@@ -79,6 +79,72 @@ Each attachment in `payload.attachments` provides **either** base64 `data`
   cloud‑metadata (`169.254.169.254`) targets.
 - Attachment bytes are not persisted.
 
+## Evaluation pipeline
+
+### 1. Authenticate and resolve the collector
+
+TrustGuard verifies the API key, checks that it is active and not expired, and
+resolves its collector. A missing or invalid key returns `401`; an inactive or
+expired key returns `403`. Authentication failures are rejected before any
+evaluation runs.
+
+### 2. Resolve the policy
+
+TrustGuard uses the request's `consumer_id` to look for a per-consumer policy.
+If none matches, it uses the collector's default policy.
+
+If the collector has no matching policy, the request is unguarded: TrustGuard
+returns `status: "allow"` with no findings. The policy's enforcement mode also
+applies to this evaluation. In **Observe**, actions are recorded without
+enforcement.
+
+### 3. Run gates
+
+[Gates](/trustguard/concepts/policies#gates) run before detectors. Each gate
+matches request attributes, such as consumer, model, collector, protocol,
+direction, tool, session, or source, and takes an action:
+
+| Gate action | Effect |
+| --- | --- |
+| **Block** | Skips detectors and returns `status: "block"`. |
+| **Report** | Records a finding and continues to detection. |
+| **Skip** | Stops remaining gates and proceeds to detection without a gate finding. |
+| **Ask** | Skips detectors and returns `status: "ask"`. Matches input only; an empty `direction` counts as input. Ignored on output. |
+
+Block, Skip, and Ask end the gate chain. Report continues. In Observe mode,
+Block and Ask verdicts are downgraded to a non-blocking record.
+
+### 4. Run the detector rules
+
+TrustGuard filters detector rules by the request's `direction` and each rule's
+optional conditions. These are the same **Input** and **Output** phases
+configured on the [policy](/trustguard/concepts/policies).
+
+| Phase | Detectors | Execution |
+| --- | --- | --- |
+| **Detect** | Detection-only detectors | Run concurrently and merge results deterministically. They read the payload without modifying it. |
+| **Transform** | Mutable detectors, currently `data_loss_prevention` | Run sequentially after detection. With the Transform action, they rewrite the payload and produce `transformed_payload`. |
+
+Each rule's Monitor (`report`), Block, or Transform action sets `outcome.action`
+on its findings. A Block rule also stops the remaining detector chain.
+
+File attachments are decoded once and shared with detectors that consume them,
+currently `doc_analyzer`. The `url_analyzer` detector finds URLs in the body or
+messages, not in attachments. Remote attachment URLs are fetched server-side
+under the [SSRF protections](#attachments-and-ssrf) described above.
+
+### 5. Reduce to a status
+
+TrustGuard reduces the findings to one top-level `status`, from most to least
+restrictive:
+
+```text
+block → ask → transform → report → allow
+```
+
+In **Observe**, Block, Ask, and Transform actions are downgraded, so the status
+never exceeds `report`.
+
 ## Response
 
 A successful evaluation returns `200`, including one whose status is `block`.
@@ -138,6 +204,20 @@ A successful evaluation returns `200`, including one whose status is `block`.
 | `500` | A detector errored **and** the deployment is fail‑closed. With fail‑open you get `200`. |
 
 Error responses carry `{ "error", "trace_id", "request_id" }`.
+
+### Failure behavior
+
+Detector infrastructure errors, such as an upstream outage or timeout, follow
+the deployment's fail-open or fail-closed setting:
+
+- **Fail-open:** TrustGuard drops the failed detector's result and evaluation
+  continues.
+- **Fail-closed:** TrustGuard returns `500`, so the caller can decide whether to
+  hold traffic.
+
+A structured Block decision from a gate or detector rule still applies
+regardless of this setting. The default is configured per deployment; confirm
+it with your NeuralTrust administrator or support contact.
 
 ## Enforcing the verdict
 

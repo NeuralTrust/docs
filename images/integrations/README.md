@@ -7,12 +7,11 @@ changes.
 
 | Asset | Documentation source |
 | --- | --- |
-| `coding-agent-security-flow.svg` | `integrations/claude.mdx`, `integrations/cursor.mdx`, `integrations/codex.mdx`, `integrations/github-copilot.mdx` |
-| `gateway-evaluation-flow.svg` | Gateway guides in `integrations/` and `integrations/coverage.mdx` |
-| `edge-request-evaluation.svg` | `integrations/akamai.mdx`, `integrations/aws-cloudfront.mdx`, `integrations/cloudflare.mdx`, `integrations/fastly.mdx` |
+| `coding-agent-security-flow.svg` | `integrations/claude-code.mdx`, `integrations/cursor.mdx`, `integrations/codex.mdx`, `integrations/github-copilot.mdx` |
+| `gateway-evaluation-flow.svg` | Gateway guides in `integrations/` and `trustguard/how-it-works.mdx` |
 
 The product illustration at `../static/img/trustguard-product.svg` follows
-`trustguard/how-it-works.mdx` and `trustguard/concepts/policies.mdx`.
+`trustguard/api/evaluate.mdx` and `trustguard/concepts/policies.mdx`.
 
 Each SVG includes a title and description. Pages embedding an image must also
 provide descriptive `alt` text and explain any coverage limits in ordinary page
