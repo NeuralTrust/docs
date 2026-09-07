@@ -1,0 +1,242 @@
+---
+title: "Akamai"
+description: "Evaluate prompts at the Akamai edge with an EdgeWorkers responseProvider"
+---
+
+Akamai is a content delivery network that serves traffic from edge locations
+before forwarding it to your origin. **EdgeWorkers** runs your JavaScript at
+those locations. A `responseProvider` can read the request body, call another
+host, fetch the origin, and construct the response returned to the client.
+
+This integration evaluates requests to the AI routes matched by the EdgeWorker.
+It does not inspect origin responses, direct calls to model providers, or
+employee use of third-party AI services.
+
+## Integration capabilities
+
+| Product | What it does at the Akamai edge | What you can enforce |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates the body of every POST to your AI routes against the assigned [policy](/trustguard/concepts/policies), from an EdgeWorker, before the origin is called | Monitor · Block |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| An Akamai collector, API key, and assigned policy | Go to **Runtime → Collectors → Catalog → Edge / WAF → Akamai**. Create the collector, create a key on its **Auth** tab, and assign an Input-phase policy on the **Policies** tab. The key is shown once and identifies the collector. |
+| Egress from the Akamai edge to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. EdgeWorkers requires you to map it onto your property first. See [Map the TrustGuard endpoint](#1-map-the-trustguard-endpoint-under-your-property). |
+| A property with EdgeWorkers enabled | The EdgeWorker and the path mapping are both behaviors on the **same** property in **Property Manager**. |
+| A spare path on that property | `/trustguard/*` in the sample below. It becomes the address the worker calls instead of `{TRUSTGUARD_URL}`. |
+| Secure storage for the collector key | The sample inlines `Bearer <collector-api-key>` for clarity. Treat the EdgeWorkers bundle as a secret artifact, or use your property's existing method for supplying secrets. |
+
+<Note>
+Start with the policy in **Observe** mode. Findings appear in **Activity** without
+affecting traffic. Switch to **Enforce** after reviewing the results. See
+[Policies](/trustguard/concepts/policies).
+</Note>
+
+## 1. Map the TrustGuard endpoint under your property
+
+An EdgeWorkers `httpRequest` sub-request reaches **only** hostnames your Akamai
+property serves. A direct call to `{TRUSTGUARD_URL}` fails with a **400**, so map
+the TrustGuard host as an origin on your property.
+
+In **Property Manager**, route a path on the property to the TrustGuard host as
+an origin:
+
+```text
+/trustguard/*   →   origin: <your TrustGuard host>
+```
+
+The worker calls the relative path `/trustguard/v1/evaluate`, not the absolute
+URL. If you change the prefix, update both the property mapping and the worker.
+
+<Warning>
+**The mapped path is a public route on your property.** Any caller that can reach
+the property can reach `/trustguard/*`. TrustGuard rejects requests without a
+valid collector key, but the path remains an open proxy to the TrustGuard host
+until you restrict it in Property Manager. Do not rely on the key as the only
+access control for the route.
+</Warning>
+
+## 2. Write the responseProvider
+
+Because `responseProvider` constructs the response, the worker must fetch the
+origin and construct the client response with `createResponse`, including for allowed
+requests. The allow path therefore makes two sub-requests. Both count toward the
+wall-time limit described in
+[step 4](#4-configure-timeouts-and-failure-behavior).
+
+```js
+import { httpRequest } from "http-request";
+import { createResponse } from "create-response";
+
+export async function responseProvider(request) {
+  if (request.method === "POST") {
+    const text = await request.text();
+    const guardResponse = await httpRequest("/trustguard/v1/evaluate", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer <collector-api-key>",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        protocol: "llm",
+        direction: "input",
+        payload: { input: text },
+        consumer_id: request.getHeader("X-User-Id")?.[0] ?? "",
+        session_id: request.getHeader("X-Session-Id")?.[0] ?? "",
+      }),
+      timeout: 3000,
+    });
+    const result = await guardResponse.json();
+
+    if (result.status === "block") {
+      return createResponse(403, {}, "Blocked by TrustGuard");
+    }
+
+    const originResponse = await httpRequest(request.url, {
+      method: "POST",
+      headers: { "Content-Type": request.getHeader("Content-Type")?.[0] ?? "" },
+      body: text,
+    });
+    return createResponse(originResponse.status, {}, originResponse.body);
+  }
+
+  const originResponse = await httpRequest(request.url, {
+    method: request.method,
+  });
+  return createResponse(originResponse.status, {}, originResponse.body);
+}
+```
+
+Only POST is evaluated; every other method is sent to the origin with its
+original method. `request.getHeader()` returns an **array**, which is why header
+values use `?.[0]`. Without it, the worker sends an array where
+[`POST /v1/evaluate`](/trustguard/api/evaluate) expects a string.
+
+<Warning>
+**This sample does not implement redaction.** A `transform` verdict contains
+TrustGuard's `{ "input": "…" }` payload rather than your origin's request
+schema. Applying it requires custom, schema-aware code that inserts the rewritten
+text into the original body. Until you implement and test that conversion, use
+**Block** rules.
+</Warning>
+
+The sample constructs the client response with the origin status and body, but
+passes an empty headers object to `createResponse`. Copy any required origin
+response headers into that object before production use.
+
+## 3. Place the EdgeWorker after App & API Protector
+
+Order the EdgeWorker behavior **after** App & API Protector on the property. The
+WAF then runs first. TrustGuard evaluates only traffic that App & API Protector
+accepts, avoiding an evaluation call for requests the WAF rejects.
+
+## 4. Configure timeouts and failure behavior
+
+An EdgeWorker has a **4-second wall-time budget**, and it covers the
+guard call **and** the origin sub-request together, not each of them. The sample
+spends `timeout: 3000` on the guard call, which leaves about a second for your
+origin. Measure your origin latency and set the guard timeout to leave enough
+time for both calls.
+
+The sample also has no `try`/`catch`. If TrustGuard is unreachable or the call
+times out, the worker throws and the property handles the failed EdgeWorker.
+Wrap the guard call and explicitly choose whether to continue to the origin
+(fail open) or return an error (fail closed).
+
+## 5. Activate the bundle
+
+Upload the EdgeWorker version and activate it on **staging** before production.
+The property version carrying the path mapping and behavior order has to be
+activated too, not just the worker.
+
+## 6. Verify
+
+1. Put the policy in **Enforce** and POST a prompt to a guarded path that trips
+   a rule.
+2. Confirm that the client receives **403** with the body `Blocked by TrustGuard`.
+3. Confirm the event in TrustGuard **Activity**, under the `consumer_id` you sent
+   as `X-User-Id`.
+
+Then send a clean prompt. Confirm that the client receives the expected origin
+status and body, and verify any origin headers that your implementation copies.
+The guard and origin calls together must stay within the wall-time limit.
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ❌ | ❌ | ❌ |
+| Tool-level | ➖ | ➖ | ➖ |
+
+The integration evaluates input only and does not implement redaction. The
+4-second wall-time budget covers both the evaluation and origin sub-requests.
+The sample also omits origin response headers when it constructs the client
+response.
+
+### What is evaluated
+
+| Akamai event | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| `responseProvider`, POST | `protocol: llm`, `direction: input`; `payload.input` contains the raw request body as text | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII in prompts ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** returns 403 and prevents the origin call |
+| `responseProvider`, any other method | Not evaluated; passed directly to the origin | Not evaluated | Not evaluated |
+| The origin's response | Not evaluated. The sample returns its status and body but omits its headers | Not evaluated | Not evaluated |
+| Tool calls and tool results | Not available. The edge sees an HTTP request body, not the agent loop | Not evaluated | Not evaluated |
+
+Every call is [`POST /v1/evaluate`](/trustguard/api/evaluate) with the collector
+key as a bearer token, and the policy's detectors decide the verdict. The worker
+acts on `status` alone: `block` becomes a 403, and other verdicts continue. The
+edge cannot prompt a user, so `ask` is allowed and recorded like `report`.
+
+### Configuration
+
+Settings are defined in Property Manager and in the EdgeWorkers bundle.
+
+| Setting | Where | Notes |
+|---|---|---|
+| Path mapping | Property Manager | `/trustguard/*` → the TrustGuard host. Mandatory: sub-requests reach only hostnames the property serves. |
+| Guard URL | Bundle | The **relative** path `/trustguard/v1/evaluate`, matching the mapping. Never `{TRUSTGUARD_URL}` directly. |
+| Behavior order | Property Manager | EdgeWorker after App & API Protector, so the WAF filters first. |
+| `Authorization` | Bundle, guard call headers | `Bearer <collector-api-key>`. The key resolves the collector and its policy. |
+| `timeout` | Bundle, guard call options | `3000` ms in the sample. It plus the origin call must fit the 4s wall clock. |
+| Method filter | Bundle | The sample evaluates POST. Update the condition for any other method that carries prompts. |
+| Fail mode | Bundle | Controlled by your `try`/`catch`. Without one, a failed guard call throws. |
+| `consumer_id` / `session_id` | Bundle, from request headers | `X-User-Id` and `X-Session-Id`. |
+
+### Attributes
+
+- `consumer_id`: from the `X-User-Id` header. Per-consumer policy routing keys
+  on it, and gates match it as `consumer.id`, so without it every caller shares
+  the collector's default policy.
+- `session_id`: from the `X-Session-Id` header. The sample sends `""` when the
+  header is absent. Send a stable, verified conversation ID if you need reliable
+  grouping in **Activity**.
+- The edge derives neither. Your client has to send both headers, and
+  `getHeader()` returns them as arrays, so take `[0]`.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| The guard call fails with `400` | The sub-request went to a hostname the property does not serve. Map the path in Property Manager and call the relative path, not `{TRUSTGUARD_URL}` |
+| No events in **Activity** | No policy assigned to the collector, the path mapping is missing on the active property version, or the EdgeWorker does not match that route |
+| A blocking prompt still reaches the origin | The policy is in Observe rather than Enforce, or the request is not a POST and took the pass-through branch |
+| A masking policy records but does not mask | Expected. The sample does not apply `transformed_payload`. Use a **Block** rule unless you implement schema-aware reconstruction |
+| An `ask` gate does not block | Expected. The edge cannot prompt a user, so `ask` is allowed and recorded |
+| The response was not evaluated | Expected. This collector has no output pass |
+| Intermittent failures when the origin is slow | The 4s wall clock covers both sub-requests. Lower the guard `timeout` or shorten the origin call |
+| Clients receive an error when TrustGuard is unreachable | Without `try`/`catch`, the worker throws. Implement the required fail-open or fail-closed behavior |
+| Events share one session or have no consumer | The client did not send `X-User-Id` / `X-Session-Id`, or the `?.[0]` was removed and an array was sent |
+| Requests do not reach the worker | App & API Protector rejected them first |
+
+## Related
+
+- [Evaluate API](/trustguard/api/evaluate): request and response contract for the endpoint the worker calls
+- [Policies](/trustguard/concepts/policies): Observe and Enforce modes, including gate configuration
+- [Collectors](/trustguard/concepts/collectors): collector keys and policy resolution
+- Other edge collectors: [Cloudflare](/integrations/cloudflare) · [CloudFront](/integrations/aws-cloudfront) · [Fastly](/integrations/fastly)
+- [Akamai EdgeWorkers docs](https://techdocs.akamai.com/edgeworkers/docs): Akamai reference for `responseProvider` and sub-requests

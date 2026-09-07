@@ -1,0 +1,446 @@
+---
+title: "Claude"
+description: "Configure TrustGuard for Claude inference and Claude Code lifecycle events, and connect Claude to TrustGate over MCP"
+---
+
+Claude is Anthropic's AI assistant, available at claude.ai, in the desktop app,
+in Cowork, and as **Claude Code**. Claude Code can read repositories, edit files,
+run shell commands, and call external tools from a developer's terminal.
+
+NeuralTrust integrates with Claude at three points. Anthropic's organization-level
+inference hook evaluates model requests across Claude surfaces. The Claude Code
+plugin evaluates lifecycle events on the developer's machine, including the
+commands and tool calls that the inference hook does not expose. A TrustGate
+organization connector controls the MCP tools available to Claude.
+
+<span id="why-it-needs-a-guardrail"></span>
+
+<span id="what-neuraltrust-does-here"></span>
+
+## NeuralTrust controls
+
+| Product | Scope | Controls |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates prompts, tool calls, and tool results against an organization [policy](/trustguard/concepts/policies). Requests arrive either from Anthropic's inference hook or from the Claude Code plugin. | Monitor · Block · Ask on Claude Code tool calls |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer. MCP (Model Context Protocol) connects Claude to systems such as trackers, databases, and internal APIs. | Tool availability · identity-based access · per-tool rate limits |
+
+<span id="choose-your-setup"></span>
+
+## Deployment options
+
+| Goal | Configuration | Location |
+| --- | --- | --- |
+| Evaluate Claude requests across the organization | **[Claude Enterprise](#claude-enterprise)** using Anthropic's inference hook | Anthropic's servers; configured by an organization admin |
+| Evaluate Claude Code commands and tool calls before execution | **[Claude Code](#claude-code)** using the `trustguard@neuraltrust` plugin | Each managed developer machine |
+| Centrally manage the MCP tools available to Claude | **[Organization connectors](#organization-connectors)** using a TrustGate [MCP consumer](/trustgate/mcp/overview) | Anthropic's cloud calls the MCP endpoint |
+
+<Warning>
+**Use separate credentials for TrustGuard and TrustGate.** TrustGuard uses a
+`tgk_…` [collector](/trustguard/concepts/collectors) key. Put it in Anthropic's
+inference-hook `Authorization` header or in `claude-code.json`, depending on the
+deployment. MCP authenticates as a consumer with OAuth2 or an `ag_…` API key. A
+`tgk_…` key does not authenticate MCP, and the plugin's managed settings do not
+accept an MCP URL.
+</Warning>
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| Egress to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. The Enterprise path calls it from Anthropic's servers; the plugin calls it from developer machines. |
+| The **Claude Enterprise** collector type *(Enterprise path)* | **Runtime → Collectors → Catalog → IDE & coding agents → Claude Enterprise**. Create the `tgk_…` key on **Auth**, then assign a policy with the required Input rules on **Policies**. The key is shown once. |
+| An Anthropic organization admin *(Enterprise path)* | The hook lives in the Anthropic admin console under **Data and Privacy → Inference hooks**. |
+| The **Claude Code** collector type *(plugin path)* | **Runtime → Collectors → Catalog → IDE & coding agents → Claude Code**. Create its `tgk_…` key on **Auth** and assign the policy on **Policies**. |
+| MDM *(plugin path)* | Deploys `claude-code.json`, and optionally `managed-settings.json` and a pinned binary. |
+| Egress to GitHub Releases *(plugin path)* | On first use the plugin bootstrap downloads the platform `trustguard-claude-code` binary. |
+| An [MCP consumer](/trustgate/mcp/overview) *(connector path)* | Bind the required registries, then copy the endpoint from its **Connect** tab. |
+| Owner role in the Anthropic organization *(connector path)* | Custom connectors are added from **Organization settings**. |
+| A publicly reachable MCP host *(connector path)* | The connector is called from Anthropic's cloud, not from the user's machine. |
+
+<Note>
+Create the policy in **Observe** mode. Observe records decisions in **Activity**
+without enforcing them. Review the results, then switch the policy to
+**Enforce**. See [Policies](/trustguard/concepts/policies).
+</Note>
+
+Developers do **not** need NeuralTrust accounts for the Claude Enterprise or
+plugin paths. On the connector path, each member completes an OAuth login against
+the IdP configured for the consumer, which may be NeuralTrust.
+
+## Claude Enterprise
+
+Anthropic's organization-level **Inference Hooks** call TrustGuard before the
+model answers. The hook applies across Claude surfaces, requires no laptop
+installation, and cannot be disabled by end users. Each Anthropic organization
+endpoint maps to one TrustGuard collector. TrustGuard records the originating
+surface in `source.application`; see [Attributes](#attributes).
+
+The verdict is binary: **allow** or **deny**. There is no Ask dialog, masking, or
+visibility into individual tool executions on this path. It sees the model
+request, not the command Claude Code is about to run. [Data Loss
+Prevention](/trustguard/detectors/data-loss-prevention) therefore **blocks or
+reports** here; it cannot mask in flight.
+
+1. In the Anthropic admin console, open **Data and Privacy → Inference hooks**.
+2. Set **Hook URL** to `{TRUSTGUARD_URL}/v1/evaluate/claude` and
+   **Authorization** to `Bearer <collector API key>`. Use the `tgk_…` key, not a
+   `tgcol_…` key.
+3. **Save** the endpoint in Anthropic. Saving is what generates the `whsec_…`
+   signing secret.
+4. Paste `whsec_…` into the collector's **Connection** tab in TrustGuard.
+5. Back in Anthropic, reopen **Edit** and run **Test connection**. The test fails
+   until the secret has been added to TrustGuard.
+6. Assign a default [policy](/trustguard/concepts/policies) to the collector
+   before enforcing in production.
+
+This path installs **no** Claude Code lifecycle hooks. For control over
+individual actions on a developer machine, add the
+[plugin](#claude-code) as well.
+
+## Claude Code
+
+The [Claude Code plugin](https://github.com/NeuralTrust/trustguard-claude-code-plugin)
+registers lifecycle hooks on the developer's machine. Before an action runs,
+each hook calls [`POST /v1/evaluate`](/trustguard/api/evaluate) with a collector
+`tgk_…` key. Unlike the inference hook, the plugin receives shell commands and
+supports Ask on tool calls.
+
+Hooks fire only when all three pieces are present:
+
+| Piece | What | If missing |
+|---|---|---|
+| **Plugin** `trustguard@neuraltrust` | Registers `hooks.json` | Claude Code never calls the bootstrap |
+| **Binary** `trustguard-claude-code` | MDM `/Library/Application Support/TrustGuard/bin/`, or `~/.trustguard/bin` | Bootstrap fail-opens (`{}`) |
+| **Collector key** `tgk_…` | In `claude-code.json` | Binary runs and **allows the action without calling evaluate** |
+
+1. **Enable the plugin.** Deploy this through server-managed settings (claude.ai
+   **Admin → Claude Code → Managed settings**) or as the file
+   `/Library/Application Support/ClaudeCode/managed-settings.json`:
+
+   ```json
+   {
+     "extraKnownMarketplaces": {
+       "neuraltrust": {
+         "source": {
+           "source": "github",
+           "repo": "NeuralTrust/trustguard-claude-code-plugin"
+         },
+         "autoUpdate": true
+       }
+     },
+     "enabledPlugins": {
+       "trustguard@neuraltrust": true
+     }
+   }
+   ```
+
+   Do not add `pluginConfigs`, `mcpServers`, or an MCP URL. Organization-wide MCP
+   access uses a separate [organization connector](#organization-connectors).
+
+2. **Deploy the collector config** with MDM, and optionally pin the binary:
+
+   ```json
+   {
+     "data_url": "https://<your-trustguard-host>",
+     "api_key": "tgk_…",
+     "fail_mode": "open"
+   }
+   ```
+
+   | OS | Config | Binary (optional pin) |
+   |---|---|---|
+   | macOS | `/Library/Application Support/TrustGuard/claude-code.json` | `…/TrustGuard/bin/trustguard-claude-code` |
+   | Linux | `/etc/trustguard/claude-code.json` | `~/.trustguard/bin/` |
+   | Windows | `%ProgramData%\TrustGuard\claude-code.json` | `%ProgramData%\TrustGuard\bin\` |
+
+3. **Confirm the plugin is enabled.** An installed plugin, including one with
+   `Scope: managed`, does not run until its status is `enabled`:
+
+   ```bash
+   # Inside `claude`: /status  →  Enterprise managed settings: remote  (or file)
+   claude plugin list          # Status: enabled
+   claude plugin enable trustguard@neuraltrust   # if still disabled
+   ```
+
+4. **Start a new Claude Code session** so `hooks.json` loads.
+
+<Warning>
+`enabledPlugins: true` in the admin JSON does **not** always enable the plugin in
+the CLI. Claude Code **skips server-managed settings entirely** when
+`ANTHROPIC_BASE_URL` or any `CLAUDE_CODE_USE_*` variable is set. This includes
+sessions pointed at a TrustGate LLM proxy. Deploy the **file** path instead in
+that case.
+</Warning>
+
+## Organization connectors
+
+Add TrustGate to Claude as an **organization connector**. The connector is
+available in claude.ai, Desktop, Cowork, and Claude Code. Claude receives the
+merged toolkit assigned to the MCP consumer. Copy the URL from the consumer's
+**Connect** tab:
+
+```text
+https://<mcp-host>/<consumer-slug>/mcp
+```
+
+1. As **Owner**, open **Organization settings → Connectors → Add → Custom → Web**.
+2. Set **Name** to `TrustGate` and **URL** to the **Connect** endpoint above.
+3. Save. Each member then opens **Customize → Connectors → TrustGate → Connect**
+   and completes OAuth.
+
+See Anthropic's own
+[custom connectors guide](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
+
+<Warning>
+The connector is called from **Anthropic's cloud**, not from the user's machine.
+The MCP URL must be reachable from the public internet, or from allowlisted
+Anthropic egress. A Hybrid-only MCP endpoint needs a public path or one of
+TrustGate's private-network options before the connector can connect.
+</Warning>
+
+Prefer **OAuth2** (or **Use NeuralTrust**): org connectors expect OAuth.
+API-key consumers work through the Claude Code CLI instead.
+
+### Claude Code CLI
+
+Claude Code loads the organization connector after the user completes the
+connection. Confirm in `/mcp` that TrustGate is the **org** connector, not
+*"Provided by a plugin"*.
+
+For local testing only, use the following command. It does **not** replace the
+organization connector:
+
+```bash
+claude mcp add --transport http TrustGate https://<mcp-host>/<consumer-slug>/mcp
+```
+
+An API-key consumer sends the key as a header:
+
+```bash
+claude mcp add --transport http TrustGate https://<mcp-host>/<consumer-slug>/mcp \
+  --header "X-AG-API-Key: ag_…"
+```
+
+On a private (Hybrid) data plane, add
+`--header "X-AG-Gateway-Slug: <gateway-slug>"` as well.
+
+## Verify
+
+**Claude Enterprise.**
+
+1. Run **Test connection** in Anthropic. It arrives in **Activity** with
+   the collector's connection-test event.
+2. Send a prompt from claude.ai and confirm the event with
+   `source.application = claude-ai`.
+
+**Claude Code.**
+
+```bash
+ls -l "/Library/Application Support/TrustGuard/bin/trustguard-claude-code"
+cat "/Library/Application Support/TrustGuard/claude-code.json"   # data_url + tgk_ prefix only
+
+echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"},"session_id":"pilot"}' \
+  | trustguard-claude-code hook
+```
+
+A manual probe that shows up in **Activity** with
+`source.application = claude-code-plugin` means the binary and key work. If
+Claude Code still never evaluates, the plugin is disabled or hooks did not
+reload.
+
+**Organization connector.**
+
+1. claude.ai or Desktop: **Connectors → TrustGate** shows connected, and its
+   tools are available in chat.
+2. Claude Code: `/mcp` lists TrustGate; call a tool from a bound registry.
+3. Confirm the call in TrustGate telemetry. See
+   [Metrics](/trustgate/observability/metrics).
+
+## Reference
+
+### Coverage
+
+**Claude Enterprise**
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ➖ | ➖ | ➖ |
+| Tool listing | ✅ | ⚠️ | ➖ |
+| Tool call | ✅ | ⚠️ | ❌ |
+| Tool result | ✅ | ⚠️ | ❌ |
+
+⚠️ Tool content is visible in the transcript and can be blocked, but only by
+blocking the **whole inference** at the single pre-inference decision point. There
+is no per-tool verdict.
+
+**Claude Code plugin**
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ➖ | ➖ | ➖ |
+| Tool call | ✅ | ✅ | ❌ |
+| Tool result | ✅ | ✅ | ❌ |
+
+Use Claude Enterprise to evaluate model requests across the organization. Use
+the plugin to evaluate specific shell commands and MCP calls on managed developer
+machines. Neither path evaluates model responses.
+
+**Ask.** Only the plugin honors Ask, and only on tool calls, where it raises
+Claude Code's native permission dialog. The **subtitle** is the generic
+TrustGuard sentence `A TrustGuard policy needs your approval to continue.`; the
+**title** is Claude Code's tool name and the plugin cannot change it. An `ask` on
+`UserPromptSubmit` does **not** stop the prompt. Claude Code has no confirmation
+dialog for that event, so it submits the prompt with a warning. Use a **block**
+gate to stop a prompt. On the Enterprise path, `ask` becomes **allowed**.
+
+**Limits.** Neither path supports redaction. There is no hook for assistant
+output, so model responses, system prompts, token usage, and extended thinking
+are not evaluated. The plugin does not evaluate tool declarations. Route MCP
+through TrustGate if you need controls over the available tool set. On the
+Enterprise path, a non-2xx response from TrustGuard is a **delivery failure, not
+a deny**. Anthropic's failure handling then applies, while TrustGuard-side
+failures allow the request.
+
+Full comparison: [Coverage](/integrations/coverage).
+
+### What is evaluated
+
+**Claude Enterprise:** one decision point before the model answers.
+
+```text
+Anthropic → POST /v1/evaluate/claude
+  Authorization: Bearer tgk_…
+  Standard Webhooks signature (whsec_)
+  → TrustGuard allow | deny
+```
+
+This is **not** the generic [`POST /v1/evaluate`](/trustguard/api/evaluate)
+path. The inference-hook endpoint returns only allow or deny.
+
+**Claude Code plugin:** one call per lifecycle hook.
+
+| Claude Code event | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| `UserPromptSubmit` | `protocol: llm`, `direction: input` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII pasted into the agent ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** only |
+| `PreToolUse` (`Bash` / `Shell`) | `protocol: all`, `{ "input": "<command>" }`, `direction: input` | Dangerous or out-of-policy shell commands. The full command line is `tool.command`, and `tool.name` is `Bash` | **Block** or **Ask** |
+| `PreToolUse` (MCP and other tools) | `protocol: mcp`, `tools/call`, `direction: input` | Risky MCP tool calls | **Block** or **Ask** |
+| `PostToolUse` | `protocol: mcp`, tool result, `direction: output` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) in MCP or tool output, and sensitive data in results, before the model consumes it | **Block**. Ask gates do not match on output |
+
+`tool.name` is `payload.params.name`: for `mcp__<server>__<tool>` that is the
+last segment. Gate on that short name, not the full hook `tool_name`. The
+policy's [detectors](/trustguard/concepts/detectors) decide the verdict.
+
+### Configuration
+
+**Managed settings (plugin enablement only).** `managed-settings.json` carries
+`extraKnownMarketplaces` and `enabledPlugins`. It does not hold a collector key
+or an MCP URL.
+
+**`claude-code.json` (TrustGuard collector only).** Keys: `data_url`, `api_key`,
+`fail_mode`. When the managed file contains `api_key`, that key plus `data_url`
+and `fail_mode` are **locked**. A user file cannot replace them.
+`fail_mode: open` plus an empty hook body `{}` means **allow**; that is also the
+response when evaluate returns `allow`.
+
+**Binary discovery.** The MDM path is checked first, then `~/.trustguard/bin`.
+The user path is not required when the MDM binary exists. On a **private**
+fork of the plugin repository, an unauthenticated GitHub Releases request may
+return `404`. Set `TRUSTGUARD_GITHUB_TOKEN` and pin the release version. If the
+download fails, the bootstrap fails open.
+
+**Remote sessions.** Over SSH or WSL, the hooks run on the **remote** host. An
+MDM-deployed binary on the Mac does not cover that session. The config and
+binary must exist where the agent runs.
+
+**MCP auth.** Organization connectors use OAuth2 (or **Use NeuralTrust**).
+Through the CLI, TrustGate also accepts an `ag_…` consumer key as
+`X-AG-API-Key`, and a private data plane needs `X-AG-Gateway-Slug` unless the MCP
+host already scopes the [gateway](/trustgate/concepts/gateways). Which IdP backs
+the login is configured on the consumer. See
+[Auth](/trustgate/concepts/auth). Authenticating to TrustGate is separate from
+authenticating to the upstream servers; a registry using OAuth (forwarded)
+returns a connect link on the first call for a user without a stored credential.
+
+**Deployment ownership.**
+
+| Component | Owner | Configuration |
+| --- | --- | --- |
+| **Inference hook** | Anthropic organization administrator | Hook URL + `Bearer tgk_…` + `whsec_…` |
+| **Plugin enablement** | IT / MDM, or server-managed settings | `managed-settings.json` |
+| **Collector config** | IT / MDM | `claude-code.json` with the organization `tgk_…` key |
+| **Organization connector** | Anthropic organization owner | The MCP consumer's **Connect** URL |
+
+Configure the consumer's available tools under **Routing** in the NeuralTrust
+console, or through a [role](/trustgate/concepts/roles) for Identity-based consumers.
+To limit MCP tool calls, attach the [Per-Tool Rate
+Limiter](/trustgate/policies/tool-governance) policy.
+
+### Attributes
+
+**Claude Enterprise** deliveries carry `collector.type =
+anthropic_inference_hook`, `model.provider = anthropic`, and `consumer.id` from
+the actor's email or id. The surface arrives in `source.application`:
+
+| `source.application` (observed) | Product |
+| --- | --- |
+| `claude-ai` | Claude chat |
+| `claude-code` | Claude Code, seen server-side |
+
+TrustGuard copies the frame's `source.application` into the gate attribute map on
+every delivery. Unknown values are accepted as-is (open string).
+
+**The Claude Code plugin** stamps `source.application = claude-code-plugin` and a
+per-developer `consumer_id`. These values provide per-developer attribution in
+**Activity**.
+
+A gate on `claude-code` does **not** match the plugin. The collectors use
+different values, so configure their gates separately.
+
+**Policy gates per surface.** Use a collector and default policy for each
+integration path. Within Claude Enterprise, use a
+[gate](/trustguard/concepts/policies#gates) on `source.application` to apply
+different rules to each surface (**Policies** → **Gates** → **Source application**):
+
+| Goal | Condition | Then |
+| --- | --- | --- |
+| Stricter on Claude Code only | `source.application` **eq** `claude-code` | **Block** or **Report** |
+| Waive chat (detectors still run after Skip) | `source.application` **eq** `claude-ai` | **Skip** |
+| Only the laptop plugin | `source.application` **eq** `claude-code-plugin` | **Ask** or **Block** |
+
+Gates run **before** detectors. In **Observe** policy mode, Block is recorded but
+not enforced. Test the condition on the policy **Test** tab
+with Extra parameter **Source application** set to the surface you care about.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| **Test connection** fails in Anthropic | The `whsec_…` secret is not on the collector's **Connection** tab yet. Save in Anthropic, paste the secret, then test |
+| No inference-hook events | The inference hook is not saved, or the collector has no policy assigned |
+| TrustGuard is down and Claude still answers | Expected. Failures allow the request, and a non-2xx is a delivery failure rather than a deny. Anthropic's failure handling applies |
+| An `ask` gate did nothing on the Enterprise path | Expected. The inference-hook endpoint returns only allow or deny; `ask` becomes allowed |
+| An `ask` gate on a prompt did not stop it in Claude Code | Expected. There is no confirmation dialog at `UserPromptSubmit`. Use a **Block** gate |
+| A gate on `claude-code` never fires for the plugin | The plugin stamps `claude-code-plugin`. `claude-code` is Claude Code seen server-side |
+| `claude plugin list` shows the plugin, no hooks fire | Status is `installed`, not `enabled`. Run `claude plugin enable trustguard@neuraltrust`, then start a new session |
+| Managed settings ignored | `ANTHROPIC_BASE_URL` or a `CLAUDE_CODE_USE_*` variable is set, so Claude Code skips server-managed settings. Deploy the file instead |
+| Hooks fire but nothing reaches **Activity** | `claude-code.json` has no `tgk_…` key, so the binary allows without calling evaluate, or `data_url` is incorrect |
+| Hooks work locally but not over SSH / WSL | Hooks run on the **remote** host. The binary and config have to be there |
+| Bootstrap returns `{}` without running the binary | An unauthenticated GitHub Releases request can return `404` for a private fork. Set `TRUSTGUARD_GITHUB_TOKEN`; otherwise the bootstrap allows the action |
+| The plugin evaluates nothing in claude.ai or Desktop | Expected. Those surfaces have no lifecycle hooks. Use Claude Enterprise |
+| The connector saves but never connects | The MCP URL is not reachable from Anthropic's cloud |
+| Claude Code shows TrustGate as *"Provided by a plugin"* | This is a local `claude mcp add` entry, not the organization connector. Confirm in `/mcp` |
+| Connector connects, no tools | Consumer has no bound registries, tool restrictions exclude everything, or the upstream connect link was never authorized |
+| `401` / repeated login on MCP | Wrong plane URL, revoked `ag_…` key, or `X-AG-Gateway-Slug` missing on Hybrid |
+
+## Related
+
+- [Policies: Gates](/trustguard/concepts/policies#gates): Ask and Block configuration, including `source.application` values
+- [Evaluate API](/trustguard/api/evaluate): requests sent by the plugin hooks
+- [Collectors](/trustguard/concepts/collectors): collector types and keys
+- [MCP overview](/trustgate/mcp/overview): consumers, catalog merging, and upstream authentication
+- [TrustGate authentication](/trustgate/concepts/auth): API key and OAuth2 authentication for MCP consumers
+- [Coverage](/integrations/coverage): comparison of the Claude collectors with other integrations
+- [Plugin repository](https://github.com/NeuralTrust/trustguard-claude-code-plugin): source, releases, and the hook contract
+- [Custom connectors (Anthropic)](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp): Anthropic's reference

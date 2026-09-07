@@ -1,0 +1,207 @@
+---
+title: "Kong"
+description: "Evaluate prompts and completions on Kong AI Proxy routes"
+---
+
+Kong Gateway applies plugins for authentication, rate limiting, logging, and
+other controls to API routes. Its **AI Proxy** plugin exposes a route that
+forwards prompts to a configured model provider and returns completions.
+
+This integration evaluates traffic on routes that use AI Proxy without client
+changes. Applications that call a provider directly bypass it, and verdicts
+apply to the complete request or response rather than an individual tool call.
+
+## Integration capabilities
+
+| Product | What it does in Kong | What you can enforce |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Runs as a guardrail plugin on the route, evaluating the AI request against the assigned [policy](/trustguard/concepts/policies) before the provider is called and the completion on the way back | Monitor · Block |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| A Kong collector, API key, and assigned policy | Go to **Runtime → Collectors → Catalog → Gateway → Kong**. Create the collector, create a key on its **Auth** tab, and assign a policy with the required Input and Output rules on the **Policies** tab. The key is shown once and identifies the collector. |
+| Egress from Kong to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. |
+| Kong Gateway 3.14 or later | `ai-custom-guardrail` was introduced in Kong Gateway 3.14. |
+| **AI Proxy** (or **AI Proxy Advanced**) on every route you want covered | `ai-custom-guardrail` reads the AI request AI Proxy builds. It does **not** work on its own. |
+| A way to apply plugin configuration | The snippet below is a declarative configuration fragment. Apply it through your existing Kong configuration workflow. |
+
+<Note>
+Start with the policy in **Observe** mode. Findings appear in **Activity** without
+affecting traffic. Switch to **Enforce** after reviewing the results. See
+[Policies](/trustguard/concepts/policies).
+</Note>
+
+## 1. Create a collector API key
+
+On the Kong collector, open **Auth** and create a key. It is shown once. The key
+identifies the collector and its assigned policy; the request body does not need
+a collector ID.
+
+## 2. Configure AI Proxy on the route
+
+Attach **AI Proxy** (or **AI Proxy Advanced**) to the route you want to protect
+and confirm model calls flow through it. Until they do, `ai-custom-guardrail`
+has nothing to evaluate.
+
+## 3. Add the guardrail plugin
+
+`ai-custom-guardrail` calls an HTTP endpoint with the text of the AI request and
+maps the response to a decision. Point it at
+[`POST /v1/evaluate`](/trustguard/api/evaluate) and send the collector key as a
+bearer token:
+
+```yaml
+plugins:
+  - name: ai-custom-guardrail
+    config:
+      guarding_mode: BOTH
+      text_source: concatenate_all_content
+      params:
+        api_key: "<collector-api-key>"
+      request:
+        url: "{TRUSTGUARD_URL}/v1/evaluate"
+        headers:
+          Authorization: Bearer $(conf.params.api_key)
+        body:
+          protocol: llm
+          direction: "$(trustguard_direction)"
+          payload:
+            input: "$(content)"
+      response:
+        block: "$(check_response.block)"
+        block_message: "$(check_response.block_message)"
+      functions:
+        trustguard_direction: |
+          return function(conf, content, source)
+            return source == "INPUT" and "input" or "output"
+          end
+        check_response: |
+          return function(resp)
+            -- Transform body rewrite needs a downstream plugin; this mapping only
+            -- supports block / block_message.
+            return {
+              block = resp.status == "block",
+              block_message = "Blocked by TrustGuard"
+            }
+          end
+```
+
+Request-template functions receive Kong's built-in `conf`, `content`, and
+`source` values in that order. `trustguard_direction` reads the third argument
+and converts `INPUT` or `OUTPUT` to the lowercase value accepted by
+`/v1/evaluate`, so `guarding_mode: BOTH` selects the correct policy phase on each
+pass.
+
+Add `consumer_id` and `session_id` to the same `body` block. Map `consumer_id`
+from Kong's verified consumer identity and `session_id` from a stable, verified
+conversation ID. These values determine how **Activity** groups events. See
+[Attributes](#attributes).
+
+## 4. Map the verdict to a block
+
+The `check_response` function maps `resp.status == "block"` to the plugin's
+boolean `block` field. The caller receives the configured `block_message`.
+
+<Warning>
+**This route does not support redaction.** A masking policy returns `transform`,
+which the boolean mapping does not block or apply. The request continues without
+masking, while the console records the verdict. Rewriting the body requires a
+downstream plugin. Use **Block** rules on a Kong route.
+</Warning>
+
+An `ask` verdict is also allowed and recorded because the gateway cannot prompt
+a user. Every status other than `block` passes.
+
+## 5. Configure response evaluation
+
+The sample sets `guarding_mode: BOTH`. Kong runs the plugin for the request and
+response and passes the current phase to `trustguard_direction`. Use
+`guarding_mode: INPUT` for request-only evaluation. In that mode, Output-phase
+rules do not run.
+
+## 6. Verify
+
+1. Put the policy in **Enforce** and send a prompt through the guarded route
+   that trips a rule.
+2. Confirm that the caller receives `Blocked by TrustGuard`.
+3. Confirm the event in TrustGuard **Activity**, under the `consumer_id` you
+   mapped from `X-Consumer-ID`.
+
+Then repeat with a response-side rule and confirm that the output pass runs.
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ✅ | ✅ | ❌ |
+| Tool-level | ➖ | ➖ | ➖ |
+
+The plugin evaluates requests and responses but does not support redaction.
+`concatenate_all_content` flattens message roles into one string. Validate
+streaming-response behavior for your Kong deployment before relying on it. Each
+evaluated direction adds one round trip to `{TRUSTGUARD_URL}`.
+
+### What is evaluated
+
+| Kong pass | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| Request pass | `protocol: llm`, `direction: input`; `payload.input` contains the request text flattened by `text_source` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII in prompts ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** prevents the provider call |
+| Response pass | `direction: output`; the completion | Unsafe or leaking model output | **Block** |
+| Tool calls and tool results | Not available. The route sees one request body, not the agent loop | Not evaluated | Not evaluated |
+
+Every call is [`POST /v1/evaluate`](/trustguard/api/evaluate) with the collector
+key as a bearer token, and the policy's
+[detectors](/trustguard/concepts/detectors) decide the verdict. Every verdict is
+request-level: a `block` stops the whole request, never one part of it.
+
+### Configuration
+
+Configure the integration in the plugin's `config` block:
+
+| Key | Notes |
+|---|---|
+| `guarding_mode` | `BOTH` evaluates both request and response; `INPUT` evaluates the request only. |
+| `text_source` | `concatenate_all_content` flattens the message array into the single string sent as `payload.input`. |
+| `params.api_key` | The collector key. Referenced from the header template as `$(conf.params.api_key)`, so it appears once. |
+| `request.url` | `{TRUSTGUARD_URL}/v1/evaluate`, including the full endpoint path. |
+| `request.body` | `protocol`, `payload.input`, `direction` from `trustguard_direction`, plus the `consumer_id` and `session_id` you map. |
+| `response.block` / `response.block_message` | The only two fields the contract carries back. Both are read from `check_response`. |
+| `functions.check_response` | The Lua that turns a TrustGuard status into that boolean. |
+| `functions.trustguard_direction` | Converts Kong's `INPUT` or `OUTPUT` source to TrustGuard's lowercase direction enum. |
+
+The mapping reads only `status`. `allow`, `report`, `ask`, and `transform` all
+pass. Findings remain available in **Activity**.
+
+### Attributes
+
+- `consumer_id`: Kong's `X-Consumer-ID`. It is what per-consumer policy routing
+  keys on, so without it every caller shares the collector's default policy.
+- `session_id`: a stable, verified conversation ID. Do not send an empty value if
+  you need reliable grouping in **Activity**.
+- Both are body fields that you must map from trusted Kong or application data.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| The plugin has no effect | AI Proxy is not on the route |
+| No events in **Activity** | No policy assigned to the collector, a wrong `request.url`, or no egress from Kong to `{TRUSTGUARD_URL}` |
+| A blocking prompt still reaches the provider | The policy is in Observe rather than Enforce, or `response.block` is not wired to `check_response` |
+| A masking policy records but does not mask | Expected. `transform` is not `block`, so the mapping passes it. This route cannot redact; use a **Block** rule |
+| An `ask` gate does not block | Expected. The gateway cannot prompt a user, so `ask` is allowed and recorded |
+| The response was not evaluated | Confirm that you use Kong Gateway 3.14 or later, set `guarding_mode: BOTH`, and map `$(source)` through `trustguard_direction` |
+| A role-aware detector fires on the wrong turn | `concatenate_all_content` flattens the message array, so the detector sees one blob with no role boundaries |
+| Events share one session or have no consumer | `consumer_id` and `session_id` were not added to `request.body` |
+
+## Related
+
+- [Evaluate API](/trustguard/api/evaluate): request and response contract for the endpoint the plugin calls
+- [Policies](/trustguard/concepts/policies): Observe and Enforce modes, including gate configuration
+- [Collectors](/trustguard/concepts/collectors): collector keys and policy resolution
+- [Kong AI Proxy](https://docs.konghq.com/hub/kong-inc/ai-proxy/): Kong reference for the plugin this integration depends on
+- [Kong AI Custom Guardrail](https://developer.konghq.com/plugins/ai-custom-guardrail/): configuration, built-in variables, and minimum version

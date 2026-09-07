@@ -1,0 +1,368 @@
+---
+title: "GitHub Copilot"
+description: "Configure TrustGuard hooks for GitHub Copilot agent surfaces and connect Copilot Chat to TrustGate over MCP"
+---
+
+GitHub Copilot provides inline code completions and agent workflows. **Copilot
+CLI**, **VS Code Agent mode**, and the **cloud coding agent** can run shell
+commands, edit files, and call external tools.
+
+TrustGuard hooks evaluate prompt submissions, tool calls, and tool results. Local
+hooks run on the developer's machine; cloud coding-agent jobs use hooks committed
+to the repository.
+
+Cloud coding-agent jobs have no interactive user, so Copilot treats Ask as
+denied.
+
+Microsoft Copilot Studio is a separate product. See
+[Microsoft Copilot Studio](/integrations/copilot-studio).
+
+<span id="why-it-needs-a-guardrail"></span>
+
+<span id="what-neuraltrust-does-here"></span>
+
+## NeuralTrust controls
+
+| Product | Scope | Controls |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates prompt submissions, tool calls, and tool results against an organization [policy](/trustguard/concepts/policies), using a [collector](/trustguard/concepts/collectors) on the developer's machine or a repository hook for cloud jobs. | Prompt submissions: audit only · tool calls: Block or Ask · tool results: Block after execution |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer. MCP (Model Context Protocol) connects Copilot Chat to systems such as trackers, databases, and internal APIs. | Tool availability · identity-based access · per-tool rate limits |
+
+Install TrustGuard from the
+[trustguard-copilot-plugin](https://github.com/NeuralTrust/trustguard-copilot-plugin).
+Configure TrustGate separately as a remote MCP server in Copilot's MCP config.
+
+<span id="choose-your-setup"></span>
+
+## Deployment options
+
+| Goal | Configuration | Location |
+| --- | --- | --- |
+| Pilot Copilot CLI on one machine | **Marketplace plugin** plus `~/.trustguard/copilot.json` | Copilot CLI on that machine |
+| Enforce screening across managed machines | **Policy hooks** deployed by MDM | Copilot CLI, machine-wide |
+| Evaluate actions in VS Code Agent mode | **Plugin from your organization marketplace** | VS Code Agent mode |
+| Evaluate cloud coding-agent jobs | **A hook file committed under `.github/hooks/`** | The GitHub-hosted job |
+| Centrally manage the MCP tools available to Copilot Chat | **TrustGate MCP** using `.vscode/mcp.json` | Copilot Chat connects to the remote TrustGate endpoint |
+
+<Warning>
+**Use separate credentials for TrustGuard and TrustGate.** The hooks use a
+`tgk_…` [collector](/trustguard/concepts/collectors) key in `copilot.json`. MCP
+authenticates as a consumer with OAuth or an `ag_…` API key. A `tgk_…` key does
+not authenticate MCP.
+</Warning>
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| Egress from developer machines to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. |
+| The **GitHub Copilot** collector type *(hooks path)* | **Runtime → Collectors → Catalog → IDE & coding agents → GitHub Copilot**. Create the `tgk_…` key on its **Auth** tab, where it is shown once, and assign the default policy on the **Policies** tab. |
+| MDM *(enterprise path)* | Kandji scripts ship in the repo under [`mdm/kandji/`](https://github.com/NeuralTrust/trustguard-copilot-plugin/tree/main/mdm/kandji). |
+| VS Code enterprise policy *(Agent mode path)* | Agent hooks are a VS Code **preview** feature. Confirm your policy permits hooks and controls marketplace sources. |
+| An [MCP consumer](/trustgate/mcp/overview) *(MCP path)* | Bind the required registries, then copy the endpoint or JSON configuration from **Connect**. |
+| Consumer credentials *(MCP path)* | OAuth2 where Copilot can complete the browser login, or an `ag_…` API key. |
+
+<Note>
+Create the policy in **Observe** mode. Observe records decisions in **Activity**
+without enforcing them. Review the results, then switch the policy to
+**Enforce**. See [Policies](/trustguard/concepts/policies).
+</Note>
+
+Developers do **not** need NeuralTrust accounts for the hooks path.
+
+## Set up prompt and tool screening (TrustGuard)
+
+### Pilot: Copilot CLI plugin
+
+1. Add the marketplace and install the plugin:
+
+   ```bash
+   copilot plugin marketplace add NeuralTrust/trustguard-copilot-plugin
+   copilot plugin install trustguard@neuraltrust
+   ```
+
+2. Write the API key config to `~/.trustguard/copilot.json` and `chmod 600` it:
+
+   ```json
+   {
+     "data_url": "https://<your-trustguard-host>",
+     "api_key": "tgk_…",
+     "fail_mode": "open"
+   }
+   ```
+
+Environment variables override that file. See
+[Configuration](#configuration).
+
+### Enterprise: policy hooks
+
+IT deploys **policy hooks**, which Copilot CLI loads machine-wide **before**
+user, repository and plugin hooks. Developers cannot disable them:
+`disableAllHooks` does not apply to policy hooks. The Kandji scripts install four
+pieces:
+
+| Piece | Path (macOS) |
+|---|---|
+| Collector binary | `/Library/Application Support/TrustGuard/bin/trustguard-copilot` |
+| Managed config (`tgk_…`) | `/Library/Application Support/TrustGuard/copilot.json` |
+| Wrapper | `/usr/local/bin/trustguard-policy-hook` |
+| Policy hook file | `/etc/github-copilot/policy.d/10-trustguard.json` |
+
+| OS | Collector | Managed config | Policy hooks dir |
+|---|---|---|---|
+| macOS | `…/TrustGuard/bin/trustguard-copilot` | `…/TrustGuard/copilot.json` | `/etc/github-copilot/policy.d/` |
+| Linux | `/opt/trustguard/bin/` or `/usr/local/bin/` | `/etc/trustguard/copilot.json` | `/etc/github-copilot/policy.d/` |
+| Windows | `%ProgramData%\TrustGuard\bin\trustguard-copilot.exe` | `%ProgramData%\TrustGuard\copilot.json` | `C:\ProgramData\GitHub\Copilot\policy.d\` |
+
+The managed config is the same JSON shape as the pilot file, carrying the org
+`tgk_…` key. The policy hook file calls the **wrapper**, not the collector
+directly. `TRUSTGUARD_COPILOT_BIN` overrides the platform-specific binary lookup.
+
+### VS Code Agent mode
+
+Install the plugin from your **organization marketplace**. Agent hooks are
+currently a VS Code **preview** feature, so confirm enterprise policy permits
+hooks and controls which marketplace sources are allowed before you roll out.
+
+### Cloud coding agent
+
+Cloud jobs do not load local plugins, user hooks, MDM files, or policy hooks.
+They load hooks committed under `.github/hooks/*.json`. Configure them as follows:
+
+1. Commit a Copilot hook file under `.github/hooks/`.
+2. Make the collector binary available in the job image, or use an HTTP hook
+   endpoint that accepts Copilot's event payload.
+3. Add the TrustGuard host to the cloud-agent firewall allowlist.
+4. Provide credentials through the approved GitHub environment mechanism.
+
+<Warning>
+**Ask behavior in cloud jobs.** The collector still returns
+`permissionDecision: "ask"`, but no interactive user is available to respond.
+Copilot treats the unresolved approval as denied. Use a **Block** policy action
+for cloud jobs that must stop the tool call.
+`userPromptSubmitted` remains audit-only there too.
+</Warning>
+
+## Set up governed tool access (TrustGate)
+
+Copilot treats TrustGate as a **remote HTTP MCP server**: one `url` per MCP
+consumer, and Copilot Chat sees the merged toolkit that consumer is routed to.
+Copy the endpoint from the consumer's **Connect** tab:
+
+```text
+https://<mcp-host>/<consumer-slug>/mcp
+```
+
+Create `.vscode/mcp.json` in the workspace, or use the user MCP config your VS
+Code version provides.
+
+**OAuth2 consumers (recommended).** Use OAuth2 where Copilot can complete the
+browser login. Omit `headers`:
+
+```json
+{
+  "servers": {
+    "TrustGate": {
+      "type": "http",
+      "url": "https://<mcp-host>/<consumer-slug>/mcp"
+    }
+  }
+}
+```
+
+**API-key consumers.** Send the `ag_…` consumer key as a header. Do not use a
+TrustGuard `tgk_…` key:
+
+```json
+{
+  "servers": {
+    "TrustGate": {
+      "type": "http",
+      "url": "https://<mcp-host>/<consumer-slug>/mcp",
+      "headers": {
+        "X-AG-API-Key": "ag_…"
+      }
+    }
+  }
+}
+```
+
+**Private (Hybrid) data plane.** Add the
+[gateway](/trustgate/concepts/gateways) slug to `headers`:
+
+```json
+"headers": {
+  "X-AG-API-Key": "ag_…",
+  "X-AG-Gateway-Slug": "<gateway-slug>"
+}
+```
+
+Reload the window. In Copilot Chat, enable the **TrustGate** MCP server if it is
+listed but disabled; the first OAuth connect may open a browser.
+
+<Note>
+The top-level key is `servers` or `mcpServers`, depending on your VS Code and
+Copilot version. If the file is ignored, paste the **JSON** tab from the
+consumer's **Connect** page into the MCP configuration UI instead.
+</Note>
+
+## Verify
+
+**Hooks.**
+
+1. Run Copilot CLI, send a test prompt, then trigger a shell tool call.
+2. Confirm both events in TrustGuard **Activity**. They carry
+   `source.application = copilot-plugin`. The prompt is audit-only; enforcement
+   applies at tool events.
+
+Smoke-test the binary (optional):
+
+```bash
+echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"},"session_id":"pilot"}' \
+  | trustguard-copilot hook
+```
+
+**MCP.**
+
+1. In Copilot Chat, list tools or invoke one bound on the consumer.
+2. Confirm the call in TrustGate telemetry. See
+   [Metrics](/trustgate/observability/metrics).
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ❌ | ❌ |
+| LLM output | ➖ | ➖ | ➖ |
+| Tool call | ✅ | ✅ | ❌ |
+| Tool result | ✅ | ⚠️ | ❌ |
+
+TrustGuard receives prompt submissions, tool calls, and tool results from
+Copilot CLI, VS Code Agent mode, and cloud coding-agent jobs. Copilot discards
+command-hook output at `userPromptSubmitted`, so prompts are audit-only.
+Block and Ask apply to tool calls; a Block on a tool result flags or replaces
+the result after the call has run.
+
+**Ask.** Copilot honors Ask on tool calls by displaying its approval prompt. There
+is no user to prompt in the cloud coding agent, so Copilot treats the unresolved
+approval as denied. Use a **Block** policy action for cloud jobs that must stop
+the call.
+
+**Limits.** Inline code completions (ghost text) expose no hooks. The hooks also
+do not evaluate model responses or tool declarations. Use TrustGate to control
+which tools are available.
+
+Tool-result handling depends on the payload. For a native Copilot payload, a
+Block verdict adds untrusted-result guidance to `additionalContext` and replaces
+the entire tool output with `[Tool result redacted by TrustGuard]` through
+`modifiedResult`. For a VS Code-compatible snake_case payload, it emits
+`decision: "block"` with a reason and leaves the result intact. Neither behavior
+can undo a tool call that has already run.
+
+Full comparison: [Coverage](/integrations/coverage).
+
+### What is evaluated
+
+| Copilot event | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| `userPromptSubmitted` | `protocol: llm`, `direction: input` | Visibility into jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII pasted into the agent ([DLP](/trustguard/detectors/data-loss-prevention)) | **Audit only**. Copilot discards command-hook output at this event, so findings are recorded but the prompt is not blocked |
+| `preToolUse` (shell) | `protocol: all`, `direction: input` | Dangerous or out-of-policy commands | **Block**, returned to Copilot as `permissionDecision: "deny"`, or **Ask** |
+| `preToolUse` (MCP and other tools) | `protocol: mcp`, `tools/call`, `direction: input` | Risky MCP tool calls | **Block**, returned to Copilot as `permissionDecision: "deny"`, or **Ask** |
+| `postToolUse` | `protocol: mcp`, tool result, `direction: output` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) in MCP or tool output | **Block**. The result is marked as untrusted context and replaced on native payloads |
+
+Every hook calls [`POST /v1/evaluate`](/trustguard/api/evaluate) with the
+collector `tgk_…` key, and the policy's
+[detectors](/trustguard/concepts/detectors) decide the verdict. MCP tool calls
+pass through the hooks like any other tool call, including tools served by
+TrustGate.
+
+### Configuration
+
+**`copilot.json` (TrustGuard only).** Keys: `data_url`, `api_key`, `fail_mode`,
+plus optional `consumer_id`. The managed copy is deployed by MDM to the per-OS
+path in the table above; the pilot copy lives at
+`~/.trustguard/copilot.json` (`chmod 600`).
+
+Environment variables override the user file:
+
+```text
+TRUSTGUARD_DATA_URL
+TRUSTGUARD_API_KEY
+TRUSTGUARD_FAIL_MODE
+TRUSTGUARD_TIMEOUT_MS
+TRUSTGUARD_TRANSFORM_ACTION
+TRUSTGUARD_CONSUMER_ID
+```
+
+**Hook precedence.** Copilot CLI loads policy hooks machine-wide **before** user,
+repository and plugin hooks, and `disableAllHooks` does not apply to them. That
+ordering prevents developers from disabling the MDM-deployed hooks.
+
+**Failure behavior.** Normal data-plane errors follow the configured
+`fail_mode`. Two installation failures are handled separately, and only by the
+**policy-hook wrapper**:
+
+| Situation | What the wrapper does |
+|---|---|
+| Collector **not installed** | Allow, so an incomplete provisioning run does not prevent Copilot from starting |
+| Collector **installed but failing** | `preToolUse` is denied and `postToolUse` output is marked untrusted |
+
+The marketplace plugin bootstrap does not make that distinction: it fails **open**
+in both cases. If a personal install is incomplete it emits `{}` and exits 0 on
+purpose, because Copilot's `preToolUse` command hooks fail **closed** on non-zero
+exits. This prevents an incomplete plugin installation from blocking Copilot.
+
+**`mcp.json` (TrustGate only).** Workspace file `.vscode/mcp.json`, or the user
+MCP config your VS Code version uses. TrustGate is always `"type": "http"` with a
+`url`. Auth is `X-AG-API-Key` with an `ag_…` consumer key, plus
+`X-AG-Gateway-Slug` on a private (Hybrid) data plane; OAuth2 consumers send no
+headers. The top-level key is `servers` or `mcpServers` depending on version.
+
+**Deployment ownership.**
+
+| Component | Owner | Configuration |
+| --- | --- | --- |
+| **Plugin** | Each developer (CLI marketplace) or the organization marketplace (VS Code) | `copilot plugin install trustguard@neuraltrust` |
+| **Policy hooks, collector, config, and wrapper** | IT / MDM | Four pieces at the per-OS paths, with the org `tgk_…` key |
+| **Cloud hook** | Repository maintainer | A hook file under `.github/hooks/`, the binary in the job image, firewall allowlist, credentials |
+| **MCP config** | Developer or IT | `.vscode/mcp.json` pointing at the consumer endpoint |
+
+### Attributes
+
+- `attributes.source.application = "copilot-plugin"`
+- `attributes.copilot.*`, containing the full hook stdin JSON
+- `consumer_id` is sent **only** when configured explicitly, via
+  `TRUSTGUARD_CONSUMER_ID` or `consumer_id` in `copilot.json`
+
+Every decision appears in **Activity** under `source.application =
+copilot-plugin`. Gate on `source.application` and the tool name or command. Set
+`consumer_id` explicitly for per-developer attribution; this collector does not
+infer one.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| A block gate on a prompt did not stop it | Expected. Copilot discards command-hook output at `userPromptSubmitted`, so prompts are audit-only. Enforce at the tool events |
+| No events appear from the editor | Inline completions expose no hooks. Only Agent mode, Copilot CLI and the cloud agent are hooked |
+| A finding on a tool result did not stop anything | Expected. `postToolUse` fires after the tool runs. The result is flagged and replaced on native payloads, but the call cannot be undone |
+| An `ask` gate stops a cloud job | Expected. No interactive user is available to approve the action, so Copilot treats it as denied. Use **Block** to express a noninteractive policy explicitly |
+| Cloud coding-agent jobs show no events | Cloud jobs do not load local plugins, user hooks, MDM files or policy hooks. Commit a hook file under `.github/hooks/` |
+| No events in **Activity** | No policy assigned to the collector, or `copilot.json` is missing or has the wrong `data_url` |
+| A developer turned hooks off and enforcement stopped | The plugin was installed per user, not as a policy hook. Policy hooks are unaffected by `disableAllHooks` |
+| Every tool call is denied on one machine | The collector is installed but failing, and the policy-hook wrapper denies `preToolUse` in that state. Check the binary and `TRUSTGUARD_COPILOT_BIN` |
+| The TrustGate server is not listed in Copilot Chat | Wrong top-level key for your version (`servers` vs `mcpServers`), or the window was not reloaded. Paste the **Connect** JSON into the MCP config UI instead |
+| `401` on MCP | A `tgk_…` key was used instead of an `ag_…` consumer key, or `X-AG-Gateway-Slug` is missing on Hybrid |
+
+## Related
+
+- [Policies: Gates](/trustguard/concepts/policies#gates): Ask and Block configuration
+- [Evaluate API](/trustguard/api/evaluate): requests sent by the hooks
+- [MCP overview](/trustgate/mcp/overview): consumers, catalog merging, and upstream authentication
+- [Microsoft Copilot Studio](/integrations/copilot-studio): Microsoft's agent builder and its TrustGate MCP integration
+- [Coverage](/integrations/coverage): comparison of Copilot with other collectors
+- [Plugin repository](https://github.com/NeuralTrust/trustguard-copilot-plugin): source, releases, and the hook contract
+- [Enterprise deployment guide](https://github.com/NeuralTrust/trustguard-copilot-plugin/blob/main/docs/enterprise.md): full MDM deployment procedure
+- [VS Code MCP servers](https://code.visualstudio.com/docs/copilot/customization/mcp-servers): VS Code reference

@@ -1,0 +1,294 @@
+---
+title: "Portkey"
+description: "Evaluate Portkey requests and responses through a TrustGuard BYOG webhook"
+---
+
+Portkey is an AI gateway that routes model requests to providers and handles
+credentials, retries, caching, and logging. Its Bring Your Own Guardrails
+(BYOG) webhook can call TrustGuard before a provider request and after a model
+response.
+
+Portkey and TrustGuard use different webhook contracts, so the integration
+requires a small adapter. Portkey sends a hook event and expects a boolean
+`verdict`; the adapter sends the relevant request or response content to
+[`POST /v1/evaluate`](/trustguard/api/evaluate) and maps TrustGuard's `status`
+to that verdict.
+
+Only traffic routed through a Portkey configuration is evaluated. Direct calls
+to a model provider bypass this integration.
+
+## Integration capabilities
+
+| Product | What it does in Portkey | What you can enforce |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates the request before the provider call and a non-streaming response before Portkey returns it | Monitor · Block |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| A Portkey collector, API key, and assigned policy | Go to **Runtime → Collectors → Catalog → Gateway → Portkey**. Create the collector, create a key on its **Auth** tab, and assign a policy with the required Input and Output rules on the **Policies** tab. The key is shown once and identifies the collector. |
+| A webhook adapter | It must accept Portkey's BYOG event, call `{TRUSTGUARD_URL}/v1/evaluate`, and return Portkey's `{ "verdict": boolean }` response. |
+| Egress from the adapter to `{TRUSTGUARD_URL}` | The console shows the URL for your workspace. |
+| A Portkey configuration you can edit | Use a saved configuration or pass one in the `x-portkey-config` header. |
+
+<Note>
+Start with the policy in **Observe** mode. Findings appear in **Activity** without
+affecting traffic. Switch to **Enforce** after reviewing the results. See
+[Policies](/trustguard/concepts/policies).
+</Note>
+
+## 1. Implement the webhook adapter
+
+Portkey sends a JSON object containing `request`, `response`, `metadata`, and
+`eventType`. For `beforeRequestHook`, evaluate `request.json` as input. For
+`afterRequestHook`, evaluate `response.json` as output. Use the corresponding
+`text` field when a normalized JSON body is not available.
+
+The following function shows the contract conversion. Deploy the equivalent in
+your webhook service and return its result as JSON:
+
+```js
+async function evaluatePortkey(event) {
+  const isInput = event.eventType === "beforeRequestHook";
+  const source = isInput ? event.request : event.response;
+  const payload =
+    source?.json && Object.keys(source.json).length > 0
+      ? source.json
+      : { input: source?.text ?? "" };
+
+  const response = await fetch(`${process.env.TRUSTGUARD_URL}/v1/evaluate`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.TRUSTGUARD_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      protocol: "llm",
+      direction: isInput ? "input" : "output",
+      payload,
+      consumer_id: event.metadata?._user,
+      session_id: event.metadata?.session_id,
+      attributes: {
+        source: { application: "portkey" },
+        model: {
+          name: event.request?.json?.model,
+          provider: event.provider,
+        },
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`TrustGuard returned ${response.status}`);
+  }
+
+  const result = await response.json();
+  return {
+    verdict: result.status !== "block",
+    data: {
+      status: result.status,
+      trace_id: result.trace_id,
+      request_id: result.request_id,
+    },
+  };
+}
+```
+
+Do not point `default.webhook` directly at `/v1/evaluate`. Portkey's hook event
+contains top-level fields that the Evaluate API does not accept, and the
+Evaluate API returns `status` rather than Portkey's required `verdict`.
+
+The sample maps only `block` to `verdict: false`. It allows `allow`, `report`,
+`ask`, and `transform`. It does not return `transformedData`, so redaction is not
+supported. Use **Block** rules for enforcement.
+
+## 2. Configure the BYOG hooks
+
+Add `default.webhook` to both hook phases. Replace the example adapter URL and
+token with your values:
+
+```json
+{
+  "before_request_hooks": [
+    {
+      "id": "trustguard-input",
+      "type": "guardrail",
+      "deny": true,
+      "async": false,
+      "checks": [
+        {
+          "id": "default.webhook",
+          "parameters": {
+            "webhookURL": "https://guardrails.example.com/trustguard",
+            "headers": {
+              "Authorization": "Bearer <webhook-token>"
+            },
+            "timeout": 5000,
+            "failOnError": true
+          }
+        }
+      ]
+    }
+  ],
+  "after_request_hooks": [
+    {
+      "id": "trustguard-output",
+      "type": "guardrail",
+      "deny": true,
+      "async": false,
+      "checks": [
+        {
+          "id": "default.webhook",
+          "parameters": {
+            "webhookURL": "https://guardrails.example.com/trustguard",
+            "headers": {
+              "Authorization": "Bearer <webhook-token>"
+            },
+            "timeout": 5000,
+            "failOnError": true
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+`deny: true` makes a failed check return HTTP 446. `async: false` keeps the
+check in the request path so Portkey can enforce its result. With only the
+before-request hook, Output-phase rules do not run.
+
+Prefer a saved Portkey configuration when the webhook header contains a secret.
+An inline configuration sent through `x-portkey-config` exposes that value to
+the calling application.
+
+## 3. Send consumer and session identifiers
+
+Pass verified identifiers through Portkey metadata so the adapter can populate
+`consumer_id` and `session_id`:
+
+```http
+x-portkey-metadata: {"_user":"user-123","session_id":"conversation-456"}
+```
+
+Portkey forwards this object to the webhook as `event.metadata`. `_user` is
+Portkey's documented user identifier, and `session_id` is its recommended key
+for grouping related requests.
+
+## 4. Configure failure behavior
+
+Portkey's webhook timeout defaults to 3000 ms. The example raises it to 5000 ms
+and sets `failOnError: true`, so a timeout or non-200 adapter response fails the
+check. With `deny: true`, Portkey returns 446 instead of calling the provider or
+returning the completion.
+
+Without `failOnError: true`, Portkey allows the request when the webhook times
+out or returns an error. Use that setting only when you deliberately want to
+fail open.
+
+The adapter should return a non-200 response when TrustGuard is unavailable or
+rejects its credentials. Returning `{ "verdict": true }` in those cases makes
+the integration fail open regardless of the Portkey setting.
+
+## 5. Verify
+
+Attach the configuration to a request using your existing Portkey client or the
+`x-portkey-config` header. With a blocking rule in Enforce mode:
+
+1. Send a prompt that triggers the rule.
+2. Confirm that Portkey returns HTTP 446 and that `hook_results` contains the
+   `trustguard-input` hook and `default.webhook` check.
+3. Confirm that the adapter's `data` appears under the check's `responseData`,
+   including the TrustGuard `trace_id`.
+4. Find the same `trace_id` in TrustGuard **Activity** under the expected
+   `consumer_id` and `session_id`.
+
+Then send a request that passes and triggers an Output-phase rule. A blocked
+output also returns 446, but the provider has already processed the request.
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ✅ | ✅ | ❌ |
+| Tool-level | ⚠️ | ⚠️ | ❌ |
+
+The adapter evaluates Portkey's normalized request or response body. Tool
+definitions and model-selected tool calls are available only when Portkey
+includes them in that body, and a block stops the complete request or response,
+not an individual tool event. The adapter does not apply transformed payloads.
+Portkey does not support blocking output guardrails on streamed responses, so
+use non-streaming responses when output enforcement is required.
+
+A turn with both synchronous hooks makes two TrustGuard evaluations. Each hook
+also passes through the adapter, so include both network legs in the timeout and
+latency budget.
+
+### What is evaluated
+
+| Portkey hook | TrustGuard call | Enforcement |
+| --- | --- | --- |
+| `before_request_hooks` | `direction: input`; `payload` is `request.json`, with `request.text` as a fallback | `verdict: false` with `deny: true` returns 446 before the provider call |
+| `after_request_hooks`, non-streaming | `direction: output`; `payload` is `response.json`, with `response.text` as a fallback | `verdict: false` with `deny: true` returns 446 instead of the completion |
+| `after_request_hooks`, streaming | No blocking output evaluation | Not enforced |
+
+### Configuration
+
+| Setting | Notes |
+|---|---|
+| `checks[].id` | `default.webhook`, included in released Portkey Cloud and self-hosted gateways. |
+| `parameters.webhookURL` | The adapter URL, not `{TRUSTGUARD_URL}/v1/evaluate`. |
+| `parameters.headers` | Authentication for your adapter. Store the TrustGuard collector key in the adapter. |
+| `parameters.timeout` | Portkey's webhook timeout in milliseconds. The default is 3000; the sample uses 5000. |
+| `parameters.failOnError` | Set `true` to treat a timeout or non-200 webhook response as a failed check. |
+| Hook `deny` | Set `true` to return 446 when the check fails. |
+| Hook `async` | Set `false` for enforcement. Asynchronous checks do not affect the request. |
+
+### Attributes
+
+- `consumer_id`: map it from the `_user` value in verified Portkey metadata.
+  Per-consumer policy routing and gates matching `consumer.id` depend on this
+  value.
+- `session_id`: map it from a stable, verified `session_id` value in Portkey
+  metadata. Without it, related turns may not be grouped together in
+  **Activity**.
+- `attributes.model.name` and `attributes.model.provider`: the adapter can read
+  these from `request.json.model` and Portkey's `provider` field.
+- `trace_id` and `request_id`: return them in the webhook response's `data`
+  object. Portkey records that object under
+  `hook_results[].checks[].data.responseData`.
+
+Do not trust caller-supplied metadata for policy decisions unless your
+authentication layer validates or replaces it.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| `400` from `/v1/evaluate` | The adapter forwarded Portkey's hook event unchanged. Build the Evaluate API body shown in step 1 |
+| A blocking prompt returns `200` | The policy is in Observe, `deny` is false, `async` is true, or the adapter did not map `status: block` to `verdict: false` |
+| Portkey returns `446` for every request | The webhook is timing out or returning an error while `failOnError` and `deny` are true. Check adapter logs, egress, and the collector key |
+| Requests continue during a TrustGuard outage | `failOnError` is false, or the adapter returns `verdict: true` when its TrustGuard call fails |
+| No events in **Activity** | No policy is assigned to the collector, the adapter cannot reach `{TRUSTGUARD_URL}`, or it is using the wrong collector key |
+| Input rules work but output rules do not | The after-request hook is missing, the adapter still sends `direction: input`, or the response is streamed |
+| A masking policy records but does not redact | Expected. The adapter does not return Portkey `transformedData`; use a **Block** rule |
+| Events have no consumer or do not group by conversation | The metadata is missing, uses different field names, or the adapter does not map it to `consumer_id` and `session_id` |
+| `hook_results` has no TrustGuard trace ID | The adapter did not include `trace_id` in the response `data` object |
+
+## Related
+
+- [Evaluate API](/trustguard/api/evaluate): request and response contract for the adapter
+- [Policies](/trustguard/concepts/policies): Observe and Enforce modes
+- [Collectors](/trustguard/concepts/collectors): collector keys and policy assignment
+- [Portkey BYOG webhooks](https://portkey.ai/docs/integrations/guardrails/bring-your-own-guardrails): webhook request, response, and failure behavior
+- [Portkey metadata](https://portkey.ai/docs/product/observability/metadata): supported metadata keys and precedence
+
+<Note>
+Experimental: a native `neuraltrust` plugin is proposed in
+[Portkey-AI/gateway#1772](https://github.com/Portkey-AI/gateway/pull/1772), but
+it is not part of a released Portkey version.
+</Note>

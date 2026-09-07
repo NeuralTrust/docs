@@ -1,0 +1,241 @@
+---
+title: "TrustGate"
+description: "Configure TrustGuard in TrustGate for LLM and MCP traffic, including policy scope, verdict handling, and failure behavior"
+---
+
+TrustGate is an AI gateway: a reverse proxy that sits between your applications
+and the model providers they call. Applications point their base URL at it
+instead of at OpenAI, Anthropic, Bedrock or Gemini, and it normalizes the
+request, selects a provider, balances traffic, meters spend, and records
+telemetry. It handles prompts and completions on LLM routes and tool traffic on
+the MCP (Model Context Protocol) Gateway.
+
+Use the native TrustGuard collector for content policy enforcement on traffic
+routed through TrustGate. If a gateway is not part of your data path, use an
+[application](/integrations/python-sdk)
+[collector](/trustguard/concepts/collectors) or an
+[edge](/integrations/cloudflare) collector instead.
+
+## Integration capabilities
+
+| Product | What it does in TrustGate | What you can enforce |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates guarded prompts, completions, tool declarations, tool calls, and tool results against the assigned [policy](/trustguard/concepts/policies) in the gateway request path. | Monitor · Block · Redact |
+| **[TrustGate](/trustgate/overview)** | Governs the traffic itself: which providers and models a [consumer](/trustgate/concepts/consumers) may reach, request rate limits, token and dollar budgets, request-size guards, tool allow-listing, and which MCP tools exist at all | Which models · which tools · spend ceilings |
+
+TrustGuard is configured as a [policy](/trustgate/policies/overview) inside
+TrustGate. TrustGate controls routing, model and tool access, rate limits, and
+budgets. TrustGuard evaluates content. You can run TrustGate without a TrustGuard
+policy, but its routing and budget controls do not inspect payload content.
+
+The native collector supports input and output evaluation for LLM and MCP
+traffic. It can block or redact before non-streaming content is forwarded.
+Streamed responses are evaluated after delivery and therefore provide monitoring
+only.
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| A TrustGate collector bound to your gateway | Create one under **TrustGuard** → **Collectors** in the console. Each [gateway](/trustgate/concepts/gateways) has one collector. TrustGate is native, so it has no **Auth** tab and does not use a collector API key. |
+| A policy bound to that collector | With Input **and** Output phase rules if you want both directions evaluated. |
+| Egress from the gateway deployment to `{TRUSTGUARD_URL}` | Configured through the deployment's `TRUSTGUARD_*` environment, not the policy form. Platform-managed on SaaS. |
+| A gateway with the routes you want to protect | The guardrail attaches to a running [gateway](/trustgate/concepts/gateways), for LLM routes, MCP routes, or both. |
+
+<Note>
+Create the policy in **Observe** mode. Observe records decisions in **Activity** without enforcing
+them. Review the results, then switch the policy to **Enforce**. See
+[Policies](/trustguard/concepts/policies).
+</Note>
+
+## 1. Create the TrustGate collector
+
+In TrustGuard, open **Runtime → Collectors → Catalog → Gateway → TrustGate** and
+bind the new collector to your gateway (**Agent Gateway** in the console). Use one
+collector per gateway.
+
+You can also create the gateway-bound collector from the TrustGate policy form
+in step 3, when it prompts you.
+
+## 2. Assign a runtime policy
+
+On the collector's **Policies** tab, set a **default** policy, and per-consumer
+overrides if one consumer needs different rules.
+
+<Warning>
+A collector with no matching policy returns `allow` with no findings. Assign a
+default policy before enabling enforcement in production.
+</Warning>
+
+## 3. Turn on the TrustGuard guardrail
+
+In TrustGate, open **Policies** → **Catalog**, where guardrails are listed first, and
+pick **TrustGuard**. Select the collector from step 1, then set the scope: global
+for the gateway, or attached to one consumer.
+
+```json
+{ "slug": "trustguard", "settings": { "collector_id": "<uuid>", "direction": "request_response", "on_error": "fail_open" } }
+```
+
+| Setting | Type | Default | Notes |
+|---|---|---|---|
+| `collector_id` | string | None | TrustGuard collector UUID bound to this policy. **Required.** |
+| `direction` | enum | `request_response` | `request`, `response`, or `request_response`. |
+| `on_error` | enum | `fail_open` | `fail_open` or `fail_closed` for transport and service errors. Authentication, rate-limit, and entitlement responses always block. |
+
+The TrustGuard base URL and credentials come from the gateway deployment, not
+from this policy form.
+
+## 4. Choose Enforce or Observe
+
+**Enforce** applies the verdict inline. **Observe** records it and lets the
+traffic through. See [Verdict behavior](#verdict-behavior) for the full mapping.
+
+`direction` defaults to `request_response`, which evaluates both directions.
+Use `request` or `response` to limit evaluation to one leg. See
+[Coverage](#coverage) for what each leg can enforce.
+
+You can run TrustGuard alongside another guardrail policy in the same chain. For
+example, use TrustGuard on the request and a Bedrock guardrail for PII
+anonymization on the response. See
+[Guardrails](/trustgate/policies/guardrails#trustguard).
+
+## 5. Verify
+
+1. Send a test request through the guarded route, or generate one from
+   **Playground** under a consumer.
+2. Confirm the event in TrustGuard **Activity**.
+3. Confirm the matching span on the TrustGate trace, and the **Security** flag in
+   gateway telemetry. See [Metrics](/trustgate/observability/metrics).
+
+Verify a blocked request as well as an allowed request. An unattached policy and
+a policy that never produces findings can otherwise look the same in **Activity**.
+
+## Reference
+
+### Coverage
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ✅ |
+| LLM output | ✅ | ⚠️ | ⚠️ |
+| Tool listing | ✅ | ✅ | ➖ |
+| Tool call | ✅ | ✅ | ✅ |
+| Tool result | ✅ | ✅ | ✅ |
+
+Use this integration for LLM and MCP traffic routed through TrustGate. If you do
+not use a gateway, see the [application](/integrations/python-sdk) or
+[edge](/integrations/cloudflare) collectors.
+
+**Ask.** In **Enforce** mode, an `ask` verdict blocks because the gateway has no
+interactive approval flow. In **Observe** mode, it is recorded and traffic
+continues. Ask gates match input only.
+
+**Streaming.** TrustGate evaluates a streamed response in the `post_response`
+stage after the client has drained the stream. The resulting finding is recorded
+but cannot affect bytes already delivered. Put rules that require preventive
+enforcement on the request direction or use non-streaming completions.
+
+**Limits.** Redaction applies only to
+[data-loss](/trustguard/detectors/data-loss-prevention) outcomes in Enforce mode.
+See [Verdict behavior](#verdict-behavior). Redaction does not
+apply to a tool *listing*: a poisoned tool description is blocked, not rewritten.
+
+### What is evaluated
+
+| Gateway stage | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| `pre_request`, LLM route | `protocol: llm`, `direction: input` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII in the prompt ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** or **Redact** |
+| `pre_request`, `tools[]` on the LLM route | `protocol: llm`, `direction: input` | [Tool poisoning](/trustguard/detectors/agent-mcp-security) hidden in a tool declaration | **Block** |
+| `pre_request`, MCP `tools/list` | `protocol: mcp`, `direction: input` | Tool poisoning from an upstream MCP server | **Block** |
+| `pre_request`, MCP `tools/call` | `protocol: mcp`, `direction: input` | Risky or out-of-policy tool calls | **Block** or **Redact** |
+| `pre_response`, tool result | `direction: output` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) riding back in tool output | **Block** or **Redact** |
+| `pre_response`, non-streaming completion | `protocol: llm`, `direction: output` | Sensitive data or policy-breaking content in the model's answer | **Block** or **Redact** |
+| `post_response`, streamed completion | `direction: output` | The stream has already drained | **Monitor** |
+
+Tool declarations are the names, descriptions, and parameter schemas in LLM
+`tools[]` or MCP `tools/list`. TrustGate can inspect them before an agent chooses
+a tool. Developer lifecycle hooks generally see tool calls and results rather
+than the declaration list.
+
+Each stage sends a [`POST /v1/evaluate`](/trustguard/api/evaluate) request. The
+gateway sets `direction`, sends the payload, and applies the returned `status`.
+Application collectors set `direction` themselves and enforce the verdict in
+their own code.
+`direction` selects which detector phase of the policy runs, `Input` or
+`Output`.
+
+For MCP `tools/call`, `tool.name` is read from `payload.params.name`, not from
+`attributes`. Gate on that.
+
+### Verdict behavior
+
+| TrustGuard `status` | **Enforce** | **Observe** |
+| --- | --- | --- |
+| `block` | Deny the request or the response | Log; traffic continues |
+| `ask` | Deny the request because there is no user confirmation at the gateway | Log; traffic continues |
+| `transform` | Forward the masked or rewritten payload; if the rewrite cannot be applied safely, block | Log only; no rewrite |
+| `report` / `allow` | Continue | Continue |
+
+Statuses reduce most-restrictive-first: `block` > `ask` > `transform` >
+`report` > `allow`.
+
+### Configuration
+
+**Where connection settings live.** Policy settings include `collector_id`,
+`direction`, and `on_error`. The TrustGuard base URL and credentials come from
+the gateway deployment's `TRUSTGUARD_*` environment. On SaaS they are
+platform-managed and require no user configuration.
+
+**Failure behavior.** `on_error` applies to transport failures, timeouts, and
+ordinary service errors. Its default, `fail_open`, lets traffic continue;
+`fail_closed` returns a gateway error. TrustGuard responses for authentication
+(`401`/`403`), rate limits (`429`), and unavailable entitlements (`503`) always
+block. A missing TrustGuard base URL or gateway credential fails open.
+
+**Policy routing.** The collector's default policy covers all of its traffic; a
+per-consumer override keyed on `consumer_id` wins where one matches. Resolution
+is override first, default second.
+
+**Scope.** The guardrail policy itself is attached globally to the gateway or to a
+single consumer, so a gateway can inspect some consumers and not others.
+
+### Attributes
+
+Findings appear in TrustGuard **Activity** and on the TrustGate trace for the
+same request, as a span and a **Security** flag in gateway
+telemetry. Correlate them with [Alerts](/platform/alerts), under **Telemetry**
+in the console.
+
+Per-consumer policy overrides key on `consumer_id`. Attribute conditions
+available to gates and detector rules include `consumer.{name,tag,type}`,
+`model.{name,provider}`, `collector.type`, `source.application`, and
+`tool.{name,command,arguments}`, with MCP `tool.name` taken from
+`payload.params.name` as above.
+
+### Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| No events in **Activity** | The collector has no default policy and no matching per-consumer override, so evaluate returns `allow` and the traffic runs unguarded |
+| Findings appear, nothing is blocked | The guardrail or policy is in **Observe** mode |
+| A masking policy logs but does not mask | The guardrail is in **Observe**. See [Verdict behavior](#verdict-behavior). Redaction also applies to DLP outcomes only |
+| A `transform` blocked instead of masking | The rewrite could not be applied safely. See [Verdict behavior](#verdict-behavior) |
+| Responses are never inspected | `direction` is set to `request`. Set it to `request_response` |
+| A streamed response was recorded but not stopped | `post_response` evaluates the stream after the client drains it. Enforce required rules on the request direction |
+| An `ask` gate blocked instead of prompting | TrustGate has no interactive approval flow, so **Enforce** handles `ask` as a block. Use **Observe** to record it without stopping traffic |
+| Traffic continued during a TrustGuard outage | `on_error` defaults to `fail_open`. Set it to `fail_closed` if transport and service errors must stop traffic. Authentication, rate-limit, and entitlement responses already block |
+| The collector has no **Auth** tab | TrustGate is native and does not use a collector API key |
+| A `tgk_…` key is rejected as an MCP credential | A collector key is not an MCP credential. MCP consumers authenticate with OAuth or an `ag_…` key |
+
+## Related
+
+- [TrustGate guardrails](/trustgate/policies/guardrails#trustguard): configure the policy and guardrail chain
+- [Collectors](/trustguard/concepts/collectors): collector types and configuration
+- [Policies: Gates](/trustguard/concepts/policies#gates): configure Ask, Block, and Redact actions
+- [Evaluate API](/trustguard/api/evaluate): request and response reference
+- [MCP Gateway](/trustgate/mcp/overview): registries, toolkits, and MCP tools
+- [Per-Tool Rate Limiter](/trustgate/policies/tool-governance): limit MCP tool executions
+- [Quickstart](/trustgate/getting-started/quickstart): create a gateway
+- [Coverage](/integrations/coverage): compare available collectors
+- [TrustGate on GitHub](https://github.com/NeuralTrust/TrustGate): open-source gateway, Apache-2.0

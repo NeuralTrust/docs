@@ -1,17 +1,16 @@
 ---
 title: "OpenAPI to MCP"
-description: "Turn a REST API into agent tools by pointing TrustGate at its OpenAPI document — no MCP server to build."
+description: "Generate MCP tools from an OpenAPI 3 document and connect them through TrustGate"
 ---
 
-If your API already publishes an **OpenAPI 3** document, you can hand it to TrustGate and
-every operation in it becomes a tool your agents can call. You do not have to build or run
-an MCP server.
+If your API publishes an **OpenAPI 3** document, TrustGate can expose its
+supported operations as tools. You do not have to build or run an MCP server.
 
-Your agents keep connecting to TrustGate as usual. When one calls a tool, TrustGate makes
+Agents continue to connect to TrustGate. When one calls a tool, TrustGate makes
 the matching REST request to your API and returns the response.
 
 <Note>
-An OpenAPI backend provides **tools** only — no prompts or resources. Other MCP servers on
+An OpenAPI backend provides **tools** only, not prompts or resources. Other MCP servers on
 the same consumer still contribute theirs.
 </Note>
 
@@ -39,17 +38,15 @@ they are reachable.
     Put the link to your OpenAPI file in **OpenAPI spec URL**.
 
     Leave **API base URL** empty. TrustGate reads the address of your API from the
-    document. Fill it in only when the document does not say where the API lives, or names
-    an address you do not want to call — a public URL when you reach the service
-    internally, for example.
+    document. Fill it in only when the document omits the API address or when you
+    need to override it, for example to replace a public URL with an internal one.
   </Step>
   <Step title="Choose how TrustGate signs in to your API">
     See [Connecting to your API](#connecting-to-your-api) below.
   </Step>
   <Step title="Validate">
-    Select **Validate OpenAPI**. TrustGate downloads the document and shows you exactly
-    which tools it would create. You cannot connect until this succeeds, so nothing broken
-    reaches your agents.
+    Select **Validate OpenAPI**. TrustGate downloads the document and previews the
+    tools it would create. The registry cannot be connected until validation succeeds.
   </Step>
   <Step title="Connect">
     Save, then bind the server to an [MCP consumer](/trustgate/mcp/overview) like any
@@ -62,18 +59,18 @@ they are reachable.
 A successful validation shows the number of tools, your API's title, the address requests
 will go to, and one line per tool: the method, the path, and the name your agents will see.
 
-It may also show a **warning count** you can expand. Warnings never block anything — they
-tell you what the document left unsaid:
+It may also show a **warning count** you can expand. Warnings do not prevent
+validation. They identify incomplete or potentially unwieldy definitions:
 
 | Warning | What it means |
 |---|---|
-| *N operations without operationId* | Your document does not name its operations, so TrustGate named them from the method and path (`GET /v1/models-catalog` becomes `get_v1_models_catalog`). Everything works; the names are just uglier than ones you choose. |
-| *N operations skipped* | Those operations cannot become tools — usually file uploads or another non-JSON format. The rest of the API still works. |
-| *This document exposes N tools* | More than 80 tools is a lot of choice for a model. Narrow it with a toolkit on the consumer. |
+| *N operations without operationId* | The document does not name its operations, so TrustGate derives names from each method and path (`GET /v1/models-catalog` becomes `get_v1_models_catalog`). Generated names may be less descriptive than explicit `operationId` values. |
+| *N operations skipped* | Those operations cannot become tools, usually because they use file uploads or another non-JSON format. Other operations remain available. |
+| *This document exposes N tools* | The document defines more than 80 tools. Use a toolkit on the consumer to limit the exposed set. |
 
 <Tip>
 Tool names are the first thing a model reads when deciding what to call. If you own the
-API, give each operation an `operationId` in the document — that value becomes the tool
+API, give each operation an `operationId` in the document. That value becomes the tool
 name, and `listModels` guides a model far better than `get_v1_models_catalog`.
 </Tip>
 
@@ -94,12 +91,11 @@ the individual end user. Per-user sign-in to your API is not part of this integr
 
 ## What it does not do
 
-Turning REST into tools is never a perfect translation. These are the boundaries, and they
-are the same across the industry — worth knowing before you promise something to a team.
+OpenAPI conversion has the following limitations.
 
 **Only OpenAPI 3.** Swagger 2.0 documents are rejected: convert one first (with a tool such
 as `swagger2openapi`) and publish the result. If your API serves Swagger UI at `/docs`,
-that page is not the document — look for the raw file behind it.
+that page is not the document. Use the raw file behind it.
 
 **No per-user login to your API.** TrustGate authenticates with one service credential, so
 your API cannot tell which person is behind a call. When you need each user to authorize
@@ -107,51 +103,52 @@ individually, use a real MCP server with forwarded OAuth instead of an OpenAPI b
 
 **Lists come back one page at a time.** If an operation takes `page`, `cursor`, or `limit`,
 those become tool arguments and the agent asks for the next page itself. TrustGate never
-walks a whole collection on its own — one tool call is one HTTP request. If an agent
-genuinely needs everything at once, add an endpoint to your API that returns it.
+walks a whole collection on its own. One tool call is one HTTP request. If an agent
+needs the complete collection in one call, add an endpoint that returns it.
 
 **JSON only.** Operations that send file uploads, form posts, or XML are skipped with a
 warning; the rest of the document still compiles. The same applies to a document that
 splits itself across several files: TrustGate does not follow references to other URLs, so
 publish it as a single file.
 
-**There are size limits.** The document may be up to 5 MB and 500 operations, and a single
+**Size limits.** The document may be up to 5 MB and 500 operations, and a single
 tool response up to 10 MB. Above 80 tools you get a warning, because long tool lists crowd
 out the model's context.
 
 ## Troubleshooting
 
-Validation tells you which of the three phases failed — fetching the document, reading it,
+Validation identifies which phase failed: fetching the document, reading it,
 or building the tools.
 
 | Message mentions | Usually means |
 |---|---|
 | **fetch** | TrustGate could not download the document: wrong URL, the endpoint needs a login, or the host is unreachable from the data plane. |
-| **parse** | The file downloaded but is not a valid OpenAPI 3 document — often Swagger 2.0, an HTML page instead of the raw file, or a reference to another file. |
+| **parse** | The downloaded file is not a valid OpenAPI 3 document. Common causes include Swagger 2.0, an HTML page instead of the raw file, or a reference to another file. |
 | **compile** | The document is valid but yields nothing callable, or the API address in it cannot be used. |
 | **no callable operations** | Every operation was skipped, typically because none of them accept JSON. |
 
-If tool calls fail later while validation passed, the credential is the usual cause: the
-API answered, but rejected it. The tool result carries the upstream status and body.
+If validation succeeds but later tool calls fail, check the API credential. The
+tool result includes the upstream status and response body.
 
 ## Example: the TrustGate Admin API
 
-TrustGate's own Admin API is a good first target — a real document, already OpenAPI 3.
+The TrustGate Admin API can be used as a test target because it publishes an
+OpenAPI 3 document.
 
 1. Use your Admin address plus `/docs/openapi.json` as the document URL, for example
    `https://admin.example/docs/openapi.json`.
 2. Leave **API base URL** empty.
 3. Choose **Static header** with `Authorization` and `Bearer <your admin token>`.
-4. Validate. You should see several dozen tools — health checks, gateway and registry
-   operations — and one warning noting that the document does not name its operations.
+4. Validate. The preview lists health checks, gateway operations, and registry
+   operations. It also warns if the document does not name its operations.
 
 <Warning>
-Give an agent the whole Admin API and it can change your gateways. Bind a narrow toolkit
-and a dedicated token, and think twice before pointing a production agent at it.
+Use a restricted toolkit and dedicated token. Do not expose the full Admin API to
+production agents.
 </Warning>
 
 ## Related
 
-- [MCP Gateway](/trustgate/mcp/overview) — consumers, toolkits, upstream auth
-- [Registries](/trustgate/concepts/registries) — connecting MCP and LLM backends
-- [Connect from Cursor](/trustgate/integrations/cursor)
+- [MCP Gateway](/trustgate/mcp/overview): consumers, toolkits, and upstream authentication
+- [Registries](/trustgate/concepts/registries): connect MCP and LLM backends
+- [Connect from Cursor](/integrations/cursor)
