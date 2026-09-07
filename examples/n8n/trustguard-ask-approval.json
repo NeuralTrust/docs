@@ -1,0 +1,318 @@
+{
+  "name": "TrustGuard Ask approval routing",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {
+          "responseMode": "responseNodes"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -200,
+        0
+      ],
+      "id": "115a01ab-77b7-42b1-82be-f752b588f501",
+      "name": "When chat message received",
+      "webhookId": "13a6d31f-418d-4d7a-a0fe-3c36ff3de11c"
+    },
+    {
+      "parameters": {
+        "operation": "evaluateInput",
+        "inputMode": "text",
+        "text": "={{ $json.chatInput }}",
+        "options": {
+          "protocol": "llm",
+          "timeout": 10,
+          "sessionId": "={{ $json.sessionId }}"
+        }
+      },
+      "type": "@neuraltrust/n8n-nodes-trustguard.neuralTrustTrustGuard",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "226b12bc-88c8-43c2-93cf-0863c6990602",
+      "name": "TrustGuard",
+      "credentials": {
+        "trustGuardApi": {
+          "name": "NeuralTrust TrustGuard account"
+        }
+      },
+      "notes": "Evaluate input and route by verdict",
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "message": "=Continue the normal workflow here.\n\nVerdict: {{ $json.trustguard.status }}\nTrace: {{ $json.trustguard.trace_id }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        180,
+        -160
+      ],
+      "id": "337c23cd-99d9-44d3-a4d0-1974d7aa1703",
+      "name": "Continue normal",
+      "webhookId": "38d32968-2c08-4d72-9bbb-34752ee8a8d1"
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "046be239-59ca-49a6-bfa1-145c21c06e06",
+                    "leftValue": "={{ $json.trustguard.status }}",
+                    "rightValue": "ask",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Ask"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Block / deny",
+          "allMatchingOutputs": false
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        180,
+        160
+      ],
+      "id": "448d34de-aaea-45e4-b5e1-2a85e8bb2804",
+      "name": "Ask or Block?"
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "message": "=TrustGuard requires approval.\n\nRequest: {{ $json.chatInput }}\nTrace: {{ $json.trustguard.trace_id }}",
+        "responseType": "approval",
+        "blockUserInput": true,
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double",
+            "approveLabel": "Approve",
+            "buttonApprovalStyle": "primary",
+            "disapproveLabel": "Reject",
+            "buttonDisapprovalStyle": "secondary"
+          }
+        },
+        "options": {
+          "limitWaitTime": {
+            "values": {
+              "limitType": "afterTimeInterval",
+              "resumeAmount": 15,
+              "resumeUnit": "minutes"
+            }
+          }
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        360,
+        160
+      ],
+      "id": "559e45ef-bbfb-46f5-c6f2-3b96f9cc3905",
+      "name": "Request approval",
+      "webhookId": "876945d4-daf0-435f-b270-6721a44a1b0a"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "e23af67b-f56a-4c65-8965-ece368cb7e89",
+              "leftValue": "={{ $json.data?.approved }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        540,
+        160
+      ],
+      "id": "66af5600-cc0c-4706-d703-4ca70add4a06",
+      "name": "Approved?"
+    },
+    {
+      "parameters": {
+        "message": "=Approved. Continue the workflow from this branch.\n\nTrace: {{ $('TrustGuard').first(3).json.trustguard.trace_id }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        720,
+        80
+      ],
+      "id": "77b06711-dd1d-4817-e814-5db81bee5b17",
+      "name": "Continue approved Ask",
+      "webhookId": "42d49dc2-45e7-4f43-8f63-7419da2fe23d"
+    },
+    {
+      "parameters": {
+        "message": "=Request denied because approval was rejected or timed out.\n\nTrace: {{ $('TrustGuard').first(3).json.trustguard.trace_id }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        720,
+        240
+      ],
+      "id": "88c17822-ee2e-4928-f925-6ec92cff6c28",
+      "name": "Deny rejected Ask",
+      "webhookId": "11f9dfcf-66f8-4789-aabb-1fde54d2288b"
+    },
+    {
+      "parameters": {
+        "message": "=Request denied.\n\nVerdict: {{ $json.trustguard.status }}\nTrace: {{ $json.trustguard.trace_id }}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        360,
+        320
+      ],
+      "id": "99d28933-ff3f-4a39-a036-7fda3d007d39",
+      "name": "Deny Block",
+      "webhookId": "fd310b57-6035-4ed7-b060-76e74c050476"
+    }
+  ],
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "TrustGuard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TrustGuard": {
+      "main": [
+        [
+          {
+            "node": "Continue normal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Continue normal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Continue normal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ask or Block?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask or Block?": {
+      "main": [
+        [
+          {
+            "node": "Request approval",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Deny Block",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request approval": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Continue approved Ask",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Deny rejected Ask",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
