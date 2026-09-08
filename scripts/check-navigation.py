@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Check that docs.json is valid and every page it lists exists.
+"""Check navigation page existence and unambiguous top-level tab ownership.
 
 A page entry is any string inside a "pages" array. Group and tab names are not
-paths, so they are not checked — that distinction matters, because a group can
-legitimately be called "Edge / WAF" and would look like a path to a looser rule.
+paths, so they are not checked. A group label containing a slash is not a page
+path and must not be passed to the file-existence check.
+
+A local page must belong to only one top-level tab. Cross-tab discovery should
+use links in page content, not duplicate page entries in navigation.
 
 Run it before opening a PR:
 
@@ -41,6 +44,21 @@ def resolves(page):
     return (ROOT / f"{page}.mdx").is_file() or (ROOT / page / "index.mdx").is_file()
 
 
+def tab_ownership_conflicts(navigation):
+    """Return local routes listed under more than one top-level tab."""
+    owners = {}
+    for index, tab in enumerate(navigation.get("tabs", [])):
+        name = tab.get("tab", f"Tab {index + 1}")
+        pages = {
+            page.strip("/")
+            for page in page_entries(tab)
+            if not page.startswith(("http://", "https://"))
+        }
+        for page in sorted(pages):
+            owners.setdefault(page, []).append(name)
+    return {page: tabs for page, tabs in owners.items() if len(tabs) > 1}
+
+
 def main():
     try:
         docs = json.loads(DOCS_JSON.read_text())
@@ -65,7 +83,21 @@ def main():
         )
         return 1
 
-    print(f"docs.json is valid; {len(pages)} navigation entries all resolve.")
+    conflicts = tab_ownership_conflicts(docs.get("navigation", {}))
+    if conflicts:
+        print("Local pages must belong to only one top-level tab:", file=sys.stderr)
+        for page, tabs in sorted(conflicts.items()):
+            print(f"  {page}: {', '.join(tabs)}", file=sys.stderr)
+        print(
+            "\nKeep each page in its own tab and use content links from other tabs.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        f"docs.json is valid; {len(pages)} navigation entries all resolve "
+        "and local pages have unique tab ownership."
+    )
     return 0
 
 

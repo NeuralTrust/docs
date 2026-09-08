@@ -1,15 +1,49 @@
 ---
 title: "Evaluate API"
-description: "Request and response reference for POST /v1/evaluate, including authentication, attachments, SSRF protections, and status codes"
+description: "Request, evaluation pipeline, and response reference for POST /v1/evaluate, including authentication, attachments, and status codes"
 hidePagination: true
 ---
 
 `POST /v1/evaluate` is the standard runtime endpoint for TrustGuard collectors.
 A [collector](/trustguard/concepts/collectors) calls it to evaluate one request
 against its assigned [policy](/trustguard/concepts/policies). See
-[How it works](/trustguard/how-it-works) for the evaluation pipeline. Claude
-Enterprise uses the specialized endpoint documented in its
-[integration guide](/integrations/claude#claude-enterprise).
+[How it works](/trustguard/how-it-works) for policy actions and collector coverage.
+Claude Enterprise uses the specialized endpoint documented in its
+[integration guide](/integrations/claude-enterprise).
+
+## Base URL
+
+Every path on this page is relative to your deployment's TrustGuard base URL, written
+`{TRUSTGUARD_BASE_URL}` throughout these guides:
+
+```http
+POST {TRUSTGUARD_BASE_URL}/v1/evaluate
+```
+
+| Deployment | Base URL |
+|---|---|
+| **SaaS** | The public TrustGuard origin for your region, such as `https://trustguard.neuraltrust.ai`. |
+| **Self-hosted / hybrid** | The TrustGuard data-plane endpoint your operator exposes. |
+
+The authoritative value is in the console: open the collector and read the **Connection**
+tab, which renders the setup snippet with your base URL already substituted.
+
+<Warning>
+Use the **public** TrustGuard origin, not an in-cluster service address. Self-hosted
+deployments run TrustGuard behind an internal admin address that is not reachable from
+gateways, SDKs, or edge workers, and is not the value to put in a collector snippet. If
+the console shows a placeholder instead of a URL, it could not resolve a customer-facing
+host — ask your operator for the data-plane endpoint rather than guessing.
+</Warning>
+
+<Note>
+**If you are the operator**, note that the deployment environment variable named
+`TRUSTGUARD_URL` is the **internal admin** address, and is deliberately *not* what
+`{TRUSTGUARD_BASE_URL}` means in these guides. The customer-facing origin comes from
+`TRUSTGUARD_PUBLIC_URL` on SaaS, or from the guard data-plane endpoint you expose for a
+hybrid deployment. Putting `TRUSTGUARD_URL` into a collector snippet is a common
+misconfiguration — the request simply never arrives.
+</Note>
 
 ## Authentication
 
@@ -79,6 +113,87 @@ Each attachment in `payload.attachments` provides **either** base64 `data`
   cloud‑metadata (`169.254.169.254`) targets.
 - Attachment bytes are not persisted.
 
+## Evaluation pipeline
+
+```mermaid
+flowchart TD
+  REQ[POST /v1/evaluate] --> AUTH[1 · Authenticate<br/>resolve the collector from the API key]
+  AUTH --> POL[2 · Resolve the policy<br/>per-consumer, else collector default]
+  POL --> GATES[3 · Gates<br/>match request metadata]
+  GATES -->|Block or Ask<br/>detectors skipped| RED[5 · Reduce to one status]
+  GATES -->|Report or Skip| RULES[4 · Detector rules<br/>matching this direction]
+  RULES --> DETECT[Detect phase<br/>concurrent, read-only]
+  DETECT --> XFORM[Transform phase<br/>sequential, may rewrite]
+  XFORM --> RED
+  RED --> RESP[Response<br/>status + findings]
+```
+
+Each numbered step below is one box in that diagram.
+
+### 1. Authenticate and resolve the collector
+
+TrustGuard verifies the API key, checks that it is active and not expired, and
+resolves its collector. A missing or invalid key returns `401`; an inactive or
+expired key returns `403`. Authentication failures are rejected before any
+evaluation runs.
+
+### 2. Resolve the policy
+
+TrustGuard uses the request's `consumer_id` to look for a per-consumer policy.
+If none matches, it uses the collector's default policy.
+
+If the collector has no matching policy, the request is unguarded: TrustGuard
+returns `status: "allow"` with no findings. The policy's enforcement mode also
+applies to this evaluation. In **Observe**, actions are recorded without
+enforcement.
+
+### 3. Run gates
+
+[Gates](/trustguard/concepts/policies#gates) run before detectors. Each gate
+matches request attributes, such as consumer, model, collector, protocol,
+direction, tool, session, or source, and takes an action:
+
+| Gate action | Effect |
+| --- | --- |
+| **Block** | Skips detectors and returns `status: "block"`. |
+| **Report** | Records a finding and continues to detection. |
+| **Skip** | Stops remaining gates and proceeds to detection without a gate finding. |
+| **Ask** | Skips detectors and returns `status: "ask"`. Matches input only; an empty `direction` counts as input. Ignored on output. |
+
+Block, Skip, and Ask end the gate chain. Report continues. In Observe mode,
+Block and Ask verdicts are downgraded to a non-blocking record.
+
+### 4. Run the detector rules
+
+TrustGuard filters detector rules by the request's `direction` and each rule's
+optional conditions. These are the same **Input** and **Output** phases
+configured on the [policy](/trustguard/concepts/policies).
+
+| Phase | Detectors | Execution |
+| --- | --- | --- |
+| **Detect** | Detection-only detectors | Run concurrently and merge results deterministically. They read the payload without modifying it. |
+| **Transform** | Mutable detectors, currently `data_loss_prevention` | Run sequentially after detection. With the Transform action, they rewrite the payload and produce `transformed_payload`. |
+
+Each rule's Monitor (`report`), Block, or Transform action sets `outcome.action`
+on its findings. A Block rule also stops the remaining detector chain.
+
+File attachments are decoded once and shared with detectors that consume them,
+currently `doc_analyzer`. The `url_analyzer` detector finds URLs in the body or
+messages, not in attachments. Remote attachment URLs are fetched server-side
+under the [SSRF protections](#attachments-and-ssrf) described above.
+
+### 5. Reduce to a status
+
+TrustGuard reduces the findings to one top-level `status`, from most to least
+restrictive:
+
+```text
+block → ask → transform → report → allow
+```
+
+In **Observe**, Block, Ask, and Transform actions are downgraded, so the status
+never exceeds `report`.
+
 ## Response
 
 A successful evaluation returns `200`, including one whose status is `block`.
@@ -135,9 +250,59 @@ A successful evaluation returns `200`, including one whose status is `block`.
 | `400` | Invalid body, unknown fields, bad `direction`/`protocol`, or a bad collector reference. |
 | `401` | Missing or invalid API key. |
 | `403` | Key found but inactive/expired. |
+| `429` | Plan burst or monthly quota exceeded. See [Limits and quotas](#limits-and-quotas). |
 | `500` | A detector errored **and** the deployment is fail‑closed. With fail‑open you get `200`. |
+| `503` | Rate-limit entitlements could not be loaded, so TrustGuard would not evaluate blind. |
 
 Error responses carry `{ "error", "trace_id", "request_id" }`.
+
+## Limits and quotas
+
+| Limit | Value |
+|---|---|
+| Request body | **10 MiB** by default, set per deployment. A larger body is rejected before evaluation. |
+| Persisted body, for findings evidence | **1 MiB** after sanitisation; longer bodies are stored truncated. See [Data handling](/trustguard/data-handling). |
+| Rate limit | A **burst** limit plus a **monthly quota**, both from your plan entitlements. |
+| `url_analyzer` fetch timeout | **20 s** by default, configurable on the detector. |
+
+### Rate limiting
+
+Exceeding either limit returns `429` with standard headers, so a client can back off
+without parsing the body:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+X-RateLimit-Limit: 1000
+X-RateLimit-Remaining: 0
+X-RateLimit-Reason: burst
+```
+
+Honour `Retry-After` rather than retrying immediately. `X-RateLimit-Reason` distinguishes
+a short burst from an exhausted monthly quota — the first clears on its own, the second
+needs a plan change. Your plan's numbers are in the console; they are not fixed across
+plans, so treat the headers as the source of truth at runtime.
+
+<Note>
+Per-request latency depends on which detectors a policy runs and on your deployment.
+There are no published latency figures yet — measure against your own policy before you
+set a client timeout, and see [Failure behavior](#failure-behavior) for what happens when
+TrustGuard is slow or unavailable.
+</Note>
+
+### Failure behavior
+
+Detector infrastructure errors, such as an upstream outage or timeout, follow
+the deployment's fail-open or fail-closed setting:
+
+- **Fail-open:** TrustGuard drops the failed detector's result and evaluation
+  continues.
+- **Fail-closed:** TrustGuard returns `500`, so the caller can decide whether to
+  hold traffic.
+
+A structured Block decision from a gate or detector rule still applies
+regardless of this setting. The default is configured per deployment; confirm
+it with your NeuralTrust administrator or support contact.
 
 ## Enforcing the verdict
 
