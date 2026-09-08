@@ -1,0 +1,99 @@
+---
+title: "Data handling"
+description: "What TrustGuard stores when it evaluates a request, which values are redacted before storage, and how long records are retained."
+---
+
+TrustGuard inspects prompts, completions, and tool traffic, so the first question any
+security review asks is what it keeps. This page answers that for the runtime path
+([`POST /v1/evaluate`](/trustguard/api/evaluate)).
+
+## What is stored
+
+An evaluation produces two kinds of record, and they are not equally detailed.
+
+| Record | Contains | Why it exists |
+|---|---|---|
+| **Finding** | `source`, `signal`, `outcome`, and `evidence` — for example `{ "masked": 1, "entities": ["email"] }`. Evidence describes *what kind* of thing was detected and how much of it, not the sensitive value itself. | Drives **Activity**, analytics, and [alerts](/platform/alerts). |
+| **Request body** | The evaluated body, **sanitised** (see below) and capped at **1 MiB**. Bodies over the cap are stored truncated. | Lets you see the traffic behind a finding when you investigate it in **Activity**. |
+
+**The request body is persisted.** That is the important sentence on this page: if a
+prompt is evaluated, its text can be read back in the console by anyone with access to
+your workspace, subject to the redaction and retention rules below. Plan your workspace
+permissions accordingly.
+
+## What is redacted before storage
+
+Sanitisation runs **before** anything is written, and it is not configurable.
+
+**Credential headers** are replaced with a placeholder, so a collector API key never
+lands in storage:
+
+```http
+Authorization: Bearer [REDACTED]
+```
+
+**Credential-looking body fields** are replaced with `[REDACTED]` by key name, regardless
+of nesting: `password`, `passwd`, `secret`, `token`, `api_key`, `apikey`,
+`authorization`, `credential`, `access_token`, `refresh_token`, `client_secret`, and
+`private_key`.
+
+**Multipart bodies** are never stored as content. They are replaced wholesale with
+`{"_multipart": true}`.
+
+<Warning>
+Redaction targets **credentials**, not personal data. A prompt containing a customer's
+name, email, or account number is stored as written unless a
+[DLP](/trustguard/detectors/data-loss-prevention) rule set to **Transform** masks it. If
+you do not want PII reaching storage, mask it with a Transform rule rather than relying on
+sanitisation.
+</Warning>
+
+## Attachments
+
+Files and URLs are handled apart from the body and are **never stored**:
+
+- `payload.attachments` are decoded for the detectors that consume them (today
+  `doc_analyzer`) and discarded.
+- Remote attachment URLs are fetched server-side under a strict SSRF guard — HTTPS only,
+  with loopback, private, link-local, CGNAT, and cloud-metadata addresses blocked — and
+  the fetched content is not retained.
+
+Details: [Attachments and SSRF](/trustguard/api/evaluate#attachments-and-ssrf).
+
+## Retention
+
+Retention is **set by your plan**, not by a single global default. Every stored record
+carries its own retention plan and an absolute expiry, so a record written today expires
+on a date fixed when it was written — changing plans does not retroactively extend or
+shorten records already stored.
+
+Your plan's window is in the console. Ask your NeuralTrust contact if you need it
+contractually, or need a shorter window than your plan's default.
+
+## Where it is stored
+
+Findings and sanitised bodies leave TrustGuard over OTLP and land in the NeuralTrust
+metadata store, which is what **Activity**, analytics, and the alerting rules read. The
+[event schema](/platform/event-schema) documents the record shape.
+
+The storage location follows your deployment:
+
+| Deployment | Where records live |
+|---|---|
+| **SaaS** | The NeuralTrust region your workspace is provisioned in. |
+| **Self-hosted / hybrid** | Your own infrastructure. Records never leave it. |
+
+If data residency is a requirement, confirm your region with your NeuralTrust contact
+before onboarding traffic — it is set when the workspace is provisioned.
+
+## Reducing what gets stored
+
+If your threat model calls for storing less:
+
+- **Mask at the edge.** A [DLP](/trustguard/detectors/data-loss-prevention) rule set to
+  **Transform** rewrites the payload, so downstream records hold the masked form.
+- **Scope your collectors.** Traffic that never reaches a collector is never evaluated
+  and never stored. Attach policies deliberately rather than workspace-wide.
+- **Use gates to waive traffic.** A gate with the **Skip** action stops evaluation for
+  matched requests, so no detector runs on them. See
+  [Policies](/trustguard/concepts/policies).
