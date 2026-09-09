@@ -1,0 +1,116 @@
+---
+title: "mTLS"
+description: "Authenticate callers to TrustGate with a client certificate — CA, optional allowlists, and X-Forwarded-Client-Cert when TLS terminates in front of the gateway."
+---
+
+**mTLS** is a consumer [auth](/trustgate/concepts/auth) type. The caller presents a client
+certificate. TrustGate verifies it against your CA and optionally against CN, DNS SAN, or
+SHA-256 fingerprint allowlists. Routing must be **Static** (`inline`). Identity-based
+(`role_based`) consumers cannot use mTLS.
+
+This is **client → TrustGate**. It is not how TrustGate authenticates to an upstream MCP
+server, and it is not a TrustGuard evaluate-API method.
+
+<Note>
+The NeuralTrust console **New Auth** form does not offer **mTLS**. Create the credential
+with the [Admin API](/trustgate/api/credentials), then attach it to a consumer.
+</Note>
+
+## Quick path
+
+1. Issue a client certificate from a CA you control. Keep the CA PEM.
+2. `POST /v1/gateways/{gateway_id}/auths` with `type: mtls` and `config.mtls.ca_cert`.
+3. `POST /v1/gateways/{gateway_id}/consumers/{id}/auths/{auth_id}` on a **Static** consumer.
+4. Terminate TLS in front of TrustGate (or on the process). If a proxy terminates TLS, set
+   `TRUST_XFCC_FROM` to that proxy's IPs and forward `X-Forwarded-Client-Cert`.
+5. Call the proxy or MCP plane with the client certificate. A valid cert and matching
+   allowlists authenticate as that consumer.
+
+## What TrustGate checks
+
+Verification uses `x509` client-auth EKU against `ca_cert`. Empty allowlists mean “any
+cert from this CA”.
+
+| Field | Required | Meaning |
+|---|---|---|
+| `ca_cert` | Yes | PEM CA bundle used as the trust roots. |
+| `allowed_common_names` | No | Subject CN must be in this list. |
+| `allowed_dns_names` | No | At least one DNS SAN must be in this list. |
+| `allowed_fingerprints` | No | SHA-256 of the leaf DER. Hex, optional colons, case-insensitive. |
+
+The principal **subject** is the certificate CN, or the first DNS SAN if CN is empty.
+Telemetry records `trustgate.principal.method` = `mtls`.
+
+Auth resolution order on a request: **client certificate → bearer token → API key**.
+
+## How the certificate arrives
+
+TrustGate's HTTP planes listen in plaintext. The leaf comes from one of:
+
+| Source | When it is used |
+|---|---|
+| TLS peer certificate | The process terminated TLS and the handshake presented a client cert. |
+| `X-Forwarded-Client-Cert` | The **immediate** peer IP is in `TRUST_XFCC_FROM`. |
+
+`TRUST_XFCC_FROM` is a comma-separated list of IPs or CIDRs. If it is empty, TrustGate
+**ignores** XFCC — a client cannot smuggle a cert header.
+
+The header is Envoy-style: a `Cert=` element whose value is a URL-encoded PEM. Example
+shape (truncated):
+
+```http
+X-Forwarded-Client-Cert: Cert="-----BEGIN%20CERTIFICATE-----%0A..."
+```
+
+<Warning>
+Only put the TLS-terminating proxy in `TRUST_XFCC_FROM`. Anyone in that set can present
+an arbitrary client certificate as if it were on the wire.
+</Warning>
+
+## Create and attach
+
+Admin JWT or [machine credentials](/trustgate/api/credentials) on the Admin plane:
+
+```http
+POST /v1/gateways/{gateway_id}/auths
+Authorization: Bearer <admin-jwt>
+Content-Type: application/json
+```
+
+```json
+{
+  "name": "partner-mtls",
+  "type": "mtls",
+  "config": {
+    "mtls": {
+      "ca_cert": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+      "allowed_common_names": ["partner-app"],
+      "allowed_dns_names": ["client.partner.example"],
+      "allowed_fingerprints": ["aa:bb:..."]
+    }
+  }
+}
+```
+
+Then attach to a Static consumer:
+
+```http
+POST /v1/gateways/{gateway_id}/consumers/{consumer_id}/auths/{auth_id}
+Authorization: Bearer <admin-jwt>
+```
+
+## Where it applies
+
+| Surface | mTLS |
+|---|---|
+| LLM proxy (`:8081`) | Yes — Static consumer. |
+| MCP plane (`:8082`), inbound | Yes — Static MCP consumer. Interactive agents (Cursor, etc.) still need [OAuth2](/trustgate/concepts/auth) to broker login. |
+| Identity-based (`role_based`) consumer | No — requires an IdP auth (`oauth2` / `oidc`). |
+| TrustGate → upstream MCP (`mcp_target.auth`) | No — modes are `none`, `static`, `passthrough`, `exchange`, `forwarded`, `client_credentials`. |
+| TrustGuard `/v1/evaluate` | No — collector API key or service token. |
+
+## Next step
+
+- [Auth](/trustgate/concepts/auth) — the other credential types.
+- [Consumers](/trustgate/concepts/consumers) — attach and route.
+- [API authentication](/trustgate/api/credentials) — admin JWT and machine credentials.
