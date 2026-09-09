@@ -1,0 +1,498 @@
+---
+title: "Strands Agents"
+description: "Add TrustGuard to Strands Agents, configure input and output checks, protect tool calls, and handle policy decisions"
+---
+
+[Strands Agents](https://strandsagents.com/docs/user-guide/quickstart/python/) is a Python SDK for building
+agents that use models and tools. The `strands-neuraltrust` package connects its
+agent lifecycle to TrustGuard, evaluating prompts, conversation history, model
+responses, tool arguments, and tool results.
+
+Use `GuardedAgent` when your application needs a complete, checked text response.
+Use `TrustGuardIntervention` when you manage the Strands agent and its callbacks,
+telemetry, and execution settings yourself.
+
+## Integration capabilities
+
+| Product | What it does in Strands | What you can enforce |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Checks supported content at invocation, model, and tool boundaries against the assigned [policy](/trustguard/concepts/policies). Your agent sends evaluations through a [collector](/trustguard/concepts/collectors). | Monitor · Block · Transform supported text and JSON |
+
+Tool arguments are evaluated before execution. Completed tool results are
+evaluated before the next model call. A result check cannot undo effects the
+tool has already produced.
+
+## Before you start
+
+| Requirement | Notes |
+| --- | --- |
+| An **Application** collector and its API key | Create **Agent Runtime → Collectors → Catalog → Application → Python**. Create the API key on its **Auth** tab and assign a policy on the **Policies** tab. The API key identifies the collector; no separate Strands collector type, collector ID, or collector key is required. |
+| Input and Output policy rules | Tool results use the **Input** direction because they become input to the next model turn. Model responses use **Output**. |
+| Your TrustGuard deployment URL | Use the [base URL](/trustguard/api/evaluate#base-url) shown for your workspace. Your application needs HTTPS access to it. |
+| A supported Python and Strands installation | The package currently supports Python 3.10–3.14 and pins Strands Agents to 1.54.0. Install its declared dependencies together; lifecycle and telemetry compatibility are version-sensitive. |
+| An explicitly configured Strands `Model` | Configure provider credentials, region, model selection, and provider logging in your application. Models and tools remain trusted application code. |
+
+<Note>
+Start with an **Observe** policy to review findings in **Activity**, then verify
+the intended outcomes in **Enforce** mode. An `allow` or `report` response does
+not prove that a detector matched or that an enforcing rule was enabled. See
+[Policies](/trustguard/concepts/policies).
+</Note>
+
+## 1. Install
+
+```bash
+python -m pip install strands-neuraltrust
+```
+
+The Python import is `strands_neuraltrust`.
+
+## 2. Configure credentials and tracing
+
+Load the collector API key and deployment URL from your environment or secret
+store. Set trace redaction **before the process creates any Strands agent or
+tracer**:
+
+```bash
+export TRUSTGUARD_API_KEY='<collector-api-key>'
+export TRUSTGUARD_BASE_URL='<your-trustguard-deployment-url>'
+export OTEL_SEMCONV_STABILITY_OPT_IN='gen_ai_unredacted_attributes='
+```
+
+The example below reads these variables explicitly. `TrustGuardConfig` does not
+discover environment variables, select a default endpoint, or select a model
+provider. `base_url` is the deployment root, optionally with a path prefix; the
+client appends `/v1/evaluate`.
+
+<Warning>
+The empty telemetry allowlist redacts the supported Strands content fields.
+`GuardedAgent` checks the initialized tracer state. Setting the variable after
+a tracer exists is insufficient; restart the process. Allowed system instructions
+can still appear in the SDK's separate `system_prompt` span attribute. Keep
+secrets out of system instructions and configure other logging and telemetry
+sinks separately. See [Streaming and telemetry](#streaming-and-telemetry).
+</Warning>
+
+## 3. Create a guarded agent
+
+Pass your configured, stateless Strands `Model` to this function. The evaluator
+stays open for the invocation and closes when the context exits:
+
+```python
+import os
+
+from strands.models import Model
+from strands_neuraltrust import GuardedAgent, GuardedResult, TrustGuardClient, TrustGuardConfig
+
+
+async def answer(model: Model, prompt: str) -> GuardedResult:
+    config = TrustGuardConfig(
+        api_key=os.environ["TRUSTGUARD_API_KEY"],
+        base_url=os.environ["TRUSTGUARD_BASE_URL"],
+    )
+    async with TrustGuardClient(config) as evaluator:
+        agent = GuardedAgent(model=model, client=evaluator)
+        return await agent.invoke_async(prompt)
+```
+
+`GuardedResult.text` contains the accepted final text. `decisions` is a tuple of
+content-free `DecisionRecord(stage, status)` values, and `stop_reason` identifies
+the accepted completion reason. The result does not expose raw findings, model
+events, SDK history, or the underlying `AgentResult`.
+
+For a synchronous application, use `agent.invoke(prompt)` inside a
+`with TrustGuardClient(config)` context. Do not call the synchronous invocation
+from an already running event loop.
+
+Keep the agent and evaluator alive together to continue a conversation. Reuse
+the same agent only after successful calls, and use separate agents for concurrent
+conversations. After any failed or cancelled invocation, create a new agent.
+
+### Add tools
+
+Pass registered Strands tools through `tools`:
+
+```python
+from strands import tool
+from strands.models import Model
+from strands_neuraltrust import EvaluationClient, GuardedAgent
+
+
+@tool
+def service_status(service: str) -> str:
+    """Return the status of a service from a synthetic local catalog."""
+    return {"billing": "operational"}.get(service, "unknown")
+
+
+def support_agent(model: Model, evaluator: EvaluationClient) -> GuardedAgent:
+    return GuardedAgent(
+        model=model,
+        client=evaluator,
+        tools=[service_status],
+        system_prompt="Answer service-status questions using the provided tool.",
+    )
+```
+
+Tools execute sequentially, and the guarded agent disables agent retries. A
+block prevents pending protected work from continuing. Tools that already ran
+may have changed external state; the integration does not provide rollback or
+authorize an entire batch atomically.
+
+## 4. Handle decisions
+
+The guarded agent and intervention enforce the following behavior:
+
+| TrustGuard status | Behavior |
+| --- | --- |
+| `allow` | Continue with the assessed content. |
+| `report` | Continue and record the status. Raw findings are omitted from adapter results. |
+| `transform` | Apply a validated replacement that preserves the supported content structure. |
+| `block` | Stop with `TrustGuardBlocked`. |
+| `ask` | Stop with `TrustGuardApprovalRequired`. Interactive approval and resume are unsupported. |
+| Invalid response or evaluation failure | Stop with a typed `TrustGuardError`. |
+
+Catch `TrustGuardBlocked` when your application needs to display its own refusal
+message. Treat other `TrustGuardError` subclasses as terminal protection
+failures, and return an application-controlled error rather than retrying the
+same agent. `asyncio.CancelledError` remains cancellation.
+
+<Warning>
+The direct `TrustGuardClient.evaluate()` and `aevaluate()` methods return
+**advisory** `Verdict` values. They return `block` and `ask` without enforcing
+them. Use the guarded agent or intervention for lifecycle enforcement, or
+implement every decision in your own application.
+</Warning>
+
+## Coverage
+
+| Surface | Monitor | Block | Transform |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ⚠️ |
+| LLM output | ✅ | ⚠️ | ⚠️ |
+| Tool call | ✅ | ✅ | ⚠️ |
+| Tool result | ✅ | ✅ | ⚠️ |
+
+`GuardedAgent` returns complete checked text, so it can block or transform
+supported output before delivery. A native agent with only
+`TrustGuardIntervention` can expose raw streamed output before its completed
+output check. Transformations preserve supported text/JSON structure and refuse
+changes to tool schemas, names, routing identities, and other immutable metadata.
+See [Supported content and transformations](#supported-content-and-transformations).
+
+Coverage applies to the configured agent path. Tool-result checks cannot undo
+completed tool effects. Models, tools, and application instrumentation remain
+trusted application components.
+
+## What gets evaluated
+
+| Boundary | Content | Direction |
+| --- | --- | --- |
+| Guarded-agent preflight | New prompt, system instructions, and registered tool declarations, before agent tracing starts | Input |
+| Before invocation | Supported new messages, before the model runs | Input |
+| Before each model call | Local conversation history, system instructions, and tool declarations | Input |
+| After each model call | Completed model content, including intermediate tool-call turns | Output |
+| Before each tool call | Exact supported arguments and the registered schema | Input |
+| After each tool call | Completed text or JSON result, including an error result, before model continuation | Input |
+
+Every boundary normally makes **two evaluations**: a structured payload followed
+by a text assessment of its supported content. The second assessment presents
+history, tool content, and the values inside supported JSON as text. This lets
+text-oriented detectors inspect content that they may not extract from every
+structured field. Both assessments must pass before staged changes are applied.
+
+The second request uses the same collector, direction, session, and consumer.
+It adds service latency, quota usage, and ordinary evaluation records, and may
+affect stateful detector counters. It remains subject to all request, time, and
+invocation budgets. Logical decision records summarize both responses:
+`transform` takes precedence over `report`, then `allow`.
+
+An accepted text-only `GuardedAgent` invocation normally makes eight evaluation
+requests. A native agent with the intervention normally makes six. Tool calls
+and additional model turns add more; a block or failure can stop earlier. There
+is no policy-decision cache.
+
+Set `text_assessment=False` only after independently qualifying your collector's
+structured assessment for every required history, tool, and metadata surface.
+This option removes the additional text coverage and is not equivalent
+protection with a collector that scans only the latest message.
+
+## Configuration
+
+### Collector client
+
+`TrustGuardConfig` is immutable. Its representation omits the API key, and
+constructing it performs no evaluation.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `api_key` | Required | Collector API key, sent as `Authorization: Bearer …`. Service tokens and separate collector selectors are unsupported. |
+| `base_url` | Required | HTTPS deployment root; the client appends `/v1/evaluate`. |
+| `timeout` | `5.0` | Positive finite seconds. Native async evaluation has an overall HTTP deadline. Sync evaluation has phase timeouts and elapsed checks between chunks. |
+| `max_request_bytes` | `1_048_576` | Maximum UTF-8 JSON request-envelope size before sending. |
+| `max_response_bytes` | `1_048_576` | Maximum accepted response body, checked against headers and streamed bytes. |
+| `allow_local_http` | `False` | Permit HTTP only for `localhost`, literal IPv4 loopback, or `::1`, for local testing. |
+
+URLs containing credentials, query strings, fragments, encoded path segments,
+dot segments, or malformed hosts are rejected. Owned transports verify TLS,
+ignore environment proxy configuration, disable redirects, and request
+uncompressed JSON. The response must be HTTP 200, `application/json`, and
+identity encoding. The client performs no retries and fails closed on transport
+or protocol errors.
+
+Requests use `protocol="llm"` and an explicit `direction`. The direct client also
+accepts `session_id`, `consumer_id`, and JSON `attributes` on each evaluation;
+see the [Evaluate API](/trustguard/api/evaluate). These are evaluation routing
+fields and do not create Strands sessions.
+
+### Guarded agent
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `model` | Required | Explicit Strands `Model`; models declaring `stateful=True` are refused. |
+| `client` | Required | `TrustGuardClient` or a trusted implementation of `EvaluationClient`. |
+| `tools` | None | Registered tools; dynamic discovery is unsupported. |
+| `system_prompt` | None | Text instructions, assessed with model context. |
+| `session_id` / `consumer_id` | Omitted | Application-selected identifiers sent on evaluations. |
+| `max_turns` | `8` | Maximum model turns in an invocation. |
+| `timeout` | `60.0` | Total invocation deadline, including preflight. |
+| `max_stream_bytes` | `1_048_576` | Bounds serialized raw model/tool events and final returned UTF-8 text. This is a resource bound, not a token count. |
+| `max_evaluations` | `128` | Actual requests per invocation, including preflight and both assessments. |
+| `text_assessment` | `True` | Require structured and text assessments at each protected boundary. |
+
+The caller owns model and evaluator lifetimes. Provider-managed conversation
+state cannot be inspected as local history, so use a fresh, stateless model
+instance with application-controlled settings. The facade accepts no arbitrary
+agent construction options, custom middleware, sessions, plugins, or executor
+configuration.
+
+<Accordion title="HTTP client ownership and cancellation">
+Owned synchronous transports reuse a serialized connection pool. Owned async
+evaluations create and close a client on the current loop for each request. This
+supports repeated synchronous guarded invocations that create distinct event
+loops, at the cost of async connection reuse.
+
+`TrustGuardClient(config, http_client=..., async_http_client=...)` accepts caller
+HTTPX clients. You own their transport, TLS, proxy, event-hook configuration,
+and lifetime. The adapter overrides request authentication and redirect
+behavior but cannot control arbitrary custom transport code. An injected async
+client binds to its first evaluation loop and refuses another loop. A sync
+HTTPX injection is not used by async evaluation; use owned transports for
+repeated synchronous guarded-agent calls.
+
+Close the adapter with `close()` / `aclose()` or its context managers. Closing it
+prevents new evaluations and never closes injected clients. Finish or cancel
+outstanding calls before closing shared resources. Async cancellation propagates
+and owned per-request resources are closed.
+
+Python cancellation is cooperative. Blocking user code cannot be forcibly
+interrupted by an async deadline. The sync elapsed bound can be exceeded by an
+in-flight HTTP phase. Limits bound accepted content sizes, not every allocation
+inside provider or tool implementations.
+</Accordion>
+
+## Supported content and transformations
+
+Supported content is user/assistant text, model tool calls, and tool results
+containing text or JSON blocks. Other content fails closed. Images, audio,
+video, documents, binary attachments, reasoning/signatures, citations, cache
+points, and unknown message structures are unsupported.
+
+Transformations preserve message count, order, roles, block kinds, tool names,
+result success/error state, system instructions, and tool declarations. JSON
+transformations preserve object keys, array lengths, and scalar categories.
+Arguments must validate against the registered tool schema before execution.
+An invalid, partial, or ambiguous replacement stops the invocation.
+
+Tool schemas use reference-free JSON Schema 2020-12, or omit `$schema` and use
+that draft's semantics. `$ref`, `$dynamicRef`, and `$recursiveRef` are rejected,
+including local references. Output schemas and extra provider-specific tool
+declaration fields are unsupported. Tool annotations are not policy input;
+keep authorization data in supported assessed content.
+
+<Accordion title="How content and routing identities are preserved">
+The evaluator receives normalized Anthropic-style messages. JSON tool results
+become individual text blocks for evaluation and are restored to their original
+JSON block types after validation.
+
+Opaque tool-call IDs are replaced with consistent, nonnumeric aliases for each
+structured assessment. Original IDs remain local, and are restored only after
+the returned aliases are validated unchanged. This prevents generic PII detection
+from treating SDK routing IDs as phone numbers. Unknown, swapped, added, or
+modified aliases are refused. Tool names, arguments, results, schemas, and
+system instructions remain subject to assessment. The direct advisory client
+sends caller-supplied payloads as given.
+
+The additional text assessment uses an immutable prefix and an ordered mapping
+to the original content locations. JSON values appear as individual units;
+repeated equal text does not replace unrelated fields. Changes remain staged
+until both decisions and all structural/schema checks succeed. A changed prefix,
+role, block count, or immutable metadata is refused.
+
+Encoded JSON objects, arrays, and quoted strings are decoded for text assessment.
+Unchanged encoded text keeps its original formatting. Bare numeric-looking,
+boolean-looking, and null-looking SDK strings remain strings; typed JSON values
+keep their categories. Traversal is bounded to 64 levels and 100,000 nodes,
+including encoded layers. Recognizable JSON that violates duplicate-key,
+nonfinite-number, or resource checks is refused.
+
+A full-message evaluation requires a matching structured replacement. A generic
+`{"input": "replacement"}` is not a valid rewrite of a multi-message payload.
+Message metadata and tracking IDs stay local and are omitted from evaluator
+payloads as non-provider content.
+</Accordion>
+
+## Streaming and telemetry
+
+`GuardedAgent` returns complete accepted text and offers no token stream. Its
+internal callback validates and bounds raw model/tool events before the SDK
+consumes them. It refuses malformed or truncated streams and malformed tool
+argument JSON instead of allowing the SDK to repair it into an empty object.
+The supported model event protocol is the sequential Bedrock-style protocol;
+provider-specific fields and alternate tool-identity-in-delta protocols are
+refused.
+
+The lower-level intervention sees **completed** model output. Raw SDK streams
+and callbacks can expose tokens before a later output block. Setting
+`callback_handler=None` disables default printing, but does not make raw
+streaming preventive. Use the complete-result interface when response content
+must be checked before delivery.
+
+The guarded facade wraps the model through the public Strands `Model` interface
+and converts provider stream exceptions to content-free errors before SDK error
+instrumentation. The application still owns the provider lifetime. Local token
+estimation uses the base model heuristic rather than an optional remote token
+counting method.
+
+Trace redaction checks the supported SDK tracer fields at construction and on
+invocation. An absent or changed field refuses construction. The integration
+does not mutate global telemetry settings. Preflight keeps blocked system/tool
+context out of agent invocation; **allowed system text can still appear in the
+separate `system_prompt` span attribute**.
+
+Configure third-party spans, exception exporters, Python logging handlers,
+tool-owned stdout/stderr, HTTPX logging, callbacks, and provider instrumentation
+separately. Avoid recording prompts, tool results, request bodies, credentials,
+and raw exceptions. The supported return value and trace redaction do not imply
+that arbitrary application code cannot disclose data.
+
+## Using a native Strands agent
+
+Use `TrustGuardIntervention` when your application owns the native agent:
+
+```python
+from strands import Agent
+from strands.models import Model
+from strands_neuraltrust import EvaluationClient, TrustGuardIntervention
+
+
+def native_agent(model: Model, evaluator: EvaluationClient) -> Agent:
+    return Agent(
+        model=model,
+        interventions=[TrustGuardIntervention(evaluator)],
+        callback_handler=None,
+    )
+```
+
+This supplies lifecycle checks without the facade's preflight, raw-event parser,
+complete-result interface, sequential executor, or provider-error wrapper. Your
+application owns callbacks, tracing, sessions, hooks, middleware, streaming,
+retries, and executor configuration. Do not mutate configuration while the agent
+is executing.
+
+The intervention accepts `session_id`, `consumer_id`, `max_evaluations=128`, and
+`text_assessment=True`. A shared intervention keeps separate failure and decision
+state for each agent. `decisions(agent)` returns bounded stage/status records.
+Failed agents cannot continue. Direct native tool calls share the agent's
+evaluation counter until a normal invocation begins.
+
+Its async `assess(payload, direction, stage)` method performs a bounded
+standalone assessment with a fresh per-call budget. It does not authorize a
+later unassessed execution.
+
+<Warning>
+Native direct `agent.tool` calls copy keyword arguments into
+`ToolContext.invocation_state`. That separate state is outside the transformation
+boundary, so a tool reading it may see original arguments independently of its
+transformed input. The guarded facade exposes no direct-tool shortcut.
+</Warning>
+
+## Errors
+
+All protection errors inherit from `TrustGuardError`. Messages are content-free;
+raw upstream bodies and finding evidence are not exposed.
+
+| Exception | Meaning |
+| --- | --- |
+| `TrustGuardBlocked` | A policy blocked the protected operation. |
+| `TrustGuardApprovalRequired` | A policy requested an unsupported approval flow. |
+| `TrustGuardAuthenticationError` | TrustGuard rejected authentication. |
+| `TrustGuardConfigurationError` | Configuration or a request is invalid. |
+| `TrustGuardProtocolError` | The response or execution protocol is invalid. |
+| `TrustGuardTransformError` | A replacement cannot be applied safely. |
+| `TrustGuardUnsupportedContentError` | Content is outside the supported interface. |
+| `TrustGuardUnavailable` | An evaluation or guarded execution could not complete. |
+| `TrustGuardStateError` | The agent/client state does not permit the operation. |
+
+Unknown statuses, duplicate JSON keys, nonfinite numbers, invalid Unicode,
+malformed transforms, and inconsistent finding-action precedence are refused.
+Transport fail-closed behavior cannot turn an `allow` from an unmatched,
+Observe, or fail-open server policy into a verified enforcing decision.
+
+## Verify your integration
+
+1. Use a dedicated test collector and synthetic content with known matching
+   rules. Confirm Input and Output directions and the selected policy mode.
+2. Confirm an accepted prompt returns a complete response and stage/status
+   decisions. Reconcile the conversation in **Activity** using your `session_id`.
+3. Trigger an input block and confirm the model is never called. Trigger an
+   output block and confirm no response text reaches the application caller.
+4. Trigger a tool-argument block and confirm the tool performs no effect. Trigger
+   a tool-result block and confirm the next model turn does not run.
+5. Test transformations in prompts, history, output, tool arguments, and results.
+   Confirm only the accepted replacement continues and unsupported replacements
+   fail closed. Include older history and nested JSON in your cases.
+6. Test unavailable service, invalid authentication, malformed decisions,
+   resource limits, and cancellation. Confirm failed conversations refuse reuse.
+7. Review application logs and telemetry using synthetic markers. Verify the
+   configured provider's stream protocol separately before deployment.
+
+The integration protects only the supported agent path. It does not sandbox
+models or tools, cover child agents or direct MCP clients automatically, inspect
+provider-managed hidden history, or control provider-side logging and retention.
+TrustGuard receives the content it evaluates, including supported history,
+system text, tool declarations, arguments, and results. Choose its deployment,
+retention, and access controls for that data. See
+[Data handling](/trustguard/data-handling) for the service-side storage contract.
+
+Source and issues:
+[`NeuralTrust/strands-neuraltrust`](https://github.com/NeuralTrust/strands-neuraltrust).
+For endpoint semantics, see the [Evaluate API](/trustguard/api/evaluate). For
+gateway enforcement across applications and clients, see
+[TrustGate](/integrations/trustgate).
+
+<Accordion title="Development and security reporting">
+Install the locked development environment in the package checkout and run the
+standard checks:
+
+```bash
+uv sync --locked
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked mypy
+uv run --locked pytest
+```
+
+Default tests disable network sockets and use synthetic data. Keep live service
+credentials and test evidence out of contributions. Add behavior-focused
+regressions for transport, enforcement, transformation, cancellation, and
+caller-visible results. Dependency updates require lifecycle, streaming,
+telemetry, cancellation, and failed-conversation checks. New content types
+require lossless reconstruction and schema/identity preservation.
+
+Report vulnerabilities privately to NeuralTrust maintainers through your
+existing project contact. Do not open a public issue containing exploit
+details, credentials, production prompts, service responses, or unredacted
+traces. Include the package, Strands, and Python versions; the affected
+lifecycle boundary; a synthetic reproduction; expected and observed behavior;
+and the relevant collector policy mode.
+</Accordion>
