@@ -22,6 +22,10 @@ developer machine. For those, use a client integration such as
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | A custom guardrail file referenced by `config.yaml` evaluates the request before the upstream model call and the assembled response afterward. For streaming requests, output evaluation is audit-only because it runs after delivery. LiteLLM sends each evaluation to the [policy](/trustguard/concepts/policies) assigned to the collector. | Monitor · Block |
 
+The proxy can also carry the conversation, so policy applies across turns rather
+than to one message at a time. That requires the caller to send a session key —
+see [Multi-turn conversations](#multi-turn-conversations).
+
 ## Before you start
 
 | Requirement | Notes |
@@ -31,6 +35,7 @@ developer machine. For those, use a client integration such as
 | Egress from the proxy to `{TRUSTGUARD_BASE_URL}` | The console shows the [base URL](/trustguard/api/evaluate#base-url) for your workspace. |
 | Control of the proxy `config.yaml` and a restart | Required to load the guardrail. |
 | A way to place `trustguard_guardrail.py` next to `config.yaml` | Use a read-only volume, a ConfigMap with `subPath`, or include it in your image. |
+| LiteLLM proxy **1.89.0** or later | The guardrail calls `CustomGuardrail._get_session_id_from_request_data`, which LiteLLM added in 1.89.0. On an earlier proxy every request fails inside the hook. |
 
 <Note>
 Create the policy in **Observe** mode. Observe records decisions in **Activity** without enforcing
@@ -301,22 +306,103 @@ guardrails:
 Here `TRUSTGUARD_API_BASE` is the full endpoint,
 `{TRUSTGUARD_BASE_URL}/v1/evaluate`, not only the host.
 
-### Choose what gets inspected
+## Multi-turn conversations
 
-An agent client, such as an IDE assistant or an in-house agent loop, can resend
-the **entire transcript** on every turn, including the system prompt and earlier
-tool results. Choose `scope` based on the context required by your policy and the
-acceptable payload size.
+A multi-turn attack spreads its intent across several messages. Each one reads as
+harmless on its own; the escalation, the reinforcement, or the reassembled
+instruction exists only across turns. See
+[multi-turn attacks](/trusttest/create/threat-detection/prompt-injections/multi-turn/overview)
+for the techniques involved — Crescendo, Echo Chamber, Multi-Turn Manipulation,
+and Payload Splitting. Their common target is a filter that inspects each message
+independently, which is what this guardrail does until you give it the
+conversation.
+
+Two inputs give TrustGuard the conversation, and they are complementary rather
+than alternatives:
+
+| What the guardrail sends | What TrustGuard can then do |
+|---|---|
+| A stable `session_id` on **every** request of one conversation | Group the turns server-side. Findings for one conversation appear together in **Activity**, `session.id` becomes available as a [gate](/trustguard/concepts/policies#gates) condition, and the [stateful detectors](/trustguard/concepts/collectors#attribution) get the grouping they rely on. |
+| Earlier turns inside `payload.messages` | Score the newest message inside one evaluation call that also contains what came before. |
+
+Neither happens by default. `/v1/evaluate`
+[synthesizes a `session_id` when the field is omitted](/trustguard/api/evaluate#request),
+so a proxy whose callers send no conversation key produces one session per
+request. Nothing errors and no finding goes missing, so the gap is only visible
+as single-turn conversations in **Activity**.
+
+### Send a session ID
+
+LiteLLM does not invent a conversation key. The **caller** supplies one on every
+request of the conversation, and the proxy makes it available to the guardrail
+before the `pre_call` hook runs.
+
+| How the caller sends it | Notes |
+|---|---|
+| `x-litellm-session-id` request header | The recommended form. Any non-empty string is accepted. |
+| Any `x-<vendor>-session-id` request header | LiteLLM matches that pattern generically, so a client already sending a session header of its own shape — `x-myapp-session-id` — needs no change. The value must be at least 8 characters of `A-Z`, `a-z`, `0-9`, `_`, or `-`; anything else is skipped without an error. Requires LiteLLM 1.84.0 or later. |
+| `x-litellm-trace-id` request header | LiteLLM treats it as interchangeable with the session header, and it takes **precedence** over `x-litellm-session-id`. Only use it if the value is stable for the whole conversation. |
+| Top-level body field `litellm_session_id` | For callers that cannot set headers. |
+| Body `metadata: {"session_id": "…"}` | The alternative body form. |
+
+A header always overrides a body value, so audit whatever sits in front of the
+proxy before telling application teams to use the body form.
+
+With the OpenAI SDK, send the header on every call of the conversation:
+
+```python
+client.chat.completions.create(
+    model="<your-model>",
+    messages=[...],
+    extra_headers={"x-litellm-session-id": conversation_id},
+)
+```
+
+Or on the request itself:
+
+```bash
+curl $PROXY/v1/chat/completions \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -H "x-litellm-session-id: $CONVERSATION_ID" \
+  -d '{"model":"<your-model>","messages":[{"role":"user","content":"…"}]}'
+```
+
+The guardrail reads the resolved value with
+`_get_session_id_from_request_data`, which checks the top-level
+`litellm_session_id` field, then `metadata.session_id`, then
+`litellm_metadata.session_id`, and sends the first non-empty one as `session_id`.
+The `post_call` hook receives the same request data, so the output evaluation
+carries the same session as the input evaluation.
+
+<Warning>
+`metadata: {"litellm_session_id": "…"}` does **not** work. Inside `metadata` the key
+is `session_id`; `litellm_session_id` is only recognized as a top-level body field.
+</Warning>
+
+### Send conversation history
+
+`/v1/chat/completions` is stateless, so `messages` holds whatever the caller sent
+— for a normal chat client or agent loop, the whole conversation. `scope` decides
+how much of it the guardrail forwards.
 
 | `scope` | What is sent | Trade-off |
 |---|---|---|
-| `current_turn` | The newest user message plus any `tool` results that arrived after it | Constant payload size. Attacks spread across several turns are not visible to a single call. |
-| `transcript` | Every message, on every turn | The payload grows with the conversation, and one flagged string in the history blocks later requests in that session. |
+| `current_turn` | The newest user message plus any `tool` results that arrived after it | Constant payload size. A single evaluation call cannot see earlier turns, so cross-turn context comes only from the `session_id` grouping. |
+| `transcript` | Every message, on every turn | One call carries the conversation. The payload grows with it, text already cleared is re-inspected, and one flagged string in the history blocks later requests in that session. |
 
 Tool results must keep `role: "tool"` because the
 [indirect prompt injection](/trustguard/detectors/agent-mcp-security) detector
 uses that role. Flattening every message to `user` disables that check. Agent
 transcripts can also be large, so measure latency with representative payloads.
+
+<Note>
+On `/v1/responses`, `previous_response_id` does not supply either input. The
+guardrail sees only the new turn's `input`, because LiteLLM rehydrates the
+earlier turns after the hook has already run, and the recovered identifier is not
+the one the guardrail reads. The session headers work normally on that route, so
+send `x-litellm-session-id` explicitly, and put the transcript in the request if
+a single call needs the history.
+</Note>
 
 ## Verify
 
@@ -440,7 +526,9 @@ inspected)` warning if you enable this setting.
 
 ### Attributes
 
-- `session_id`: derived from the LiteLLM request when available
+- `session_id`: the conversation key the **caller** supplied, resolved by LiteLLM
+  from a session header or a body field. LiteLLM does not generate one. See
+  [Multi-turn conversations](#multi-turn-conversations)
 - `consumer_id`: derived from the virtual key's `key_alias`, `user_email`,
   `user_id`, or `team_alias`, then from request metadata if those fields are empty
 
@@ -460,6 +548,12 @@ They support conversation grouping and per-consumer attribution in **Activity**.
 | An output-side block did not stop the response | The request streams. The output is evaluated after the stream closes, when its tokens have already been delivered |
 | A tool-level finding blocked the complete request | Every verdict is request-level |
 | Indirect prompt injection is not detected | The tool result is outside the selected `scope`, or its `role` was changed from `tool` to `user` |
+| Every turn is its own conversation in **Activity** | The caller sends no session key, so `/v1/evaluate` synthesizes one per request. Send `x-litellm-session-id` on every request of the conversation |
+| A `x-<vendor>-session-id` header is set but the turns still do not group | The value is shorter than 8 characters or contains characters outside `A-Z a-z 0-9 _ -`, so LiteLLM skips it silently. Use `x-litellm-session-id`, which is not validated |
+| A correct session header is sent, but the grouping key is something else | The caller also sends a per-request `x-litellm-trace-id`, which takes precedence. Send one or the other |
+| A body `litellm_session_id` is ignored | A header value overrides it, or the field was placed inside `metadata`, where the key is `session_id` |
+| LiteLLM's own session field is empty even though grouping works | `litellm.request_correlation_in_logs` is off by default, so LiteLLM's logs omit the session. Verify in TrustGuard **Activity** instead |
+| Every request fails inside the pre-call hook | The proxy is older than 1.89.0, so `CustomGuardrail._get_session_id_from_request_data` does not exist |
 | LiteLLM cannot import `trustguard_guardrail.TrustGuard` | `trustguard_guardrail.py` is not in the proxy working directory beside `config.yaml` |
 
 ## Related
@@ -473,6 +567,10 @@ They support conversation grouping and per-consumer attribution in **Activity**.
 
 <Note>
 **Experimental:** [BerriAI/litellm#37165](https://github.com/BerriAI/litellm/pull/37165)
-proposes a native `neuraltrust` guardrail. It is not part of the setup described
-on this page.
+proposes a native `neuraltrust` guardrail, configured with
+`guardrail: neuraltrust` instead of a file. It is open, is not in any released
+LiteLLM version, and is not part of the setup described on this page. It resolves
+`session_id` the same way, from the same caller-supplied header or body field, so
+the guidance in [Multi-turn conversations](#multi-turn-conversations) applies to
+either path. It has no `scope` setting and sends the full message array.
 </Note>
