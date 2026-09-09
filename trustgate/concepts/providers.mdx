@@ -1,0 +1,87 @@
+---
+title: "Providers"
+description: "Every LLM provider TrustGate can route to, and which modalities each adapter supports — chat, embeddings, rerank, files, images, and audio."
+---
+
+<p className="nt-lead">
+  A registry picks one of these adapters. Chat is always available. Embeddings,
+  rerank, files, images, and audio only run when the adapter advertises them
+  and the model slug can do that work.
+</p>
+
+Connect a card from **Agent Gateway → Registry**. How credentials and health
+checks work is on [Registries](/trustgate/concepts/registries). Clients still
+call one TrustGate path — [chat](/trustgate/endpoints/chat),
+[embeddings](/trustgate/endpoints/embeddings),
+[images](/trustgate/endpoints/images), [files](/trustgate/endpoints/files),
+[audio](/trustgate/endpoints/audio), or [rerank](/trustgate/endpoints/rerank) —
+and TrustGate adapts the wire format.
+
+MCP servers are a different registry type. See the
+[MCP Gateway](/trustgate/mcp/overview).
+
+## Capability matrix
+
+`Code` is the registry provider id (`owned_by` on
+[`GET /v1/models`](/trustgate/endpoints/models), and the `@provider/…` prefix in
+[model resolution](/trustgate/routing/model-resolution)).
+
+| Provider | Code | Chat | Embeddings | Rerank | Files | Images | Speech | Transcription |
+|---|---|---|---|---|---|---|---|---|
+| OpenAI | `openai` | Yes | Yes | — | Yes | Yes | Yes | Yes |
+| Anthropic | `anthropic` | Yes | — | — | Yes | — | — | — |
+| Google Gemini | `google` | Yes | — | — | — | — | — | — |
+| Azure OpenAI | `azure` | Yes | Yes | — | Yes | Yes | Yes | Yes |
+| Amazon Bedrock | `bedrock` | Yes | Yes | — | — | — | — | — |
+| Vertex AI | `vertex` | Yes | Yes | — | — | — | — | — |
+| Cerebras | `cerebras` | Yes | — | — | — | — | — | — |
+| Cohere | `cohere` | Yes | Yes | Yes | — | — | — | — |
+| DeepSeek | `deepseek` | Yes | — | — | — | — | — | — |
+| Groq | `groq` | Yes | — | — | — | — | Yes | Yes |
+| Mistral | `mistral` | Yes | Yes | — | Yes | — | Yes | Yes |
+| OpenRouter | `openrouter` | Yes | — | — | Yes | Yes | Yes | Yes |
+| xAI | `xai` | Yes | — | — | Yes | — | — | — |
+| Custom / OpenAI-compatible | `openai_compatible` | Yes | Yes | — | — | Yes | Yes | Yes |
+
+Yes means the **adapter** can forward that modality. A request still needs a
+model that actually supports it — for example Bedrock embeddings only accept
+Titan embed slugs, and OpenAI image calls need an image model.
+
+Pinning a registry that cannot serve the path is a **400**, not a failover. An
+empty capable pool is a **503**. See each endpoint page for the candidate pool.
+
+## What each capability maps to
+
+| Capability | Client path | Notes |
+|---|---|---|
+| **Chat** | [`/v1/chat/completions`](/trustgate/endpoints/chat), `/v1/messages`, `/v1/responses`, Cohere `/v2/chat`, Gemini `generateContent` | Every provider. Inbound format is independent of the upstream. |
+| **Embeddings** | [`/v1/embeddings`](/trustgate/endpoints/embeddings) | OpenAI-shaped body. Gemini AI Studio (`google`) does not embed — use Vertex. Bedrock is Titan embed only. |
+| **Rerank** | [`/v1/rerank`](/trustgate/endpoints/rerank) | Cohere only. |
+| **Files** | [`/v1/files`](/trustgate/endpoints/files) | Upload, list, retrieve, delete, download. Custom OpenAI-compatible backends do not expose a files store. |
+| **Images** | [`/v1/images/generations`](/trustgate/endpoints/images) | Plus multipart edits and variations where the upstream accepts them. |
+| **Speech** | [`/v1/audio/speech`](/trustgate/endpoints/audio) | TTS. Raw audio bytes. |
+| **Transcription** | [`/v1/audio/transcriptions`](/trustgate/endpoints/audio) | STT. Multipart. |
+
+## Credentials
+
+The credential on the registry is how TrustGate calls the **provider**. It is
+not the [consumer key](/trustgate/concepts/auth) your applications send.
+
+| Provider | Auth |
+|---|---|
+| OpenAI, Anthropic, Gemini, Mistral, Groq, Cohere, DeepSeek, xAI, Cerebras, OpenRouter | API key |
+| Custom / OpenAI-compatible | API key and/or a custom header pair, plus a `base_url` |
+| Azure OpenAI | API key, service principal, or managed identity, plus the resource endpoint |
+| Amazon Bedrock | Access keys (optional session token) or assume-role / IRSA, plus region |
+| Vertex AI | GCP service-account JSON |
+
+Use **Custom / OpenAI-compatible** when the upstream speaks Chat Completions
+(and optionally `/v1/embeddings`, images, or audio) but is not a first-class
+card — vLLM, Ollama, LiteLLM, and similar.
+
+## Related
+
+- [Registries](/trustgate/concepts/registries) — connect, test, and price a backend
+- [Chat](/trustgate/endpoints/chat)
+- [Model resolution](/trustgate/routing/model-resolution)
+- [Models](/trustgate/endpoints/models)
