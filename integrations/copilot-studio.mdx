@@ -1,34 +1,160 @@
 ---
 title: "Microsoft Copilot Studio"
-description: "Connect Microsoft Copilot Studio agents to TrustGate over MCP using OAuth and dynamic client registration"
+description: "Screen every tool a Copilot Studio agent is about to run with TrustGuard threat detection, and govern its MCP tool access with TrustGate"
 ---
 
 Microsoft Copilot Studio is a low-code Power Platform service used to build
 conversational agents. Makers define instructions, add knowledge sources and
 tools, and publish agents to Teams, websites, or Microsoft 365.
 
-[TrustGate](/trustgate/overview) connects Copilot Studio to MCP servers. The
-default setup manages tool access and identity without inspecting tool payloads.
-Microsoft hosts model execution, so TrustGate cannot inspect agent prompts or
-model responses.
+Microsoft hosts model execution, so nothing of ours sits in the data path. There
+are two integration points, and they solve different problems:
 
-To inspect MCP tool calls and results, attach an optional
-[TrustGuard policy](/integrations/trustgate) to the TrustGate consumer. The policy
-runs before a tool call reaches the MCP server and before its result returns to
-Copilot Studio.
-
-<span id="why-it-needs-a-guardrail"></span>
-
-<span id="what-neuraltrust-does-here"></span>
-
-## Integration capabilities
+## NeuralTrust controls
 
 | Product | What it does for Copilot Studio | What you can enforce |
 | --- | --- | --- |
-| **[TrustGate](/trustgate/overview)** | Publishes the assigned MCP servers through one OAuth endpoint and limits the catalog to the consumer's registries and toolkit. | Tool access and rate limits |
-| **[TrustGuard](/trustguard/overview)** *(optional)* | Evaluates MCP `tools/call` requests and `CallToolResult` responses routed through TrustGate. | Monitor · Block · Redact |
+| **[TrustGuard](/trustguard/overview)** threat detection | Copilot Studio calls TrustGuard for a verdict **before every tool the agent is about to run**, including what earlier tools returned. | Monitor · Block |
+| **[TrustGate](/trustgate/overview)** MCP | Publishes the assigned MCP servers through one OAuth endpoint and limits the catalog to the consumer's registries and toolkit. | Tool access and rate limits |
+| **[TrustGuard](/trustguard/overview)** on MCP traffic *(optional)* | Evaluates MCP `tools/call` requests and `CallToolResult` responses routed through TrustGate. | Monitor · Block · Transform |
 
-## Before you start
+<Warning>
+**Threat detection cannot redact.** Copilot Studio's contract accepts a single
+boolean decision, so there is no field in which to return rewritten content. A
+**Transform** rule produces no masking on this path — use **Block** when content
+must not reach the tool. Redaction is available only on the TrustGate MCP path,
+where TrustGuard owns the payload.
+</Warning>
+
+## Scope
+
+Threat detection covers Copilot Studio agents that use **generative
+orchestration**. It does **not** cover Microsoft 365 Copilot in Word, Teams or
+Outlook, which exposes no hook to third parties.
+
+## Deployment options
+
+| Goal | Configuration | Location |
+| --- | --- | --- |
+| Screen every tool call an agent makes | **Threat detection**: a Copilot Studio collector plus a federated credential in your Entra app | Power Platform admin center, per environment |
+| Centrally manage which MCP tools the agent can reach | **TrustGate MCP** with OAuth and dynamic client registration | The agent's MCP tool connection |
+| Inspect MCP tool payloads as well as access | A TrustGuard policy attached to the TrustGate consumer | On the TrustGate consumer |
+
+The two paths are independent. Threat detection screens every tool the agent
+runs, whatever its source; TrustGate MCP governs only the tools it publishes.
+
+## Set up threat detection (TrustGuard)
+
+Microsoft calls TrustGuard, so nothing is deployed and nothing is proxied.
+Authentication uses an Entra **federated identity credential** — there is no
+shared secret and no API key on this path.
+
+Setup spans three places: the collector's **Connection** tab, your Entra app
+registration, and Power Platform admin center. The Connection tab produces every
+value the other two ask for.
+
+### Before you start
+
+| Requirement | Notes |
+|---|---|
+| A **Copilot Studio** collector | **Agent Runtime → Collectors → Catalog → Agent platforms → Copilot Studio**. |
+| A TrustGuard instance with a **public address** | Microsoft calls in from the internet. The Connection tab says so plainly if your instance has no public address yet — ask your operator before configuring the environment. |
+| Permission to register an application in **Microsoft Entra ID** | You create a single-tenant app and add a credential to it. |
+| **Power Platform admin center** access for the environment | Threat detection is configured per environment, not per agent. |
+| An agent using **generative orchestration** | See [Scope](#scope). |
+
+### 1. Copy the threat detection endpoint
+
+Open the collector and read the **Connection** tab. The **Threat detection
+endpoint** is unique to this collector:
+
+```text
+{TRUSTGUARD_BASE_URL}/v1/evaluate/copilot-studio/{collector_id}
+```
+
+One endpoint per collector, never shared. The federated credential binds this
+exact URL, so if the endpoint changes the credential stops matching.
+
+### 2. Register an application in Microsoft Entra ID
+
+In **Microsoft Entra ID → App registrations**, create a **single-tenant**
+application. Copy two values:
+
+| Value | Where |
+|---|---|
+| **Directory (tenant) ID** | Microsoft Entra ID → Overview |
+| **Application (client) ID** | The app registration you just created |
+
+### 3. Store the tenant and application IDs on the collector
+
+Back on the **Connection** tab, paste both values and press **Save**. Separate
+several Application IDs with commas if more than one application will call.
+
+The status changes from *Waiting for your tenant and application* to *Ready*.
+
+<Warning>
+**Deliveries are refused until both values are stored.** TrustGuard checks the
+caller's application against this allowlist on every request, so an unsaved
+collector rejects Microsoft's calls with `401`.
+</Warning>
+
+### 4. Add the federated identity credential
+
+The Connection tab now shows a **Federated credential subject identifier**. Copy
+it.
+
+In your Entra app registration, open **Certificates & secrets → Federated
+credentials → Add credential** and fill the form:
+
+| Field | Value |
+|---|---|
+| **Federated credential scenario** | Other issuer |
+| **Issuer** | `https://login.microsoftonline.com/{your-tenant-id}/v2.0` |
+| **Type** | Explicit subject identifier |
+| **Value** | The subject identifier copied from the Connection tab |
+| **Audience** | `api://AzureADTokenExchange` |
+
+<Warning>
+**Never build the subject identifier by hand.** It encodes your tenant *and*
+the exact endpoint URL, and the tenant GUID is not written as a GUID — it is
+re-ordered into .NET byte order and base64url-encoded. A subject assembled by
+hand from the tenant ID looks entirely reasonable, **Entra accepts it without
+complaint**, and it never matches an incoming token. Always copy the value the
+Connection tab computes, and copy it again if you change the endpoint.
+</Warning>
+
+### 5. Turn on threat detection in Power Platform admin center
+
+Open the environment → **Security** → **Threat detection**, then enter the
+endpoint from step 1 and the Application (client) ID from step 2.
+
+Power Platform admin center also asks what should happen when TrustGuard cannot
+answer in time.
+
+<Warning>
+**Microsoft's default is to let the agent respond.** If a missed verdict should
+stop the tool rather than wave it through, choose to block the query instead.
+TrustGuard answers within a 700 ms budget because Copilot Studio waits 1000 ms
+and treats a slower answer as no answer.
+</Warning>
+
+Pressing **Save** makes Power Platform call the collector's readiness probe. A
+healthy collector answers `{"isSuccessful": true, "status": "OK"}`.
+
+### 6. Assign a policy
+
+On the collector's **Policies** tab, assign a default policy. Start it in
+**Observe** so findings are recorded without stopping any tool, check
+**Agent Runtime → Activity**, then switch to **Enforce**.
+
+<Warning>
+A collector with no matching policy is **unguarded**: TrustGuard allows every
+tool and inspects nothing.
+</Warning>
+
+## Set up governed tool access (TrustGate)
+
+### Before you start
 
 | Requirement | Notes |
 |---|---|
@@ -48,7 +174,9 @@ that authentication is set to **Dynamic discovery** and that the server URL is
 the endpoint copied from **Connect**.
 </Warning>
 
-## 1. Create the MCP consumer
+
+
+### 1. Create the MCP consumer
 
 In **Agent Gateway** → **Consumers**, create a consumer with protocol **MCP** and
 auth **OAuth2**, bind the [registries](/trustgate/concepts/registries) and
@@ -72,14 +200,14 @@ caller's identity selects the [roles](/trustgate/concepts/roles), which determin
 the registries and toolkit available to that caller.
 </Note>
 
-## 2. Add the MCP tool in Copilot Studio
+### 2. Add the MCP tool in Copilot Studio
 
 1. Create a tool → **MCP**.
 2. Set Authentication → **OAuth** → **Dynamic discovery**.
 3. Paste the consumer URL from [step 1](#1-create-the-mcp-consumer) as the server
    URL. Leave the defaults. If Power Automate opens, no changes are needed there.
 
-## 3. Build the agent and activate the connection
+### 3. Build the agent and activate the connection
 
 1. Create an agent and add the MCP Server tool from step 2.
 2. On the first run, activate every connection when prompted, including the MCP
@@ -89,14 +217,14 @@ the registries and toolkit available to that caller.
    call returns a connection link. After authorization, TrustGate stores and
    refreshes the credential.
 
-## 4. Verify
+### 4. Verify
 
 1. Submit a request that invokes a tool from a bound registry.
 2. Confirm the agent lists only the tools granted by the consumer's toolkit.
 3. Confirm the call in TrustGate telemetry. See
    [Metrics](/trustgate/observability/metrics).
 
-## Optional: inspect tool calls and results
+### Optional: inspect tool calls and results
 
 The preceding steps configure an access-only connection. To evaluate the content
 of MCP traffic with TrustGuard:
@@ -125,8 +253,105 @@ instead of forwarding unmasked content. Redaction applies to DLP outcomes only.
 
 ### Coverage
 
-Microsoft hosts model execution, so neither setup evaluates the agent's prompts
-or model responses.
+Microsoft hosts model execution, so **neither path evaluates the agent's prompts
+or model responses**. What each one sees:
+
+| Surface | Threat detection | TrustGate MCP, access only | TrustGate MCP + TrustGuard policy |
+|---|---|---|---|
+| Agent prompt | Not evaluated | Not evaluated | Not evaluated |
+| Model response | Not evaluated | Not evaluated | Not evaluated |
+| Tool about to run | **Evaluated, whatever its source** | Routed only if the consumer may use it | The `tools/call` request is evaluated |
+| Earlier tool output | **Included in the request** | Not inspected | The `CallToolResult` is evaluated |
+| Redaction | **Not possible** — the response is one boolean | — | Available |
+
+### What threat detection covers
+
+**Microsoft decides what any third party can see here, not us.** Copilot Studio
+exposes exactly one hook to an external security provider: the call immediately
+before a tool runs. Everything else — how the model is prompted, how
+instructions shape behaviour, what the platform remembers between turns —
+happens inside Microsoft's service, where no third party can observe or
+intervene. That is a property of the platform, not a limit of TrustGuard, and
+it applies identically to every vendor in this position.
+
+What that single hook gives you is broad: if the platform orchestrates something
+as a tool execution, it reaches TrustGuard, whatever built it and wherever the
+tool came from. Threat detection sees **what the agent does**, not what it says
+or how it was built.
+
+| Agent surface | Covered | Why |
+|---|:--:|---|
+| **Tools** — connectors, Dataverse, custom actions, MCP tools on the agent | ✅ | Every execution, with its arguments. This is the hook. |
+| **Knowledge** and **Connected agents** | ✅ | Whenever the platform runs them as a tool execution |
+| Output of an earlier tool | ✅ | Carried in the next request, so a poisoned result is seen before the agent acts on it |
+| **Model** — the prompt and the model response | ❌ | Microsoft hosts inference and exposes no hook for it, to anyone |
+| **Skills** — instructions that shape behaviour | ❌ | Applied inside Microsoft's orchestrator. No hook is exposed for it. |
+| **Memory** | ❌ | Held by the platform between turns. No hook is exposed for it. |
+
+In short: **actions are covered; the conversation and the configuration stay
+inside Microsoft's platform.**
+
+<Warning>
+**A prompt on its own is never evaluated on this path.** If someone types a
+jailbreak into the chat, threat detection does not see it — it only sees that
+text if it ends up in the arguments of a tool the agent then runs. To evaluate
+prompts and model responses you need a collector that sits on the model call,
+which Copilot Studio does not offer to third parties. Screening prompts on this
+platform is not something a security vendor can choose to add — Microsoft would
+have to expose the hook first.
+</Warning>
+
+<Note>
+Coverage follows the platform's own orchestration, not a list we maintain. To
+confirm what a specific agent produces, run it in **Observe** and read
+**Agent Runtime → Activity**: every tool execution that reached TrustGuard
+appears there, so the findings are the authoritative answer for your agent.
+</Note>
+
+### What Copilot Studio sends to threat detection
+
+Each delivery carries the planner context (the user message, chat history, the
+model's thought, and previous tool outputs), the definition of the tool about to
+run with its input and output parameters, the input values being passed to it,
+and conversation metadata — agent, user, trigger, conversation and message ids,
+channel, and the incoming client IP.
+
+Every field is treated as optional, so a Copilot Studio API version that adds or
+drops one does not break evaluation.
+
+### The verdict contract
+
+Threat detection answers with a single decision:
+
+```json
+{ "blockAction": false }
+```
+
+A block adds the reason Copilot Studio surfaces to the maker:
+
+```json
+{
+  "blockAction": true,
+  "reasonCode": 1001,
+  "reason": "Blocked by TrustGuard",
+  "diagnostics": "{\"signals\":[…]}"
+}
+```
+
+`blockAction` is the whole contract. That is why this path cannot redact:
+there is no field in which to return rewritten content.
+
+### Failure behavior
+
+| Situation | What happens |
+|---|---|
+| Verdict not ready within **700 ms** | TrustGuard stops waiting. Copilot Studio's own limit is 1000 ms and it treats a slower answer as no answer — the environment setting decides whether the tool runs. |
+| Tenant or Application ID not saved | `401`. Deliveries are refused until both are stored. |
+| Token from an application outside the allowlist | `401`. |
+| Malformed delivery | `400`. |
+| Audience not configured on the instance | `503`. The operator must set the threat-detection audience; TrustGuard refuses deliveries rather than accept a token minted for someone else. |
+
+### MCP tool coverage in detail
 
 | Surface | Default access-only setup | With a TrustGuard policy |
 |---|---|---|
