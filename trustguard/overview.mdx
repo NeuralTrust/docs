@@ -1,275 +1,121 @@
 ---
-title: "Overview"
+title: "TrustGuard"
 "og:title": "TrustGuard: AI Guardrails for LLM and Agent Traffic"
 "twitter:title": "TrustGuard: AI Guardrails for LLM and Agent Traffic"
-description: "Learn how TrustGuard AI guardrails inspect LLM and agent traffic, apply security policies, and return verdicts for collectors to enforce."
+description: "Inspect prompts, responses, and tool activity at runtime. TrustGuard returns a verdict; the collector enforces it."
 ---
 
-**TrustGuard** is NeuralTrust's runtime engine for AI guardrails. It inspects prompts,
-completions, documents, URLs, and tool calls, then returns a structured verdict. It is
-**not** a gateway: it does not route, load-balance, or talk to model providers. The
-[collector](/trustguard/concepts/collectors) that called it decides whether to allow,
-mask, prompt the user, or block.
+TrustGuard inspects prompts, completions, documents, URLs, and tool calls, then
+returns a structured verdict. It is **not** a gateway: it does not route or call
+model providers. The [collector](/trustguard/concepts/collectors) that called it
+decides whether to allow, mask, ask, or block.
 
-**[TrustGate](/trustgate/overview)** provides native inline enforcement for TrustGuard
-verdicts. **[TrustTest](/trusttest/getting-started/overview)** serves a separate purpose:
-it red-teams AI systems before and between releases. You can connect TrustGuard to
-another gateway, an SDK, or a coding-agent plugin.
+[TrustGate](/trustgate/overview) enforces those verdicts natively.
+[TrustTest](/trusttest/getting-started/overview) is the pre-release counterpart:
+it red-teams a system before you rely on runtime controls.
 
 <img
   src="/images/static/img/trustguard-product.svg"
   alt="Flow diagram showing a collector sending input or output to TrustGuard, which selects a policy, evaluates gates and detector rules, and returns a verdict for the collector to apply."
 />
 
-## What it stops
-
-Three things TrustGuard is bought for, and where each is handled:
-
-- **An employee pastes a customer contract into a chat assistant.** The prompt carries
-  names, emails, and an account number. A [DLP](/trustguard/detectors/data-loss-prevention)
-  rule set to **Transform** masks them in flight, so the model receives
-  `[MASKED_EMAIL]` instead of the real address.
-- **A user talks the assistant out of its instructions.** The jailbreak attempt is scored
-  by [Content security](/trustguard/detectors/content-security), and a **Block** rule stops
-  the turn before it reaches the model.
-- **An MCP tool returns text that instructs your agent.** Nobody on your side wrote that
-  instruction — it was planted in a page, a ticket, or a file the tool read.
-  [Agent & MCP security](/trustguard/detectors/agent-mcp-security) screens tool-sourced
-  content for exactly this.
-
-## What TrustGuard inspects
-
-| Area | Catalog |
-|---|---|
-| Jailbreaks, toxicity, topic/keyword moderation, and the URL (`url_analyzer`) and document (`doc_analyzer`) analyzers | [Content security](/trustguard/detectors/content-security) |
-| PII and secrets (optional in-flight masking) | [Data loss prevention](/trustguard/detectors/data-loss-prevention) |
-| Indirect prompt injection in tool-sourced content (MCP / `role=tool`) | [Agent & MCP security](/trustguard/detectors/agent-mcp-security) |
-
-Detectors **find** risks. The [policy](/trustguard/concepts/policies) determines what
-happens next: gates run first (matching attributes such as consumer, model, tool, and
-source), followed by detector rules (**Monitor** / **Block** / **Transform**).
-
-## Where traffic comes from
-
-Create a collector under **Agent Runtime → Collectors → Catalog**.
-
-The five groups and nineteen collector types below are exactly what the catalog offers,
-named as the console names them:
-
-| Catalog group | Collector types |
-|---|---|
-| **Gateway** | [TrustGate](/integrations/trustgate) (native; no `tgk_…` key), [Portkey](/integrations/portkey), [LiteLLM](/integrations/litellm), [Kong](/integrations/kong), [Apigee](/integrations/apigee), [Azure APIM](/integrations/azure-apim) |
-| **AI assistants & coding agents** | [Inference Hooks](/integrations/claude-enterprise) (Claude chat and Cowork, server-side), [Claude Code](/integrations/claude-code), [Cursor](/integrations/cursor), [Codex](/integrations/codex), [GitHub Copilot](/integrations/github-copilot) |
-| **Application** | [Python](/integrations/python-sdk), [Node.js](/integrations/node-sdk), [REST API](/integrations/rest), [Python Middleware](/integrations/python-middleware), [Node.js Middleware](/integrations/node-middleware) |
-| **Agent frameworks** | [n8n](/integrations/n8n) (`@neuraltrust/n8n-nodes-trustguard`), [LangChain](/integrations/langchain) (`langchain-neuraltrust`) |
-| **Agent platforms** | [Microsoft Copilot Studio](/integrations/copilot-studio) |
-
-Most collectors call [`POST /v1/evaluate`](/trustguard/api/evaluate) with a collector
-API key. TrustGate authenticates as the gateway. Inference Hooks uses
-`POST /v1/evaluate/claude`.
-
-**Some gateways still need a piece from you.** [Portkey](/integrations/portkey) and
-[LiteLLM](/integrations/litellm) have a collector type, but TrustGuard is not yet a named
-guardrail in either product: Portkey needs a Bring Your Own Guardrails webhook adapter you
-host, and LiteLLM loads a custom guardrail class you place next to its `config.yaml`. Both
-work today; both are more setup than the other groups.
-
 <Warning>
-A collector with **no matching policy** is **unguarded**: TrustGuard returns
-`status: "allow"` and inspects nothing. Assign a default policy (and per-consumer
-overrides if you need them) before you rely on it.
+A collector with **no matching policy** is unguarded. TrustGuard returns
+`status: "allow"` and inspects nothing. Attach a default policy before you
+rely on it.
 </Warning>
 
-## AI guardrails for coding agents and agent platforms
+<CardGroup cols={2}>
+  <Card title="Connect a collector" icon="plug" href="/integrations/overview">
+    TrustGate, coding agents, other gateways, SDKs, or middleware.
+  </Card>
+  <Card title="How verdicts are enforced" icon="workflow" href="/trustguard/how-it-works">
+    Block, Ask, Transform, and Monitor — and what each collector can actually apply.
+  </Card>
+</CardGroup>
 
-Coding-agent plugins evaluate lifecycle events on developer machines. Agent
-platforms can provide organization-level inference hooks. These integration
-points expose different parts of a request and support different enforcement
-actions.
+## What it stops
 
-| Collector | Path | `source.application` | Enforcement |
-|---|---|---|---|
-| [Claude Enterprise](/integrations/claude-enterprise) | Anthropic organization, server-side (`/v1/evaluate/claude`) | `claude-ai`, `claude-code`, `config-test` | Allow or deny only. Ask is treated as Allow because this endpoint has no interactive confirmation. |
-| [Claude Code](/integrations/claude-code) | Laptop plugin + binary + `tgk_…` | `claude-code-plugin` | Block on prompts; Block or Ask on tool calls |
-| [Cursor](/integrations/cursor) | Plugin + MDM `cursor.json` | `cursor-plugin` | Block on prompts; Block or Ask on tool calls |
-| [Codex](/integrations/codex) | Plugin / managed hooks + `codex.json` | `codex-plugin` | Block to stop. Ask is extra context only (no dialog) |
-| [GitHub Copilot](/integrations/github-copilot) | Plugin / policy hooks + `copilot.json` | `copilot-plugin` | Block or Ask on tool calls; prompt events are audit-only |
+<CardGroup cols={3}>
+  <Card title="Data loss" icon="eye-off" href="/trustguard/detectors/data-loss-prevention">
+    PII and secrets. Set **Transform** to mask them in flight.
+  </Card>
+  <Card title="Jailbreaks and abuse" icon="shield-off" href="/trustguard/detectors/content-security">
+    Prompt injection, toxicity, topic controls, URLs, and documents.
+  </Card>
+  <Card title="Tool-borne attacks" icon="bot" href="/trustguard/detectors/agent-mcp-security">
+    Indirect injection in MCP and other `role=tool` content.
+  </Card>
+</CardGroup>
 
-A gate on `claude-code` (Claude Enterprise, server-side) does **not** match the laptop plugin
-(`claude-code-plugin`). TrustGate MCP is an [organization connector](/integrations/claude-enterprise#organization-connectors),
-not one of these plugins. Do not put a `tgk_…` key on the connector.
-
-Full list: [Integrations](/integrations/overview).
+Detectors **find** risk. The [policy](/trustguard/concepts/policies) decides what
+happens next: gates match metadata first, then detector rules run
+(**Monitor** / **Block** / **Transform**).
 
 ## Building blocks
 
-| Concept | What it is |
-|---|---|
-| **[Detector](/trustguard/concepts/detectors)** | A named instance of a [catalog](/trustguard/detectors/overview) detector plus its settings. Detection-only. |
-| **[Policy](/trustguard/concepts/policies)** | Gates + detector rules (Input / Output), and **Observe / Enforce**. Built under **Agent Runtime → Policies**. |
-| **[Collector](/trustguard/concepts/collectors)** | The integration point that sends requests to a policy. |
-| **Gate** | A rule on request **metadata** — consumer, model, tool, source — not on the text. Gates run before detectors and can settle a request without reaching them. |
-| **Finding** | What a gate or detector reported (`source`, `signal`, `outcome`, `evidence`). |
-
-Requests do **not** name detectors. TrustGuard resolves the collector, selects the
-policy, runs gates, then applies detector rules that match `direction`. See
-[Evaluation pipeline](/trustguard/api/evaluate#evaluation-pipeline).
-
-## The verdict
-
-Everything that fires reduces to a single `status`. The console and the API each have a
-name for it, so here they are side by side — most restrictive first, which is also the
-order TrustGuard applies when several fire at once:
-
-| Console | API `status` | Produced by | What the collector does |
-|---|---|---|---|
-| **Block** | `block` | a gate or a detector rule | Stops the interaction before the model, the tool, or the user sees it. |
-| **Ask** | `ask` | **a gate only, on input only** | Asks the person to confirm. Needs a human at a keyboard, so most collectors cannot honour it. |
-| **Transform** | `transform` | a detector rule — `data_loss_prevention` only | Rewrites the content and continues, masked. Returned as `transformed_payload`. |
-| **Monitor** | `report` | a gate (labelled **Report** there) or a detector rule | Records the finding and continues. |
-| **Allow** | `allow` | nothing fired, or everything was waived | Continues untouched. |
-
-Two things this table exists to settle:
-
-- **Monitor and `report` are the same thing.** The console labels it **Monitor** on a
-  detector rule and **Report** on a gate; the API value is `report` in both cases.
-- **There is no Ask rule.** A detector rule can only be Monitor, Block, or Transform.
-  `ask` comes from a gate, and only on input — on output a gate with Ask does not match.
-
-Which of these a given collector can actually apply varies:
-[TrustGuard coverage](/trustguard/how-it-works) is the per-collector matrix. Read it
-before designing a policy around Transform or Ask.
-
-## A request and its verdict
-
-The smallest useful call — an employee prompt on the way in:
-
-```json
-{
-  "payload": { "input": "My email is jane.doe@example.com, please draft a reply" },
-  "direction": "input",
-  "protocol": "llm",
-  "consumer_id": "jane.doe@acme.com"
-}
-```
-
-With a DLP detector on a **Transform** rule, TrustGuard answers:
-
-```json
-{
-  "status": "transform",
-  "transformed_payload": { "input": "My email is [MASKED_EMAIL], please draft a reply" },
-  "findings": [
-    {
-      "source": { "kind": "detector", "plugin": "data_loss_prevention", "detector_name": "PII masking" },
-      "signal": { "type": "pii", "confidence": 1.0 },
-      "outcome": { "action": "transform" },
-      "evidence": { "masked": 1, "entities": ["email"] }
-    }
-  ]
-}
-```
-
-The collector forwards `transformed_payload` instead of the original. Every field, plus
-the base URL, limits, and status codes: [Evaluate API](/trustguard/api/evaluate).
-
-## Observe vs Enforce
-
-Every policy runs in one of two modes, switched on its **Basics** tab. In **Observe**
-everything is recorded and nothing is applied: blocks, asks, and transforms are all
-downgraded, so the status never goes past `report`. In **Enforce**, actions apply as
-configured. Run a new policy in **Observe** until the signal looks right, then switch it.
-
-The collector acts on `status`. TrustGate enforces the verdict on the route;
-coding-agent behavior varies by event and host, as
-[TrustGuard coverage](/trustguard/how-it-works) sets out. A successful evaluation returns
-`HTTP 200` **even when `status` is `block`**. A non-2xx response means something else
-entirely: authentication failed, the body was rejected, the plan quota was exceeded, or a
-detector errored while the deployment was set to
-[fail-closed](/trustguard/api/evaluate#failure-behavior).
+<CardGroup cols={2}>
+  <Card title="Detectors" icon="scan-search" href="/trustguard/concepts/detectors">
+    A catalog detector plus its settings. Detection only — they do not enforce.
+  </Card>
+  <Card title="Policies" icon="file-text" href="/trustguard/concepts/policies">
+    Gates, Input / Output rules, and Observe vs Enforce.
+  </Card>
+  <Card title="Collectors" icon="radar" href="/trustguard/concepts/collectors">
+    The integration point that sends traffic to a policy.
+  </Card>
+  <Card title="Evaluate API" icon="code" href="/trustguard/api/evaluate">
+    `POST /v1/evaluate`. Most collectors call this; TrustGate does not need a `tgk_` key.
+  </Card>
+</CardGroup>
 
 ## Get started
 
-You need a workspace with TrustGuard enabled. It is entitlement-gated, so if your team
-does not have it, **Agent Runtime** does not appear in the console sidebar at all.
-TrustGuard runs as SaaS and self-hosted; the console shows the
-[base URL](/trustguard/api/evaluate#base-url) for your deployment.
+TrustGuard is entitlement-gated. If your team does not have it, **Agent Runtime**
+does not appear in the console. The fastest path is **Agent Runtime → Getting
+started**, which creates detectors and a first policy, tests them, then connects
+the collector.
 
-The console walks you through setup in three steps under **Agent Runtime → Getting
-started**, and that is the fastest path — it creates the detectors and a first policy for
-you, tests them, and connects the collector last.
+1. **Build a policy** from the [detector catalog](/trustguard/detectors/overview).
+   Leave it in **Observe**.
+2. **Test it** on the policy **Test** tab. The tab evaluates the *saved* policy.
+3. **Connect a collector** under **Collectors → Catalog**, then attach the policy.
+   Until you attach one, every request comes back `allow`.
 
-1. **Build a policy.** Pick the [detectors](/trustguard/detectors/overview) you want and
-   add Input / Output rules — or gates alone, if you are matching on metadata only. Leave
-   the policy in **Observe**.
-2. **Test it.** Run a sample on the policy **Test** tab. It evaluates the *saved* policy,
-   so save before you test.
-3. **Connect a collector.** Create one under **Agent Runtime → Collectors → Catalog**,
-   then attach the policy: the **Policies** tab on the collector, or **Collectors** on the
-   policy. **Until a policy is attached, that collector inspects nothing** and every
-   request comes back `allow`.
+Watch **Activity**, then switch the policy to **Enforce**.
 
-Then watch **Agent Runtime → Activity** for real traffic, and switch the policy to
-**Enforce** once the findings look right.
+## FAQ
 
-To build the same setup by hand, create the detectors and policy under **Agent Runtime →
-Detectors** and **→ Policies**, then attach a collector as in step 3.
-
-## TrustGuard FAQ
-
-### Is TrustGuard an AI gateway?
-
-No. TrustGuard's AI guardrails evaluate traffic and return verdicts. The calling
-collector applies the verdict; when that collector is a gateway, it also routes the
-traffic. TrustGate includes a native TrustGuard integration.
-
-### What happens if a collector has no matching policy?
-
-TrustGuard returns `status: "allow"` without running detectors. Assign a default policy
-before relying on the collector, then add per-consumer overrides if needed.
-
-### Can TrustGuard inspect tool calls?
-
-Yes, when the collector sends tool events. Available enforcement actions depend on the
-collector and host, as shown in [TrustGuard coverage](/trustguard/how-it-works).
-
-### Can I evaluate a policy without blocking traffic?
-
-Yes. Start the policy in **Observe** to record findings without blocking or transforming
-traffic. Move to **Enforce** after you validate the results in **Activity**.
-
-### Do I need TrustGate to use TrustGuard?
-
-No. You can connect TrustGuard through another supported gateway, an SDK, middleware,
-or a coding-agent plugin.
-
-### How does TrustGuard choose what to evaluate?
-
-TrustGuard resolves the collector and its assigned policy. It runs matching gates first,
-then detector rules for the request's Input or Output direction.
-
-## Where to go next
+<AccordionGroup>
+<Accordion title="Is TrustGuard an AI gateway?">
+No. It evaluates traffic and returns a verdict. The collector applies it. When
+that collector is TrustGate, the gateway also routes the call.
+</Accordion>
+<Accordion title="Do I need TrustGate?">
+No. Use another supported gateway, an SDK, middleware, or a coding-agent plugin.
+See [Integrations](/integrations/overview).
+</Accordion>
+<Accordion title="Can I evaluate a policy without blocking traffic?">
+Yes. **Observe** records findings and downgrades block, ask, and transform to
+`report`. Switch to **Enforce** after Activity looks right.
+</Accordion>
+<Accordion title="Can TrustGuard inspect tool calls?">
+Yes, when the collector sends tool events. Which actions the host can apply is
+in [How it works](/trustguard/how-it-works).
+</Accordion>
+</AccordionGroup>
 
 <CardGroup cols={2}>
-  <Card title="How it works" icon="workflow" href="/trustguard/how-it-works">
-    Compare policy actions and enforcement support across collectors.
+  <Card title="Detector catalog" icon="list" href="/trustguard/detectors/overview">
+    Built-in detections and their settings.
   </Card>
-  <Card title="Policies" icon="shield-check" href="/trustguard/concepts/policies">
-    Tabs, Observe / Enforce, gates (including Ask), Test.
+  <Card title="Data handling" icon="lock" href="/trustguard/data-handling">
+    What TrustGuard stores, redacts, and for how long.
+  </Card>
+  <Card title="Alerts" icon="siren" href="/platform/alerts">
+    Turn findings into SIEM-ready alerts.
   </Card>
   <Card title="Coding agents" icon="laptop" href="/integrations/overview#ai-coding-agents">
     Claude Code, Cursor, Codex, and GitHub Copilot.
-  </Card>
-  <Card title="Detector catalog" icon="list" href="/trustguard/detectors/overview">
-    Built-in detections and settings.
-  </Card>
-  <Card title="Evaluate API" icon="code" href="/trustguard/api/evaluate">
-    `POST /v1/evaluate`, base URL, limits, and status codes.
-  </Card>
-  <Card title="Data handling" icon="lock" href="/trustguard/data-handling">
-    What TrustGuard stores, what it redacts, and for how long.
-  </Card>
-  <Card title="Telemetry Alerts" icon="siren" href="/platform/alerts">
-    Turn findings into alerts.
   </Card>
 </CardGroup>
