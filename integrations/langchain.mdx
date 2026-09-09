@@ -22,6 +22,10 @@ Pass the agent's tool list to the middleware to include **tool declarations** in
 the evaluation payload. This allows tool-poisoning rules to inspect tool names,
 descriptions, and schemas.
 
+Policy can also apply across turns rather than to one message at a time, which
+requires passing a conversation identifier on every invocation — see
+[Group the turns of a conversation](#4-group-the-turns-of-a-conversation).
+
 ## Before you start
 
 | Requirement | Notes |
@@ -67,6 +71,11 @@ agent = create_agent(
 result = agent.invoke({"messages": [("human", "Hello")]})
 ```
 
+This evaluates one turn in isolation. For a chat application, pass a
+conversation identifier on every invocation so the turns are evaluated as one
+conversation — see
+[Group the turns of a conversation](#4-group-the-turns-of-a-conversation).
+
 Load credentials from the environment instead of placing them in the constructor:
 
 ```bash
@@ -103,7 +112,104 @@ It adds one evaluation round trip per tool call.
 
 Both sync (`invoke`) and async (`ainvoke`) paths are implemented for every hook.
 
-## 4. Verify
+## 4. Group the turns of a conversation
+
+A multi-turn attack spreads its intent across several messages. Each one reads as
+harmless on its own; the escalation, the reinforcement, or the reassembled
+instruction exists only across turns. See
+[multi-turn attacks](/trusttest/create/threat-detection/prompt-injections/multi-turn/overview)
+for the techniques involved — Crescendo, Echo Chamber, Multi-Turn Manipulation,
+and Payload Splitting. Their common target is a check that inspects each message
+independently, which is what the middleware does until you give it the
+conversation.
+
+Two inputs give TrustGuard the conversation, and they are complementary rather
+than alternatives:
+
+| What the middleware sends | What TrustGuard can then do |
+|---|---|
+| A stable `session_id` on **every** evaluation of one conversation | Group the turns server-side. Findings for one conversation appear together in **Activity**, `session.id` becomes available as a [gate](/trustguard/concepts/policies#gates) condition, and the [stateful detectors](/trustguard/concepts/collectors#attribution) get the grouping they rely on. |
+| Earlier turns inside `payload.messages` | Score the newest message inside one evaluation call that also contains what came before. |
+
+Neither happens by default. `/v1/evaluate`
+[synthesizes a `session_id` when the field is omitted](/trustguard/api/evaluate#request),
+so an agent that never passes a `thread_id` produces one session per evaluation.
+Nothing errors and no finding goes missing, so the gap is only visible as
+single-turn conversations in **Activity**.
+
+### Pass a thread_id on every invocation
+
+The middleware takes `session_id` from the LangGraph `thread_id` in the run
+config. Set it per invocation, so one agent and one middleware instance can serve
+many conversations:
+
+```python
+from langchain.agents import create_agent
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_neuraltrust import TrustGuardMiddleware
+
+agent = create_agent(
+    model="gpt-4o-mini",
+    tools=tools,
+    middleware=[TrustGuardMiddleware(check_input=True, check_output=True)],
+    checkpointer=InMemorySaver(),
+)
+
+config = {"configurable": {"thread_id": str(conversation_id)}}
+agent.invoke({"messages": [("human", "first turn")]}, config=config)
+agent.invoke({"messages": [("human", "second turn")]}, config=config)
+```
+
+Both turns evaluate under the same `session_id`, on every enabled stage —
+input, output, tool result, and tool call.
+
+The `thread_id` must be a non-blank **string**. LangGraph accepts a `uuid.UUID`
+object or an `int` and checkpoints correctly, but the middleware only forwards a
+string, so a non-string or empty `thread_id` drops `session_id` without an error.
+Call `str()` on whatever your application uses as a conversation identifier.
+
+<Warning>
+`session_id` and `TRUSTGUARD_SESSION_ID` are resolved once, when the middleware is
+constructed, and they override `thread_id` on every request that instance makes.
+On a multi-user server that collapses every conversation into one session. Use them
+only for a single-conversation script, and use `thread_id` everywhere else.
+</Warning>
+
+### Give one call the history
+
+With a checkpointer and a stable `thread_id`, `before_model` receives the whole
+accumulated thread, and the middleware forwards all of it. The input evaluation
+payload therefore already contains the earlier turns. Without a checkpointer, the
+application passes the transcript it wants evaluated in the `invoke` payload
+itself.
+
+The message list is sent untrimmed. It grows by two messages per turn, more when
+tools run, and the `payload_tools` schemas are re-sent on every pass through the
+agent loop. There is no windowing setting, so raise `timeout` from its `5.0`
+second default for long threads and measure against a representative one.
+
+| Stage | What its payload contains |
+|---|---|
+| Input (`before_model`) | Every message in state, plus the `payload_tools` schemas |
+| Output (`after_model`) | The last AI message only |
+| Tool result | The tool messages from the previous step only |
+| Tool call (`wrap_tool_call`) | The pending call only |
+
+Only the input stage carries history. The other three depend entirely on the
+`session_id` grouping for conversational context.
+
+<Warning>
+TrustGuard evaluates the messages that are in state when its `before_model` hook
+runs. Any middleware that rewrites `state["messages"]` first —
+`SummarizationMiddleware`, for example — replaces the turns it condensed, and a
+checkpointer persists that rewrite, so those turns are not in the payload. If a
+policy needs the original turns, capture one payload and confirm what it
+contains. A `SystemMessage` set through `create_agent(system_prompt=…)` is never
+in state and never reaches the payload; one placed in `messages` is sent in full
+on every input evaluation.
+</Warning>
+
+## 5. Verify
 
 ```python
 from langchain.agents import create_agent
@@ -230,9 +336,13 @@ Every setting falls back to an environment variable:
 | `model_name` | `TRUSTGUARD_MODEL_NAME` | the runtime context model |
 | `timeout` | `TRUSTGUARD_TIMEOUT` | `5.0` seconds |
 
-When `session_id` is unset, the middleware uses the LangGraph `thread_id`. This
-groups turns in **Activity** by the same conversation identifier as the
-application.
+`session_id` and `TRUSTGUARD_SESSION_ID` are read once at construction and pin
+that value to every request the instance makes. Leave both unset and pass the
+conversation identifier per invocation as the LangGraph `thread_id` instead. See
+[Group the turns of a conversation](#4-group-the-turns-of-a-conversation).
+
+The middleware never sends `consumer_id`, so a collector attached in **Consumer
+ID** routing mode has nothing to match. Attach it in **Default** routing mode.
 
 **Fail-open or fail-closed.** `unreachable_fallback` applies only when
 TrustGuard cannot be reached because of a connection error, timeout, HTTP
@@ -280,9 +390,15 @@ the stream at the gateway.
 
 ### Attributes
 
-- `session_id`: the LangGraph `thread_id` unless you set it
+- `session_id`: the LangGraph `thread_id` unless you set it, and omitted when
+  neither is a non-blank string. Sent on every stage. See
+  [Group the turns of a conversation](#4-group-the-turns-of-a-conversation)
 - `model_name`: the runtime context model unless you set it
 - `trace_id`: included in every verdict and the matching finding in **Activity**
+
+The wire `direction` has two values, not four. Only the output stage sends
+`direction: "output"`; the input, tool-result, and tool-call stages all send
+`direction: "input"`, so all three are evaluated by the policy's Input phase.
 
 `on_violation(verdict, stage)` receives the stage name alongside the verdict, so
 alerting can distinguish an input finding from a tool-call finding without
@@ -299,6 +415,11 @@ parsing the payload. Reconcile a run with the console on `trace_id`.
 | An output-side block did not stop anything | The route streams. `after_model` runs after the tokens are sent |
 | A masking policy leaves text unchanged | The transform had a mismatched message count, role, tool name or ID, or a non-text block, so the middleware refused it |
 | The agent gained tools it should not have | The tool list was passed as `tools` instead of `payload_tools` |
+| Every turn is its own conversation in **Activity** | No `thread_id` was passed in the run config, so `/v1/evaluate` synthesizes a session per evaluation |
+| A `thread_id` is passed but the turns still do not group | It is not a non-blank string. A `uuid.UUID` object or an `int` checkpoints correctly but is dropped by the middleware. Wrap it in `str()` |
+| Every conversation shares one session | `session_id` or `TRUSTGUARD_SESSION_ID` is set, and it overrides `thread_id` on every request that instance makes |
+| An input evaluation is missing earlier turns | No checkpointer, so state holds only what `invoke` passed; or middleware rewrote `state["messages"]` before TrustGuard's `before_model` hook ran |
+| Input payloads grow until requests time out | The message list is sent untrimmed and `payload_tools` is re-sent on every pass. Raise `timeout`, or shorten the thread |
 | `ImportError` or a missing `create_agent` | LangChain 0.x. The middleware API landed in 1.0 |
 | Nothing in **Activity** | No policy assigned to the collector, or `api_base` points at the wrong host |
 | Runs hang | `timeout` is too high for the number of enabled stages. Account for each evaluation round trip |

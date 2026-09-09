@@ -29,6 +29,10 @@ sub-node attached to the AI Agent. The collector stores the policy, each verdict
 includes a `trace_id` that appears in **Activity**, and `transform` rewrites the
 payload before the next node.
 
+Policy can also apply across the turns of a conversation rather than to one message
+at a time, which takes two options the node does not set for you — see
+[Group the turns of a conversation](#7-group-the-turns-of-a-conversation).
+
 ## Before you start
 
 | Requirement | Notes |
@@ -103,7 +107,7 @@ template shows this configuration.
 | Mode | Sends | Use for |
 |---|---|---|
 | **Text** | One chat message wrapped in `payload.messages`; role `user` on Evaluate Input and `assistant` on Evaluate Output | A chat trigger, webhook field, or model response |
-| **Messages** | An OpenAI-style array as `payload.messages`, verbatim | A transcript you have assembled, including `tool_calls` and `tool` results |
+| **Messages** | An OpenAI-style array as `payload.messages`, verbatim | A transcript you have assembled, including `tool_calls` and `tool` results. See [Group the turns of a conversation](#7-group-the-turns-of-a-conversation) |
 
 The role matters: an Output-phase rule scoped to `assistant`, or an indirect-injection rule scoped
 to `tool`, only fires if the message carries that role. **Text** prefills
@@ -230,13 +234,87 @@ click **Add option**.
 | Timeout (Seconds) | HTTP timeout **per attempt**, 1–60 | `5` |
 | Fail Open on Unreachable | see [Configuration](#configuration) | off |
 
-Add **Session ID** and keep its prefilled `{{ $json.sessionId }}`: leave the option off and
-TrustGuard synthesizes a session per request, so **Activity** cannot group turns the way your chat
-does. Add **Consumer ID** if the collector has per-consumer [policy](/trustguard/concepts/policies)
-overrides, or every request resolves to the default policy. In a chat workflow, use the trigger's
-authenticated user. **Protocol** should stay `llm` for chat workflows.
+Add **Session ID** so TrustGuard can evaluate a conversation instead of isolated messages. See
+[Group the turns of a conversation](#7-group-the-turns-of-a-conversation) for what to point it at,
+which is not always the prefilled expression. Add **Consumer ID** if the collector has
+per-consumer [policy](/trustguard/concepts/policies) overrides, or every request resolves to the
+default policy. In a chat workflow, use the trigger's authenticated user. **Protocol** should stay
+`llm` for chat workflows.
 
-## 7. Verify
+<Warning>
+Both **Session ID** and **Consumer ID** are dropped when their expression resolves to an empty
+value, and neither raises an error. Unlike the **Text** parameter, which fails closed, an option
+that resolves to nothing simply is not sent. Confirm both in **Activity** after wiring them.
+</Warning>
+
+## 7. Group the turns of a conversation
+
+A multi-turn attack spreads its intent across several messages. Each one reads as harmless on its
+own; the escalation, the reinforcement, or the reassembled instruction exists only across turns.
+See [multi-turn attacks](/trusttest/create/threat-detection/prompt-injections/multi-turn/overview)
+for the techniques involved — Crescendo, Echo Chamber, Multi-Turn Manipulation, and Payload
+Splitting. Their common target is a check that inspects each message independently, which is what
+the node does until you give it the conversation.
+
+Two inputs give TrustGuard the conversation, and they are complementary rather than alternatives:
+
+| What the node sends | What TrustGuard can then do |
+|---|---|
+| A stable `session_id` on **every** call of one conversation | Group the turns server-side. Findings for one conversation appear together in **Activity**, `session.id` becomes available as a [gate](/trustguard/concepts/policies#gates) condition, and the [stateful detectors](/trustguard/concepts/collectors#attribution) get the grouping they rely on. |
+| Earlier turns inside `payload.messages` | Score the newest message inside one evaluation call that also contains what came before. |
+
+Neither happens by default. `/v1/evaluate`
+[synthesizes a `session_id` when the field is omitted](/trustguard/api/evaluate#request), so a
+workflow that never sends one produces one session per request. Nothing errors and no finding goes
+missing, so the gap is only visible as single-turn conversations in **Activity**.
+
+### Point Session ID at a key that survives the workflow
+
+The **Session ID** option is per node. Add it on **every** TrustGuard node in the workflow —
+each one reads its own **Options** collection and builds its own request body — and point each at
+an expression that actually resolves at that point on the canvas.
+
+| Trigger | Expression to use |
+|---|---|
+| Chat Trigger, on a node wired directly to it | `{{ $json.sessionId }}`, the prefilled value. The trigger emits the chat client's own `sessionId`, which the client reuses for every message of that chat. |
+| Chat Trigger, on any node after an AI Agent | `{{ $('When chat message received').first().json.sessionId }}`, naming your trigger. |
+| Webhook | Your own field: `{{ $json.body.session_id }}`, or a header such as `{{ $json.headers['x-session-id'] }}`. A webhook item has no `sessionId`. |
+
+<Warning>
+The prefilled `{{ $json.sessionId }}` is correct on **Evaluate Input** and wrong on
+**Evaluate Output** in a chat workflow. The TrustGuard node preserves the incoming item, but an
+**AI Agent** node replaces it with its own result, so `sessionId` is gone by the time the output
+node runs and the expression resolves to nothing. Reference the trigger by name instead, or put a
+**Set** node with **Include Other Input Fields** enabled after the agent.
+</Warning>
+
+Align the value with your memory node's session key so the conversation TrustGuard groups and the
+conversation the agent remembers are the same one. Every n8n chat-memory node exposes
+**Session ID** as either **Connected Chat Trigger Node** or **Define below**; whichever expression
+it resolves, use the same one in the TrustGuard option.
+
+`{{ $execution.id }}` and `{{ $workflow.id }}` are not conversation keys. A chat turn is one
+execution, so the first changes every turn, and the second is shared by every conversation in the
+workflow.
+
+### Give one call the history
+
+Set **Input Mode** to **Messages** and point the **Messages** parameter at an assembled
+OpenAI-style array. The node sends it verbatim as `payload.messages`, so one evaluation call
+carries the conversation, with `tool_calls` and `tool` results intact.
+
+Build the array in a **Code** node from whatever your workflow already stores. To read an
+attached memory node's history onto the `main` path, use a **Chat Memory Manager** node in
+**Get Many Messages** mode, then map its output in a Code node: its entries are keyed by sender
+(`human`, `ai`, `system`) rather than by `role`, and the node fails closed on an array whose
+items have no `role`.
+
+The whole transcript is re-sent and re-scanned on every turn, and the node evaluates one item per
+call. In Messages mode the node writes its own normalized array back to `json.messages` on every
+branch, not only on `transform`, so a downstream node that appends the next turn is reading the
+node's copy rather than the one it assembled.
+
+## 8. Verify
 
 With a jailbreak rule in Enforce mode, run the workflow with:
 
@@ -345,7 +423,10 @@ It is set both on a fail-open Allow item and on a Block-routed failure.
 
 `protocol`, `attributes.content_type`, and `attributes.model.name` are sent on **every** request.
 When Model Name is blank, `attributes.model.name` is an empty string. `collector_key`,
-`consumer_id`, `session_id`, and `attributes.model.provider` are sent only when set.
+`consumer_id`, `session_id`, and `attributes.model.provider` are sent only when set — meaning the
+option was added *and* its expression resolved to a non-empty value. Each node builds its own
+body, so an option set on one TrustGuard node does not apply to another. See
+[Group the turns of a conversation](#7-group-the-turns-of-a-conversation).
 
 `workflowId`, `workflowName`, and `executionId` are output metadata only. They are added to the
 item for correlation and are not sent in the evaluation body because `/v1/evaluate` rejects
@@ -396,6 +477,10 @@ into the workflow JSON because it is stored unencrypted and included in every ex
 | A downstream node runs several times per item | Several outputs are wired into it. Put a **Merge** node in between |
 | `400` from `/v1/evaluate` | The body contains extra top-level keys, which the endpoint rejects |
 | **Activity** cannot group a conversation | The **Session ID** option was never added, so nothing is sent and TrustGuard synthesizes a session per request |
+| Input turns group but output turns do not | The output node kept the prefilled `{{ $json.sessionId }}`, and the AI Agent replaced the item, so the expression resolves to nothing. Reference the trigger by name |
+| A **Session ID** or **Consumer ID** option is set but never arrives | The expression resolved to an empty value. An option that resolves to nothing is dropped silently; only the **Text** parameter fails closed |
+| Turns group in **Activity** but the agent does not remember them | The memory node's session key is a different value than the one sent as `session_id`. Use one expression for both |
+| Each turn is a separate session even though a key is sent | The expression is `{{ $execution.id }}`, which is a new value per chat turn |
 | Every request resolves to the default policy | No **Consumer ID**, so per-consumer overrides never match |
 | `npm install` warns or fails on the host | Node 25+. The package declares `engines: node >=20 <25` |
 | The node cannot be installed on n8n Cloud | Cloud installs only community nodes verified by n8n. Use the [templates](#templates) |
