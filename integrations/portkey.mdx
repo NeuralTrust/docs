@@ -23,6 +23,10 @@ to a model provider bypass this integration.
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | Evaluates the request before the provider call and a non-streaming response before Portkey returns it | Monitor · Block |
 
+Policy can also apply across the turns of a conversation rather than to one
+message at a time, which requires the caller to send a session key — see
+[Group the turns of a conversation](#3-group-the-turns-of-a-conversation).
+
 ## Before you start
 
 | Requirement | Notes |
@@ -51,6 +55,12 @@ your webhook service and return its result as JSON:
 ```js
 async function evaluatePortkey(event) {
   const isInput = event.eventType === "beforeRequestHook";
+
+  // A streamed response has no assembled body to inspect.
+  if (!isInput && (event.request?.isStreamingRequest || event.request?.json?.stream)) {
+    return { verdict: true, data: { skipped: "streaming" } };
+  }
+
   const source = isInput ? event.request : event.response;
   const payload =
     source?.json && Object.keys(source.json).length > 0
@@ -67,8 +77,10 @@ async function evaluatePortkey(event) {
       protocol: "llm",
       direction: isInput ? "input" : "output",
       payload,
-      consumer_id: event.metadata?._user,
-      session_id: event.metadata?.session_id,
+      consumer_id: event.metadata?._user ? String(event.metadata._user) : undefined,
+      session_id: event.metadata?.session_id
+        ? String(event.metadata.session_id)
+        : undefined,
       attributes: {
         source: { application: "portkey" },
         model: {
@@ -94,6 +106,11 @@ async function evaluatePortkey(event) {
   };
 }
 ```
+
+Sending `request.json` as `payload` is what puts the caller's whole `messages`
+array in front of the policy, so the evaluation is not limited to the newest
+message. See
+[Group the turns of a conversation](#3-group-the-turns-of-a-conversation).
 
 Do not point `default.webhook` directly at `/v1/evaluate`. Portkey's hook event
 contains top-level fields that the Evaluate API does not accept, and the
@@ -163,18 +180,86 @@ Prefer a saved Portkey configuration when the webhook header contains a secret.
 An inline configuration sent through `x-portkey-config` exposes that value to
 the calling application.
 
-## 3. Send consumer and session identifiers
+## 3. Group the turns of a conversation
 
-Pass verified identifiers through Portkey metadata so the adapter can populate
-`consumer_id` and `session_id`:
+A multi-turn attack spreads its intent across several messages. Each one reads as
+harmless on its own; the escalation, the reinforcement, or the reassembled
+instruction exists only across turns. See
+[multi-turn attacks](/trusttest/create/threat-detection/prompt-injections/multi-turn/overview)
+for the techniques involved — Crescendo, Echo Chamber, Multi-Turn Manipulation,
+and Payload Splitting. Their common target is a check that inspects each message
+independently, which is what the adapter does until you give it the conversation.
+
+Two inputs give TrustGuard the conversation, and they are complementary rather
+than alternatives:
+
+| What the adapter sends | What TrustGuard can then do |
+|---|---|
+| A stable `session_id` on **every** request of one conversation | Group the turns server-side. Findings for one conversation appear together in **Activity**, `session.id` becomes available as a [gate](/trustguard/concepts/policies#gates) condition, and the [stateful detectors](/trustguard/concepts/collectors#attribution) get the grouping they rely on. |
+| Earlier turns inside `payload.messages` | Score the newest message inside one evaluation call that also contains what came before. |
+
+Neither happens by default. `/v1/evaluate`
+[synthesizes a `session_id` when the field is omitted](/trustguard/api/evaluate#request),
+so a gateway whose callers send no conversation key produces one session per
+request. Nothing errors and no finding goes missing, so the gap is only visible
+as single-turn conversations in **Activity**.
+
+### Send a session ID through metadata
+
+Portkey has no conversation identifier of its own, so the caller — or, better, an
+authenticated proxy in front of Portkey — supplies one on every request:
 
 ```http
 x-portkey-metadata: {"_user":"user-123","session_id":"conversation-456"}
 ```
 
-Portkey forwards this object to the webhook as `event.metadata`. `_user` is
-Portkey's documented user identifier, and `session_id` is its recommended key
-for grouping related requests.
+Portkey forwards this object to the webhook as `event.metadata`, on both hook
+phases. `_user` is Portkey's reserved user identifier, and `session_id` is the
+key its own metadata guidance recommends for grouping related requests, though
+the gateway itself does nothing with it: only your adapter reads it.
+
+The adapter maps both onto the Evaluate API body, as shown in
+[step 1](#1-implement-the-webhook-adapter). It coerces each to a string because
+Portkey parses the header without validating value types, so a caller can put a
+number where a string is expected.
+
+<Warning>
+Metadata is caller-supplied, so a client can pick its own `session_id` and
+`_user`. Have your authentication layer set or overwrite both before the request
+reaches Portkey if either drives a policy decision. Metadata attached to a
+workspace or an API key also takes precedence over per-request metadata, so a
+`session_id` or `_user` set at either level silently overrides the value the
+caller sends.
+</Warning>
+
+Do not reuse `x-portkey-trace-id` as the conversation key. Portkey generates one
+per request when the caller omits it, it identifies a request rather than a
+conversation, and it does not reach the webhook body at all.
+
+### Give one call the history
+
+Portkey does not store turns, but it does not need to: `event.request.json` is
+the request body as Portkey parsed it, so on a `/v1/chat/completions` call it
+already holds the caller's complete `messages` array. Forwarding it as `payload`
+— which the [step 1](#1-implement-the-webhook-adapter) adapter does — puts the
+whole conversation in one evaluation call at no extra cost.
+
+<Warning>
+`event.request.text` is only the **last** message, not the transcript. An adapter
+that falls back to `{ input: source.text }` when `request.json` looks empty
+silently discards every earlier turn. Treat an empty `request.json` on a chat
+completion as an error worth logging rather than a reason to degrade: it means the
+body arrived in a form Portkey did not parse.
+</Warning>
+
+The transcript grows every turn, so account for the payload size in the webhook
+timeout and in your token budget.
+
+The `afterRequestHook` event carries `request.json` alongside `response.json`, so
+an adapter can send the transcript and the completion together on the output leg
+rather than the completion alone. The sample sends only the completion, which is
+the smaller payload; send both if an Output-phase rule needs to judge the answer
+against the conversation that produced it.
 
 ## 4. Configure failure behavior
 
@@ -224,6 +309,13 @@ not an individual tool event. The adapter does not apply transformed payloads.
 Portkey does not support blocking output guardrails on streamed responses, so
 use non-streaming responses when output enforcement is required.
 
+Have the adapter skip its TrustGuard call on the response leg of a streamed
+request, using `event.request.isStreamingRequest` or
+`event.request.json.stream`. Portkey can still invoke the after-request hook on a
+stream, with no assembled response body to inspect. An adapter that evaluates it
+anyway posts an empty output payload under a real `session_id` on every streamed
+turn, which pollutes the conversation grouping it is trying to establish.
+
 A turn with both synchronous hooks makes two TrustGuard evaluations. Each hook
 also passes through the adapter, so include both network legs in the timeout and
 latency budget.
@@ -254,8 +346,9 @@ latency budget.
   Per-consumer policy routing and gates matching `consumer.id` depend on this
   value.
 - `session_id`: map it from a stable, verified `session_id` value in Portkey
-  metadata. Without it, related turns may not be grouped together in
-  **Activity**.
+  metadata, on both hook phases. Without it, `/v1/evaluate` synthesizes a session
+  per request, which breaks the grouping the stateful detectors rely on. See
+  [Group the turns of a conversation](#3-group-the-turns-of-a-conversation).
 - `attributes.model.name` and `attributes.model.provider`: the adapter can read
   these from `request.json.model` and Portkey's `provider` field.
 - `trace_id` and `request_id`: return them in the webhook response's `data`
@@ -277,6 +370,10 @@ authentication layer validates or replaces it.
 | Input rules work but output rules do not | The after-request hook is missing, the adapter still sends `direction: input`, or the response is streamed |
 | A masking policy records but does not redact | Expected. The adapter does not return Portkey `transformedData`; use a **Block** rule |
 | Events have no consumer or do not group by conversation | The metadata is missing, uses different field names, or the adapter does not map it to `consumer_id` and `session_id` |
+| The caller sends `session_id` but a different value arrives | The `x-portkey-metadata` header is malformed, so it parses to `{}`; or metadata on the workspace or the API key overrides the per-request value |
+| Every conversation shows a single turn | The caller sends no `session_id`, so `/v1/evaluate` synthesizes one per request |
+| A single evaluation sees only the newest message | The adapter fell back to `request.text`, which is the last message rather than the transcript. Send `request.json` as `payload` |
+| Output evaluations arrive with empty content | The adapter evaluated the response leg of a streamed request. Skip it on `isStreamingRequest` |
 | `hook_results` has no TrustGuard trace ID | The adapter did not include `trace_id` in the response `data` object |
 
 ## Related
