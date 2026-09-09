@@ -131,30 +131,6 @@ Documento interno. **No forma parte de la documentación publicada** en
 
 ---
 
-## Fuera de alcance
-
-No se controlan ni se testean como parte de este inventario.
-
-### Excluidos a petición
-
-| Repo | Motivo |
-| --- | --- |
-| `kafka-connect` | Conector viejo |
-| `internal-sdk` | SDK interno, fuera de alcance |
-| `agentguardian-api` | SDK / proto de AgentGuardian |
-| `neuraltrust-typescript` | SDK TypeScript, fuera de alcance |
-| `TrustGate-Client` | Cliente viejo de TrustGate |
-
-### Vivos por push, pero benches / demos / POC / research
-
-`e2e-tests`, `agent-gateway-eval`, `agentguardian-demo-api`, `poc-agents`, `tech-slides`, `multi-agent-tests`, `AI-Gateway-Benchmark`, `trusttest-examples`, `agent-swarms`, `compliance`, `agent-posture-research`, `benchmarks-v2`, `agents-hub`, `FakeAI`, `neuraltrust-iso-topology`.
-
-### Resto
-
-Repos sin push desde el 2026-07-09, archivados, y el resto de demos / research / slides de la org.
-
----
-
 ## Dueños (quién toca qué)
 
 | Persona | Repos |
@@ -192,6 +168,5 @@ Si solo se testea lo crítico:
 ## Cómo refrescar
 
 1. Listar repos de la org no archivados con `pushed_at >=` (hoy − 2 meses).
-2. Quitar benches, demos, POCs, research, slides y los cinco repos de la sección *Excluidos a petición*.
-3. Recalcular contributor principal humano en `main` (o `develop` si `main` está quieto).
-4. Actualizar las tablas y la fecha de este documento.
+2. Recalcular contributor principal humano en `main` (o `develop` si `main` está quieto).
+3. Actualizar las tablas y la fecha de este documento.
