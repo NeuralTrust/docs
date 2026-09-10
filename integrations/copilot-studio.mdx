@@ -163,6 +163,28 @@ On the collector's **Policies** tab, assign a default policy. Start it in
 **Agent Runtime → Activity**, then switch to **Enforce**.
 
 <Warning>
+**Write the rule in the Input direction.** Copilot Studio calls threat detection
+once, before a tool runs, so every delivery is evaluated as input. A rule placed
+in the Output direction is never reached on this collector — it saves without
+complaint and silently matches nothing.
+</Warning>
+
+Because the delivery is a planner snapshot rather than a chat turn, the choice of
+detector decides what is actually read:
+
+| Rule | What it reads on this path |
+|---|---|
+| **Indirect Prompt Injection** | The output of tools that already ran, plus the definitions of the tools offered to the agent. This is the rule that catches a poisoned tool or workflow result before the agent acts on it. |
+| **Prompt Moderation**, jailbreak and other prompt rules | The user's latest message only, and only at the moment a tool is about to run. A message that never leads to a tool call is never seen. |
+| Attribute conditions on `tool.name` and `tool.arguments.*` | The tool about to run and the values being passed to it. |
+
+<Note>
+If you are protecting against a poisoned document, ticket, or API response, use
+**Indirect Prompt Injection**. Prompt rules do not read tool output on this path,
+so a policy built only from them stays quiet while the injection goes through.
+</Note>
+
+<Warning>
 A collector with no matching policy is **unguarded**: TrustGuard allows every
 tool and inspects nothing.
 </Warning>
@@ -466,6 +488,20 @@ For role-based consumers the effective mode is open **only** when every
 contributing role declares it open.
 
 ### Troubleshooting
+
+**Threat detection.**
+
+| Symptom | Cause |
+|---|---|
+| The collector panel still says it is waiting for the tenant and application after saving | Reload the page. On consoles before September 2026 the panel saved the values without re-reading the collector, so the badge did not change and reopening the panel showed empty fields |
+| **Save** in Power Platform admin center fails | The endpoint is unreachable from Microsoft, or the collector answers the readiness probe with something other than `{"isSuccessful": true, "status": "OK"}` |
+| Deliveries arrive but no finding is recorded | The rule is in the Output direction, which this collector never reaches, or the rule reads prompts while the injection is in a tool result. See [step 6](#6-assign-a-policy) |
+| A condition on `tool.name` never matches | Copilot Studio strips spaces from tool names. Copy the name from **Agent Runtime → Activity** |
+| A condition on `tool.arguments.*` never matches | The parameter is a Power Automate default name (`text_1`) whose position changed, or the value was empty because the input parameter has no description |
+| Every delivery is refused with `401` | Tenant or Application ID not stored on the collector, or the token came from an application outside the allowlist |
+| Every delivery is refused with `503` | The threat-detection audience is not configured on the instance. TrustGuard refuses rather than accept a token minted for someone else |
+
+**Governed tool access.**
 
 | Symptom | Cause |
 |---|---|
