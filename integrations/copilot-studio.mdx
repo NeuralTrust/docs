@@ -64,8 +64,9 @@ collector only produces once it knows the application ID.
 
 | Requirement | Notes |
 |---|---|
-| A **Copilot Studio** collector | **Agent Runtime → Collectors → Catalog → Agent platforms → Copilot Studio**. |
-| A TrustGuard instance with a **public address** | Microsoft calls in from the internet. The Connection tab says so plainly if your instance has no public address yet — ask your operator before configuring the environment. |
+| A **Copilot Studio** collector, and permission to edit it | **Agent Runtime → Collectors → Catalog → Agent platforms → Copilot Studio**. You will store identifiers on it and bind a policy to it. |
+| A TrustGuard instance that **resolves from the internet** | Microsoft calls in from outside, and there is no outbound mode: a privately-addressed instance cannot receive deliveries at all. Nothing checks this for you — the Connection tab issues an endpoint without testing whether anyone outside can reach it. Resolve the host from a network that is not yours (`dig +short A {host} @1.1.1.1`) and confirm a public address before configuring the environment. |
+| The **audience application** present in your tenant | The token Microsoft mints is addressed to your endpoint's origin, and an application has to claim that origin for Entra to issue it. That application is NeuralTrust's, not yours — see [step 2](#2-register-the-client-application-in-microsoft-entra-id). |
 | The **Cloud Application Administrator** role in Microsoft Entra ID | You create a single-tenant app and add a credential to it. *Application Developer* is not enough: it registers the app but cannot finish it. |
 | The **Power Platform Administrator** role for the environment | Threat detection is configured per environment, not per agent. Without this role the Threat detection screen is **hidden entirely**, with nothing to indicate a permission is missing. |
 | An agent using **generative orchestration** | See [Scope](#scope). |
@@ -83,7 +84,7 @@ endpoint** is unique to this collector:
 One endpoint per collector, never shared. The federated credential binds this
 exact URL, so if the endpoint changes the credential stops matching.
 
-### 2. Register an application in Microsoft Entra ID
+### 2. Register the client application in Microsoft Entra ID
 
 In **Microsoft Entra ID → App registrations**, create a **single-tenant**
 application. Copy two values:
@@ -92,6 +93,22 @@ application. Copy two values:
 |---|---|
 | **Directory (tenant) ID** | Microsoft Entra ID → Overview |
 | **Application (client) ID** | The app registration you just created |
+
+<Note>
+**Two applications are involved, and you create only one of them.** This one is
+the *client*: it is the identity Copilot Studio authenticates as, it holds the
+federated credential from [step 4](#4-add-the-federated-identity-credential),
+and its Application (client) ID is what you paste into Power Platform.
+
+The other is the *audience* — the application that claims your endpoint's origin
+as its **Application ID URI**, so Entra knows who the token is for. That one is
+**NeuralTrust's**, and it cannot be yours: Entra only accepts an Application ID
+URI on a domain verified in the tenant that owns the application, and the
+endpoint is on our domain. Its own client ID is never entered anywhere. If it is
+not present in your tenant, [step 5](#5-turn-on-threat-detection-in-power-platform-admin-center)
+fails with `AADSTS500011` — contact us rather than trying to register it
+yourself.
+</Note>
 
 ### 3. Store the tenant and application IDs on the collector
 
@@ -122,14 +139,53 @@ credentials → Add credential** and fill the form:
 | **Value** | The subject identifier copied from the Connection tab |
 | **Audience** | `api://AzureADTokenExchange` |
 
+<Note>
+**On the audience application's Expose an API page, only the first line matters.**
+*Scopes defined by this API* and *Authorized client applications* stay empty, as
+do App roles and API permissions. They exist for APIs where a user or an admin
+consents to permissions; here nothing consents to anything — the token is issued
+against a federated credential, machine to machine. Defining scopes builds
+something that is never evaluated.
+</Note>
+
 <Warning>
 **Never build the subject identifier by hand.** It encodes your tenant *and*
 the exact endpoint URL, and the tenant GUID is not written as a GUID — it is
 re-ordered into .NET byte order and base64url-encoded. A subject assembled by
 hand from the tenant ID looks entirely reasonable, **Entra accepts it without
 complaint**, and it never matches an incoming token. Always copy the value the
-Connection tab computes, and copy it again if you change the endpoint.
+Connection tab computes.
 </Warning>
+
+<Warning>
+**If the endpoint ever changes, two things go stale, not one.** Both are bound to
+the URL: the Application ID URI claims its **origin**, and the subject encodes
+the **full URL**. A new environment, a recreated collector or a different host
+invalidates both at once, and fixing only one produces an error that points at
+the other.
+
+Adding the new Application ID URI is enough — an application accepts several. The
+credential is not editable: **the subject cannot be changed after creation**, so
+delete the credential and add a new one with the subject the Connection tab shows
+for the current endpoint.
+</Warning>
+
+<Note>
+**By this point you are handling five identifiers that look alike.** Mixing them
+up is the most common setup error, and none of the portals warns you:
+
+| Identifier | What it is | Where it goes |
+|---|---|---|
+| **Directory (tenant) ID** | Your Microsoft directory | The Issuer above, and the collector's Connection tab |
+| **Client application ID** | The application you registered | The Connection tab, and *Azure Entra App ID* in the next step |
+| **Audience application ID** | Represents TrustGuard as the token's recipient | **No field at all.** Only its Application ID URI matters |
+| **Collector ID** | The collector in TrustGuard | Travels inside the endpoint; never entered on its own |
+| **Workspace ID** | Your team in the NeuralTrust console | The console's own URL only. **Never in a Microsoft portal** |
+
+The rule that avoids all four confusions: if a Microsoft portal asks for the
+value, it comes from Microsoft or from the collector's Connection tab — never
+from the address bar of the NeuralTrust console.
+</Note>
 
 ### 5. Turn on threat detection in Power Platform admin center
 
@@ -198,24 +254,87 @@ an agent tool, and Copilot Studio says so on the picker.
 Two more things are worth knowing before you write a policy against a workflow,
 because neither is visible until you try.
 
-**Give every input parameter a description.** Power Automate names them after
-their type — `text`, `text_1`, `text_2` — and the description you type is the
-only thing that says what each one is. Without it the model does not know what
-to put in the field and leaves it empty, and a policy can only target
-`tool.arguments.text_3` instead of `tool.arguments.copia_oculta`. TrustGuard
-offers the readable name as a dimension of its own whenever the description
-reads like a label rather than a sentence.
+**Give every input parameter a short, readable description.** Power Automate
+names them after their type — `text`, `text_1`, `text_2` — and **that is what
+arrives, whatever you type in the name field.** Renaming a parameter in Power
+Automate changes its *description*, not its name; the name reaches TrustGuard as
+`text_N` regardless. Confirmed against live traffic: a flow whose four
+parameters were named `destinatario`, `asunto`, `cuerpo` and `copia_oculta`
+delivered them as `text`, `text_1`, `text_2`, `text_3`, carrying those words as
+the descriptions.
 
-That distinction matters more than it sounds: reordering a workflow's fields
-changes which parameter `text_3` refers to, and a condition on an attribute that
-no longer exists matches the empty string rather than failing. A policy pinned to
-the label keeps meaning what you wrote.
+So the description is the only place a readable name exists, and it does two
+jobs. It tells the model what to put in the field — without it the model leaves
+the field empty. And TrustGuard offers it as a dimension of its own whenever it
+reads like a label rather than a sentence, so a policy can target
+`tool.arguments.copia_oculta` instead of `tool.arguments.text_3`. Write a label,
+not a paragraph: a long description stays a description and you are left with
+the number.
+
+That matters more than it sounds: reordering a workflow's fields changes which
+parameter `text_3` refers to, and a condition on an attribute that no longer
+exists matches the empty string rather than failing. A policy pinned to
+`text_N` breaks silently the day someone adds a field.
 
 **Tool names arrive without spaces.** A flow shown as *Enviar respuesta* in
 Copilot Studio reaches TrustGuard as `Enviarrespuesta`, so a condition on
 `tool.name` typed the way the tool appears on screen never matches. Copy the
 name from **Agent Runtime → Activity** rather than from the Copilot Studio
 canvas.
+
+<Warning>
+**Publish the flow after every change, and the agent after changing its tools.**
+A flow with unpublished changes stays in the agent's tool catalog, so the model
+still selects it and finds nothing behind it. There is no error and no timeout —
+the turn simply never finishes, and it looks like threat detection is hanging.
+It is not: when a verdict is late, the tool is *blocked* per the environment
+setting, never left pending.
+</Warning>
+
+### Confirm it blocks
+
+Assigning a policy is not evidence that it fires. This is the smallest test that
+produces some, and it takes one conversation.
+
+**It needs two tools, not one.** Threat detection is called once per tool, just
+before it runs. With a single tool there is nothing to see: the injection is not
+in the request, it is in the *response*, which arrives afterwards. It is only
+observable in the gap between two calls — the first returns the poisoned content
+and the second carries it along.
+
+1. Give the agent a tool that returns text you control, and a second tool that
+   acts on it — reading a record and sending a message is the usual pair.
+2. Put an instruction that does not belong in the content the first tool
+   returns, alongside some ordinary text. Something the agent would have to obey
+   to be compromised, such as sending a summary to an outside address.
+3. Assign a policy with **Indirect Prompt Injection** in the Input direction,
+   set to block.
+4. Remove every other tool and Knowledge source while you test. With three
+   possible paths and one measured, a clean trace proves nothing — it may only
+   mean there was an easier route.
+5. Publish, then ask the agent to do the work end to end in one turn.
+
+| Delivery | What it carries | Expected verdict |
+|---|---|---|
+| The first tool | Nothing earlier in the turn: `previousToolsOutputs` is empty | **Not blocked.** This is the negative control |
+| The second tool | The first tool's output, verbatim, with the role `tool` | **Blocked** before it runs |
+
+<Warning>
+**If both are blocked, that is not a pass.** It means anything would be flagged,
+and the block on the second proves nothing — it would have blocked without the
+injection too. The negative control is what gives the positive one its meaning.
+Lower the rule's sensitivity and repeat until the first delivery passes clean.
+</Warning>
+
+<Note>
+Read the blocked call in **Agent Runtime → Activity** before moving on, because
+it is the point of the whole path. In a real run of this test the proposed call
+was impeccable — a correct recipient, an ordinary subject, a well-written body,
+and the model had not obeyed the injection at all — and it was blocked anyway.
+Nothing in the call itself was objectionable. The evidence was entirely in what
+the previous tool returned, which is why a policy that reads only prompts or
+only arguments lets this exact case through.
+</Note>
 
 ## Set up governed tool access (TrustGate)
 
@@ -350,7 +469,7 @@ or how it was built.
 | **Workflows** — Power Automate flows added as agent tools | ✅ | Arrive as ordinary tool executions, and their result is carried into the next request. *Confirmed end to end.* |
 | Output of an earlier tool | ✅ | Carried in the next request, so a poisoned result is seen before the agent acts on it. *Confirmed: a poisoned workflow result was blocked before the agent could act on it.* |
 | **Knowledge** and **Connected agents** | ◐ | Covered whenever the platform runs them as a tool execution, which is how it orchestrates them. *Not yet confirmed against live traffic — see the note below on checking your own agent.* |
-| **Model** — the prompt and the model response | ❌ | Microsoft hosts inference and exposes no hook for it, to anyone |
+| **Model** — the prompt and the model response | ❌ | Microsoft hosts inference and exposes no hook for it, to anyone. The model in use is not sent either, so **no policy can target the model an agent runs on** — a rule like "only agents on a specific model" cannot be written on this path |
 | **Skills** — instructions that shape behaviour | ❌ | Applied inside Microsoft's orchestrator. No hook is exposed for it. |
 | **Memory** | ❌ | Held by the platform between turns. No hook is exposed for it. |
 
@@ -368,6 +487,13 @@ have to expose the hook first.
 </Warning>
 
 <Note>
+**Threat detection is configured per environment, and there is no way to
+propagate it.** No tenant-level setting, and no API: every new environment is
+connected by hand, repeating the collector and Power Platform steps. Plan for
+that when sizing a rollout across many environments.
+</Note>
+
+<Note>
 Coverage follows the platform's own orchestration, not a list we maintain. To
 confirm what a specific agent produces, run it in **Observe** and read
 **Agent Runtime → Activity**: every tool execution that reached TrustGuard
@@ -381,6 +507,13 @@ previous tool outputs), the definition of the tool about to run with its input
 and output parameters, the input values being passed to it, and conversation
 metadata — agent, user, trigger, conversation and message ids, channel, and the
 incoming client IP.
+
+**Earlier tool output arrives under `plannerContext.previousToolsOutputs`**, one
+entry per tool that already ran in the turn, each carrying the calling tool's
+name and its output values with the role `tool`. The values are verbatim — the
+platform does not truncate or summarise them — which is what makes a poisoned
+result visible before the agent acts on it. On the turn's *first* tool call the
+list is empty, so that delivery has no earlier output to evaluate.
 
 The contract also defines a `thought` field for the planner's reasoning, and
 `planId` / `planStepId` for the step being executed. All three have arrived
@@ -419,12 +552,18 @@ detection tools. Please contact your administrator if you believe this is an
 error."* — and appends an instruction telling the agent to relay that text
 verbatim rather than paraphrase it. Your `reason` and `diagnostics` are for your
 logs and for Activity, so do not plan end-user wording around them.
+
+In the maker's trace the blocked call carries a different, more useful pair:
+`errorCode: "pre-tool-blocked"` with *"This action was blocked before the tool
+could run."* That is the one to look for when diagnosing, and it distinguishes a
+block from every other reason a tool call can fail.
 </Note>
 
 ### Failure behavior
 
 | Situation | What happens |
 |---|---|
+| **First delivery after a restart** | Slower than the rest: TrustGuard fetches Microsoft's signing keys to verify the token, then caches them. Measured against live traffic: ~320 ms for the first call, 6–17 ms afterwards. Well inside budget, but measure the second call, not the first. |
 | Verdict not ready within **700 ms** | TrustGuard stops waiting. Copilot Studio's own limit is 1000 ms and it treats a slower answer as no answer — the environment setting decides whether the tool runs. |
 | Tenant or Application ID not saved | `401`. Deliveries are refused until both are stored. |
 | Token from an application outside the allowlist | `401`. |
@@ -497,7 +636,11 @@ contributing role declares it open.
 | **Save** in Power Platform admin center fails | The endpoint is unreachable from Microsoft, or the collector answers the readiness probe with something other than `{"isSuccessful": true, "status": "OK"}` |
 | Deliveries arrive but no finding is recorded | The rule is in the Output direction, which this collector never reaches, or the rule reads prompts while the injection is in a tool result. See [step 6](#6-assign-a-policy) |
 | A condition on `tool.name` never matches | Copilot Studio strips spaces from tool names. Copy the name from **Agent Runtime → Activity** |
-| A condition on `tool.arguments.*` never matches | The parameter is a Power Automate default name (`text_1`) whose position changed, or the value was empty because the input parameter has no description |
+| A condition on `tool.arguments.*` never matches | The condition uses a name typed in Power Automate, which never arrives as a name — parameters come as `text_N`, and the readable label comes from the description. Or `text_N` shifted position when a field was added. See [If your agent uses workflows](#if-your-agent-uses-workflows) |
+| **Save** fails with `AADSTS500011`, *"the resource principal named … was not found in the tenant"* | Despite appearing when you save the endpoint, this is not about the endpoint or the credential: no application in the tenant claims the token's audience. The audience application is missing — see [step 2](#2-register-the-client-application-in-microsoft-entra-id) |
+| **Save** fails with a DNS or socket error | The endpoint host does not resolve publicly. Check it from outside your network; a private address cannot receive deliveries |
+| The turn never finishes and no delivery arrives at all | Not threat detection: a late verdict blocks the tool, it never leaves the turn pending. The agent did not get as far as proposing a tool. In order of likelihood — a flow with unpublished changes, an unpublished agent, a tool connection left half-activated, or the environment out of Copilot Studio credit |
+| The agent runs tools normally and **nothing whatsoever** reaches TrustGuard | The agent is in a different environment from the one you configured. Threat detection is enabled per environment, and an agent in an unconfigured environment runs **unprotected with no indication anywhere** — no error, no marker in the console. Confirm the environment in Copilot Studio matches the one under **Security → Threat detection** |
 | Every delivery is refused with `401` | Tenant or Application ID not stored on the collector, or the token came from an application outside the allowlist |
 | Every delivery is refused with `503` | The threat-detection audience is not configured on the instance. TrustGuard refuses rather than accept a token minted for someone else |
 
