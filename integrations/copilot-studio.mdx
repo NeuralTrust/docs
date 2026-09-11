@@ -9,128 +9,41 @@ conversational agents. Makers define instructions, add knowledge sources and
 tools, and publish agents to Teams, websites, or Microsoft 365.
 
 Microsoft hosts model execution, so nothing of ours sits in the data path. There
-are two integration points, and they solve different problems:
+are two integration points, and they solve different problems. Use one or both.
 
-## NeuralTrust controls
+## Choose a path
 
-| Product | What it does for Copilot Studio | What you can enforce |
-| --- | --- | --- |
-| **[TrustGuard](/trustguard/overview)** threat detection | Copilot Studio calls TrustGuard for a verdict **before every tool the agent is about to run**, including what earlier tools returned. | Monitor · Block |
-| **[TrustGate](/trustgate/overview)** MCP | Publishes the assigned MCP servers through one OAuth endpoint and limits the catalog to the consumer's registries and toolkit. | Tool access and rate limits |
-| **[TrustGuard](/trustguard/overview)** on MCP traffic *(optional)* | Evaluates MCP `tools/call` requests and `CallToolResult` responses routed through TrustGate. | Monitor · Block · Transform |
-
-<Warning>
-**Threat detection cannot redact.** Copilot Studio's contract accepts a single
-boolean decision, so there is no field in which to return rewritten content. A
-**Transform** rule produces no masking on this path — use **Block** when content
-must not reach the tool. Redaction is available only on the TrustGate MCP path,
-where TrustGuard owns the payload.
-</Warning>
-
-## Scope
-
-Threat detection covers Copilot Studio agents that use **generative
-orchestration**. It does **not** cover Microsoft 365 Copilot in Word, Teams or
-Outlook, which exposes no hook to third parties.
-
-## Deployment options
-
-| Goal | Configuration | Location |
-| --- | --- | --- |
-| Screen every tool call an agent makes | **Threat detection**: a Copilot Studio collector plus a federated credential in your Entra app | Power Platform admin center, per environment |
-| Centrally manage which MCP tools the agent can reach | **TrustGate MCP** with OAuth and dynamic client registration | The agent's MCP tool connection |
-| Inspect MCP tool payloads as well as access | A TrustGuard policy attached to the TrustGate consumer | On the TrustGate consumer |
+| Path | What it does | What you can enforce | Where you configure it |
+|---|---|---|---|
+| **[Threat detection](/integrations/copilot-studio-threat-detection)** | Copilot Studio calls TrustGuard **before every tool the agent is about to run**, including what earlier tools returned — whatever built that tool. | Monitor · Block | Power Platform admin center, per environment |
+| **[Governed tool access](/integrations/copilot-studio-governed-tool-access)** | TrustGate publishes the assigned MCP servers through one OAuth endpoint and limits the catalog to the consumer's registries and toolkit. | Tool access and rate limits | The agent's MCP tool connection |
+| **Governed tool access + TrustGuard** *(optional)* | The same MCP path, with a policy that evaluates `tools/call` requests and `CallToolResult` responses. | Monitor · Block · Transform | On the TrustGate consumer |
 
 The two paths are independent. Threat detection screens every tool the agent
-runs, whatever its source; TrustGate MCP governs only the tools it publishes.
+runs, whatever its source. Governed tool access governs only the MCP tools
+TrustGate publishes.
+
+These integrations apply to Copilot Studio agents that use **generative
+orchestration**. They do not apply to Microsoft 365 Copilot in Word, Teams, or
+Outlook.
 
 ## Where to go next
 
 <CardGroup cols={2}>
   <Card title="Set up threat detection" icon="shield-check" href="/integrations/copilot-studio-threat-detection">
-    Screen every tool the agent is about to run, whatever built it. Entra
-    federated credential, per environment.
+    What this path covers, then the Entra federated credential and Power
+    Platform setup, per environment.
   </Card>
   <Card title="Set up governed tool access" icon="plug" href="/integrations/copilot-studio-governed-tool-access">
-    Decide which MCP tools the agent can reach at all, and optionally inspect
-    their payloads.
+    What this path covers, then the TrustGate consumer and the agent's MCP
+    connection — and the optional payload inspection.
   </Card>
 </CardGroup>
 
-## Reference
-
-### Coverage
-
-Microsoft hosts model execution, so **neither path evaluates the agent's prompts
-or model responses**. What each one sees:
-
-| Surface | Threat detection | TrustGate MCP, access only | TrustGate MCP + TrustGuard policy |
-|---|---|---|---|
-| Agent prompt | Not evaluated | Not evaluated | Not evaluated |
-| Model response | Not evaluated | Not evaluated | Not evaluated |
-| Tool about to run | **Evaluated, whatever its source** | Routed only if the consumer may use it | The `tools/call` request is evaluated |
-| Earlier tool output | **Included in the request** | Not inspected | The `CallToolResult` is evaluated |
-| Redaction | **Not possible** — the response is one boolean | — | Available |
-
-### What threat detection covers
-
-**Microsoft decides what any third party can see here, not us.** Copilot Studio
-exposes exactly one hook to an external security provider: the call immediately
-before a tool runs. Everything else — how the model is prompted, how
-instructions shape behaviour, what the platform remembers between turns —
-happens inside Microsoft's service, where no third party can observe or
-intervene. That is a property of the platform, not a limit of TrustGuard, and
-it applies identically to every vendor in this position.
-
-What that single hook gives you is broad: if the platform orchestrates something
-as a tool execution, it reaches TrustGuard, whatever built it and wherever the
-tool came from. Threat detection sees **what the agent does**, not what it says
-or how it was built.
-
-| Agent surface | Covered | Why |
-|---|:--:|---|
-| **Tools** — connectors, Dataverse, custom actions, MCP tools on the agent | ✅ | Every execution, with its arguments. This is the hook. *Confirmed against a Dataverse connector.* |
-| **Workflows** — Power Automate flows added as agent tools | ✅ | Arrive as ordinary tool executions, and their result is carried into the next request. *Confirmed end to end.* |
-| Output of an earlier tool | ✅ | Carried in the next request, so a poisoned result is seen before the agent acts on it. *Confirmed: a poisoned workflow result was blocked before the agent could act on it.* |
-| **Knowledge** and **Connected agents** | ◐ | Covered whenever the platform runs them as a tool execution, which is how it orchestrates them. *Not yet confirmed against live traffic — see the note below on checking your own agent.* |
-| **Model** — the prompt and the model response | ❌ | Microsoft hosts inference and exposes no hook for it, to anyone. The model in use is not sent either, so **no policy can target the model an agent runs on** — a rule like "only agents on a specific model" cannot be written on this path |
-| **Skills** — instructions that shape behaviour | ❌ | Applied inside Microsoft's orchestrator. No hook is exposed for it. |
-| **Memory** | ❌ | Held by the platform between turns. No hook is exposed for it. |
-
-In short: **actions are covered; the conversation and the configuration stay
-inside Microsoft's platform.**
-
-<Warning>
-**A prompt on its own is never evaluated on this path.** If someone types a
-jailbreak into the chat, threat detection does not see it — it only sees that
-text if it ends up in the arguments of a tool the agent then runs. To evaluate
-prompts and model responses you need a collector that sits on the model call,
-which Copilot Studio does not offer to third parties. Screening prompts on this
-platform is not something a security vendor can choose to add — Microsoft would
-have to expose the hook first.
-</Warning>
-
-<Note>
-**Threat detection is configured per environment, and there is no way to
-propagate it.** No tenant-level setting, and no API: every new environment is
-connected by hand, repeating the collector and Power Platform steps. Plan for
-that when sizing a rollout across many environments.
-</Note>
-
-<Note>
-Coverage follows the platform's own orchestration, not a list we maintain. To
-confirm what a specific agent produces, run it in **Observe** and read
-**Agent Runtime → Activity**: every tool execution that reached TrustGuard
-appears there, so the findings are the authoritative answer for your agent.
-</Note>
-
 ## Related
 
+- [Threat detection](/integrations/copilot-studio-threat-detection): coverage and setup
+- [Governed tool access](/integrations/copilot-studio-governed-tool-access): coverage and setup
 - [MCP Gateway](/trustgate/mcp/overview): consumers, catalog merging, toolkits, and upstream authentication
 - [TrustGate and TrustGuard](/integrations/trustgate): collector, policy, verdict, and failure behavior
-- [TrustGate guardrails](/trustgate/policies/guardrails#trustguard): configure the optional policy
-- [Consumers](/trustgate/concepts/consumers): slugs, routing modes, and the Connect tab
-- [TrustGate authentication](/trustgate/concepts/auth): OAuth2 authentication for MCP consumers
-- [Okta](/trustgate/concepts/authorization/okta) and [Entra ID](/trustgate/concepts/authorization/entra-id): IdP applications and redirect URIs
-- [Roles](/trustgate/concepts/roles): identity-scoped toolkits
 - [Microsoft Copilot Studio documentation](https://learn.microsoft.com/microsoft-copilot-studio/): Microsoft reference
