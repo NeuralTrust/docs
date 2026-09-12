@@ -31,44 +31,20 @@ or how it was built.
 | **Tools** — connectors, Dataverse, custom actions, MCP tools on the agent | ✅ | Every execution, with its arguments. This is the hook. *Confirmed against a Dataverse connector.* |
 | **Workflows** — Power Automate flows added as agent tools | ✅ | Arrive as ordinary tool executions, and their result is carried into the next request. *Confirmed end to end.* |
 | Output of an earlier tool | ✅ | Carried in the next request, so a poisoned result is seen before the agent acts on it. *Confirmed: a poisoned workflow result was blocked before the agent could act on it.* |
-| **Knowledge** and **Connected agents** | ◐ | Covered whenever the platform runs them as a tool execution, which is how it orchestrates them. *Not yet confirmed against live traffic — see the note below on checking your own agent.* |
+| **Knowledge** and **Connected agents** | ◐ | Covered whenever the platform runs them as a tool execution, which is how it orchestrates them. *Not yet confirmed against live traffic — confirm on your agent in Activity.* |
 | **Model** — the prompt and the model response | ❌ | Microsoft hosts inference and exposes no hook for it, to anyone. The model in use is not sent either, so **no policy can target the model an agent runs on** — a rule like "only agents on a specific model" cannot be written on this path |
 | **Skills** — instructions that shape behaviour | ❌ | Applied inside Microsoft's orchestrator. No hook is exposed for it. |
 | **Memory** | ❌ | Held by the platform between turns. No hook is exposed for it. |
 
 In short: **actions are covered; the conversation and the configuration stay
-inside Microsoft's platform.**
+inside Microsoft's platform.** A prompt is evaluated only when it lands in the
+arguments of a tool about to run. The verdict is one boolean, so use **Block**
+when content must not reach the tool — **Transform** does not redact on this
+path.
 
-<Warning>
-**Threat detection cannot redact.** Copilot Studio's contract accepts a single
-boolean decision, so there is no field in which to return rewritten content. A
-**Transform** rule produces no masking on this path — use **Block** when content
-must not reach the tool.
-</Warning>
-
-<Warning>
-**A prompt on its own is never evaluated on this path.** If someone types a
-jailbreak into the chat, threat detection does not see it — it only sees that
-text if it ends up in the arguments of a tool the agent then runs. To evaluate
-prompts and model responses you need a collector that sits on the model call,
-which Copilot Studio does not offer to third parties. Screening prompts on this
-platform is not something a security vendor can choose to add — Microsoft would
-have to expose the hook first.
-</Warning>
-
-<Note>
-**Threat detection is configured per environment, and there is no way to
-propagate it.** No tenant-level setting, and no API: every new environment is
-connected by hand, repeating the collector and Power Platform steps. Plan for
-that when sizing a rollout across many environments.
-</Note>
-
-<Note>
-Coverage follows the platform's own orchestration, not a list we maintain. To
+Coverage follows the platform's orchestration, not a list we maintain. To
 confirm what a specific agent produces, run it in **Observe** and read
-**Agent Runtime → Activity**: every tool execution that reached TrustGuard
-appears there, so the findings are the authoritative answer for your agent.
-</Note>
+**Agent Runtime → Activity**.
 
 ## Set up
 
@@ -78,14 +54,12 @@ shared secret and no API key on this path.
 
 Setup spans three places: the collector's **Connection** tab, your Entra app
 registration, and Power Platform admin center. The Connection tab produces every
-value the other two ask for.
+value the other two ask for. Visit Entra twice, in that order: step 2 creates
+the application so you have its ID; step 4 adds the credential, which encodes
+an endpoint the collector only produces once it knows the application ID.
 
-<Note>
-**You visit Entra twice, and the order is not optional.** Step 2 creates the
-application so you have its ID; step 4 comes back to add the credential. They
-cannot be done in one pass, because the credential encodes an endpoint the
-collector only produces once it knows the application ID.
-</Note>
+Configuration is **per environment**, with no tenant-level setting and no API.
+Every new environment repeats the collector and Power Platform steps.
 
 ## Before you start
 
@@ -121,21 +95,18 @@ application. Copy two values:
 | **Directory (tenant) ID** | Microsoft Entra ID → Overview |
 | **Application (client) ID** | The app registration you just created |
 
-<Note>
-**Two applications are involved, and you create only one of them.** This one is
-the *client*: it is the identity Copilot Studio authenticates as, it holds the
-federated credential from [step 4](#4-add-the-federated-identity-credential),
-and its Application (client) ID is what you paste into Power Platform.
+Two applications are involved, and you create only one. This one is the
+*client*: Copilot Studio authenticates as it, it holds the federated credential
+from [step 4](#4-add-the-federated-identity-credential), and its Application
+(client) ID is what you paste into Power Platform.
 
-The other is the *audience* — the application that claims your endpoint's origin
-as its **Application ID URI**, so Entra knows who the token is for. That one is
-**NeuralTrust's**, and it cannot be yours: Entra only accepts an Application ID
-URI on a domain verified in the tenant that owns the application, and the
-endpoint is on our domain. Its own client ID is never entered anywhere. If it is
-not present in your tenant, [step 5](#5-turn-on-threat-detection-in-power-platform-admin-center)
-fails with `AADSTS500011` — contact us rather than trying to register it
-yourself.
-</Note>
+The *audience* application claims your endpoint's origin as its **Application
+ID URI**, so Entra knows who the token is for. That one is **NeuralTrust's**.
+Entra only accepts an Application ID URI on a domain verified in the tenant
+that owns the application, and the endpoint is on our domain. Its client ID is
+never entered anywhere. If it is missing from your tenant,
+[step 5](#5-turn-on-threat-detection-in-power-platform-admin-center) fails with
+`AADSTS500011` — contact us rather than registering it yourself.
 
 ## 3. Store the tenant and application IDs on the collector
 
@@ -166,40 +137,24 @@ credentials → Add credential** and fill the form:
 | **Value** | The subject identifier copied from the Connection tab |
 | **Audience** | `api://AzureADTokenExchange` |
 
-<Note>
-**On the audience application's Expose an API page, only the first line matters.**
-*Scopes defined by this API* and *Authorized client applications* stay empty, as
-do App roles and API permissions. They exist for APIs where a user or an admin
-consents to permissions; here nothing consents to anything — the token is issued
-against a federated credential, machine to machine. Defining scopes builds
-something that is never evaluated.
-</Note>
+Leave **Expose an API**, App roles, and API permissions empty. The token is
+issued against a federated credential, machine to machine; scopes are never
+evaluated.
 
 <Warning>
-**Never build the subject identifier by hand.** It encodes your tenant *and*
-the exact endpoint URL, and the tenant GUID is not written as a GUID — it is
-re-ordered into .NET byte order and base64url-encoded. A subject assembled by
-hand from the tenant ID looks entirely reasonable, **Entra accepts it without
-complaint**, and it never matches an incoming token. Always copy the value the
-Connection tab computes.
+**Copy the subject identifier from the Connection tab. Never build it by
+hand.** It encodes your tenant *and* the exact endpoint URL. The tenant GUID is
+re-ordered into .NET byte order and base64url-encoded, so a subject assembled
+from the tenant ID looks reasonable, **Entra accepts it without complaint**,
+and it never matches an incoming token.
+
+If the endpoint changes, both the Application ID URI (origin) and the
+credential subject (full URL) go stale. Add the new URI — an application
+accepts several. The subject cannot be edited after creation: delete the
+credential and add one with the subject the Connection tab now shows.
 </Warning>
 
-<Warning>
-**If the endpoint ever changes, two things go stale, not one.** Both are bound to
-the URL: the Application ID URI claims its **origin**, and the subject encodes
-the **full URL**. A new environment, a recreated collector or a different host
-invalidates both at once, and fixing only one produces an error that points at
-the other.
-
-Adding the new Application ID URI is enough — an application accepts several. The
-credential is not editable: **the subject cannot be changed after creation**, so
-delete the credential and add a new one with the subject the Connection tab shows
-for the current endpoint.
-</Warning>
-
-<Note>
-**By this point you are handling five identifiers that look alike.** Mixing them
-up is the most common setup error, and none of the portals warns you:
+These five identifiers look alike; mixing them up is the usual setup error:
 
 | Identifier | What it is | Where it goes |
 |---|---|---|
@@ -209,22 +164,15 @@ up is the most common setup error, and none of the portals warns you:
 | **Collector ID** | The collector in TrustGuard | Travels inside the endpoint; never entered on its own |
 | **Workspace ID** | Your team in the NeuralTrust console | The console's own URL only. **Never in a Microsoft portal** |
 
-The rule that avoids all four confusions: if a Microsoft portal asks for the
-value, it comes from Microsoft or from the collector's Connection tab — never
-from the address bar of the NeuralTrust console.
-</Note>
+If a Microsoft portal asks for a value, it comes from Microsoft or from the
+collector's Connection tab — never from the NeuralTrust console address bar.
 
 ## 5. Turn on threat detection in Power Platform admin center
 
 Open the environment → **Security** → **Threat detection** → *Additional threat
 detection and protection for Copilot Studio agents*, then enter the endpoint from
-step 1 and the Application (client) ID from step 2.
-
-<Note>
-**The provider list is empty until you type in the filter.** It loads on search,
-so a blank list is the normal starting state and not a sign that anything is
-wrong — search for your provider by name.
-</Note>
+step 1 and the Application (client) ID from step 2. The provider list is empty
+until you type in the filter — search for your provider by name.
 
 Power Platform admin center also asks what should happen when TrustGuard cannot
 answer in time.
@@ -241,9 +189,10 @@ healthy collector answers `{"isSuccessful": true, "status": "OK"}`.
 
 ## 6. Assign a policy
 
-On the collector's **Policies** tab, assign a default policy. Start it in
-**Observe** so findings are recorded without stopping any tool, check
-**Agent Runtime → Activity**, then switch to **Enforce**.
+On the collector's **Policies** tab, assign a default policy. A collector with
+no matching policy is unguarded: TrustGuard allows every tool and inspects
+nothing. Start in **Observe** so findings are recorded without stopping any
+tool, check **Agent Runtime → Activity**, then switch to **Enforce**.
 
 <Warning>
 **Write the rule in the Input direction.** Copilot Studio calls threat detection
@@ -261,16 +210,9 @@ detector decides what is actually read:
 | **Prompt Moderation**, jailbreak and other prompt rules | The user's latest message only, and only at the moment a tool is about to run. A message that never leads to a tool call is never seen. |
 | Attribute conditions on `tool.name` and `tool.arguments.*` | The tool about to run and the values being passed to it. |
 
-<Note>
 If you are protecting against a poisoned document, ticket, or API response, use
 **Indirect Prompt Injection**. Prompt rules do not read tool output on this path,
 so a policy built only from them stays quiet while the injection goes through.
-</Note>
-
-<Warning>
-A collector with no matching policy is **unguarded**: TrustGuard allows every
-tool and inspects nothing.
-</Warning>
 
 ## If your agent uses workflows
 
@@ -353,15 +295,12 @@ injection too. The negative control is what gives the positive one its meaning.
 Lower the rule's sensitivity and repeat until the first delivery passes clean.
 </Warning>
 
-<Note>
-Read the blocked call in **Agent Runtime → Activity** before moving on, because
-it is the point of the whole path. In a real run of this test the proposed call
-was impeccable — a correct recipient, an ordinary subject, a well-written body,
-and the model had not obeyed the injection at all — and it was blocked anyway.
-Nothing in the call itself was objectionable. The evidence was entirely in what
+Read the blocked call in **Agent Runtime → Activity** before moving on. In a
+real run of this test the proposed call was impeccable — a correct recipient,
+an ordinary subject, a well-written body, and the model had not obeyed the
+injection at all — and it was blocked anyway. The evidence was entirely in what
 the previous tool returned, which is why a policy that reads only prompts or
 only arguments lets this exact case through.
-</Note>
 
 ## Reference
 
@@ -410,19 +349,15 @@ A block adds a reason and diagnostics for your own records:
 `blockAction` is the whole contract. That is why this path cannot redact:
 there is no field in which to return rewritten content.
 
-<Note>
-**The person using the agent does not see your `reason`.** Copilot Studio shows
-its own message when a tool is blocked — *"This action was blocked by threat
-detection tools. Please contact your administrator if you believe this is an
-error."* — and appends an instruction telling the agent to relay that text
-verbatim rather than paraphrase it. Your `reason` and `diagnostics` are for your
-logs and for Activity, so do not plan end-user wording around them.
+The person using the agent does not see your `reason`. Copilot Studio shows its
+own message — *"This action was blocked by threat detection tools. Please
+contact your administrator if you believe this is an error."* — and tells the
+agent to relay that text verbatim. Your `reason` and `diagnostics` are for
+logs and Activity.
 
-In the maker's trace the blocked call carries a different, more useful pair:
-`errorCode: "pre-tool-blocked"` with *"This action was blocked before the tool
-could run."* That is the one to look for when diagnosing, and it distinguishes a
-block from every other reason a tool call can fail.
-</Note>
+In the maker's trace the blocked call carries `errorCode: "pre-tool-blocked"`
+with *"This action was blocked before the tool could run."* That pair
+distinguishes a block from every other reason a tool call can fail.
 
 ### Failure behavior
 
