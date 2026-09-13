@@ -66,6 +66,7 @@ block:
 | [LangChain](/integrations/langchain) | **Blocked** because the middleware has no `ask` case and fails closed on unknown verdicts. |
 | [Claude Enterprise](/integrations/claude-enterprise) | **Allowed** because this integration returns only allow or deny and has no interactive prompt. |
 | [TrustGate](/integrations/trustgate) | **Blocked in Enforce** because the gateway has no interactive approval flow. In Observe, the verdict is recorded and traffic continues. |
+| [LiteLLM](/integrations/litellm) | **Blocked** on the native `neuraltrust` guardrail, which returns HTTP `400` naming `verdict: ask` because the proxy has no approval flow. **Allowed** and logged on the custom guardrail file. |
 | Other gateways | **Allowed**, and recorded. There is no user to prompt and the verdict is not `block`, so the request passes through. |
 | Application collectors | **Application-defined.** The `status` is advisory; your code must implement the approval flow. |
 
@@ -151,9 +152,16 @@ response.
 | Python middleware | ✅ | ⚠️ | ⚠️ |
 | Node.js middleware | ✅ | ⚠️ | ⚠️ |
 
-**Streaming responses:** TrustGate and LiteLLM inspect a streamed response after
-it has been delivered to the client, so findings on streamed output are
-monitor-only. The other gateway integrations cover only non-streaming responses.
+**Streaming responses:** TrustGate and the LiteLLM custom guardrail file inspect a
+streamed response after it has been delivered to the client, so findings on
+streamed output are monitor-only. The native LiteLLM guardrail samples the stream
+as it accumulates and a block ends it, but chunks already sent stay with the
+client. The other gateway integrations cover only non-streaming responses.
+
+**LiteLLM redaction:** Not available on any released LiteLLM version. The native
+`neuraltrust` guardrail contributed in BerriAI/litellm#37165 applies `transform`
+on input and on non-streaming output; these tables will change once a release
+carries it. The custom guardrail file does not redact.
 
 **Azure APIM output:** Input redaction uses `transformed_payload.input`. Output
 coverage requires the outbound policy and does not support redaction.
@@ -244,10 +252,15 @@ safely blocks rather than forwarding unmasked content.
 verdict. Enforcement requires `deny: true` on the hook. The webhook does not
 apply `transformed_payload`, and streamed responses are not inspected.
 
-**LiteLLM:** The custom guardrail runs before and after model calls and applies
-verdicts at the request level. It does not apply `transformed_payload`.
-Streamed output is evaluated after delivery for monitoring only; its verdict
-cannot block chunks that have already been sent.
+**LiteLLM:** Either guardrail runs before and after model calls and applies
+verdicts at the request level. The native `neuraltrust` guardrail applies
+`transformed_payload` on non-streaming completions, writes back transformed
+tool calls, lands `ask` as a block, and fails closed on a transform it cannot
+apply safely; it is not in a released LiteLLM version yet. The custom guardrail
+file does not apply `transformed_payload`. On a streamed response the custom
+guardrail file evaluates the output after delivery for monitoring only, while
+the native guardrail samples the accumulating text and a block ends the stream;
+neither can recall chunks that have already been sent.
 
 **Kong:** Requires AI Proxy on the route. Its boolean verdict does not support
 redaction.
@@ -292,8 +305,8 @@ routes, so background jobs and queue consumers bypass it.
 
 | If you need | Use |
 | --- | --- |
-| Masking sensitive data in flight | [TrustGate](/integrations/trustgate) for non-streaming LLM responses and MCP traffic |
-| Coverage of streaming completions | [TrustGate](/integrations/trustgate) or [LiteLLM](/integrations/litellm) for monitoring after delivery; place preventive rules on the request path |
+| Masking sensitive data in flight | [TrustGate](/integrations/trustgate) for non-streaming LLM responses and MCP traffic; [LiteLLM](/integrations/litellm) for non-streaming completions once a release carries the native guardrail |
+| Coverage of streaming completions | [TrustGate](/integrations/trustgate) or [LiteLLM](/integrations/litellm) for monitoring after delivery, and the native LiteLLM guardrail to end a stream mid-way; place preventive rules on the request path |
 | A developer confirmation dialog | [Claude Code](/integrations/claude-code), [Cursor](/integrations/cursor), or [GitHub Copilot](/integrations/github-copilot). These integrations support `ask` on tool calls |
 | Inspection of tool declarations for tool poisoning | [TrustGate](/trustgate/mcp/overview) on MCP, or [LangChain](/integrations/langchain) inside the agent |
 | Enforcement as a visible step in a low-code workflow | [n8n](/integrations/n8n), where the verdict becomes a branch on the canvas |
