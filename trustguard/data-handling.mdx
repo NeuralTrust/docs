@@ -1,11 +1,38 @@
 ---
 title: "Data handling"
-description: "What TrustGuard stores when it evaluates a request, which values are redacted before storage, and how long records are retained."
+description: "Where TrustGuard records live, what an evaluation stores, which credentials are redacted before storage, and how long records are retained."
 ---
 
 TrustGuard inspects prompts, completions, and tool traffic, so the first question any
-security review asks is what it keeps. This page answers that for the runtime path
-([`POST /v1/evaluate`](/trustguard/api/evaluate)).
+security review asks is what it keeps and where. This page answers that for the runtime
+path ([`POST /v1/evaluate`](/trustguard/api/evaluate)).
+
+## Where records live
+
+This is the answer that matters most, and it is decided by your deployment — not by a
+setting you can get wrong later.
+
+| Deployment | Where records live |
+|---|---|
+| **Self-hosted / hybrid** | **Your own infrastructure, entirely.** |
+| **SaaS** | The NeuralTrust region your workspace is provisioned in. |
+
+<Note>
+**On hybrid, evaluated traffic never leaves your perimeter.** TrustGuard runs inside
+your infrastructure and exports records to the OTLP endpoint **you** configure, which on
+a hybrid deployment is a collector inside your own network. Prompts, completions, and
+tool payloads are written there and nowhere else.
+
+The link back to NeuralTrust carries **configuration only**: the control plane pushes
+policy and collector snapshots down, and your data plane acks the version it applied.
+Evaluated traffic is not part of that exchange and has no route onto it. If a data
+residency or data sovereignty requirement is what brought you to this page, hybrid is
+the deployment that satisfies it.
+</Note>
+
+On **SaaS**, records live in the region your workspace was provisioned in. That region is
+set at provisioning time and cannot be changed from the console, so confirm it with your
+NeuralTrust contact before you onboard traffic.
 
 ## What is stored
 
@@ -13,47 +40,50 @@ An evaluation produces two kinds of record, and they are not equally detailed.
 
 | Record | Contains | Why it exists |
 |---|---|---|
-| **Finding** | `source`, `signal`, `outcome`, and `evidence` — for example `{ "masked": 1, "entities": ["email"] }`. Evidence describes *what kind* of thing was detected and how much of it, not the sensitive value itself. | Drives **Activity**, analytics, and [alerts](/platform/alerts). |
-| **Request body** | The evaluated body, **sanitised** (see below) and capped at **1 MiB**. Bodies over the cap are stored truncated. | Lets you see the traffic behind a finding when you investigate it in **Activity**. |
+| **Finding** | `source`, `signal`, `outcome`, and `evidence` — for example `{ "masked": 1, "entities": ["email"] }`. Evidence describes *what kind* of thing was detected and how much of it, not the value itself. | Drives **Activity**, analytics, and [alerts](/platform/alerts). |
+| **Request body** | The evaluated body, after credential redaction, capped at **1 MiB**. Bodies over the cap are stored truncated. | Lets you see the traffic behind a finding when you investigate it in **Activity**. |
 
-**The request body is persisted.** That is the important sentence on this page: if a
-prompt is evaluated, its text can be read back in the console by anyone with access to
-your workspace, subject to the redaction and retention rules below. Plan your workspace
-permissions accordingly.
+The second row is the one to plan around: **the evaluated body is retained**, so anyone
+who can open **Activity** in your workspace can read the traffic behind a finding, for as
+long as the retention window lasts. Scope workspace access on that basis.
 
-## What is redacted before storage
+Records reach the store over OTLP. The [event schema](/platform/event-schema) documents
+their shape.
 
-Sanitisation runs **before** anything is written, and it is not configurable.
+## Credential redaction
 
-**Credential headers** are replaced with a placeholder, so a collector API key never
-lands in storage:
+Redaction runs **before** anything is written, and it is not configurable.
+
+**Credential headers** are replaced with a placeholder, so a collector API key never lands
+in storage:
 
 ```http
 Authorization: Bearer [REDACTED]
 ```
 
-**Credential-looking body fields** are replaced with `[REDACTED]` by key name, regardless
-of nesting: `password`, `passwd`, `secret`, `token`, `api_key`, `apikey`,
+The same applies to `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Auth-Token`, and the other
+well-known credential headers.
+
+**Credential-looking body fields** are replaced with `[REDACTED]` by key name, at any
+nesting depth: `password`, `passwd`, `secret`, `token`, `api_key`, `apikey`,
 `authorization`, `credential`, `access_token`, `refresh_token`, `client_secret`, and
-`private_key`.
+`private_key`, plus any key ending in `_api_key`, `-api-key`, or `_apikey`.
 
-**Multipart bodies** are never stored as content. They are replaced wholesale with
-`{"_multipart": true}`.
+**Multipart bodies** are never stored as content. Each part is reduced to its field
+name: file parts keep the filename and drop the bytes, and every other value becomes
+`[REDACTED]`.
 
-<Warning>
-Redaction targets **credentials**, not personal data. A prompt containing a customer's
-name, email, or account number is stored as written unless a
-[DLP](/trustguard/detectors/data-loss-prevention) rule set to **Transform** masks it. If
-you do not want PII reaching storage, mask it with a Transform rule rather than relying on
-sanitisation.
-</Warning>
+<Note>
+Redaction keys off **names** — header names and JSON key names. It is a guarantee about
+credentials in well-known fields, not a content filter over free text.
+</Note>
 
 ## Attachments
 
-Files and URLs are handled apart from the body and are **never stored**:
+Attachments are handled apart from the detectors' view of the body:
 
 - `payload.attachments` are decoded for the detectors that consume them (today
-  `doc_analyzer`) and discarded.
+  `doc_analyzer`) and the decoded content is discarded afterwards.
 - Remote attachment URLs are fetched server-side under a strict SSRF guard — HTTPS only,
   with loopback, private, link-local, CGNAT, and cloud-metadata addresses blocked — and
   the fetched content is not retained.
@@ -68,37 +98,24 @@ record written today expires on a fixed date — changing entitlements later doe
 retroactively extend or shorten records already stored.
 
 For teams entitled to TrustGuard the default window is **365 days**. Your team's actual
-value is the one stamped on it, so read it in the console rather than assuming the
+value is the one stamped on the record, so read it in the console rather than assuming the
 default: a shorter window can be provisioned on request.
 
 If you need a specific window contractually, or shorter than what is stamped, raise it
 with your NeuralTrust contact — it is an entitlement change, not a policy setting, so you
 cannot alter it yourself from the console.
 
-## Where it is stored
-
-Findings and sanitised bodies leave TrustGuard over OTLP and land in the NeuralTrust
-metadata store, which is what **Activity**, analytics, and the alerting rules read. The
-[event schema](/platform/event-schema) documents the record shape.
-
-The storage location follows your deployment:
-
-| Deployment | Where records live |
-|---|---|
-| **SaaS** | The NeuralTrust region your workspace is provisioned in. |
-| **Self-hosted / hybrid** | Your own infrastructure. Records never leave it. |
-
-If data residency is a requirement, confirm your region with your NeuralTrust contact
-before onboarding traffic — it is set when the workspace is provisioned.
-
 ## Reducing what gets stored
 
 If your threat model calls for storing less:
 
-- **Mask at the edge.** A [DLP](/trustguard/detectors/data-loss-prevention) rule set to
-  **Transform** rewrites the payload, so downstream records hold the masked form.
-- **Scope your collectors.** Traffic that never reaches a collector is never evaluated
-  and never stored. Attach policies deliberately rather than workspace-wide.
+- **Deploy hybrid.** The strongest control available, and the only one that removes
+  NeuralTrust from the picture entirely: records are written to, and stay in, your own
+  infrastructure.
+- **Scope your collectors.** Traffic that never reaches a collector is never evaluated and
+  never stored. Attach policies deliberately rather than workspace-wide.
 - **Use gates to waive traffic.** A gate with the **Skip** action stops evaluation for
-  matched requests, so no detector runs on them. See
+  matched requests, so no detector runs on them and no record is produced. See
   [Policies](/trustguard/concepts/policies).
+- **Shorten retention.** Ask your NeuralTrust contact to provision a window shorter than
+  the 365-day default.

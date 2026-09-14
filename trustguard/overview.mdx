@@ -3,71 +3,103 @@ title: TrustGuard
 sidebarTitle: Overview
 og:title: "TrustGuard: AI Guardrails for LLM and Agent Traffic"
 twitter:title: "TrustGuard: AI Guardrails for LLM and Agent Traffic"
-description: "TrustGuard is runtime security for AI agents. It inspects prompts, responses, and tool activity in production and returns a verdict for the collector to enforce."
+description: "TrustGuard is runtime security for AI agents. It inspects prompts, responses, and tool activity, then returns a verdict for the collector to enforce."
 ---
 
 <p className="nt-lead">
-  TrustGuard is runtime security for AI agents. It inspects prompts,
-  completions, documents, URLs, and tool calls while traffic is in production,
-  then returns a structured verdict. It is not a gateway: it does not route or
-  call model providers. The collector that called it decides whether to allow,
-  mask, ask, or block.
+  Prompts, completions, documents, URLs, tool calls — each one gets the same
+  question asked of it: should this be allowed? TrustGuard answers. It never
+  acts on its own answer; whatever sent the traffic is what applies it.
 </p>
+
+TrustGuard is **not** a gateway. It does not route requests or call model
+providers, so putting it in front of an agent never changes where your prompts
+go. Something else asks TrustGuard for a verdict and then acts on the answer:
+a gateway, a coding-agent hook, an agent platform, or your own code. That
+something is called a **collector**, and it is the only part you install.
+
+## What it stops
+
+<CardGroup cols={3}>
+  <Card title="Data loss" icon="eye-off" href="/trustguard/detectors/data-loss-prevention">
+    PII and secrets leaving in a prompt, a completion, or a tool argument.
+  </Card>
+  <Card title="Jailbreaks and abuse" icon="shield-off" href="/trustguard/detectors/content-security">
+    Prompt injection, toxicity, off-topic use, hostile URLs, and documents.
+  </Card>
+  <Card title="Tool-borne attacks" icon="bot" href="/trustguard/detectors/agent-mcp-security">
+    Instructions smuggled into what a tool hands back — MCP results, API
+    responses, fetched pages.
+  </Card>
+</CardGroup>
+
+Detectors **find** risk. They never act on it. What happens next is the
+[policy's](/trustguard/concepts/policies) decision, which is why the same
+detector can be a silent monitor in one policy and a hard block in another.
 
 ## How it works
 
 <Steps>
 <Step title="A collector sends the event">
-[TrustGate](/integrations/trustgate), a coding-agent hook, another gateway,
-or your SDK posts the payload to TrustGuard.
+Your gateway, hook, or SDK posts the payload to
+[`POST /v1/evaluate`](/trustguard/api/evaluate). The request carries a
+`direction` — is this traffic going **to** the model, or coming **back**?
 </Step>
-<Step title="Detectors produce a verdict">
-[Gates](/trustguard/concepts/policies) match request attributes. Input and
-output rules run the [detectors](/trustguard/concepts/detectors) you attached.
-The most restrictive status wins: block, ask, transform, report, or allow.
+<Step title="TrustGuard picks one policy">
+The collector's default policy, unless a per-consumer override matches the
+request's `consumer_id`. A collector with no matching policy inspects nothing.
 </Step>
-<Step title="The collector enforces it">
-What the host can actually apply depends on the integration. See
+<Step title="Gates decide what runs">
+[Gates](/trustguard/concepts/policies) match on request attributes and can skip
+evaluation entirely — useful for traffic you have deliberately waived. Whatever
+survives the gates runs the detectors attached to that direction.
+</Step>
+<Step title="The strictest result wins">
+Each detector returns its own outcome. TrustGuard reduces them to one status,
+worst-first: **block**, **ask**, **transform**, **report**, **allow**.
+</Step>
+<Step title="The collector enforces the verdict">
+TrustGuard only answers. What a host can actually *do* with that answer varies —
+a gateway can drop the request, a coding-agent hook can refuse a tool call, an
+SDK can do whatever you code. See
 [How verdicts are enforced](/trustguard/how-it-works).
 </Step>
 </Steps>
-
-<Warning>
-A collector with **no matching policy** is unguarded. TrustGuard returns
-`status: "allow"` and inspects nothing. Attach a default policy before you
-rely on it.
-</Warning>
-
-<CardGroup cols={2}>
-  <Card title="Connect a collector" icon="plug" href="/integrations/overview">
-    TrustGate, coding agents, other gateways, SDKs, or middleware.
-  </Card>
-  <Card title="How verdicts are enforced" icon="workflow" href="/trustguard/how-it-works">
-    Block, Ask, Transform, and Monitor — and what each collector can actually apply.
-  </Card>
-</CardGroup>
 
 <img
   src="/images/static/img/trustguard-product.svg"
   alt="Flow diagram showing a collector sending input or output to TrustGuard, which selects a policy, evaluates gates and detector rules, and returns a verdict for the collector to apply."
 />
 
-## What it stops
+<Warning>
+A collector with **no matching policy** is unguarded. TrustGuard returns
+`status: "allow"` and inspects nothing — it does not fail loudly. Attach a
+default policy before you rely on it.
+</Warning>
 
-<CardGroup cols={3}>
-  <Card title="Data loss" icon="eye-off" href="/trustguard/detectors/data-loss-prevention">
-    PII and secrets. Set **Transform** to mask them in flight.
-  </Card>
-  <Card title="Jailbreaks and abuse" icon="shield-off" href="/trustguard/detectors/content-security">
-    Prompt injection, toxicity, topic controls, URLs, and documents.
-  </Card>
-  <Card title="Tool-borne attacks" icon="bot" href="/trustguard/detectors/agent-mcp-security">
-    Indirect injection in MCP and other `role=tool` content.
-  </Card>
-</CardGroup>
+## Where traffic comes from
 
-Detectors **find** risk. The [policy](/trustguard/concepts/policies) decides what
-happens next.
+The catalog under **Agent Runtime → Collectors → Catalog** offers **nineteen
+collector types in five groups**. The group tells you where the collector runs
+and, as a result, how much it can see.
+
+| Group | Where it runs | What it sees | Types |
+|---|---|---|---|
+| **Gateway** | The AI gateway path | Every LLM and MCP request the gateway proxies | TrustGate, Portkey, LiteLLM, Kong, Apigee, Azure APIM |
+| **Agent platforms** | A platform you do not operate, which calls you | What the platform sends, before the agent acts | Copilot Studio, Inference Hooks |
+| **Coding agents** | Developer machines | Prompts and agent actions — shell commands, patches, MCP calls | Claude Code, Cursor, Codex, GitHub Copilot |
+| **Application** | Your own code, around the model call | Whatever you pass it | Python, Node.js, REST API, Python Middleware, Node.js Middleware |
+| **Agent frameworks** | Inside your agent loop | Prompts, responses, and tool calls in the graph — a tool call can be stopped before it runs | n8n, LangChain |
+
+[Collectors](/trustguard/concepts/collectors) explains authentication and policy
+routing; [Integrations](/integrations/overview) has the setup steps for each
+type.
+
+<Note>
+Employee use of AI services you do **not** operate is not a collector. That is
+the [browser extension](/platform/browser-extension), deployed through managed
+browser policy.
+</Note>
 
 ## Building blocks
 
@@ -88,33 +120,42 @@ happens next.
 
 ## Get started
 
-TrustGuard is entitlement-gated. If your team does not have it, **Agent Runtime**
-does not appear in the console. The fastest path is **Agent Runtime → Getting
-started**.
+TrustGuard is entitlement-gated: if your team is not entitled, **Agent Runtime**
+does not appear in the console at all. If you can see it, start at **Agent
+Runtime → Getting started**.
 
 1. **Build a policy** from the [detector catalog](/trustguard/detectors/overview). Leave it in **Observe**.
-2. **Test it** on the policy **Test** tab. The tab evaluates the *saved* policy.
+2. **Test it** on the policy **Test** tab — note that the tab evaluates the *saved* policy, not your unsaved edits.
 3. **Connect a collector** under **Collectors → Catalog**, then attach the policy.
 
-Watch **Activity**, then switch the policy to **Enforce**.
+Watch **Activity** until the findings look right, then switch the policy to
+**Enforce**. Going straight to Enforce is the fastest way to block traffic you
+did not mean to block.
 
 ## FAQ
 
 <AccordionGroup>
 <Accordion title="Is TrustGuard an AI gateway?">
-No. It evaluates traffic and returns a verdict. The collector applies it. When
-that collector is TrustGate, the gateway also routes the call.
+No. It evaluates traffic and returns a verdict; the collector applies it. When
+that collector happens to be TrustGate, the gateway also routes the call — but
+that is TrustGate's job, not TrustGuard's.
 </Accordion>
 <Accordion title="Do I need TrustGate?">
-No. Use another supported gateway, an SDK, middleware, or a coding-agent plugin.
-See [Integrations](/integrations/overview).
+No. Use another supported gateway, an SDK, middleware, an agent platform, or a
+coding-agent plugin. See [Integrations](/integrations/overview).
 </Accordion>
 <Accordion title="Can I evaluate a policy without blocking traffic?">
-Yes. **Observe** records findings and downgrades block, ask, and transform to
-`report`. Switch to **Enforce** after Activity looks right.
+Yes — that is **Observe**. It records findings and downgrades block, ask, and
+transform to `report`. Switch to **Enforce** once Activity looks right.
 </Accordion>
 <Accordion title="Can TrustGuard inspect tool calls?">
-Yes, when the collector sends tool events. Which actions the host can apply is
-in [How it works](/trustguard/how-it-works).
+Yes, when the collector sends tool events. Which actions the host can then apply
+is in [How it works](/trustguard/how-it-works).
+</Accordion>
+<Accordion title="What happens if TrustGuard is slow or unreachable?">
+That is the collector's decision, not TrustGuard's, and every integration
+exposes it differently — Copilot Studio, for example, asks you to choose up
+front what happens when no verdict arrives in time. Check the page for your
+integration before you rely on it.
 </Accordion>
 </AccordionGroup>
