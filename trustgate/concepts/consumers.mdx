@@ -1,6 +1,6 @@
 ---
 title: "Consumers"
-description: "A consumer is the calling application's identity — create it in the console to set routing, credentials, and model policies, then copy Connect snippets for your apps."
+description: "A consumer is the calling application's identity — create it in the console to set routing, credentials, identity, and model policies, then copy Connect snippets for your apps."
 ---
 
 A **consumer** is the runtime identity of a calling application. It holds credentials and
@@ -13,6 +13,10 @@ Each consumer belongs to one gateway and has a type:
 |---|---|
 | **LLM** | Chat / Responses / Messages / [embeddings](/trustgate/endpoints/embeddings) / [images](/trustgate/endpoints/images) / [files](/trustgate/endpoints/files) / [rerank](/trustgate/endpoints/rerank) / [models](/trustgate/endpoints/models) (default). |
 | **MCP** | MCP tool endpoints. |
+
+Every consumer routes over the registries bound to it. Who calls it never changes which
+registries or models it reaches; a caller's token, key, or certificate only decides whether
+the request is admitted.
 
 ## Consumers list
 
@@ -27,11 +31,11 @@ Open **Agent Gateway** → **Consumers**.
 
 ## Create a consumer
 
-1. Open **Consumers** → **New Consumer**.
+1. Open **Consumers** → **New Application**.
 2. Work through the create tabs:
-   - **General** — **Name**, **Protocol** (**LLM** or **MCP**), optional initial target registry.
-   - **Auth** — method + entity (see below). Copy API keys when shown (once only).
-   - **Routing** — mode + strategy + registries/models (or MCP target).
+   - **Auth** — **Name**, **Protocol** (**LLM** or **MCP**), and **Authentication**
+     (see below). Copy API keys when shown (once only).
+   - **Routing** — strategy + registries/models (or MCP target).
    - **Policies** — optional **Add Policy** or **Clone policies** from another consumer.
 3. Save. The success step and the detail **Connect** tab show ready-to-use snippets.
 
@@ -39,20 +43,70 @@ Open **Agent Gateway** → **Consumers**.
 
 | Tab | Purpose |
 |---|---|
-| **General** | Name, protocol, slug / route metadata. |
-| **Auth** | Link Identity auth entities; create/regenerate API keys (LLM). |
-| **Routing** | Routing mode, strategy, registries, smart tiers, fallback, roles. |
+| **General** | Name, protocol, **Identity** (who the consumer acts for), **Authentication** (API keys, identity provider, auth binding). |
+| **Routing** | Strategy, registries, smart tiers, fallback, MCP toolkit. |
 | **Policies** | Attach, detach, clone targeted policies (globals still apply). |
 | **Connect** | Base URL, headers, model hints (`auto` vs explicit), client snippets. |
 
-## Routing mode
+## Identity
 
-| Mode | UI label | Behavior |
+Every consumer is an application. `identity` says whether a person stands behind each
+request and how TrustGate learns who that person is. It never selects a registry or a model.
+
+| Field | Console | Applies to | Meaning |
+|---|---|---|---|
+| `acts_for_users` | **Acts on behalf of end users** | MCP | Upstream accounts are held per person instead of once for the application. Off (default): the consumer acts as the application itself. |
+| `source` | **How end users are known** | MCP, when `acts_for_users` is on | `platform` (**Users sign in**) — each person signs in; `sub` and groups come from the token. `app` — the application authenticates as a machine and names the person on every request. Set it with the Admin API; the console does not offer it on a new consumer yet. Defaults to `platform`. |
+| `end_user_header` | **Accept end-user attribution header** | LLM | Accept `X-NeuralTrust-End-User` and record it as `trustgate.end_user` in traces and telemetry. |
+
+The identity fixes the credential shape (the gateway enforces it with `409`):
+
+| Identity | Allowed authentication |
+|---|---|
+| `source: platform` | An OAuth2 identity provider that can broker the login, or none — which leaves the built-in **NeuralTrust login**. |
+| `source: app` | API key or mTLS. Every MCP call must then carry `X-NeuralTrust-End-User` (≤ 256 characters, no control characters); the request runs as `app:<consumer_id>:<end_user>`. |
+| `acts_for_users` off, or LLM | API key, OAuth2 (bearer JWT), or mTLS. An API-key or mTLS MCP consumer runs as `app:<consumer_id>`. |
+
+When to use which: a backend agent or scheduled job acts as the application (leave the
+switch off). An internal assistant where each person reaches *their* Notion or Linear acts
+for users with **Users sign in**. A product that owns its own user directory and calls MCP
+server-side uses `source: app` and links accounts through the
+[end-user connections API](/trustgate/mcp/end-users). The self-service
+[MCP Store](/trustgate/mcp/store) is a built-in consumer that acts for platform users.
+
+Access rules govern the Store only. A custom consumer's servers are exactly the registries
+bound to it under **Routing**, the same set for every caller it admits.
+
+## Auth binding
+
+Identity providers and mTLS CAs are gateway-level trust anchors shared by many consumers.
+`auth_binding` narrows which verified callers may enter *this* consumer. Empty lists accept
+every caller the anchor verifies. API keys need no binding: a key belongs to one consumer.
+
+| Field | Console | Checked against |
 |---|---|---|
-| `inline` | **Static** | Strategy, registries, fallback, and model policies live on the consumer. |
-| `role_based` | **Identity-based** | [Roles](/trustgate/concepts/roles) selected from OIDC/OAuth claims decide registries and models. Attach roles under Routing; manage role definitions under [Identity](/trustgate/concepts/auth). |
+| `allowed_client_ids[]` | **Allowed client IDs** | The bearer JWT's `azp` claim, else `client_id`. A token with neither is refused when the list is set. |
+| `allowed_certificate_subjects[]` | **Allowed certificate subjects** | The client certificate's CN or one of its SAN DNS names. |
 
-## Strategies (Static routing)
+Enforced after consumer resolution on both the LLM proxy plane and the MCP plane (JWT,
+introspection, and mTLS). A caller the anchor verifies but the binding excludes gets `403`.
+Up to 100 entries per list, 256 characters each.
+
+### Attached auth entities
+
+`PUT /v1/gateways/{gateway_id}/consumers/{consumer_id}` accepts `auths: [id, …]` and applies
+it in the same transaction as `identity`, so identity and credential move together:
+
+| `auths` | Effect |
+|---|---|
+| Omitted | Associations untouched. |
+| `[]` | Detach every auth. |
+| A list (≤ 64 ids) | Replace the association set. |
+
+Detaching the last OAuth2 auth from a consumer whose users sign in hands it to the built-in
+NeuralTrust login.
+
+## Strategies
 
 | Strategy | When to use |
 |---|---|
@@ -111,5 +165,5 @@ The provider credential remains in TrustGate. Keep the consumer API key secret.
 
 ## Edit routing later
 
-Open the consumer → **Routing** to change strategy, registries, smart-routing tiers,
-fallback chain, or identity-based roles without recreating the consumer.
+Open the consumer → **Routing** to change strategy, registries, smart-routing tiers, or the
+fallback chain without recreating the consumer.
