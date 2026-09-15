@@ -16,7 +16,7 @@ connectors, see [Claude Enterprise](/integrations/claude-enterprise).
 | Product | Scope | Controls |
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | Evaluates prompts, commands, tool calls, and tool results against an organization [policy](/trustguard/concepts/policies). | Monitor · Block · Ask on tool calls |
-| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer. MCP (Model Context Protocol) connects Claude Code to systems such as trackers, databases, and internal APIs. | Tool availability · identity-based access · per-tool rate limits |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer, and can proxy Claude Code's model traffic through an LLM consumer. MCP (Model Context Protocol) connects Claude Code to systems such as trackers, databases, and internal APIs. | Tool availability · consumer authentication · per-tool rate limits · model routing and budgets |
 
 Use the TrustGuard plugin to evaluate individual actions. Add TrustGate when
 Claude Code needs controlled access to MCP tools. Each has its own configuration
@@ -146,8 +146,57 @@ claude mcp add --transport http TrustGate https://<mcp-host>/<consumer-slug>/mcp
   --header "X-AG-API-Key: ag_…"
 ```
 
-On a private (Hybrid) data plane, add
+The MCP plane also accepts the key as `Authorization: Bearer ag_…` or `x-api-key`, for
+clients that can only set one of those headers. On a private (Hybrid) data plane, add
 `--header "X-AG-Gateway-Slug: <gateway-slug>"` as well.
+
+## Route model traffic through TrustGate
+
+Claude Code can send its own model requests through an **LLM consumer** instead of
+straight to Anthropic, so the same rate limits, budgets, guardrails, and traces apply to
+the coding agent as to any other application. Claude Code speaks the Anthropic Messages
+API; TrustGate serves it at `/{consumer_slug}/v1/messages` and routes it to whichever
+registry the consumer binds — an Anthropic registry, or a cross-format route to an OpenAI
+or Gemini registry.
+
+1. Create an LLM consumer, bind the registries and models it may use, and issue an
+   `ag_…` API key. Copy the LLM host from the **Connect** tab.
+2. Point Claude Code at the consumer:
+
+   ```bash
+   export ANTHROPIC_BASE_URL="https://<llm-host>/<consumer-slug>"
+   export ANTHROPIC_AUTH_TOKEN="ag_…"      # sent as Authorization: Bearer
+   # or: export ANTHROPIC_API_KEY="ag_…"   # sent as x-api-key
+   ```
+
+   Both header forms authenticate the API key. On a private (Hybrid) data plane add the
+   gateway header:
+
+   ```bash
+   export ANTHROPIC_CUSTOM_HEADERS="X-AG-Gateway-Slug: <gateway-slug>"
+   ```
+
+3. Start a new session and send a prompt. The request appears in TrustGate traces under
+   the consumer.
+
+Claude Code names Anthropic models. On a route to an Anthropic registry they pass through.
+On a cross-format route a bound registry must serve the model name Claude Code sends —
+TrustGate walks the consumer's registries in order and answers `404 model_not_supported`
+when none does — so point Claude Code at a model the registry offers (`ANTHROPIC_MODEL`
+for one session, or `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` /
+`ANTHROPIC_DEFAULT_HAIKU_MODEL` for the aliases), and expect TrustGate to adapt the
+request:
+
+| On a cross-format route TrustGate… | Detail |
+| --- | --- |
+| Clamps `max_tokens` | Values above the resolved model's output limit are lowered to it. The response carries `X-Max-Tokens-Clamped`; the metric is `trustgate.proxy.max_tokens_clamped`. |
+| Rejects context-window overflow early | A request whose text is far larger than the model's context window returns `400` with the Anthropic error envelope before any upstream call, naming the window and the estimated size. Not applied to `openai_compatible` registries or models with an unknown window. |
+| Rewrites upstream errors | Provider errors come back as Anthropic `{"type":"error","error":{"type":"invalid_request_error",…}}` bodies (and SSE error events), so Claude Code can parse them. |
+| Drops nameless server-tool blocks | Anthropic server-side tool blocks that carry only a `type` (for example `web_search_20250305`) are removed so the OpenAI or Gemini upstream never sees a function without a name. Anthropic-to-Anthropic traffic is untouched. |
+
+The Warning above still applies: with `ANTHROPIC_BASE_URL` set, Claude Code skips
+server-managed settings, so deploy the TrustGuard plugin enablement as the
+`managed-settings.json` file.
 
 ## Verify
 
@@ -174,6 +223,13 @@ reload.
 1. Confirm that `/mcp` lists TrustGate, then call a tool from a bound registry.
 2. Confirm the call in TrustGate telemetry. See
    [Metrics](/trustgate/observability/metrics).
+
+### TrustGate inference
+
+With `ANTHROPIC_BASE_URL` set, run `/status` inside `claude` and confirm the API base URL
+is the consumer URL, then send a prompt and open the trace in the console. A `401` means
+the key is wrong or revoked; a `404` means the slug or the path is wrong (the base URL must
+end with the consumer slug, no `/v1`).
 
 ## Reference
 
@@ -242,7 +298,8 @@ MDM-deployed binary on the Mac does not cover that session. The config and
 binary must exist where the agent runs.
 
 **MCP auth.** The CLI accepts OAuth2 or an `ag_…` consumer key as
-`X-AG-API-Key`. A private data plane needs `X-AG-Gateway-Slug` unless the MCP
+`X-AG-API-Key` (the plane also takes it as `Authorization: Bearer ag_…` or
+`x-api-key`). A private data plane needs `X-AG-Gateway-Slug` unless the MCP
 host already scopes the [gateway](/trustgate/concepts/gateways). Which IdP backs
 the OAuth login is configured on the consumer. See
 [Auth](/trustgate/concepts/auth). Authenticating to TrustGate is separate from
@@ -255,7 +312,7 @@ collector key in `claude-code.json` through MDM. An Anthropic organization owner
 manages [organization connectors](/integrations/claude-enterprise#organization-connectors).
 
 Configure the consumer's available tools under **Routing** in the NeuralTrust
-console, or through a [role](/trustgate/concepts/roles) for Identity-based consumers.
+console; every caller the consumer admits sees the same tool set.
 To limit MCP tool calls, attach the [Per-Tool Rate
 Limiter](/trustgate/policies/tool-governance) policy.
 

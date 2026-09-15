@@ -1,17 +1,18 @@
 ---
 title: "Entra ID"
-description: "End-to-end manual for wiring Microsoft Entra ID (Azure AD) to TrustGate: an app registration with an exposed API scope and app roles feeding OIDC identity-based routing and OAuth2 for MCP."
+description: "End-to-end manual for wiring Microsoft Entra ID (Azure AD) to TrustGate: an app registration with an exposed API scope, validating Entra bearer tokens on a consumer, and OAuth2 login for MCP."
 ---
 
 This manual sets up **Microsoft Entra ID** (formerly Azure AD) as the identity provider for
-two TrustGate patterns in the NeuralTrust app (**Agent Gateway → Identity** /
-**Consumers**):
+two TrustGate patterns in the NeuralTrust app (**Settings → Agent Gateway → Machine
+identity** / **Consumers**):
 
-1. **OIDC · Identity-based LLM** — an LLM consumer whose routing is chosen from the
-   token's `roles` (app roles) or `groups` claim ([roles](/trustgate/concepts/roles)).
-2. **OAuth2 · MCP** — an MCP consumer gated by an exposed API scope. Interactive agents
-   (Cursor, etc.) use TrustGate's authorization-code broker; optional client-credentials
-   tokens are only for curl checks.
+1. **Validate bearer tokens** — an LLM or MCP consumer whose callers already hold an Entra
+   access token (a service using client credentials, or an app forwarding a user token).
+   TrustGate verifies the token and admits the caller; routing is the consumer's own.
+2. **OAuth2 · MCP login** — an MCP consumer gated by an exposed API scope. Interactive
+   agents (Cursor, etc.) use TrustGate's authorization-code broker; optional
+   client-credentials tokens are only for curl checks.
 
 Entra ID issues **v2.0** tokens when the app registration uses the v2 endpoint. TrustGate
 treats an `api://` resource URI and its bare identifier as the same audience, and prefers
@@ -22,7 +23,6 @@ the Entra `oid` claim as the stable subject. Use the values below exactly.
 - An Entra tenant — note your **Tenant ID** (`Overview → Tenant ID`).
 - Rights to register applications (**App registrations**) and manage
   **Enterprise applications**.
-- A group or set of users you can assign to an app role.
 - For Cursor / agent MCP login: the public MCP base URL of your gateway (e.g.
   `https://{gateway_slug}.mcp.neuraltrust.ai`), so you can register the OAuth redirect URI.
 
@@ -111,99 +111,57 @@ left-hand navigation.
   </Step>
 </Steps>
 
-## 3. Define app roles (for identity-based LLM routing)
-
-App roles are the cleanest way to drive TrustGate roles; they arrive in the `roles` claim.
-
-<Steps>
-  <Step title="Create the app role">
-    Open the app → left menu **Manage → App roles** → **Create app role**:
-
-    - **Display name**: `Engineering`
-    - **Allowed member types**: *Users/Groups* (and/or *Applications* for M2M).
-    - **Value**: `engineering` — this exact string is what appears in the `roles` claim.
-    - **Description**: anything.
-    - Tick **Do you want to enable this app role?**
-
-    Click **Apply**.
-  </Step>
-  <Step title="Assign users or groups to the role">
-    Assignment happens on the **enterprise application** (the service principal), not the
-    registration. In the left sidebar go to **Identity → Applications → Enterprise
-    applications** → open your `trustgate` app → **Manage → Users and groups** → **Add
-    user/group**. Pick the users/groups, and under **Select a role** choose `Engineering`.
-    Click **Assign**.
-  </Step>
-  <Step title="(Optional) emit a groups claim instead">
-    To route on directory groups instead of app roles, open the **app registration** →
-    **Manage → Token configuration** → **Add groups claim**, pick the group types, and save.
-    The token then carries a `groups` array of group **object IDs** (GUIDs), not names.
-  </Step>
-</Steps>
-
 ---
 
-## 4. OIDC identity-based routing (LLM)
+## 3. Validate Entra bearer tokens (LLM or MCP)
 
-Use this when an LLM consumer should pick registries and models from the caller's Entra
-token (app role `roles`, or directory `groups`). Everything below is done in the
-NeuralTrust app under **Agent Gateway** — no API payloads.
-
-Recommended order: **Auth → Role → Consumer**.
+Use this when the application already obtains its own Entra access token — client
+credentials for a service, or a user token the application forwards — and sends it as
+`Authorization: Bearer <token>`. TrustGate verifies the token; the consumer's own
+**Routing** decides registries and models. Everything below is done in the NeuralTrust app —
+no API payloads.
 
 <Steps>
-  <Step title="Create an OIDC auth">
-    Go to **Agent Gateway → Identity → Auth → New Auth**.
+  <Step title="Create the trust anchor">
+    Go to **Settings → Agent Gateway → Machine identity** → **Add trust anchor**.
 
-    - **Type**: `OIDC`
+    - **Kind**: **IdP (JWT)**
     - **Name**: e.g. `entra-idp`
-    - **Status**: Active
     - **Issuer**: `https://login.microsoftonline.com/{tenant_id}/v2.0`
-    - **JWKS URL**: `https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys`
-    - **Audiences**: `api://{client_id}` (add the bare `{client_id}` as well if your
-      tokens use that form)
-    - **Subject claim**: `oid`  
-      (`oid` is a stable per-tenant user id; Entra `sub` is pairwise per app and changes
-      across apps)
+    - **Audience**: `api://{client_id}` (the bare `{client_id}` form is accepted as the
+      same audience)
+    - **Advanced**: **Subject claim** `oid` — a stable per-tenant user id; Entra `sub` is
+      pairwise per app and changes across apps. Optionally pin **JWKS URL** to
+      `https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys`.
 
-    Click **Create Auth**.
+    Save. No client secret is stored: the gateway only verifies tokens.
   </Step>
-  <Step title="Create a role that matches Entra app roles">
-    Still under **Identity**, open the **Roles** tab → **New Role**.
+  <Step title="Attach it to the consumer">
+    Go to **Agent Gateway → Consumers**, open (or create) the consumer, and on **General →
+    Authentication** choose **Identity provider** and select `entra-idp`.
 
-    - **Role name**: e.g. `engineering`
-    - **Claim**: `roles` (or `groups` if you emit directory groups instead)
-    - **Value**: the app role **Value** from step 3, e.g. `engineering`  
-      (for directory groups, use the group **object ID** GUID, not the display name)
-    - **Resources**: **Add resource** and select the LLM registries (and optional models)
-      this role may reach
+    - **Allowed client IDs**: the **Application (client) ID** of every calling
+      application. Entra v2.0 tokens carry it in `azp`. Leave empty only when the audience
+      is dedicated to this one consumer.
 
-    Click **Create Role**.
+    **Save changes**. Registries and models stay under **Routing**, as for any consumer.
   </Step>
-  <Step title="Create an LLM consumer with Identity-based routing">
-    Go to **Agent Gateway → Consumers → Consumer**.
+  <Step title="Call the consumer">
+    Mint a token (see [§5](#5-get-a-test-token-optional-m2m)) and send it:
 
-    On **General**:
+    ```bash
+    curl https://{llm_host}/{consumer_slug}/v1/chat/completions \
+      -H "Authorization: Bearer $ENTRA_ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
+    ```
 
-    - **Name**: e.g. `entra-llm`
-    - **Protocol**: `LLM`
-    - **Authentication → Method**: `OIDC`
-    - **OIDC provider**: select the auth from the first step
-
-    On **Routing**:
-
-    - Switch from **Static** to **Identity-based**
-    - **Roles**: select the role(s) you created (at least one)
-
-    Click **Create Consumer**.
-
-    For an existing consumer, use the **Auth** and **Routing** tabs the same way, then
-    **Save changes**. With Identity-based routing, registries come from the role's
-    resources — not from a static list on the consumer.
+    `401` means the token failed verification; `403` means it verified but its `azp` is
+    not in **Allowed client IDs**.
   </Step>
 </Steps>
 
-## 5. OAuth2 for MCP
+## 4. OAuth2 for MCP
 
 Use this when Cursor (or another MCP client) should log in through Entra. Access is gated
 by the exposed API scope (for example `mcp.access`).
@@ -224,34 +182,50 @@ TrustGate accepts either:
     permissions**. Then **Grant admin consent for your tenant**. Without admin consent the
     token carries no `roles` and TrustGate rejects it for missing scopes.
   </Step>
-  <Step title="Create an OAuth2 auth in the app">
-    Go to **Agent Gateway → Identity → Auth → New Auth**.
+  <Step title="Create the interactive OAuth2 auth">
+    The **Machine identity** form creates token-validation anchors; an anchor that brokers
+    a login is created with the [Admin API](/trustgate/api/credentials) and is then
+    listed and editable under **Settings → Agent Gateway → Machine identity**:
 
-    - **Type**: `OAuth2`
-    - **Name**: e.g. `entra-mcp`
-    - **Status**: Active
-    - **Setup**: **Interactive login · IdP with discovery (Okta, Entra ID)**
-    - **Issuer**: `https://login.microsoftonline.com/{tenant_id}/v2.0`
-    - **Audiences**: `api://{client_id}`
-    - **Client ID** / **Client secret**: from the app registration
-    - **Session mode**: **Disabled**
-    - **Required scopes**: `mcp.access` (the short scope name — not
-      `openid` / `profile` / `email`)
+    ```http
+    POST /v1/gateways/{gateway_id}/auths
+    Authorization: Bearer <admin-token>
+    Content-Type: application/json
+    ```
 
-    Leave **Token validation · advanced** closed unless you want to pin **JWKS URL** to
-    `https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys`.
+    ```json
+    {
+      "name": "entra-mcp",
+      "type": "oauth2",
+      "enabled": true,
+      "config": {
+        "oauth2": {
+          "issuer": "https://login.microsoftonline.com/{tenant_id}/v2.0",
+          "audiences": ["api://{client_id}"],
+          "client_id": "{client_id}",
+          "client_secret": "{client_secret}",
+          "required_scopes": ["mcp.access"],
+          "subject_claim": "oid"
+        }
+      }
+    }
+    ```
 
-    Click **Create Auth**.
+    This is the **Interactive login · IdP with discovery** setup: leave `session_mode` off,
+    use the short scope name in `required_scopes` (not `openid` / `profile` / `email`),
+    and pin `jwks_url` only if you do not want discovery.
   </Step>
   <Step title="Create an MCP consumer and attach the auth">
-    Go to **Agent Gateway → Consumers → Consumer**.
+    Go to **Agent Gateway → Consumers → New Application**.
 
     - **Name**: e.g. `entra-mcp`
     - **Protocol**: `MCP`
-    - **Authentication → Method**: `OAuth2` (MCP does not use OIDC)
-    - **OAuth client**: select the auth from the previous step
+    - **Authentication → Identity provider**: select `entra-mcp`
+    - **Allowed client IDs** (optional): the app registration's client ID
 
-    Click **Create Consumer**.
+    Click **Create Application**. On the consumer's **General** tab, **Identity → Acts on
+    behalf of end users** with **Users sign in** makes each person hold their own upstream
+    connections; the consumer's servers stay the registries bound under **Routing**.
   </Step>
   <Step title="Connect from Cursor">
     Open the consumer → **Connect** tab and copy the Cursor URL:
@@ -265,10 +239,11 @@ TrustGate accepts either:
   </Step>
 </Steps>
 
-## 6. Get a test token (optional M2M)
+## 5. Get a test token (optional M2M)
 
-Client credentials are **not** what Cursor uses. Use this only to decode a token and
-confirm issuer, audience, and scopes:
+Client credentials are **not** what Cursor uses. Use this to decode a token and confirm
+issuer, audience, and scopes, or as the token a service sends in
+[§3](#3-validate-entra-bearer-tokens-llm-or-mcp):
 
 ```bash
 curl -s --request POST \
@@ -284,17 +259,18 @@ Decode the `access_token` and confirm:
 
 - `iss` = `https://login.microsoftonline.com/{tenant_id}/v2.0`
 - `aud` = `api://{client_id}` (or the bare `client_id`)
+- `azp` = the calling application's client ID (what **Allowed client IDs** matches)
 - `roles` (app permissions) or `scp` (delegated) contains your scope/role
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| Audience mismatch | Token `aud` is the bare `client_id` but the auth lists only `api://…` (or vice versa). Add both forms to **Audiences** if unsure — TrustGate normalizes the `api://` prefix. |
+| Audience mismatch | Token `aud` is the bare `client_id` but the auth lists only `api://…` (or vice versa). TrustGate normalizes the `api://` prefix, so either form works; check for a different app's ID. |
 | `roles`/`scp` empty | For client credentials you must **grant an app role** and admin-consent it; delegated tokens need the user assigned and consent granted. |
+| `403 forbidden` on a bearer call | Token verified but its `azp` is not in the consumer's **Allowed client IDs**. |
 | Redirect URI mismatch on login | Add `{mcp_base_url}/oauth/callback` under **Authentication → Web** on the app registration. |
 | Wrong issuer | App is emitting v1.0 tokens (`sts.windows.net`) — switch to v2 or set the v1 issuer/JWKS. |
-| Role never selected | `groups` claim carries object IDs, not names — put the GUID in the role **Value**, or match app-role `roles` values instead. |
 | Config rejected | **Required scopes** contains `openid`/`profile`/`email`/`offline_access` — remove them. |
 
 Back to [Auth](/trustgate/concepts/auth).

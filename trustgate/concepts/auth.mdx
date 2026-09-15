@@ -1,88 +1,107 @@
 ---
 title: "Overview"
-description: "API keys, OAuth2, and OIDC — how clients authenticate as a consumer, and how to wire an IdP for Identity-based LLM routing and MCP login."
+description: "API keys, OAuth2 identity providers, and mTLS — how clients authenticate as a consumer, how TrustGate validates a bearer JWT, and how it brokers MCP login."
 ---
 
 An **auth** is how a client proves it may act as a [consumer](/trustgate/concepts/consumers).
-Create entities under **Identity → Auth**, then attach them to consumers. Distinct from a
-registry's **upstream** credential (how TrustGate calls the model provider or MCP server).
+Distinct from a registry's **upstream** credential (how TrustGate calls the model provider or
+MCP server).
 
-Manage entities at **Agent Gateway → Identity → Auth**. Attach them on the consumer **Auth**
-tab, or during consumer create. **Roles** live on the other Identity tab — see
-[Roles](/trustgate/concepts/roles).
+Two kinds of auth entities exist:
+
+- **API keys** belong to one consumer. Issue, rotate, and revoke them on the consumer's
+  **General** tab under **Authentication**.
+- **Trust anchors** — external identity providers and mTLS certificate authorities — are
+  gateway-level and shared by many consumers. Manage them at **Settings → Agent Gateway →
+  Machine identity**, then select one on the consumer under **Authentication → Identity
+  provider**. Which callers of a shared anchor may enter a given consumer is the consumer's
+  [auth binding](/trustgate/concepts/consumers#auth-binding).
 
 ## Types
 
 | Type | How the client authenticates | Typical use |
 |---|---|---|
-| **API Key** | `X-AG-API-Key: ag_…` (also `x-api-key` or `Authorization: Bearer ag_…`) | Static consumers |
-| **OAuth2** | Bearer token. TrustGate can **validate** a token the client already has, or **broker** the login (authorization code + PKCE) | MCP agents; M2M |
-| **OIDC** | Bearer JWT validated against your IdP JWKS. Claims can select a [role](/trustgate/concepts/roles) | Identity-based LLM routing |
-| **mTLS** | Client certificate (or a trusted `X-Forwarded-Client-Cert` header) | Static consumers only — [mTLS](/trustgate/concepts/mtls) |
+| **API Key** (`api_key`) | `X-AG-API-Key: ag_…`, `x-api-key: ag_…`, or `Authorization: Bearer ag_…` | Applications, backend agents, scheduled jobs |
+| **OAuth2** (`oauth2`) | Bearer token issued by your IdP. TrustGate **validates** a token the client already holds (JWT or, with an introspection URL, opaque), or **brokers** the login (authorization code + PKCE) for MCP clients | LLM apps with an IdP token; M2M; MCP agents |
+| **mTLS** (`mtls`) | Client certificate (or a trusted `X-Forwarded-Client-Cert` header) — [mTLS](/trustgate/concepts/mtls) | Machine callers on both planes |
 
-| Protocol | Methods in the UI |
+`oidc` is a deprecated alias of `oauth2`: `type: oidc` and `config.oidc` are still accepted
+on create and update, but responses always carry the `oauth2` shape.
+
+| Protocol | Methods in the console |
 |---|---|
-| **LLM** | API Key, OAuth2, OIDC |
-| **MCP** | OAuth2 or API Key. For OAuth2, attach an IdP or **Use NeuralTrust** (built-in login, empty `auth_ids`). Not OIDC — agents need the gateway to run the interactive login. |
+| **LLM** | **API key**, **Identity provider** (bearer JWT validated against the IdP). |
+| **MCP** | **API key**, **Identity provider**, or **NeuralTrust login** (the built-in IdP — no auth attached). A consumer whose users sign in needs a provider that can broker the login; a validation-only provider is refused. |
 
-**mTLS** is created with the Admin API (not the **New Auth** form) and attaches to Static
-consumers on both planes. See [mTLS](/trustgate/concepts/mtls).
-
-An Identity-based LLM consumer carries **exactly one** identity auth (OIDC or OAuth2).
+**mTLS** anchors are created with the Admin API (the console form offers **IdP (JWT)**) and
+attach to consumers on both planes. See [mTLS](/trustgate/concepts/mtls).
 
 ## API keys
 
-1. **Identity → Auth → New Auth → API Key**, or create the key on the consumer **Auth** tab.
-2. Set expiry (**Never**, 30 days, 90 days, 1 year). Copy the secret once.
-3. Use it in requests or in the consumer **Connect** snippets.
+1. Open the consumer → **General** → **Authentication** → **API key** → **Add API key**
+   (or pick **API key** when creating the consumer; one key is issued on create).
+2. Copy the secret once. Use it in requests or in the consumer **Connect** snippets.
+3. **Regenerate** or **Revoke** from the same list.
 
 Keys are prefixed `ag_`. TrustGate stores a hash; the secret cannot be recovered. Rotate by
 creating a new key, updating clients, then revoking the old one.
 
+Both planes accept the key as `X-AG-API-Key`, as `x-api-key` (Anthropic-style clients), or
+as `Authorization: Bearer ag_…`. A bearer that starts with `ag_` is treated as an API key;
+any other bearer goes to the OAuth2 validators. An MCP consumer called with an API key runs
+as principal `app:<consumer_id>`, so rotating or renaming a key never strands the upstream
+accounts linked to the application.
+
 ## OAuth2 setup modes
 
-| Mode | When |
-|---|---|
-| **Validate tokens only (M2M)** | Services present bearer tokens; no browser login. |
-| **Interactive login · IdP with discovery** | Browser/agent login; OpenID discovery (Okta, Entra ID). |
-| **Interactive login · IdP without discovery** | Manual authorize / token / userinfo URLs. |
+One `oauth2` entity covers every IdP pattern; the **Setup** choice decides which fields you
+fill.
 
-OIDC fields: issuer, JWKS URL, audiences, required scopes, allowed algorithms, subject
-claim, optional public keys / certificate constraints.
-
-## Two IdP patterns
-
-Same Okta or Entra tenant can back both. They are two TrustGate **auth types**, not two IdPs.
-
-| Pattern | Auth type | Consumer | Purpose |
-|---|---|---|---|
-| **OIDC · Identity-based LLM** | OIDC | LLM, Identity-based routing | Token claims (`groups`, `roles`, …) select a [role](/trustgate/concepts/roles) |
-| **OAuth2 · MCP** | OAuth2 (interactive discovery) | MCP | Agents use TrustGate's authorization-code + PKCE broker. **Required scopes** gate access. Client-credentials tokens are for curl checks only. |
-
-| | **OIDC** | **OAuth2** |
+| Mode | When | Fields |
 |---|---|---|
-| What TrustGate does | Validates a JWT the client already has | Can also broker the login (client ID / secret → IdP authorize) |
-| Typical consumer | LLM · Identity-based | MCP |
-| Access | Claim → role | Required scopes on the token |
-| IdP app | Issuer + JWKS + audiences (no client secret required) | Same issuer family, plus a confidential client and `{mcp_base_url}/oauth/callback` |
+| **Validate tokens only (machine-to-machine)** | The caller already holds a JWT from your IdP (client credentials, certificate credentials, a user token your app obtained). No browser login. Console kind **IdP (JWT)**. | `issuer`, `audiences`; optionally `jwks_url` or inline `public_keys`, `allowed_algorithms`, `required_scopes`, `subject_claim`. |
+| **Interactive login · IdP with discovery (Okta, Entra ID)** | MCP clients sign in through TrustGate's authorization-code + PKCE broker; endpoints come from `/.well-known/openid-configuration`. | Validation fields plus `client_id`, `client_secret`. |
+| **Interactive login · IdP without discovery (GitHub)** | The IdP publishes no discovery metadata. | Plus `authorize_url` + `token_url` (set together); `session_mode` + `userinfo_url` for opaque, non-JWT tokens. |
+
+`introspection_url` validates opaque tokens without session mode. HMAC algorithms (`HS*`) are
+rejected: only asymmetric signatures are accepted. When `public_keys` are set, discovery is
+skipped.
+
+## Two ways to use an IdP
+
+The same Okta or Entra tenant can back both. What differs is whether TrustGate only checks a
+token or also runs the login.
+
+| Pattern | Consumer | What TrustGate does | IdP app |
+|---|---|---|---|
+| **Validate a bearer JWT** | LLM or MCP, machine or user token | Verifies signature, `iss`, `exp`/`nbf`, `aud`, `required_scopes`; then the consumer's **Allowed client IDs** (`azp`, else `client_id`). Claims never select a registry or model. | Issuer + audience (no client secret). |
+| **Interactive MCP login** | MCP whose users sign in | Brokers authorization code + PKCE, validates the tokens the IdP issues, keeps per-user upstream connections. **Required scopes** gate access. | Confidential client with redirect `{mcp_base_url}/oauth/callback`. |
+
+When a request carries a bearer JWT, TrustGate picks the provider by the token's `iss` and
+`aud` among the auths attached to the consumer's path, so one consumer may attach several
+IdPs. Client-credentials tokens are for curl checks or M2M apps, never for interactive
+agents.
 
 ## Rules for every provider
 
-- **Audiences** is required and must match the token's `aud` claim.
+- **Audiences** is required and must match the token's `aud` claim. An `api://` resource URI
+  and its bare identifier count as the same audience.
 - **Required scopes** must not include `openid`, `profile`, `email`, or `offline_access`.
 - Scope matching uses `scp`/`scope` **and** Auth0/Entra-style `permissions` and `roles` arrays.
 - Interactive MCP: **Setup → Interactive login · IdP with discovery**, Session mode off,
   Okta app type **Web Application** (not API Services).
 - **JWKS URL** can stay under **Token validation · advanced**; TrustGate resolves keys from
   the issuer when needed.
+- Telemetry records `trustgate.principal.method` as `external_jwt` (your IdP's token),
+  `oauth` (a gateway-brokered login), `api_key`, `mtls`, or `introspection`.
 
 ## Provider manuals
 
 <CardGroup cols={2}>
   <Card title="Okta" icon="key" href="/trustgate/concepts/authorization/okta">
-    Custom authorization server, scopes, groups claim, and both app patterns.
+    Custom authorization server, scopes, bearer-token validation, and interactive MCP login.
   </Card>
   <Card title="Entra ID" icon="microsoft" href="/trustgate/concepts/authorization/entra-id">
-    App registration, exposed API scopes, app roles, and both app patterns.
+    App registration, exposed API scopes, bearer-token validation, and interactive MCP login.
   </Card>
 </CardGroup>

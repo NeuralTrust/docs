@@ -1,0 +1,152 @@
+---
+title: "End users of your application"
+description: "Let an API-key application identify each of its users so every user connects their own upstream accounts through TrustGate"
+---
+
+An application that authenticates to TrustGate with an API key can still let each of
+**its** users connect their own accounts on the MCP servers behind it. The application
+names the person on every request; TrustGate keeps one set of upstream credentials per
+person and hands the application a connect link when a person still needs to sign in.
+
+This is the pattern for a product that embeds tools for its customers: your backend holds
+one TrustGate API key, identifies users by an opaque id, and never sees their upstream
+tokens.
+
+## Configure the consumer
+
+Create an MCP [consumer](/trustgate/concepts/consumers) with an API key and set its
+identity to act for users identified by the application:
+
+```json
+{
+  "identity": {
+    "acts_for_users": true,
+    "source": "app"
+  }
+}
+```
+
+Set it with the Admin API (`identity.source: "app"`); the console does not offer this
+source yet on a new consumer, it only shows it once set. Bind the MCP registries the
+application needs; servers with `forwarded` upstream auth are the ones each user will connect.
+
+| Request header | Value |
+|---|---|
+| `X-AG-API-Key` | The consumer's API key (also accepted as `x-api-key` or `Authorization: Bearer ag_…`). |
+| `X-NeuralTrust-End-User` | Your id for the person: an opaque string, at most 256 characters, no control characters. **Required** on every MCP request to this consumer. |
+
+The request runs as principal `app:<consumer_id>:<end_user>`. Vault credentials, the
+consent flow, and `tools/list_changed` pushes are all per end user. Two consumers never
+share a user's credentials even if they use the same ids.
+
+End users named by an application are outside [Access](/trustgate/mcp/access): the server
+set is the consumer's, and who may use your application is your application's decision.
+
+## Connections API
+
+Two endpoints on the MCP plane, next to the consumer, authenticated with the consumer's
+API key. Requests without the header, or against a consumer that does not identify its end
+users, are refused.
+
+### Mint a connect link
+
+```bash
+curl -X POST https://<mcp-host>/<slug>/connections/links \
+  -H "X-AG-API-Key: ag_…" \
+  -H "Content-Type: application/json" \
+  -d '{"end_user": "user_123", "provider": "app.github/mcp"}'
+```
+
+```json
+{
+  "connect_url": "https://<mcp-host>/oauth/connect/app.github%2Fmcp?ticket=…",
+  "ticket": "…",
+  "provider": "app.github/mcp",
+  "expires_at": "2026-09-14T12:15:00Z"
+}
+```
+
+`provider` is optional. With it, the link opens that server's connect card; without it, the
+link opens at `https://<mcp-host>/<slug>/mcp/connect?ticket=…` and lists every server of
+the consumer that forwards a credential. The ticket is redeemable for **15 minutes**. Every
+call mints a new ticket, so do not retry a link mint automatically.
+
+Show `connect_url` to that user only. The ticket carries their identity: whoever opens it
+links an account under `user_123`.
+
+### Read connection states
+
+```bash
+curl "https://<mcp-host>/<slug>/connections?end_user=user_123" \
+  -H "X-AG-API-Key: ag_…"
+```
+
+```json
+{
+  "end_user": "user_123",
+  "connections": [
+    {
+      "provider": "app.github/mcp",
+      "code": "github",
+      "registry": "GitHub",
+      "status": "connected",
+      "account_ref": "octocat",
+      "expires_at": "2026-10-01T00:00:00Z"
+    }
+  ]
+}
+```
+
+One entry per bound server that forwards a credential. `status` is `connected` (the
+credential can still be redeemed), `needs_reconnect` (it exists but can no longer be
+refreshed), or `not_connected`. `account_ref` and `expires_at` are present only when a
+credential exists.
+
+### Errors
+
+Errors are `{ "error": "<code>", "message": "<text>" }`.
+
+| HTTP | `error` | Meaning |
+|---|---|---|
+| `400` | `invalid_request` | Bad body, bad `end_user`, or a `provider` that is not a connectable server of this consumer. |
+| `401` | `unauthenticated` | Wrong API key, or the slug is not an MCP consumer of this gateway. |
+| `409` | `end_users_not_identified` | The consumer's `identity.source` is not `app`. |
+| `429` | — | Connect-attempt rate limit, per consumer and per source. Honour `Retry-After`. |
+| `503` | `unavailable` | The rate limiter is unavailable. |
+| `5xx` | `internal_error` | Gateway-side failure. |
+
+## Typical flow
+
+<Steps>
+  <Step title="Call MCP for the user">
+    Send the MCP request with `X-AG-API-Key` and `X-NeuralTrust-End-User`.
+  </Step>
+  <Step title="Handle consent required">
+    A tool on a server the user has not connected fails with JSON-RPC error `-32003`. Its
+    `data` carries `provider`, a ready-made `connect_url` for this user, and a
+    [`cause`](/trustgate/mcp/overview#forwarded-per-user-oauth). You can show that link
+    directly, or mint one ahead of time with `POST /connections/links` to offer
+    "Connect GitHub" before the first call.
+  </Step>
+  <Step title="The user signs in">
+    They open the link, authorize the upstream once, and the credential is vaulted under
+    `app:<consumer_id>:user_123`.
+  </Step>
+  <Step title="Confirm and retry">
+    Poll `GET /connections?end_user=` until the server reads `connected`, then retry the
+    tool call. `trustgate_list_tools` on the MCP endpoint shows the same state per server.
+  </Step>
+</Steps>
+
+## Attribution on LLM consumers
+
+An LLM consumer can record the same header without acting for users. Set
+`identity.end_user_header: true` on the consumer (**Accept end-user attribution header** in
+the console) and send `X-NeuralTrust-End-User` with each request; the value is recorded as
+`trustgate.end_user` on traces and telemetry. Without the flag the header is ignored.
+
+## Related
+
+- [Consumers](/trustgate/concepts/consumers): `identity`, API keys, and registry bindings
+- [MCP Gateway](/trustgate/mcp/overview): forwarded auth, consent causes, and machine callers
+- [MCP Store](/trustgate/mcp/store): the equivalent flow for people who sign in themselves

@@ -9,18 +9,24 @@ description: "Aggregate Model Context Protocol servers behind one endpoint with 
   resources, with tenancy, auth, and observability applied in one place.
 </p>
 
-<CardGroup cols={2}>
+<CardGroup cols={3}>
   <Card title="OpenAPI tools" icon="file-json" href="/trustgate/mcp/openapi">
     Turn an OpenAPI 3 document into MCP tools instead of a server URL.
   </Card>
   <Card title="MCP registries" icon="boxes" href="/trustgate/concepts/registries">
     Each upstream is a registry of type MCP.
   </Card>
+  <Card title="MCP Store" icon="store" href="/trustgate/mcp/store">
+    The self-service catalog people install from at `/store/mcp`.
+  </Card>
+  <Card title="Access" icon="user-lock" href="/trustgate/mcp/access">
+    Who may install what from the Store, and the approval queue.
+  </Card>
+  <Card title="End users" icon="users" href="/trustgate/mcp/end-users">
+    Let your application connect each of its users' own accounts.
+  </Card>
   <Card title="Coding agents" icon="terminal" href="/integrations/overview">
     Claude Code, Cursor, Codex, Copilot, and Copilot Studio.
-  </Card>
-  <Card title="Architecture" icon="layers" href="/trustgate/architecture">
-    How the MCP plane sits next to Admin and Proxy.
   </Card>
 </CardGroup>
 
@@ -41,23 +47,33 @@ Behind the endpoint, each upstream is an [MCP registry](/trustgate/concepts/regi
 (`type: MCP`). TrustGate fans `list` calls out to the bound registries, merges the results,
 and routes each `call`/`read`/`get` to the owning server.
 
+The `initialize` response carries an `instructions` string that tells the agent to route
+everything through the gateway and never wire an upstream MCP server into the client
+directly.
+
 ### Tool name composition
 
-Because two servers can expose the same tool name, TrustGate keeps names unique on the
-merged surface:
+How a tool or prompt is named on the merged surface depends on how many servers stand
+behind the endpoint:
 
-- Unique names pass through unchanged.
-- On a collision, the tool is prefixed with the **registry name** (e.g. `asana_create_task`).
-- If that still collides, a short registry id is added; as a last resort a numeric suffix.
+| Consumer | Published name |
+|---|---|
+| One MCP registry bound | The upstream name unchanged, or the toolkit's `expose_as` alias. |
+| Several MCP registries (federated), or a per-instance [Store](/trustgate/mcp/store) install | `mcp_<registry-hash>_<name>_<name-hash>` |
 
-So an agent always sees stable, unambiguous names regardless of how many servers are behind
-the endpoint.
+Both hashes are the first 16 hex characters of a SHA-256 digest (of the registry id and of
+the original name). The readable `<name>` part is cut at 26 characters, so the whole name
+stays within 64 characters. The name is stable for as long as the registry exists.
+
+Names are not aliased across an upgrade: a client that cached federated names from an
+earlier TrustGate release must refresh its tool and prompt lists (TrustGate pushes
+[`tools/list_changed`](#keeping-tool-lists-fresh) when the stream opens).
 
 ## Registering an MCP server
 
 Connect MCP servers from the console:
 
-1. Open **TrustGate** → **Registry** → **MCP**.
+1. Open **Agent Gateway** → **Registry** → **MCP**.
 2. Pick a **catalog** server (one-click when no extra config is needed) or **Add custom**.
    For a remote MCP server, paste the server URL. To expose a REST API instead, set
    **Source** to **OpenAPI document** and follow [OpenAPI tools](/trustgate/mcp/openapi).
@@ -76,11 +92,14 @@ Connect MCP servers from the console:
 | **Headers** | Static headers sent upstream. |
 | **Auth** | How TrustGate authenticates to the server (see below). An OpenAPI backend supports **None**, **Static header**, and **OAuth2 client credentials**. |
 
+Catalog servers can also be installed by people themselves through the
+[MCP Store](/trustgate/mcp/store); a registry the Store creates carries `origin: "store"`.
+
 ## Toolkits and capability scope
 
 A consumer does not automatically get every tool on every bound server. Access is governed by
-a **toolkit**, which lists grants that scope a registry to specific tools, prompts, or
-resources:
+the consumer's **toolkit** (`mcp.toolkit`), which lists grants that scope a registry to
+specific tools, prompts, or resources:
 
 | Entry field | Meaning |
 |---|---|
@@ -88,25 +107,34 @@ resources:
 | `tool` / `prompt` / `resource` | The capability name to allow; `*` grants all of that kind. |
 | `expose_as` | Optional rename for how the capability appears to the agent. |
 
-For [inline](/trustgate/concepts/consumers) MCP consumers, the toolkit lives on the consumer
-(`mcp.toolkit`). For [role-based](/trustgate/concepts/roles) consumers, the effective view is
-built from the matched roles:
-
-- **Registries** = the union of the matched roles' MCP registries.
-- **Toolkit** = the union of the roles' `mcp_policies` toolkits. A role that binds an MCP
-  registry *without* an explicit toolkit grants that server **fully**.
-
-So one MCP endpoint can present a different, identity-scoped toolkit to each caller.
+A consumer with no toolkit exposes every capability of its bound registries. The surface is
+identical for every caller the consumer admits: the [Access](/trustgate/mcp/access) page
+governs the Store only and never narrows a consumer. To give two audiences different tools,
+create two [consumers](/trustgate/concepts/consumers).
 
 ### Fail mode
 
-`fail_mode` decides what happens when an upstream server is unavailable:
+`fail_mode` on the consumer decides what happens when an upstream server is unavailable:
 
-- **`open`:** skip the failed server.
+- **`open`:** skip the failed server. When nothing was reachable, the error names the first
+  skipped server's cause instead of a generic "no upstream MCP server reachable".
 - **`closed`:** fail the call.
 
-For role-based consumers, the effective mode is **open only when every contributing role
-declares it open**; otherwise it is closed (and closed when no role grants access).
+## Gateway meta-tools
+
+Every MCP consumer with at least one MCP server bound also lists a few tools TrustGate
+implements itself. They are plumbing for managing the caller's surface, not user
+capabilities; their descriptions say so, and `trustgate_list_tools` excludes them from its
+answer.
+
+| Tool | What it does |
+|---|---|
+| `trustgate_list_tools` | Server-by-server inventory. Each server has a `state`: `ready` (tools callable now), `needs_connect` (waiting for this caller's upstream account; entry carries the `cause` and the `connect_tool` to call), `unavailable` (the gateway could not reach it), or `no_tools` (it answered but the toolkit leaves nothing). Tools of a server that is not serving are described from the catalog with `callable: false`. |
+| `trustgate_connect_<provider>` | One per `forwarded`-auth server. Returns `connect_url`, `connect_label`, `action: "user_confirmation_required"`, and `tool`; the agent shows the link, the user signs in once. |
+| `trustgate_store_search` · `trustgate_store_install` · `trustgate_store_uninstall` | Only on the [Store](/trustgate/mcp/store) consumer. |
+
+A consumer whose toolkit is a deny-all (a toolkit with no `tool` entry) gets no gateway
+tools either.
 
 ## Upstream authentication
 
@@ -143,10 +171,50 @@ For SaaS servers where each end-user must connect their own account (e.g. their 
 
 - Set `provider` and either `registration: auto` (TrustGate registers the client) or
   `registration: manual` with `client_id`, `authorize_url`, and `token_url`.
-- The first call for a user with no stored credential returns a **consent-required** signal
-  with a connect link; the user authorizes the provider once and the credential is vaulted.
+- A call for a user with no usable credential fails with JSON-RPC error `-32003`
+  (**consent required**). Its `data` carries `provider`, a `connect_url`, and a `cause`.
+  The user opens the link, authorizes the provider once, and the credential is vaulted.
 - TrustGate refreshes expiring credentials automatically and re-prompts for consent only
-  when a grant can no longer be refreshed.
+  when a grant can no longer be refreshed. After a provider rejects a refresh token, the
+  same token is not replayed.
+
+| `cause` | Meaning |
+|---|---|
+| `no_credential` | This principal never connected the provider. |
+| `credential_undecryptable` | The stored credential cannot be decrypted (key rotation). |
+| `no_refresh_token` | The access token expired and the provider issued no refresh token. |
+| `refresh_rejected` | The provider rejected the refresh (`invalid_grant`). |
+| `refresh_already_rejected` | A previous refresh was rejected; not retried. |
+| `credential_vanished` | The credential disappeared from the vault between lookup and use. |
+| `registered_client_lost` | The dynamically registered OAuth client is gone; the token cannot be refreshed. |
+
+Credentials are keyed per provider **and per instance** of the server (a fingerprint of the
+upstream resource), so two instances of the same catalog server on different deployments
+hold separate accounts. A connection is reported as **connected** — on the connect page, in
+`trustgate_list_tools`, and in the Portal — only while the credential can still be redeemed.
+
+### Machine callers: API key and mTLS
+
+An MCP consumer called with an API key or a client certificate runs as the application
+itself, principal `app:<consumer_id>`. Rotating or renaming a key never strands an upstream
+account. The API key may be sent as `X-AG-API-Key`, `x-api-key`, or
+`Authorization: Bearer ag_…`.
+
+Machine callers carry no token of their own, so `passthrough` and the `obo` /
+`token_exchange` exchange patterns fail with an error naming the fix: give the upstream
+its own credential (`static`, `client_credentials`), link one account for the application
+(`forwarded`), or call the consumer with an identity-provider token.
+
+For `forwarded` servers, one shared account is linked to the application. Admins link it
+from the consumer's **Connect** tab or the Admin API, with no API key in hand:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/gateways/{gateway_id}/consumers/{id}/upstream-accounts` | Per bound server: `mode`, `needs_linked_account`, `linked`, `account_ref`, `scopes`, `expires_at`, `needs_reconnect`. Never returns token material. |
+| `POST /v1/gateways/{gateway_id}/consumers/{id}/upstream-accounts/link?registry_id=` | Mints a connect ticket: `{ticket, consumer_path, connect_path, providers[], expires_at}`. Omit `registry_id` to cover every forwarding server. `404` for a registry not bound to the consumer; `409` for one that carries its own credential or when the consumer acts for users. |
+
+An application that wants each of *its* users to hold their own account instead uses
+[End users](/trustgate/mcp/end-users).
 
 ## Agent authentication
 
@@ -155,15 +223,34 @@ implementing the standard discovery and flow endpoints:
 
 | Endpoint | Purpose |
 |---|---|
-| `/.well-known/oauth-protected-resource` | Protected-resource metadata. |
+| `/.well-known/oauth-protected-resource` | Protected-resource metadata. `scopes_supported` is always present (empty array when none). |
 | `/.well-known/oauth-authorization-server` | Authorization-server metadata. |
-| `/register` | Dynamic Client Registration (DCR). |
-| `/authorize` · `/callback` · `/token` | Authorization-code flow with **PKCE**. |
+| `POST /oauth/register` | Dynamic Client Registration (RFC 7591). The response includes `registration_client_uri` and a `registration_access_token`. |
+| `GET` · `PUT` · `DELETE /oauth/register/{client_id}` | Client management (RFC 7592), authenticated with the `registration_access_token`. Registrations created before this token existed cannot be managed; re-register. |
+| `/oauth/authorize` · `/oauth/callback` · `/oauth/token` | Authorization-code flow with **PKCE**. |
 | `/.well-known/jwks.json` | Public keys for token verification. |
-| `/connect` · `/disconnect` | Connect/disconnect an agent's link to a downstream provider (the consent flow used by `forwarded` auth). |
+| `POST /oauth/connect/{provider}?ticket=…&instance=…` · `POST /oauth/disconnect/{provider}` | Connect or disconnect the caller's account on one instance of a downstream provider (the consent flow used by `forwarded` auth). The connect card submits both as `POST` so browsers cannot prefetch them; `/oauth/connect` also answers `GET`. |
 
 Together these let an agent register, obtain a token, call the unified MCP endpoint, and
 complete a one-time connection when a downstream service requires per-user authorization.
+
+## Keeping tool lists fresh
+
+TrustGate pushes `notifications/tools/list_changed` on the SSE stream (`GET /<slug>/mcp`)
+once when the stream opens, and again whenever the caller's surface changes: bound MCP
+registries or the toolkit are edited, a stored credential is connected or revoked, or a
+Store install, grant, or access level changes. Clients that honour the notification re-list
+without a reconnect.
+
+## Limits
+
+| Limit | Value |
+|---|---|
+| Upstream JSON response or single SSE event | 8 MiB |
+| Upstream catalog listing (`tools/list` and friends) | 16 MiB, 10,000 entries, 100 pages; a repeated pagination cursor is rejected. |
+| OpenAPI backends | See [OpenAPI to MCP](/trustgate/mcp/openapi#what-it-does-not-do). |
+
+Closing an MCP session cancels its in-flight requests.
 
 ## Connect an agent
 
@@ -184,5 +271,9 @@ Do not use a TrustGuard collector `tgk_…` as an MCP credential.
 
 ## Related
 
+- [MCP Store](/trustgate/mcp/store): the self-service catalog people install from
+- [Access](/trustgate/mcp/access): Store levels, grants, and approvals
+- [End users](/trustgate/mcp/end-users): per-user accounts behind an API-key application
 - [OpenAPI to MCP](/trustgate/mcp/openapi): expose REST API operations as tools
+- [Architecture](/trustgate/architecture): how the MCP plane sits next to Admin and Proxy
 - [Okta](/trustgate/concepts/authorization/okta) · [Entra ID](/trustgate/concepts/authorization/entra-id)

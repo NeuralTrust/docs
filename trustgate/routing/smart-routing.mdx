@@ -38,10 +38,16 @@ Each label can be used **at most once** per consumer. You need **at least two** 
    [Model resolution](/trustgate/routing/model-resolution)).
 2. TrustGate classifies the prompt into a complexity band: **Simple**, **Medium**, or
    **Hard**.
-3. It selects the tier configured for that label.
+3. It selects the tier configured for that label. A prompt whose complexity score falls
+   below every configured tier goes to the **cheapest configured tier**, not to
+   round-robin.
 4. The request is forwarded to that tier's **registry** and **model**.
-5. If the pick fails and [fallback](/trustgate/routing/fallback) is configured, TrustGate
+4. If the pick fails and [fallback](/trustgate/routing/fallback) is configured, TrustGate
    can retry another path.
+
+If a registry used by a tier is deleted, that tier is removed from the ladder. Losing a
+middle or top tier keeps smart routing; losing the **cheapest** tier drops smart routing
+and the consumer's pool falls back to **round-robin**.
 
 Example configuration:
 
@@ -57,15 +63,14 @@ A straightforward prompt lands on **Simple**; a demanding multi-step prompt land
 ## Configure in the console
 
 1. Open **Consumers** → select a consumer → **Routing**.
-2. Set **Routing mode** to **Static**.
-3. Open **Strategy** → **Load balancing** → **Smart routing**.
-4. Open **Complexity tiers**.
-5. Add **at least two tiers** (the UI blocks save with fewer).
-6. For each tier set:
+2. Open **Strategy** → **Load balancing** → **Smart routing**.
+3. Open **Complexity tiers**.
+4. Add **at least two tiers** (the UI blocks save with fewer).
+5. For each tier set:
    - **Complexity** — **Simple**, **Medium**, or **Hard** (each label once).
    - **Registry** — upstream provider connection.
    - **Model** — model used when that band is selected.
-7. Save. Open **Connect** — snippets use `"model": "auto"`.
+6. Save. Open **Connect** — snippets use `"model": "auto"`.
 
 ### Rules the UI enforces
 
@@ -74,6 +79,7 @@ A straightforward prompt lands on **Simple**; a demanding multi-step prompt land
 | **≥ 2 tiers** | A single tier is not meaningful routing; use Simple routing instead. |
 | **Unique complexity labels** | Each of Simple / Medium / Hard may appear only once. |
 | **Registry + model required** | Every tier must resolve to a concrete upstream model. |
+| **Tier registries must belong to the consumer** | Checked on every save, even while load balancing is disabled, so a tier can never keep a registry that no longer resolves. |
 
 You can point several tiers at the **same registry** with **different models** — that is
 supported and common (one OpenAI connection, mini vs full model per band).
