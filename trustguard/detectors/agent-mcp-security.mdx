@@ -1,17 +1,17 @@
 ---
 title: "Agent & MCP security detectors"
-description: "Indirect prompt injection detection for MCP tool results and other tool-sourced content."
+description: "Indirect prompt injection detection for MCP tool results and other tool-sourced content. Configured from the console."
 ---
 
-Agent / MCP security detectors protect tool-using agents from **indirect prompt
-injection** in content that comes back from tools (MCP tool results, tool-role
-messages), not from the end-user prompt alone.
+Agent and MCP security detectors protect tool-using agents from **indirect prompt
+injection** — hostile instructions that arrive in what a tool hands back, rather
+than in what the user typed.
 
-| Detector | Slug | Sides | Protocols | Backend |
-|---|---|---|---|---|
-| Indirect Prompt Injection | `indirect_prompt_injection` | input, output | llm, mcp | NeuralTrust Firewall |
+| Console card | Sides | Protocols | Configuration tab shows |
+|---|---|---|---|
+| **Indirect Prompt Injection** | Input, Output | LLM, MCP | Protection Sensitivity |
 
-## Indirect Prompt Injection — `indirect_prompt_injection`
+## Indirect Prompt Injection
 
 ### What it protects against
 
@@ -21,35 +21,35 @@ next. The tool call that follows looks entirely normal, which is why no other
 detector catches this: the evidence is in what came back, not in what is about
 to be sent.
 
-### How it works
+It also reads the tool and function descriptions offered to the model, which is
+where **tool poisoning** hides — a malicious instruction written into a tool's
+own description rather than into its output.
 
-Scores tool results — LLM `role=tool` messages and MCP tool results — with the
-NeuralTrust Firewall indirect prompt injection detector, plus the tool and
-function descriptions and parameter schema text offered to the model (LLM
-`tools[]` and MCP `tools/list`).
+### What it does not read
 
-It scores **nothing else**. Messages from the user, the assistant or the system
-are skipped, so a turn with no tool-sourced content produces no findings. There
-is no fallback to the rest of the conversation or to the request body.
+Only tool-sourced content is scored. Messages from the user, the assistant, or the
+system are skipped, so a turn with no tool activity produces no findings at all.
+There is no fallback to the rest of the conversation.
 
-Reports a finding when the max category score is at or above threshold
-(`signal.type` is typically `injection` or the top-scoring category).
+That is deliberate, and it is the reason this detector pairs with
+**Prompt Guard** rather than replacing it: one watches what comes back from tools,
+the other watches what the person types.
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `injection.threshold` | number | ✅ | Score in `[0, 1]` above which content is flagged. |
-| `provider` / `credentials` | — | — | Firewall provider + credentials (same pattern as Prompt Guard). |
+### Configure
 
-```json
-{
-  "name": "IPI — tool results",
-  "plugin_slug": "indirect_prompt_injection",
-  "settings": { "injection": { "threshold": 0.7 } }
-}
-```
+1. Open **Detectors** → **New detector** → **Indirect Prompt Injection**.
+2. On **Basics**, give it a **Name**.
+3. On **Configuration**, pick a
+   [**Protection Sensitivity**](/trustguard/detectors/content-security#protection-sensitivity)
+   preset — **Permissive**, **Balanced**, or **Strict**. That is the only setting.
+4. **Create detector**, then reference it from a
+   [policy](/trustguard/concepts/policies) rule.
 
 ## When to use
 
-- MCP / tool-calling agents that ingest untrusted tool output into the model context.
-- Pair with [Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)
-  for direct jailbreaks on user prompts.
+- Any agent that calls tools or MCP servers and feeds the results back into the
+  model context.
+- Pair it with [Prompt Guard](/trustguard/detectors/content-security#prompt-guard)
+  for direct jailbreaks in user prompts. Neither one covers the other's ground.
+- Start with the policy in **Observe**. Tool-heavy agents can surface a lot of
+  findings on day one, and you want to see them before they block anything.
