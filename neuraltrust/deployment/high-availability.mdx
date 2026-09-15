@@ -1,0 +1,415 @@
+---
+title: High availability
+description: The four availability tiers, from one cluster across zones to two active regions — what each one survives, and exactly what you change in the chart to get there.
+---
+
+<p className="nt-lead">
+  Availability is a ladder, not a single design. Climb it only as far as the
+  failure you actually have to survive — each rung costs more to operate than
+  the one below it.
+</p>
+
+This page covers every self-hosted model: [Hybrid](/neuraltrust/deployment/hybrid),
+[External](/neuraltrust/deployment/external), and
+[Central control plane](/neuraltrust/deployment/central). The tiers are the same
+for all three. What changes per model is small and listed at the
+[end](#what-changes-per-deployment-model).
+
+## The ladder
+
+<img
+  src="/images/static/img/ha-tiers.svg"
+  alt="The four availability tiers side by side. Tier 1, one cluster across zones: survives a node failing or an availability zone failing; costs node pools in three zones and needs no promotion or DNS work; you configure replicas of at least two on the request path, podDisruptionBudget.enabled true, and managed PostgreSQL and Redis with failover inside the region. Tier 2, twin clusters in one region: survives losing a whole cluster or a bad upgrade; costs a second cluster, a traffic switch, and two clusters kept at the same version; you configure both clusters against one PostgreSQL primary and one Redis primary, which adds no network hop in the same region. Tier 3, two regions active/passive: survives losing an entire region; costs everything above plus DNS promotion and a datastore runbook you have rehearsed; you configure a cross-region PostgreSQL read replica, region-local Redis one per cluster, and DataAgent on the active cluster only. Tier 4, two regions active/active: both regions serve, a design conversation rather than a values change; survives losing a region with no promotion of traffic; costs each region sized for all the traffic, geo-aware routing, and per-region counters for good; you configure still one writable PostgreSQL primary, region-local Redis with clients pinned to a region, and still exactly one DataAgent. Two invariants hold at every tier: exactly one writable PostgreSQL primary, and exactly one active DataAgent per gateway scope."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/ha-tiers-dark.svg"
+  alt="The four availability tiers side by side. Tier 1, one cluster across zones: survives a node failing or an availability zone failing; costs node pools in three zones and needs no promotion or DNS work; you configure replicas of at least two on the request path, podDisruptionBudget.enabled true, and managed PostgreSQL and Redis with failover inside the region. Tier 2, twin clusters in one region: survives losing a whole cluster or a bad upgrade; costs a second cluster, a traffic switch, and two clusters kept at the same version; you configure both clusters against one PostgreSQL primary and one Redis primary, which adds no network hop in the same region. Tier 3, two regions active/passive: survives losing an entire region; costs everything above plus DNS promotion and a datastore runbook you have rehearsed; you configure a cross-region PostgreSQL read replica, region-local Redis one per cluster, and DataAgent on the active cluster only. Tier 4, two regions active/active: both regions serve, a design conversation rather than a values change; survives losing a region with no promotion of traffic; costs each region sized for all the traffic, geo-aware routing, and per-region counters for good; you configure still one writable PostgreSQL primary, region-local Redis with clients pinned to a region, and still exactly one DataAgent. Two invariants hold at every tier: exactly one writable PostgreSQL primary, and exactly one active DataAgent per gateway scope."
+  className="hidden dark:block"
+/>
+
+| Tier | Survives | Costs you |
+| --- | --- | --- |
+| **[1. One cluster, across zones](#tier-1-one-cluster-across-zones)** | A node, or an entire availability zone | Node pools in three zones; nothing else to run |
+| **[2. Twin clusters, one region](#tier-2-twin-clusters-in-one-region)** | Losing a cluster, and bad upgrades | A second cluster and a traffic switch |
+| **[3. Two regions, active/passive](#tier-3-two-regions-active/passive)** | Losing an entire region | The above, plus DNS promotion and a datastore runbook |
+| **[4. Two regions, active/active](#tier-4-two-regions-active/active)** | Losing a region, with no promotion of traffic | Each region sized for all the traffic, geo-aware routing, and per-region counters for good |
+
+**Tier 1 is enough for most deployments.** Start there and stop there unless a
+regional requirement says otherwise. The tiers are additive: each one assumes you
+have already done the ones below it, so tier 3 is tier 1 inside each region plus
+a promotion procedure, and tier 4 is tier 3 with both regions taking traffic.
+
+The chart now ships most of tier 1: the request path defaults to two replicas
+and spreads itself across zones. What is left to you is
+[the detector replicas, the disruption budgets and the datastores](#what-the-chart-does-and-what-you-still-set).
+
+## Two invariants
+
+Everything below is easier to reason about once these are fixed. They hold at
+every tier, in every deployment model.
+
+<CardGroup cols={2}>
+  <Card title="Exactly one writable PostgreSQL primary" icon="database">
+    A single writer is what prevents split-brain. Two clusters cannot diverge if
+    there is only one place to write, which turns failover into a datastore
+    operation rather than a distributed decision.
+  </Card>
+  <Card title="Exactly one active DataAgent per gateway scope" icon="tower-broadcast">
+    Two DataAgents on the same scope register duplicate streams. This is why
+    `dataagent.replicas` is `1` and must stay `1` — it is a correctness
+    constraint, not a capacity setting.
+  </Card>
+</CardGroup>
+
+## Tier 1: one cluster, across zones
+
+Spread the node pool over three availability zones and use managed PostgreSQL
+and Redis with automatic failover inside the region. The chart already runs the
+request path at two replicas and spreads it across those zones. There is no
+promotion procedure and no DNS work.
+
+<img
+  src="/images/static/img/ha-tier1-zones.svg"
+  alt="Tier 1: one regional Kubernetes cluster with its node pool across three availability zones. Each of zone a, zone b and zone c runs agentgateway-proxy serving LLM traffic on 8081 and MCP on 8082, trustguard-data-plane evaluating every request, and the firewall gateway with its SLM detector workers. Below the cluster, managed PostgreSQL is multi-AZ with a primary in one zone and a standby in another, failing over inside the region with nothing for you to promote, and managed Redis holds semantic cache, rate-limit counters and evaluation progress with no persistence requirement because it rebuilds in seconds. Two panels set out the split. What the chart ships at tier 1: the request path defaults to two replicas, covering the gateway proxy, MCP and admin, trustguard data and control, the firewall gateway, both APIs and the console, with topologySpreadConstraints across zone then node on by default. What is still yours to set: the firewall worker replicas, because the SLM detectors still ship as singletons; global.highAvailability.podDisruptionBudget.enabled set to true, which is one switch and renders no budget below two replicas; and the managed datastores."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/ha-tier1-zones-dark.svg"
+  alt="Tier 1: one regional Kubernetes cluster with its node pool across three availability zones. Each of zone a, zone b and zone c runs agentgateway-proxy serving LLM traffic on 8081 and MCP on 8082, trustguard-data-plane evaluating every request, and the firewall gateway with its SLM detector workers. Below the cluster, managed PostgreSQL is multi-AZ with a primary in one zone and a standby in another, failing over inside the region with nothing for you to promote, and managed Redis holds semantic cache, rate-limit counters and evaluation progress with no persistence requirement because it rebuilds in seconds. Two panels set out the split. What the chart ships at tier 1: the request path defaults to two replicas, covering the gateway proxy, MCP and admin, trustguard data and control, the firewall gateway, both APIs and the console, with topologySpreadConstraints across zone then node on by default. What is still yours to set: the firewall worker replicas, because the SLM detectors still ship as singletons; global.highAvailability.podDisruptionBudget.enabled set to true, which is one switch and renders no budget below two replicas; and the managed datastores."
+  className="hidden dark:block"
+/>
+
+### What the chart does, and what you still set
+
+The chart now ships tier 1 most of the way: the request path defaults to two
+replicas and spreads itself across zones. What is left to you is the replica
+count on the detectors, the disruption budgets, and the datastores.
+
+#### Replica counts
+
+The request path defaults to two replicas, so a fresh install already survives
+losing a node. These are the numbers worth checking before you call a cluster
+tier 1.
+
+| Workload | Chart key | Default |
+| --- | --- | --- |
+| Gateway proxy (LLM) | `agentgateway.dataPlane.replicas` | `2` |
+| Gateway MCP | `agentgateway.mcp.replicas` | `2` |
+| Gateway admin — External only | `agentgateway.controlPlane.replicas` | `2` |
+| TrustGuard data | `trustguard.dataPlane.replicas` | `2` |
+| TrustGuard control — External only | `trustguard.controlPlane.replicas` | `2` |
+| Firewall gateway | `firewall.firewall.gateway.replicas` | `2` |
+| Firewall workers | `firewall.firewall.workerDefaults.replicas` | `1` — **raise it**, these are the detectors |
+| Data-plane API | `data-plane-api.dataPlane.components.api.replicas` | `2` |
+| Control-plane API | `control-plane-api.controlPlane.components.api.replicaCount` | `2` |
+| Console | `control-plane-app.controlPlane.components.app.replicaCount` | `2` |
+| DataBridge | `databridge.replicas` | `2` |
+| DataAgent | `dataagent.replicas` | `1` — **leave at 1**, see [the invariants](#two-invariants) |
+
+The firewall workers hold the SLM detectors and are the expensive pods, which is
+why they still ship as singletons. On a GPU node pool, raising them is a cost
+decision as much as an availability one.
+
+`autoscaling.enabled` is `false` everywhere. Leave it that way until you have a
+capacity reason — autoscaling is a throughput decision, not an availability one,
+and a minimum replica count is what tier 1 actually depends on.
+
+#### Zone spread, and budgets for draining
+
+Replicas alone do not survive a zone loss: nothing stops Kubernetes putting them
+both on one node, and nothing stops a drain taking them at the same time. Two
+separate settings cover those.
+
+**Spreading is on by default.** Every workload renders
+`topologySpreadConstraints` across `topology.kubernetes.io/zone` and then
+`kubernetes.io/hostname`. They use `whenUnsatisfiable: ScheduleAnyway`, which
+makes them a preference rather than a requirement — so they cannot block
+scheduling on a single-zone or single-node cluster, and there is nothing to turn
+on for the common case.
+
+**Disruption budgets are opt-in, behind one switch.** A budget stops a node
+drain evicting every replica at once:
+
+```yaml
+global:
+  highAvailability:
+    podDisruptionBudget:
+      enabled: true
+```
+
+That covers every component. Resolution is the same everywhere — an explicit
+per-component value wins, then `global.highAvailability`, then the built-in
+default — so one component can opt out again:
+
+```yaml
+agentgateway:
+  dataPlane:
+    podDisruptionBudget:
+      enabled: false        # this one component stays out
+      # maxUnavailable: 1   # or shape the budget instead
+```
+
+<Note>
+A budget never renders on a single replica. One replica with a budget pins
+`disruptionsAllowed` at 0 and deadlocks every node drain on that node, so the
+chart suppresses it below two replicas — including for DataAgent, which must
+stay a singleton.
+</Note>
+
+The same three keys — `podDisruptionBudget`, `topologySpreadConstraints` and
+`affinity` — are accepted on every component, and `global.affinity` merges
+underneath a per-component `affinity` the way `global.nodeSelector` does.
+
+Then confirm the replicas really did spread:
+
+```bash
+# which node each gateway replica landed on
+kubectl -n neuraltrust get pods \
+  -l app.kubernetes.io/name=agentgateway,app.kubernetes.io/component=data-plane \
+  -o custom-columns=POD:.metadata.name,NODE:.spec.nodeName --sort-by=.spec.nodeName
+
+# and which zone those nodes are in — two replicas in one zone is not tier 1
+kubectl get nodes -o custom-columns=\
+NODE:.metadata.name,ZONE:.metadata.labels.topology\.kubernetes\.io/zone
+```
+
+<Note>
+Both datastores should be **managed services** with automatic failover inside
+the region. In-cluster PostgreSQL and Redis are fine for a proof of concept, but
+at tier 1 they become the single node that takes your request path down with it.
+See [datastore sizing floors](/neuraltrust/deployment/architecture#datastore-sizing-floors).
+</Note>
+
+## Tier 2: twin clusters in one region
+
+Two clusters side by side, both pointed at **one PostgreSQL primary and one
+Redis primary**. Because they are in the same region, sharing both stores adds no
+network hop and loses nothing on a switch: state is identical from either side.
+
+<img
+  src="/images/static/img/ha-tier2-twin.svg"
+  alt="Tier 2: a traffic switch you operate holds one hostname pointed at one cluster at a time. Cluster 1 is serving production traffic and cluster 2 is the standby where you roll the next version first; either can be switched to in order to roll back. Both clusters run agentgateway proxy and MCP, trustguard detector chains and the firewall SLM workers, with replicas across three zones exactly as in tier 1 and the same chart, values and version. Because they are in one region both clusters share one set of stores: one writable PostgreSQL primary, whose single writer stops the two clusters diverging, and one Redis primary, which costs no extra network hop. State is identical from either side, which is what makes a blue/green upgrade safe here."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/ha-tier2-twin-dark.svg"
+  alt="Tier 2: a traffic switch you operate holds one hostname pointed at one cluster at a time. Cluster 1 is serving production traffic and cluster 2 is the standby where you roll the next version first; either can be switched to in order to roll back. Both clusters run agentgateway proxy and MCP, trustguard detector chains and the firewall SLM workers, with replicas across three zones exactly as in tier 1 and the same chart, values and version. Because they are in one region both clusters share one set of stores: one writable PostgreSQL primary, whose single writer stops the two clusters diverging, and one Redis primary, which costs no extra network hop. State is identical from either side, which is what makes a blue/green upgrade safe here."
+  className="hidden dark:block"
+/>
+
+What it buys you is an escape from a broken cluster or a bad upgrade: roll the
+second cluster, move traffic, and keep the first as your way back.
+
+Keep both clusters on the same chart version and the same values. A twin cluster
+that has drifted is not a rollback target — it is a second thing to debug during
+an incident.
+
+## Tier 3: two regions, active/passive
+
+<img
+  src="/images/static/img/ha-tier3-regions.svg"
+  alt="Tier 3: two regions in active/passive. A traffic manager you operate — DNS or a load balancer — holds one hostname per endpoint, resolving to the active region and re-pointed on promotion. Region A is active: a multi-node, multi-AZ Kubernetes cluster running agentgateway, trustguard and the firewall, with region-local Redis and the only running DataAgent, serving every request. Region B is passive and warm: the same components with its own region-local Redis, its DataAgent stopped, pods running and staying Ready but taking no production traffic. Below both, one writable PostgreSQL primary holds payloads, detections and product data and streams replication to a cross-region read replica, promoted only if the primary's region fell over, so the RPO is the replication lag. Redis is region-local on purpose: it carries cache, rate-limit counters and evaluation progress, data worth seconds, so rate limits are counted per region and a promoted cluster starts with cold counters it rebuilds in seconds."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/ha-tier3-regions-dark.svg"
+  alt="Tier 3: two regions in active/passive. A traffic manager you operate — DNS or a load balancer — holds one hostname per endpoint, resolving to the active region and re-pointed on promotion. Region A is active: a multi-node, multi-AZ Kubernetes cluster running agentgateway, trustguard and the firewall, with region-local Redis and the only running DataAgent, serving every request. Region B is passive and warm: the same components with its own region-local Redis, its DataAgent stopped, pods running and staying Ready but taking no production traffic. Below both, one writable PostgreSQL primary holds payloads, detections and product data and streams replication to a cross-region read replica, promoted only if the primary's region fell over, so the RPO is the replication lag. Redis is region-local on purpose: it carries cache, rate-limit counters and evaluation progress, data worth seconds, so rate limits are counted per region and a promoted cluster starts with cold counters it rebuilds in seconds."
+  className="hidden dark:block"
+/>
+
+Both clusters are full installs. The passive one is **warm**: its workloads run,
+pass health checks, and keep synchronizing, but it receives no production
+traffic.
+
+### Why the two datastores are treated differently
+
+**PostgreSQL — one writable primary, one cross-region read replica.** It holds
+the durable state, so a single writer is what prevents split-brain. Promotion is
+a datastore operation rather than a distributed decision, and your RPO is the
+replication lag.
+
+**Redis — region-local, one per cluster.** Redis carries semantic cache,
+rate-limit counters and evaluation progress, and has
+[no persistence requirement](/neuraltrust/deployment/architecture#datastore-sizing-floors).
+Reaching across a region for that on every request costs latency on the hot path
+and buys nothing, because the data is worth seconds. After a promotion the new
+active cluster starts with cold counters and rebuilds them in seconds.
+
+The consequence is that **rate limits are counted per region**. With one active
+region at a time that is invisible, except in the switchover window, when a
+client could briefly get a fresh allowance. With two regions active at once the
+same behaviour becomes permanent — that is the trade
+[tier 4](#tier-4-two-regions-active/active) asks you to accept.
+
+### What each failure looks like
+
+| Failure | Effect |
+| --- | --- |
+| A node or a zone | Remaining replicas absorb the traffic; no operator action |
+| The active cluster | Your traffic manager and promotion automation switch the endpoints to the passive cluster |
+| The PostgreSQL primary | Managed failover inside the region; losing the region means promoting the read replica and repointing both clusters |
+| A region's Redis | That cluster loses cache and counters and rebuilds them; the other region is untouched |
+| The control plane, or your egress to it | Data planes keep enforcing their last synchronized configuration. Changes apply once sync resumes. Hybrid and Central only — External has no such dependency |
+
+### Restarts during a control-plane outage
+
+Running pods survive a control-plane outage from their in-memory configuration,
+but a pod that **restarts** during one needs the last-known-good file on disk.
+The chart mounts it on an `emptyDir`, which does not survive a restart, so a
+restarted pod with no control-plane connectivity will not become Ready.
+
+If a cluster has to tolerate restarts mid-outage, move that mount to persistent
+storage. The `CONFIG_SYNC_LKG_KEY` that encrypts it is generated per cluster and
+needs no distribution. See [Secrets](/neuraltrust/deployment/secrets) for the
+key, and [Config sync](/neuraltrust/deployment/config-sync) for the mechanism.
+
+<Warning>
+Do not make configuration changes directly in one data plane during a
+control-plane outage. The control plane remains the source of truth.
+</Warning>
+
+### Promote the passive cluster
+
+<Steps>
+<Step title="Detect and fence">
+Use regional health checks backed by Kubernetes readiness on every published
+endpoint. Remove the failed cluster from all of them and stop its DataAgent, so
+it cannot come back mid-recovery and register a second stream.
+</Step>
+
+<Step title="Point PostgreSQL at a writable primary">
+If the primary is in the failed region, promote the read replica and update
+`global.postgresql.host` in the surviving cluster. If the primary is unaffected,
+there is nothing to do here — this is the case the single-primary design is
+buying you. Redis needs no attention either way, because the surviving cluster
+already has its own.
+</Step>
+
+<Step title="Verify configuration and start active-only services">
+Confirm the request path is Ready with a current or last-known-good
+configuration, then enable DataAgent. Only one DataAgent may be active.
+</Step>
+
+<Step title="Switch every traffic endpoint">
+Route the published hostnames to the promoted cluster. Keep all protocols on the
+same cluster, and remember that DNS-based promotion is delayed by resolver and
+client caching.
+</Step>
+
+<Step title="Verify enforcement">
+Run representative allowed and blocked requests, then confirm policy decisions
+and telemetry before declaring the failover complete.
+</Step>
+</Steps>
+
+Requests already in flight in the failed cluster fail. Clients should use bounded
+retries appropriate for their LLM or MCP operation.
+
+### Before you rely on it
+
+- [ ] Both clusters are deployed, health checked, and on the same chart version.
+- [ ] Every request-path workload has redundant replicas across zones in each cluster, with PodDisruptionBudgets enabled.
+- [ ] PostgreSQL is managed, with one primary and a cross-region read replica.
+- [ ] Each region has its own managed Redis, and you accept per-region counters.
+- [ ] Last-known-good configuration is on persistent storage.
+- [ ] Only the active cluster runs DataAgent.
+- [ ] Every published hostname resolves to exactly one cluster.
+- [ ] You have rehearsed: block egress to the control plane and confirm traffic still flows; restart a pod during that outage; promote the passive cluster and switch every endpoint.
+
+## Tier 4: two regions, active/active
+
+Both regions take production traffic at the same time. Nothing is promoted when a
+region fails: your traffic manager stops sending clients there, and the survivor
+carries everything. That is the whole gain — and the reason it is the most
+expensive rung to run honestly.
+
+<img
+  src="/images/static/img/ha-tier4-active.svg"
+  alt="Tier 4: two regions, both active. A traffic manager you operate routes by geography or latency: every hostname resolves to both regions and health checks withdraw a failed one. Clients near region A are routed to region A, clients near region B to region B. Both regions run agentgateway, trustguard and the firewall with region-local Redis. Region A runs the only DataAgent and is sized to carry all traffic alone. Region B's DataAgent is stopped, and every PostgreSQL write it makes crosses to region A. Below both, still one writable PostgreSQL primary, written in-region by region A and cross-region by region B, streams replication to a cross-region read replica promoted only if the primary's region fell over. A footer lists what active/active costs for good: rate limits and the semantic cache are per region permanently, so pin each client to one region or accept up to twice the allowance; each region must carry all of the traffic on its own, or the day one region fails you have a tier 3 without the runbook; talk to us before you build it."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/ha-tier4-active-dark.svg"
+  alt="Tier 4: two regions, both active. A traffic manager you operate routes by geography or latency: every hostname resolves to both regions and health checks withdraw a failed one. Clients near region A are routed to region A, clients near region B to region B. Both regions run agentgateway, trustguard and the firewall with region-local Redis. Region A runs the only DataAgent and is sized to carry all traffic alone. Region B's DataAgent is stopped, and every PostgreSQL write it makes crosses to region A. Below both, still one writable PostgreSQL primary, written in-region by region A and cross-region by region B, streams replication to a cross-region read replica promoted only if the primary's region fell over. A footer lists what active/active costs for good: rate limits and the semantic cache are per region permanently, so pin each client to one region or accept up to twice the allowance; each region must carry all of the traffic on its own, or the day one region fails you have a tier 3 without the runbook; talk to us before you build it."
+  className="hidden dark:block"
+/>
+
+**Talk to us before you build this.** Tier 4 is not a values change. It is a
+design conversation about your traffic manager, your write latency budget and
+how your clients are distributed. The platform supports it inside the same two
+invariants as every other tier, and those invariants are exactly what make it
+cost more than it looks.
+
+### What stays the same
+
+**Still one writable PostgreSQL primary.** Both regions write to it. The region
+that does not host it pays a cross-region round trip on every write — raw
+payloads in [Hybrid](/neuraltrust/deployment/hybrid), and additionally
+configuration and console state in
+[External](/neuraltrust/deployment/external). Measure that latency against your
+budget before committing, and put the primary in the region that writes most.
+Losing the primary's region is the same promotion as at tier 3; the difference
+is that the surviving region is already serving, so only the datastore step and
+DataAgent remain.
+
+**Still exactly one DataAgent.** It reads the single PostgreSQL primary, so one
+agent already serves both regions' data. Run it in the primary's region, and
+start the other one only as part of a promotion.
+
+**Still region-local Redis, and still independent configuration.** Each region
+pulls its own configuration and keeps its own last-known-good copy, exactly as
+at tier 3.
+
+### What it costs you for good
+
+| Consequence | What to do about it |
+| --- | --- |
+| **Rate limits are counted per region, permanently.** A client whose requests land in both regions can get up to twice its allowance. | Route by geography or client identity so that each client always lands in one region. Do not use round-robin. There is no globally exact counter across regions. |
+| **The semantic cache is per region.** Hit rates fall until each region has warmed its own. | Accept it. Pinning clients to a region also keeps their cache hits in one place. |
+| **Each region must carry all of the traffic on its own.** The day one region fails, the other takes everything. | Size and load-test each region for the whole peak, not half of it. Two half-sized regions are a tier 3 without the runbook. |
+| **Health checks decide who serves.** A region that is Ready but slow keeps taking traffic. | Back the traffic manager's checks with Kubernetes readiness on every published endpoint, and check the request path rather than a static page. |
+
+### Before you rely on tier 4
+
+Everything on the [tier 3 checklist](#before-you-rely-on-it), plus:
+
+- [ ] Every client is routed to exactly one region under normal conditions, and you know how.
+- [ ] Each region has been load-tested carrying the whole peak alone.
+- [ ] You have measured cross-region write latency from the far region and accepted it.
+- [ ] You have rehearsed withdrawing a region from the traffic manager and watched the other absorb the traffic.
+
+## What changes per deployment model
+
+The ladder is identical in all three. These are the only differences, and each
+model's page covers its own in detail.
+
+| Model | What is specific to it |
+| --- | --- |
+| **[Hybrid](/neuraltrust/deployment/hybrid#high-availability)** | Both clusters pull the same gateway scope from NeuralTrust SaaS independently and keep their own last-known-good copy. DataAgent runs in the active cluster only. |
+| **[External](/neuraltrust/deployment/external#high-availability)** | Configuration lives in PostgreSQL, so a second cluster sees the same policies the moment it starts. ClickHouse is in-cluster and **does not follow a promotion** — at tier 4 each console permanently sees only its own region's telemetry unless you replicate it. Console sessions live in the region that issued them, so at tier 4 pin the console hostname to one region. Upgrade one cluster at a time — both consoles run migrations against one database. |
+| **[Central control plane](/neuraltrust/deployment/central#high-availability)** | Two questions, not one: the remote data planes climb this ladder, and the central cluster usually sits on tier 1 because it is not on the request path. If it does go to tier 3, four published hostnames have to follow the promotion, certificates must be valid from both central clusters, and the platform Secret's signing keys must be identical in both. |
+
+## Recovery time
+
+Recovery time depends on health-check intervals, traffic-manager convergence,
+client DNS behavior, and datastore promotion — all of them yours, not the
+chart's. **Measure yours rather than assuming it**, and re-measure after any
+change to the traffic manager or the datastore topology.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Requirements and capacity" icon="list-check" href="/neuraltrust/deployment/architecture">
+    Node pools, datastore sizing floors, and the ports between components.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/neuraltrust/deployment/configuration">
+    Managed stores, ingress, TLS, and every values switch.
+  </Card>
+  <Card title="Validation" icon="circle-check" href="/neuraltrust/deployment/validation">
+    The checks that confirm a cluster is actually serving what you think.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/neuraltrust/deployment/troubleshooting">
+    What to look at when a replica will not become Ready.
+  </Card>
+</CardGroup>

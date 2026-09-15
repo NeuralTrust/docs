@@ -30,7 +30,7 @@ cluster, External is simpler. If NeuralTrust hosts the control plane, use
 />
 <img
   src="/images/static/img/central-architecture-dark.svg"
-  alt=""
+  alt="Central control plane architecture: remote Hybrid clusters each run the request path — TrustGate on :8081 and :8082, TrustGuard on :8081, the Firewall on :8000 — with their own recommended PostgreSQL and Redis; raw payloads stay there. Each remote cluster opens four outbound connections on 443 to your central cluster: one config-sync endpoint each for AgentGateway and TrustGuard, the telemetry ingest gateway, and DataBridge. The central cluster runs the console and API on :8000, both product control planes on :8080, a collector on :4317 and :4318, ClickHouse, DataCore, and AlertEngine, plus recommended PostgreSQL and Redis of its own. The central cluster never dials into a remote one."
   className="hidden dark:block"
 />
 
@@ -540,22 +540,12 @@ telemetry arriving in the central ClickHouse.
 This topology has two availability questions, and they are not equally urgent.
 
 **The data planes matter most**, because they are on the request path. Each
-remote cluster climbs the same ladder as in
-[Hybrid → High availability](/neuraltrust/deployment/hybrid#high-availability):
-one cluster across zones first, then twin clusters, and only for regional loss an
-active/passive pair on one writable PostgreSQL primary with region-local Redis,
-with just the active cluster running DataAgent.
+remote cluster climbs the standard ladder — one cluster across zones first, then
+twin clusters, and only for regional loss an active/passive or active/active pair.
 
-<img
-  src="/images/static/img/ha-ladder.svg"
-  alt="The three availability tiers side by side. Tier 1, one cluster multi-AZ: node pools in three availability zones, two or more replicas of TrustGate, TrustGuard and Firewall, and managed PostgreSQL and Redis with automatic failover inside the region; it survives node and zone loss and needs no promotion procedure or DNS work. Tier 2, twin clusters in one region: a serving cluster plus a second cluster to roll upgrades through, both against one PostgreSQL primary and one Redis primary shared inside the region; it survives cluster loss and bad upgrades. Tier 3, two regions active/passive: an active region running the only DataAgent, a warm passive region with no traffic, one writable PostgreSQL primary with a cross-region read replica, and region-local Redis per cluster; it survives regional loss and adds DNS promotion and a datastore runbook. Two invariants hold at every tier: exactly one writable PostgreSQL primary, and exactly one active DataAgent per gateway scope."
-  className="block dark:hidden"
-/>
-<img
-  src="/images/static/img/ha-ladder-dark.svg"
-  alt=""
-  className="hidden dark:block"
-/>
+<Card title="High availability" icon="layer-group" href="/neuraltrust/deployment/high-availability">
+  The four tiers, from one cluster across zones to two active regions, the two invariants, and exactly what you change in the chart.
+</Card>
 
 **The central cluster is not on the request path.** If it goes down, every remote
 data plane keeps serving traffic from its last synchronized configuration. What
@@ -566,16 +556,14 @@ their last-known-good configuration on persistent storage.
 
 ### The central cluster
 
-Most central clusters should sit on tier 1: one cluster across three zones with
-managed stores. It is not on the request path, so a promotion runbook is rarely
-worth its own operational cost.
+Most central clusters should sit on **tier 1**: one cluster across three zones
+with managed stores. It is not on the request path, so a promotion runbook is
+rarely worth its own operational cost.
 
-If a regional requirement forces tier 3, run it as an External active/passive
-pair on **one writable PostgreSQL primary** with a cross-region read replica and
-**region-local Redis** — see
-[External → High availability](/neuraltrust/deployment/external#high-availability)
-for the shape, the ClickHouse caveat, and the promotion steps. Two things are
-specific to a central cluster:
+If a regional requirement forces tier 3, run it as an
+[External active/passive pair](/neuraltrust/deployment/external#high-availability)
+— same shape, same ClickHouse caveat, same promotion steps. Two things are
+specific to a central cluster.
 
 <img
   src="/images/static/img/central-high-availability.svg"
@@ -584,7 +572,7 @@ specific to a central cluster:
 />
 <img
   src="/images/static/img/central-high-availability-dark.svg"
-  alt=""
+  alt="What a central-cluster promotion moves. Remote data planes are unaffected: they keep serving on their last-known-good configuration, and config sync and DataBridge retry until DNS converges — provided the snapshot cache is on persistent storage. DNS holds the four published hostnames: agentgateway-configsync, trustguard-configsync, telemetry, and databridge. They resolve to the active central cluster and must be repointed at the standby after a promotion. Both central clusters are identical installs, each with four L4 Services and its own CA, a console and API on :8000, and its own ClickHouse whose history does not follow the promotion. Both read and write one writable PostgreSQL primary with a cross-region read replica, promoted only if the failed region held the primary. Certificates must be valid from both central clusters: chart-generated CAs are per cluster, so install both bundles in every remote cluster or issue the four certificates from your own PKI."
   className="hidden dark:block"
 />
 
@@ -598,30 +586,15 @@ remote clusters.
 **Certificates must be valid from both central clusters.** Chart-generated
 certificates are minted per cluster with a per-cluster CA, so a remote cluster
 that trusts only the primary's bundle fails every handshake after a promotion.
-Either export and install both clusters' CA bundles in every remote cluster, or
-issue the four certificates from your own PKI or cert-manager so one bundle
-covers either cluster. The second option is much easier to operate — see
-[TLS](#tls).
+Either install both bundles in every remote cluster, or issue the four
+certificates from your own PKI.
 
-The `ENROLMENT_SIGNING_SECRET` and `TELEMETRY_JWT_PRIVATE_KEY_PEM` in the
-platform Secret must be **identical** in both central clusters. If each cluster
-generates its own, enrolment tokens and OTLP tokens minted by one are rejected by
-the other, and every remote agent returns 401 after a promotion. Pre-provision
-the platform Secret and apply the same one to both clusters — see
-[Secrets](#secrets).
-
-### Before you rely on it
-
-- [ ] Every remote cluster keeps its last-known-good configuration on persistent
-      storage, so a central outage cannot take the request path down.
-- [ ] Central PostgreSQL is managed, with one primary and a cross-region read
-      replica; each central region has its own Redis.
-- [ ] The four endpoint DNS records can be repointed, and you know how long
-      convergence takes.
-- [ ] Both central clusters serve certificates every remote cluster trusts.
-- [ ] Both central clusters hold the same platform Secret values.
-- [ ] You have rehearsed a central promotion and confirmed remote data planes
-      reconnect without intervention.
+**The platform Secret must be identical in both central clusters.**
+`ENROLMENT_SIGNING_SECRET` and `TELEMETRY_JWT_PRIVATE_KEY_PEM` sign the enrolment
+and OTLP tokens every remote agent presents. If each cluster generates its own,
+tokens minted by one are rejected by the other and every remote agent returns
+401 after a promotion. Pre-provision the Secret and apply the same one to both —
+see [Secrets](#secrets).
 
 ## Next steps
 
