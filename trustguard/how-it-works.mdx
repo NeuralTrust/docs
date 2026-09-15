@@ -36,18 +36,17 @@ each host platform. For request processing and response fields, see the
 
 ## Policy actions
 
-TrustGuard resolves every evaluation into one
-[policy](/trustguard/concepts/policies) status. When an evaluation produces
-multiple statuses, TrustGuard applies the most restrictive one in this order:
-`block` > `ask` > `transform` > `report` > `allow`.
+One request can trip several rules. TrustGuard reduces them to a single outcome
+and hands the host that one answer, worst first:
+**Block** → **Ask** → **Transform** → **Monitor** → **Allow**.
 
-| Action | Status | What it means |
-| --- | --- | --- |
-| **Block** | `block` | The host stops the interaction at its enforcement point. |
-| **Ask** | `ask` | Requests confirmation where the host provides an approval flow. This action applies to input only. |
-| **Transform** | `transform` | The host forwards `transformed_payload` instead of the original content. Available for [DLP](/trustguard/detectors/data-loss-prevention) (`data_loss_prevention`) outcomes only. |
-| **Monitor** | `report` | The interaction is recorded with findings and continues. |
-| **Allow** | `allow` | No finding requires action, so the interaction continues. |
+| Outcome | What the host is asked to do |
+| --- | --- |
+| **Block** | Stop the interaction wherever it enforces. |
+| **Ask** | Get a human to confirm, where the host has somewhere to ask. Input only. |
+| **Transform** | Forward the masked version instead of the original. Only [Data Loss Prevention](/trustguard/detectors/data-loss-prevention) produces this. |
+| **Monitor** | Record the finding and carry on. |
+| **Allow** | Nothing needed action. |
 
 Redaction requires the host to own and modify the payload. Integrations that
 return only a boolean verdict cannot apply `transform` directly.
@@ -66,7 +65,7 @@ block:
 | [LangChain](/integrations/langchain) | **Blocked** because the middleware has no `ask` case and fails closed on unknown verdicts. |
 | [Claude Enterprise](/integrations/claude-enterprise) | **Allowed** because this integration returns only allow or deny and has no interactive prompt. |
 | [TrustGate](/integrations/trustgate) | **Blocked in Enforce** because the gateway has no interactive approval flow. In Observe, the verdict is recorded and traffic continues. |
-| Other gateways | **Allowed**, and recorded. There is no user to prompt and the verdict is not `block`, so the request passes through. |
+| Other gateways | **Allowed**, and recorded. There is nobody to prompt and the outcome is not Block, so the request passes through. |
 | Application collectors | **Application-defined.** The `status` is advisory; your code must implement the approval flow. |
 
 ## Collectors
@@ -155,11 +154,11 @@ response.
 it has been delivered to the client, so findings on streamed output are
 monitor-only. The other gateway integrations cover only non-streaming responses.
 
-**Azure APIM output:** Input redaction uses `transformed_payload.input`. Output
-coverage requires the outbound policy and does not support redaction.
+**Azure APIM output:** It can mask on the way in, but not on the way back —
+covering responses at all requires adding the outbound policy.
 
-**Copilot prompts:** Copilot discards command-hook output at
-`userPromptSubmitted`, so a prompt is recorded but cannot be stopped there.
+**Copilot prompts:** Copilot ignores what the hook returns on a submitted
+prompt, so prompts are recorded but cannot be stopped at that point.
 Enforcement happens at the tool events.
 
 ## Tool-level interactions
@@ -223,13 +222,13 @@ conditional because result replacement works only with its native payload.
 Middleware collectors see HTTP routes rather than model or tool calls, so they do
 not expose tool-level coverage. SDK integrations can send tool events explicitly.
 
-Tool-declaration inspection requires an integration that sends LLM `tools[]` or
-MCP `tools/list`. This data is available from
-[TrustGate](/trustgate/mcp/overview), [LangChain](/integrations/langchain) for
-bound tools, and the
-[Claude Enterprise](/integrations/claude-enterprise) transcript.
-Developer-machine plugins send tool calls and results, but not tool listings.
-Claude Enterprise can respond to a finding only by denying the entire inference.
+Catching a poisoned **tool description** needs an integration that reports which
+tools the agent was offered, not just which one it called. That rules out the
+developer-machine plugins: they send tool calls and results, but never the list.
+It is available from [TrustGate](/trustgate/mcp/overview) on MCP, from
+[LangChain](/integrations/langchain) for bound tools, and from the
+[Inference Hooks](/integrations/claude-enterprise) transcript — where the only
+available response is to deny the whole inference.
 
 ## Choose an integration
 
