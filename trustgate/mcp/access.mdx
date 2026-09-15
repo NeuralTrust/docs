@@ -1,0 +1,101 @@
+---
+title: "Access"
+description: "Govern the MCP Store per user and group: access levels, server grants, the install request queue, and previewing a person's Store"
+---
+
+**Access** decides what each person may install from the [MCP Store](/trustgate/mcp/store).
+It governs the Store only. A [consumer](/trustgate/concepts/consumers) is never narrowed by
+an access level or grant: its servers are the ones an admin bound to it, for every caller it
+admits. Open **Agent Gateway** → **Access**.
+
+| Tab | Contents |
+|---|---|
+| **Users** | People from your identity provider, their groups, and the resources they can reach. |
+| **Groups** | IdP-synced and NeuralTrust groups; **Add group** creates a local group you can grant to. |
+| **Applications** | A directory of consumers. Their servers are managed on the consumer, not here. |
+| **Approvals** | Pending install requests and their **History**. |
+
+## Access levels
+
+Each person's effective level comes from the first of these that is set:
+
+1. Their own policy (**Access mode** on the user panel).
+2. The most permissive level among the groups their login carries.
+3. The gateway's **Default access** (`store_mode`).
+
+| Console | API `mode` | Effect on the Store |
+|---|---|---|
+| **All** | `open` | Every server in the Store installs instantly. |
+| **Selected** | `curated` | Granted servers install instantly; any other server must be requested and approved first. |
+| **None** | `none` | Nothing can be installed. |
+
+The level is evaluated on every Store request, so a change takes effect immediately for
+open sessions. **Default access** at the top of the page is the gateway default and can also
+be set with `store_mode` on `PUT /v1/gateways/{id}`.
+
+## Grants
+
+A grant makes one server install instantly for the users and groups it names. Open a user
+or group panel, set **Access mode** to **Selected**, then **Add resource** and pick the
+MCP servers. Each grant targets either a catalog code (**All instances**, including ones
+added later) or one specific **Instance**.
+
+Grants show a readiness state: **Ready · installs with OAuth**, **Configured**, or
+**Needs setup** when the server still needs an admin credential before anyone can install
+it (**Configure** opens the registry). The same grants are visible from the registry side
+panel's **Access** tab.
+
+Access levels and grants apply only to people who sign in with the NeuralTrust login. An
+application that identifies its own [end users](/trustgate/mcp/end-users) is outside
+Access: the gateway cannot know who `user_123` is.
+
+## Approvals
+
+When a person whose level is **Selected** installs a server outside their grants, the Store
+files a request instead. **Approvals** lists them with **Requester**, **Resource**,
+**Groups** (the groups the requester carried when filing), **Reason** (their own words, up
+to 500 characters, searchable), and **Requested**.
+
+- **Approve** grants the server. **Grant access to** chooses **Requester only** or one of
+  the requester's groups; a group not in the requester's recorded groups is refused.
+  Approving a single-instance server grants the catalog code, not the instance.
+- **Deny** removes the request.
+- **History** lists decided requests with **Decision**, **Decided** and who decided.
+
+## Preview a user's Store
+
+**Preview access mode** on a user or group panel opens the **Portal** as that person sees
+it (**Admin preview** · **Previewing as**). From the preview an admin can act on their
+behalf: install or request a server, open the connect link for their own account, or open
+the configure form for per-user values. The preview never shows token material.
+
+## Admin API
+
+All endpoints live under `/v1/gateways/{gateway_id}/store/` and need the registries
+access scope on the control plane.
+
+| Endpoint | Body / query | Returns |
+|---|---|---|
+| `GET /access-policies` | — | `items[]{principal_type, principal_id, mode}`, `total` |
+| `PUT /access-policies` | `{principal_type: "user"\|"group", principal_id, mode: "open"\|"curated"\|"none"}`; empty `mode` clears the policy | `200` the policy, or `204` when cleared |
+| `GET /grants` | — | `items[]{catalog_code, registry_id, groups[], users[]}`, `total` |
+| `PUT /grants` | `{catalog_code, registry_id?, groups[], users[]}` — omit `registry_id` for all instances | The grant |
+| `GET /requests` | — | Pending: `items[]{instance_id, principal_sub, code, name, installed_by, reason, requester_groups[], requested_at}`, `total` |
+| `GET /requests/history` | — | Decided: `items[]{…, reason, decision, decided_by, decided_at}`, `total` |
+| `POST /requests/approve` | `{principal_sub, code, instance_id, grant_to_group?}` | `204`; `400` when `grant_to_group` is not one of the requester's groups |
+| `POST /requests/deny` | `{principal_sub, code, instance_id}` | `204` |
+| `GET /principal?sub=` | The user's principal subject | `{principal_sub, installs[]{instance_id, code, name, registry_id, registry, status, installed_by, needs_config[], created_at, updated_at}, connections[]{provider, code, registry_id, registry, linked, account_ref, expires_at, needs_reconnect}}` |
+| `POST /principal/installs` | `{principal_sub, code, groups[], instance_id?, reason?}` — runs the installer as that user with their live level | `{code, name, status, instance_id, pending, already_installed, requires_auth, requires_config, requires_admin_setup, requires_reason, requires_instance_choice, instance_choices[]{registry_id, name}}`; `409` when the level is None |
+| `POST /principal/connect-link` | `{principal_sub, code, instance_id?}` | `{ticket, consumer_path, connect_path, expires_at}` |
+| `POST /principal/configure-link` | `{principal_sub, code, instance_id?, groups[]}` | `{ticket, consumer_path, configure_path, expires_at}` |
+
+`groups[]` on the principal endpoints are the groups to evaluate the user's level with; pass
+the ones their identity provider reports. Connect and configure links open at
+`https://<mcp-host><consumer_path>/connect?ticket=…` and `…/configure?ticket=…` and expire
+after 15 minutes.
+
+## Related
+
+- [MCP Store](/trustgate/mcp/store): what people see and the install flow
+- [Registries](/trustgate/concepts/registries): instances, `from-catalog`, and Store-created registries
+- [Consumers](/trustgate/concepts/consumers): where an application's servers are bound

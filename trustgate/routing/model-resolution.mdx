@@ -11,7 +11,7 @@ TrustGate resolves which [registry](/trustgate/concepts/registries) to use.
 | Form | Example | Meaning |
 |---|---|---|
 | **`auto`** | `"model": "auto"` | Used when the consumer has **load balancing** (including [smart routing](/trustgate/routing/smart-routing)). The gateway picks registry and model. Connect snippets show this automatically. |
-| **Short name** | `gpt-4o-mini` | Sent as-is to the selected registry. |
+| **Short name** | `gpt-4o-mini` | TrustGate walks the consumer's registries in configured order and uses the first one that serves the model. A name no registry serves is rejected with **404** `model_not_supported`. |
 | **Provider-qualified** | `@openai/gpt-4o` | Prefer registries of that provider, then pick. |
 | **Explicit model** | any allowed model id | Required when multiple registries are bound **without** load balancing — the client must specify the model. |
 
@@ -20,8 +20,7 @@ strategy you configured.
 
 ## Filter models on the consumer
 
-Model restriction is configured on the **consumer** (or [role](/trustgate/concepts/roles)),
-not as a Policies catalog plugin.
+Model restriction is configured on the **consumer**, not as a Policies catalog plugin.
 
 On the consumer **Routing** tab (or providers editor), for each registry row:
 
@@ -30,11 +29,12 @@ On the consumer **Routing** tab (or providers editor), for each registry row:
 2. Set the **default model** when the client omits `model` (must be in the filtered set when
    filtering is on).
 
+**Filter by available models** only offers models the registry's credentials can actually
+list: Azure OpenAI shows its deployments, and **Custom / OpenAI-compatible** lists the
+endpoint's live models. When the provider cannot be queried, the full catalog is shown.
+
 A request for a model outside that registry's filter is rejected during resolution, before
 it reaches the provider.
-
-Roles can define the same per-registry allow-list and default; consumers that use the role
-inherit those model policies.
 
 When [load balancing](/trustgate/routing/load-balancing) is enabled, a member's `models` list
 overrides the registry's `allowed` list, and a member's `model` pins the route outright. A
@@ -43,8 +43,9 @@ member without `model` uses the policy `default` when that model is one of the m
 
 ## Resolution order
 
-1. Read the `model` value (`auto`, short name, qualified, or empty → consumer/role default).
-2. Narrow candidate registries from the consumer's bindings (or smart-routing / LB pool).
+1. Read the `model` value (`auto`, short name, qualified, or empty → consumer default).
+2. Narrow candidate registries from the consumer's bindings (or smart-routing / LB pool),
+   walking them in configured order for an unqualified name.
 3. Apply per-registry model filters — reject disallowed models; fill in the default when none
    was given.
 4. Hand candidates to [load balancing](/trustgate/routing/load-balancing) or
@@ -54,7 +55,6 @@ member without `model` uses the policy `default` when that model is one of the m
 ## Related
 
 - [Consumers](/trustgate/concepts/consumers) — Routing tab and Connect snippets
-- [Roles](/trustgate/concepts/roles) — shared model policies
 - [Load balancing](/trustgate/routing/load-balancing) · [Smart routing](/trustgate/routing/smart-routing)
 - [Embeddings](/trustgate/endpoints/embeddings) — candidate pool is embeddings-capable registries only
 - [Images](/trustgate/endpoints/images) — candidate pool is images-capable registries only; multipart `model` also pins

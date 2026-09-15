@@ -1,14 +1,15 @@
 ---
 title: "Okta"
-description: "End-to-end manual for wiring Okta to TrustGate: a custom authorization server, scopes, and a groups claim feeding OIDC role-based routing and OAuth2 for MCP."
+description: "End-to-end manual for wiring Okta to TrustGate: a custom authorization server and scopes, validating Okta bearer tokens on a consumer, and OAuth2 login for MCP."
 ---
 
 This manual sets up Okta as the identity provider for two TrustGate patterns in the
-NeuralTrust app (**Agent Gateway → Identity** / **Consumers**):
+NeuralTrust app (**Settings → Agent Gateway → Machine identity** / **Consumers**):
 
-1. **OIDC · Identity-based LLM** — an LLM consumer whose routing is chosen from the
-   token's `groups` claim ([roles](/trustgate/concepts/roles)).
-2. **OAuth2 · MCP** — an MCP consumer gated by a custom scope. Interactive agents
+1. **Validate bearer tokens** — an LLM or MCP consumer whose callers already hold an Okta
+   access token (a service using client credentials, or an app forwarding a user token).
+   TrustGate verifies the token and admits the caller; routing is the consumer's own.
+2. **OAuth2 · MCP login** — an MCP consumer gated by a custom scope. Interactive agents
    (Cursor, Claude Desktop, MCP Inspector) use TrustGate's authorization-code broker;
    optional client-credentials tokens are only for curl checks.
 
@@ -21,7 +22,6 @@ authorization server feature is the **API Access Management** product.
 
 - An Okta org — note your domain, e.g. `dev-123456.okta.com`.
 - Admin access to **Security → API** and **Applications**.
-- A group you can route on (e.g. `TrustGate-Engineering`) under **Directory → Groups**.
 - For Cursor / agent MCP login: the public MCP base URL of your gateway (e.g.
   `https://default-xxxxxxxx.mcp.neuraltrust.ai`), so you can register the OAuth redirect URI.
 
@@ -63,7 +63,7 @@ All steps happen in the **Okta Admin Console** at `https://<your-org>-admin.okta
   <Step title="Record the issuer and audience">
     Open the server and read the **Settings** tab. Copy the **Issuer URI**
     (`https://{okta_domain}/oauth2/{okta_auth_server_id}`) and the **Audience** — you will
-    paste both into the TrustGate credential. The keys endpoint is the issuer plus
+    paste both into the TrustGate trust anchor. The keys endpoint is the issuer plus
     `/v1/keys`:
 
     ```text
@@ -114,98 +114,61 @@ that server's detail page.
   </Step>
 </Steps>
 
-## 3. Add a groups claim (for role-based routing)
-
-For OIDC role-based routing, the token must carry the claim you match roles on.
-
-<Steps>
-  <Step title="Create a group (if you don't have one)">
-    In the left sidebar go to **Directory → Groups** → **Add Group**. Name it
-    `TrustGate-Engineering`, save, then open it and use **Assign people** to add users.
-  </Step>
-  <Step title="Add the claim">
-    Back in **Security → API → Authorization Servers → your server**, open the **Claims**
-    tab → **Add Claim**:
-
-    - **Name**: `groups`
-    - **Include in token type**: `Access Token` → `Always` (repeat for `ID Token` if you
-      also send ID tokens)
-    - **Value type**: `Groups`
-    - **Filter**: `Matches regex` `.*` (or `Starts with` `TrustGate-` to scope it)
-
-    Click **Create**.
-  </Step>
-  <Step title="Verify">
-    After you mint a token (below), decode it and confirm the `groups` array carries the
-    user's group names.
-  </Step>
-</Steps>
-
 ---
 
-## 4. OIDC identity-based routing (LLM)
+## 3. Validate Okta bearer tokens (LLM or MCP)
 
-Use this when an LLM consumer should pick registries and models from the caller's Okta
-token (for example the `groups` claim). Everything below is done in the NeuralTrust app
-under **Agent Gateway** — no API payloads.
-
-Recommended order: **Auth → Role → Consumer**.
+Use this when the application already obtains its own Okta access token — client
+credentials for a service, or a user token the application forwards — and sends it as
+`Authorization: Bearer <token>`. TrustGate verifies the token; the consumer's own
+**Routing** decides registries and models. Everything below is done in the NeuralTrust app —
+no API payloads.
 
 <Steps>
-  <Step title="Create an OIDC auth">
-    Go to **Agent Gateway → Identity → Auth** → **New Auth**.
+  <Step title="Create the trust anchor">
+    Go to **Settings → Agent Gateway → Machine identity** → **Add trust anchor**.
 
-    - **Type**: `OIDC`
+    - **Kind**: **IdP (JWT)**
     - **Name**: e.g. `okta-idp`
-    - **Status**: Active
     - **Issuer**: `https://{okta_domain}/oauth2/{okta_auth_server_id}`  
       (example: `https://dev-123456.okta.com/oauth2/default`)
-    - **JWKS URL**: `https://{okta_domain}/oauth2/{okta_auth_server_id}/v1/keys`
-    - **Audiences**: the authorization server audience (example: `api://default`)
-    - **Subject claim** (optional): leave as `sub` unless your tokens use another claim
+    - **Audience**: the authorization server audience (example: `api://default`)
+    - **Advanced** (optional): pin **JWKS URL** to
+      `https://{okta_domain}/oauth2/{okta_auth_server_id}/v1/keys`, restrict **Allowed
+      algorithms**, set **Required scopes**, or change **Subject claim** from `sub`.
 
-    Click **Create Auth**.
-
-    You can also create the same OIDC auth inline later from a consumer's auth picker
-    (**Create Auth entity "…"**).
+    Save. No client secret is stored: the gateway only verifies tokens.
   </Step>
-  <Step title="Create a role that matches Okta groups">
-    Still under **Identity**, open the **Roles** tab → **New Role**.
+  <Step title="Attach it to the consumer">
+    Go to **Agent Gateway → Consumers**, open (or create) the consumer, and on **General →
+    Authentication** choose **Identity provider** and select `okta-idp`.
 
-    - **Role name**: e.g. `engineering`
-    - **Claim**: `groups` (the JWT claim path from step 3)
-    - **Value**: the Okta group name to match, e.g. `TrustGate-Engineering`  
-      (the UI maps this as “claim contains any of these values”)
-    - **Resources**: **Add resource** and select the LLM registries (and optional models)
-      this role may reach
+    - **Allowed client IDs**: the Okta **Client ID** of every application that may call
+      this consumer. TrustGate matches the token's `azp` claim, else `client_id`. Okta
+      access tokens carry the client id as `cid`, which TrustGate does not read — to use
+      this list, add a custom claim on the authorization server (**Claims → Add Claim**:
+      name `client_id`, include in **Access Token**, value type **Expression**, value
+      `access.clientId`). Leave the list empty only when the audience is dedicated to this
+      one consumer.
 
-    Click **Create Role**. Create additional roles if you need more group → resource
-    mappings.
+    **Save changes**. Registries and models stay under **Routing**, as for any consumer.
   </Step>
-  <Step title="Create an LLM consumer with Identity-based routing">
-    Go to **Agent Gateway → Consumers** → **Consumer** (new consumer panel).
+  <Step title="Call the consumer">
+    Mint a token from Okta (see [§5](#5-get-a-test-token-optional-m2m)) and send it:
 
-    On **General**:
+    ```bash
+    curl https://{llm_host}/{consumer_slug}/v1/chat/completions \
+      -H "Authorization: Bearer $OKTA_ACCESS_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"model":"auto","messages":[{"role":"user","content":"Hello"}]}'
+    ```
 
-    - **Name**: e.g. `okta-llm`
-    - **Protocol**: `LLM`
-    - **Authentication → Method**: `OIDC`
-    - **OIDC provider**: select the auth from the first step
-
-    On **Routing**:
-
-    - Switch from **Static** to **Identity-based**
-    - **Roles**: select the role(s) you created (at least one)
-
-    Click **Create Consumer**.
-
-    For an existing consumer, open it and set the same options on the **Auth** and
-    **Routing** tabs, then **Save changes**. With Identity-based routing, registries come
-    from the role's resources — not from a static list on the consumer.
+    `401` means the token failed verification; `403` means it verified but its client id is
+    not in **Allowed client IDs**.
   </Step>
 </Steps>
 
-## 5. OAuth2 for MCP
+## 4. OAuth2 for MCP
 
 Use this when Cursor (or another MCP client) should log in through Okta. Access is gated
 by the custom scope from step 2 (for example `mcp.access`).
@@ -236,7 +199,7 @@ Do **not** create an Okta **API Services** app for this credential. API Services
 `Clients with 'application_type' of 'service' are not allowed to access the 'authorize' endpoint.`
 
 Use an **OIDC Web Application**. Keep a separate API Services client only if you want
-standalone M2M curl tests — never paste that client into the app's MCP OAuth2 auth.
+standalone M2M curl tests — never paste that client into the MCP consumer's OAuth2 auth.
 </Warning>
 
 <Steps>
@@ -271,37 +234,50 @@ standalone M2M curl tests — never paste that client into the app's MCP OAuth2 
     secret**. Confirm the access-policy rule from step 2 allows **Authorization Code**
     and the `mcp.access` scope for this client.
   </Step>
-  <Step title="Create an OAuth2 auth in the app">
-    Go to **Agent Gateway → Identity → Auth → New Auth**.
+  <Step title="Create the interactive OAuth2 auth">
+    The **Machine identity** form creates token-validation anchors; an anchor that brokers
+    a login is created with the [Admin API](/trustgate/api/credentials) and is then
+    listed and editable under **Settings → Agent Gateway → Machine identity**:
 
-    - **Type**: `OAuth2`
-    - **Name**: e.g. `okta-mcp`
-    - **Status**: Active
-    - **Setup**: **Interactive login · IdP with discovery (Okta, Entra ID)**
-    - **Issuer**: `https://{okta_domain}/oauth2/{okta_auth_server_id}`  
-      (example: `https://dev-123456.okta.com/oauth2/default`)
-    - **Audiences**: the authorization server audience (example: `api://default`)
-    - **Client ID** / **Client secret**: from the Web app above
-    - **Session mode**: **Disabled** (Okta issues JWTs; session mode is for opaque-token
-      IdPs such as GitHub)
-    - **Required scopes**: `mcp.access` (do not add `openid` / `profile` / `email`)
+    ```http
+    POST /v1/gateways/{gateway_id}/auths
+    Authorization: Bearer <admin-token>
+    Content-Type: application/json
+    ```
 
-    You can leave **Token validation · advanced** closed — TrustGate can resolve JWKS from
-    the issuer. Open it only if you want to pin **JWKS URL** explicitly to
-    `https://{okta_domain}/oauth2/{okta_auth_server_id}/v1/keys`.
+    ```json
+    {
+      "name": "okta-mcp",
+      "type": "oauth2",
+      "enabled": true,
+      "config": {
+        "oauth2": {
+          "issuer": "https://dev-123456.okta.com/oauth2/default",
+          "audiences": ["api://default"],
+          "client_id": "{okta_client_id}",
+          "client_secret": "{okta_client_secret}",
+          "required_scopes": ["mcp.access"]
+        }
+      }
+    }
+    ```
 
-    Click **Create Auth**.
+    This is the **Interactive login · IdP with discovery** setup: leave `session_mode` off
+    (Okta issues JWTs; session mode is for opaque-token IdPs such as GitHub) and do not add
+    `openid` / `profile` / `email` to `required_scopes`. `jwks_url` is optional — TrustGate
+    resolves keys from the issuer.
   </Step>
   <Step title="Create an MCP consumer and attach the auth">
-    Go to **Agent Gateway → Consumers → Consumer**.
+    Go to **Agent Gateway → Consumers → New Application**.
 
     - **Name**: e.g. `okta-mcp`
     - **Protocol**: `MCP`
-    - **Authentication → Method**: `OAuth2` (MCP does not use OIDC)
-    - **OAuth client**: select the auth from the previous step (or create one inline via
-      **Create Auth entity "…"**)
+    - **Authentication → Identity provider**: select `okta-mcp`
+    - **Allowed client IDs** (optional): the Web app's Client ID
 
-    Click **Create Consumer**.
+    Click **Create Application**. On the consumer's **General** tab, **Identity → Acts on
+    behalf of end users** with **Users sign in** makes each person hold their own upstream
+    connections; the consumer's servers stay the registries bound under **Routing**.
   </Step>
   <Step title="Connect from Cursor">
     Open the consumer → **Connect** tab. Copy the Cursor snippet (URL only — no API key):
@@ -314,17 +290,19 @@ standalone M2M curl tests — never paste that client into the app's MCP OAuth2 
     (login or an existing SSO session), then optionally TrustGate **Connect your
     accounts**, then return to Cursor.
 
-    After you change the Okta Client ID in the app, confirm the next browser authorize
+    After you change the Okta Client ID on the auth, confirm the next browser authorize
     URL's `client_id=` matches the **Web** app — a stale API Services client id means the
     auth was not saved or the agent is still using an old server config.
   </Step>
 </Steps>
 
-## 6. Get a test token (optional M2M)
+## 5. Get a test token (optional M2M)
 
-Client credentials are **not** what Cursor uses. Use this only to decode a token and
-confirm issuer, audience, and scopes. The Okta app must allow the **Client Credentials**
-grant on the access-policy rule (and on the Web app if you enabled that grant type).
+Client credentials are **not** what Cursor uses. Use this to decode a token and confirm
+issuer, audience, and scopes, or as the token a service sends in
+[§3](#3-validate-okta-bearer-tokens-llm-or-mcp). The Okta app must allow the **Client
+Credentials** grant on the access-policy rule (and on the Web app if you enabled that grant
+type).
 
 ```bash
 curl -s --request POST \
@@ -339,8 +317,10 @@ Decode the `access_token` and confirm:
 - `iss` = `https://dev-123456.okta.com/oauth2/default`
 - `aud` = `api://default`
 - `scp` = `["mcp.access"]`
+- `client_id` (the custom claim from [§3](#3-validate-okta-bearer-tokens-llm-or-mcp), if
+  you use **Allowed client IDs**) = the Client ID you listed
 
-## 7. Force Okta login again (clear session)
+## 6. Force Okta login again (clear session)
 
 If the browser skips the Okta UI and jumps straight to TrustGate's connect page, you
 already had an Okta SSO cookie. To see login again:
@@ -355,15 +335,16 @@ already had an Okta SSO cookie. To see login again:
 
 | Symptom | Likely cause |
 |---|---|
-| `Clients with 'application_type' of 'service' are not allowed to access the 'authorize' endpoint` | The OAuth2 auth uses an **API Services** client. Create an **OIDC Web Application** and update **Client ID** / **Client secret** in **Identity → Auth**. |
+| `Clients with 'application_type' of 'service' are not allowed to access the 'authorize' endpoint` | The OAuth2 auth uses an **API Services** client. Create an **OIDC Web Application** and update `client_id` / `client_secret` on the auth. |
 | `The 'redirect_uri' parameter must be a Login redirect URI in the client app settings` | Add `{mcp_base_url}/oauth/callback` under the Web app's **Sign-in redirect URIs** (exact match). |
-| Okta login never appears | Existing Okta session in the browser — see [§7](#7-force-okta-login-again-clear-session). |
+| Okta login never appears | Existing Okta session in the browser — see [§6](#6-force-okta-login-again-clear-session). |
 | Lands on **Connect your accounts** (Notion / Linear / …) | Okta already succeeded; that page is the optional upstream-provider consent detour. Click **Continue** to finish returning to the agent. |
-| Authorize URL still has the old `client_id` | Auth not updated in **Identity**, or the MCP client is pointing at a different gateway / consumer. |
+| Authorize URL still has the old `client_id` | Auth not updated under **Machine identity**, or the MCP client is pointing at a different gateway / consumer. |
 | `401` / no token minted | No access policy/rule on the authorization server (step 2), or the rule omits **Authorization Code**. |
+| `401` on a bearer call | Token failed verification: wrong issuer, expired, or `aud` not in **Audience**. Decode it and compare with [§5](#5-get-a-test-token-optional-m2m). |
+| `403 forbidden` on a bearer call | Token verified but its `azp` / `client_id` is not in the consumer's **Allowed client IDs** — or the token only carries Okta's `cid` and the custom `client_id` claim from [§3](#3-validate-okta-bearer-tokens-llm-or-mcp) is missing. |
 | `missing required scopes` | The client wasn't granted `mcp.access`, or **Required scopes** on the auth does not match. |
-| Audience mismatch | **Audiences** on the auth doesn't equal the token's `aud` (`api://default` on the `default` server). |
-| Role never selected | `groups` claim not added to the token type you send, or the role **Claim** / **Value** exclude the group (step 3). |
+| Audience mismatch | **Audience** on the auth doesn't equal the token's `aud` (`api://default` on the `default` server). |
 | Config rejected | **Required scopes** contains `openid`/`profile`/`email`/`offline_access` — remove them. |
 
 Next: [Entra ID](/trustgate/concepts/authorization/entra-id).

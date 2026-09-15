@@ -1,161 +1,210 @@
 ---
 title: "Policies"
-description: "A policy is where enforcement lives: gates that match request attributes before detection, detector rules that run detectors and decide the action, and a policy-wide Observe/Enforce switch."
+description: "A policy is where enforcement lives: gates that filter before detection, detector rules that decide the action, and one switch between watching and enforcing."
 ---
 
-A **policy** turns detection into a decision. [Detectors](/trustguard/concepts/detectors)
-say *what* is in the traffic; a policy says *what to do about it*. You build
-policies under **Agent Runtime → Policies**, then attach them to
-[collectors](/trustguard/concepts/collectors).
+Detectors find things. A **policy** is what decides whether anything happens
+about it — and it is the only place in TrustGuard where that decision is made.
 
-Opening a policy opens a side panel with six tabs:
+A policy holds three things: **gates** that filter traffic before anything is
+inspected, **detector rules** that say which detector runs and what its finding
+costs, and one switch between **Observe** and **Enforce**.
 
-| Tab | What it is |
+## The six tabs
+
+Opening a policy opens a side panel:
+
+| Tab | What you do there |
 |---|---|
-| **Basics** | Name and **Enforcement mode**. |
-| **Gates** | Attribute matchers that run *before* detectors. |
-| **Detectors** | Detector rules, split by **Input** / **Output**. |
-| **Collectors** | Which collectors send traffic here, and how. |
-| **Test** | Sandbox against the **last saved** policy. |
-| **History** | Change log for the policy, gates, detector rules, and routing. |
+| **Basics** | Set the **Policy name** and the **Enforcement mode**. |
+| **Gates** | Decide which traffic is worth inspecting at all. |
+| **Detectors** | Pick detectors, split by **Input** and **Output**. |
+| **Collectors** | Choose which collectors send traffic here. |
+| **Test** | Try the saved policy against a sample before it meets real traffic. |
+| **History** | See who changed what. |
 
-The list columns **Gates**, **Detectors**, and **Collectors** count what is on
-those tabs. **Mode** is **Observe** or **Enforce**.
+In the policy list, the **Gates**, **Detectors**, and **Collectors** columns count
+what is on those tabs, and **Mode** shows Observe or Enforce.
 
-## Enforcement modes
+## Enforcement mode
 
-The switch is on **Basics** (and in the panel header):
+The switch is on **Basics**, and also in the panel header so you can flip it
+without digging.
 
-| Console | API | Effect |
-|---|---|---|
-| **Observe** | `report_only: true` | Every gate and detector action is recorded only. Nothing is blocked, asked, or transformed. |
-| **Enforce** | `report_only: false` | Actions apply as configured. |
+| Mode | What happens |
+|---|---|
+| **Observe** | Every gate and detector action is recorded and none is applied. Nothing is blocked, asked, or transformed. |
+| **Enforce** | Actions apply as configured. |
 
-Run a new policy in **Observe**, check **Activity** and **Test**, then switch to **Enforce**.
+Run every new policy in **Observe** first. Check **Activity**, use the **Test**
+tab, and only then switch. This is not ceremony — a policy that looks obviously
+correct can still be noisy against real traffic, and Observe is where you learn
+that without anyone noticing.
 
 ## Gates
 
-**Gates** match request **attributes** (not prompt text) and run **before** any detector.
+**Gates** match on request **attributes** — who is calling, which model, which
+tool — never on the text of the prompt. They run **before** any detector, which
+makes them the cheap filter: traffic a gate skips costs you nothing.
 
-Each gate is a name, **And**/**Or** conditions, and a **Then** action:
+Each gate is a **Rule name**, a set of **Conditions** joined by **And** or **Or**,
+and a **Then** action.
 
-| Action | Effect |
+| Action | What it does |
 |---|---|
-| **Block** | Stop immediately; **detectors are skipped**. In Observe this is recorded, not enforced. |
-| **Report** | Record a finding and continue to detection. |
-| **Skip** | Stop remaining gates and continue to detectors without recording a gate finding. |
-| **Ask** | Request confirmation when the integration supports it. **Input only** (missing `direction` counts as input). On **output** the gate does not match. Detectors are skipped. |
+| **Block** | Stop the request. Detectors do not run. |
+| **Report** | Let the request through and log a finding. |
+| **Skip** | Bypass detectors for matching traffic. |
+| **Ask** | Prompt the user to confirm in the IDE. Input traffic only. |
 
-Block, Skip, and Ask end the gate chain. Report continues. If any matching gate **Blocks**, detection does not run.
+All gate rules evaluate, and **the most restrictive action wins** — they are not
+a first-match chain, so adding a rule can only ever tighten a policy, never
+loosen one.
 
-Ask behavior depends on the integration. [Claude Code](/integrations/claude-code)
-and [Cursor](/integrations/cursor) display a permission prompt for tool calls,
-but prompt events continue with a warning. [GitHub Copilot](/integrations/github-copilot)
-prompts on interactive tool calls and treats Ask as denied in cloud jobs.
-[Codex](/integrations/codex) has no Ask dialog; it allows the call and adds the
-approval message to the agent context. See [How it works](/trustguard/how-it-works)
-for the complete mapping.
+**Ask** depends on the integration having somewhere to ask. [Claude
+Code](/integrations/claude-code) and [Cursor](/integrations/cursor) show a
+permission prompt for tool calls. [GitHub
+Copilot](/integrations/github-copilot) prompts on interactive tool calls and
+treats Ask as denied in cloud jobs. [Codex](/integrations/codex) has no dialog at
+all: it allows the call and adds the approval message to the agent's context.
+Full mapping in [How it works](/trustguard/how-it-works).
 
-### Condition attributes
+### What you can match on
 
-| Group (console) | Attributes |
+The **Attribute** picker groups everything you can gate on:
+
+| Group | Attributes |
 |---|---|
-| **Consumer** | `consumer.id`, `consumer.name`, `consumer.tag`, `consumer.type` |
-| **Model** | `model.name`, `model.provider` |
-| **Collector** | `collector.id`, `collector.type` |
-| **Source** | `source.application` |
-| **Session** | `session.id` |
-| **Protocol** | `protocol` (`llm` / `mcp` / `a2a`; API also accepts `all`) |
-| **Direction** | `direction` (`input` / `output`) |
-| **Tool** | `tool.name`, `tool.command`, `tool.arguments` |
+| **Consumer** | Consumer ID, Consumer name, Consumer tag, Consumer type |
+| **Model** | Model name, Model provider |
+| **Collector** | Collector ID, Collector type |
+| **Agent** | Agent ID, Agent name, Agent published, Agent environment, Agent Entra ID |
+| **Source** | Source application, Source channel, Client IP, Source tenant |
+| **Session** | Session ID |
+| **Protocol** | Protocol |
+| **Direction** | Direction |
+| **Tool** | Tool name, Tool command, Tool arguments, Tool type, Previous tool results, Tool results analyzed, Tool results already cleared, Largest tool result (bytes) |
+| **Payload size** | Delivery size (bytes), Size analyzed (bytes), Text analyzed (bytes) |
+| **Transcript** | Conversation turns, Conversation size (bytes) |
 
-**Operators:** Equals, Not equals, Greater than, Less than, Contains, Does not contain, In (list), Matches (regex).
+That is the whole list — the picker is a closed menu, so anything not in it
+cannot be gated on.
 
-`consumer.*`, `model.*`, `collector.type`, and `source.application` come from
-the request `attributes` object, or are stamped by an integration.
-`collector.id`, `session.id`, `protocol`, and `direction` are resolved by
-TrustGuard.
+The picker shows a one-line description of each as you hover it, so this table is
+a map rather than something to memorise. A few worth calling out:
 
-**`tool.name`** for MCP `tools/call` is read from **`payload.params.name`**, not
-from `attributes.tool`. Hosts that expose tools as `mcp__<server>__<tool>` send
-the last segment (`search_threads`). Gate on that short name.
-`tool.command` is the shell line for Bash / Shell.
+- **Text analyzed (bytes)** is how much text the detectors actually read, which
+  is what their cost scales with — the attribute to gate on if you are managing
+  spend.
+- **Tool results already cleared** counts results skipped because they were
+  checked and allowed earlier, so a rising number means your policy is doing
+  redundant work.
+- **Agent published** separates a live agent from one still being built, which is
+  usually the difference between enforcing and observing.
+- **Tool arguments** matches the whole argument object as a single string. There
+  is no way to gate on one named argument — if you need that, match on
+  **Tool name** and let a detector inspect the content.
 
-Do not put `name` inside `{ "input": "…" }` when `protocol` is `all`; that
-body is rejected with `400`.
+**Operators:** Equals, Not equals, Greater than, Less than, Contains, Does not
+contain, In, Matches. **In** takes a list of values; **Matches** takes a regular
+expression.
 
-#### `source.application` values
+### Source application values
 
-| Value | Path |
+**Source application** tells you which surface a request came from, and the
+values are fixed:
+
+| Value | Where it comes from |
 |---|---|
-| `claude-ai` | [Claude Enterprise](/integrations/claude-enterprise); claude.ai chat |
-| `claude-code` | Claude Enterprise; Claude Code seen server-side, not the laptop plugin |
-| `claude-code-plugin` | [Claude Code plugin](/integrations/claude-code); local lifecycle hooks |
-| `cursor-plugin` | [Cursor plugin](/integrations/cursor) |
-| `codex-plugin` | [Codex plugin](/integrations/codex) |
-| `copilot-plugin` | [GitHub Copilot plugin](/integrations/github-copilot) |
-| `config-test` | Anthropic **Test connection** |
+| `claude-ai` | claude.ai chat, through the Inference Hooks collector |
+| `claude-code` | Claude Code seen server-side by Anthropic — **not** the laptop plugin |
+| `claude-code-plugin` | The [Claude Code plugin](/integrations/claude-code) on a developer machine |
+| `cursor-plugin` | The [Cursor plugin](/integrations/cursor) |
+| `codex-plugin` | The [Codex plugin](/integrations/codex) |
+| `copilot-plugin` | The [GitHub Copilot plugin](/integrations/github-copilot) |
+| `config-test` | The **Test connection** button |
 
-A gate on `claude-code` does **not** match the laptop plugin (`claude-code-plugin`).
+<Warning>
+`claude-code` and `claude-code-plugin` are different surfaces. A gate on
+`claude-code` does **not** match the laptop plugin, which is the single most
+common reason a gate silently never fires.
+</Warning>
 
 ## Detectors
 
-The **Detectors** tab is split by **evaluation phase**:
+The **Detectors** tab is split by **Evaluation phase**:
 
-- **Input:** prompt or tool call.
-- **Output:** completion or tool result.
+- **Input** — traffic going to the model or tool.
+- **Output** — traffic coming back.
 
-TrustGuard only runs the phase that matches the request `direction`. If the
-caller never sends `output`, Output rules never run.
+Only the phase matching the traffic runs. That sounds obvious but has a practical
+edge: a collector that only ever sees prompts has nothing to evaluate on Output,
+so Output rules there will never fire no matter how they are written. Which
+phases a collector can see is on its [integration
+page](/integrations/overview).
 
-**Who sets `direction`?**
+Each rule picks a [detector](/trustguard/concepts/detectors), an **Action**, and
+optional **Conditions** — the same attributes as gates.
 
-- **[TrustGate](/integrations/trustgate)** sets it (`input` on
-  the request path, `output` on the response path).
-- **IDE plugins** set it per hook (prompt and `preToolUse` → input; `postToolUse` → output).
-- **SDK / REST / browser** must send it on every call. Omitting it defaults to `input`.
+| Action | What it does |
+|---|---|
+| **Monitor** | Record a finding and change nothing. |
+| **Block** | Flag the request to be blocked. |
+| **Transform** | Mask the matched values and forward the rest. Only **Data Loss Prevention** can do this. |
 
-Each rule picks a [detector](/trustguard/concepts/detectors), an **action**, and
-optional **conditions** (same attributes as gates):
+As with gates, every rule evaluates and the most restrictive action wins.
 
-| Action | Console | Effect | Rewrites payload |
-|---|---|---|---|
-| `report` | **Monitor** | Record a finding only. | No |
-| `block` | **Block** | Flag for blocking; stops the remaining detector chain. | No |
-| `transform` | **Transform** | Mask/rewrite. Only valid for **`data_loss_prevention`**. | Yes |
+## When several things fire
 
-## Verdict precedence
+One request can trip a gate and three detectors. TrustGuard reduces all of it to
+a single outcome, worst first:
 
 ```text
-block  →  ask  →  transform  →  report  →  allow
+Block  →  Ask  →  Transform  →  Monitor  →  Allow
 ```
 
-`allow` means nothing fired, or everything was waived. The caller enforces the
-verdict; see the [Evaluate API](/trustguard/api/evaluate). In **Observe**, the
-status never goes past `report`.
+**Allow** means nothing fired, or everything that fired was waived. In
+**Observe**, the outcome never goes past Monitor — which is exactly what makes
+Observe safe.
 
 ## Test
 
-**Test** evaluates the **saved** policy (unsaved Gates/Detectors do not apply).
+**Test** runs against the **saved** policy. Unsaved gates and detector rules are
+not applied, so save before you test or you will be testing the old version.
 
-1. **Test direction:** Input or Output. It must match the detector phase you want to test.
-2. **Sample:** paste text, pick a preset, or select **Upload file**, which uses the **LLM** protocol.
-3. **Extra parameters:** the same attributes available to gates. Skip, Block, and Ask match only when these are set. For example, set **Tool name** to `search_threads` or **Source application** to `claude-code-plugin`.
-4. **Run test:** view the Blocked, Transformed, Reported, or Allowed decision and its findings.
+1. Pick a **Test direction** — Input or Output. It has to match the phase of the
+   rule you are trying to exercise.
+2. Paste a sample input or output, pick one of the built-in presets — **Prompt
+   Injection**, **PII**, **Jailbreak**, **Secrets**, **Toxicity** — or upload a
+   file.
+3. Fill in **Extra parameters**, the same attributes gates use. They are
+   prefilled from the policy's own gates, and Skip, Block and Ask rules only
+   match when the attribute they gate on is actually set here — so a rule keyed
+   on **Tool name** will look broken until you fill it in.
+4. **Run test** and read the outcome and its findings.
 
-Test does not emit **Activity** and does not consume the `/v1/evaluate` plan rate limit.
+Test does not write to **Activity** and does not count against your plan's rate
+limit, so use it freely.
+
+## Collectors
+
+A policy does nothing until traffic reaches it. On the **Collectors** tab, attach
+collectors and pick a **Routing mode**:
+
+- **Default** — the fallback for all of that collector's traffic.
+- **Consumer ID** — only requests from that consumer, which is how one collector
+  sends different consumers to different policies.
+
+You can bind the same routing from the collector's own **Policies** tab.
+
+<Warning>
+A collector with no matching policy leaves that traffic **unguarded**. TrustGuard
+returns allow and inspects nothing — it does not warn you. This is the last step,
+and the one people forget.
+</Warning>
 
 ## History
 
-History records create, update, and delete events for the policy, its gates,
-detector rules, and collector routing.
-
-## Collectors tab
-
-Attach collectors with a routing mode:
-
-- **Default:** fallback for all of that collector's traffic.
-- **Consumer ID:** only requests with that `consumer_id`.
-
-You can also bind routing from the collector’s **Policies** tab. A collector
-with no matching policy leaves that request **unguarded** (`status: "allow"`, no findings).
+**History** records every create, update, and delete on the policy, its gates,
+its detector rules, and its collector routing. When enforcement changes and
+nobody remembers why, this is where the answer is.

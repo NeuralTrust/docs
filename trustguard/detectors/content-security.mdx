@@ -1,27 +1,63 @@
 ---
 title: "Content security detectors"
-description: "Jailbreak detection, toxicity, Moderation, and document/URL screening for indirect prompt injection and PII."
+description: "Jailbreak detection, toxicity, Moderation, and document/URL screening for indirect prompt injection and PII. Configured from the console."
 ---
 
-Content-security detectors are the LLM-aware core of TrustGuard: they score
-prompts and model output for jailbreaks, toxicity, and off-topic/disallowed
-content, and analyze documents and URLs for **indirect prompt injection** and
-PII. Several call the **NeuralTrust Firewall**; its credentials are configured
-globally (env) or overridden per-detector under `settings.credentials`.
+Content-security detectors are the LLM-aware core of TrustGuard. They score prompts
+and model output for jailbreaks, toxicity, and off-topic content, and they screen
+documents and URLs for **indirect prompt injection** and PII.
 
-All of these are **detection‑only** — the action (**Monitor** / **Block**) and
-evaluation phase (Input / Output) are set on the
-[policy](/trustguard/concepts/policies) rule that references the detector.
+Create them in the console under **Detectors**, then attach them from a
+[policy](/trustguard/concepts/policies) to decide what happens when they match.
 
-| Detector | Slug | Sides | Protocols | Backend |
-|---|---|---|---|---|
-| Prompt Guard | `prompt_guard` | input, output | all | NeuralTrust Firewall |
-| Toxicity | `toxicity` | input, output | all | NeuralTrust Firewall |
-| Moderation | `prompt_moderation` | input, output | all | keyword/regex + NeuralTrust topics |
-| URL Analyzer | `url_analyzer` | input | llm, mcp | fetch + NeuralTrust Firewall |
-| Document Analyzer | `doc_analyzer` | input | llm | extract/OCR + PII + Firewall |
+| Console card | Sides | Protocols | Configuration tab shows |
+|---|---|---|---|
+| **Prompt Guard** | Input, Output | All | Protection Sensitivity |
+| **Toxicity Detection** | Input, Output | All | Protection Sensitivity |
+| **Moderation** | Input, Output | All | Topics + Protection Sensitivity |
+| **Custom Moderation** (Beta) | Input, Output | All | Topics you define + Protection Sensitivity |
+| **URL Analyzer** | Input | LLM, MCP | Domains + two linked detectors |
+| **Document Analyzer** | Input | LLM | Two linked detectors |
 
-## Prompt Guard — `prompt_guard`
+All of them are **detection-only**. The action — **Monitor**, **Block** — and the
+phase — **Input**, **Output** — are set on the
+[policy](/trustguard/concepts/policies) rule that references the detector, not on
+the detector itself.
+
+## Protection Sensitivity
+
+Most content-security detectors have exactly one setting, and it is the same
+control everywhere: three preset cards. You pick one; there is no number to type.
+
+| Preset | Pill | What it does | Fits |
+|---|---|---|---|
+| **Permissive** | Low noise | Flags only clear, high-confidence threats. Your users rarely hit false blocks. | Internal tools and admin panels, developer-facing APIs, a trusted user base |
+| **Balanced** | Recommended | Good coverage without over-blocking. The right starting point for most apps. | Employee-facing chatbots, B2B SaaS products, general-purpose assistants |
+| **Strict** | High coverage | Catches everything possible. Expect some legitimate requests to be flagged. | Customer-facing chatbots, finance and healthcare apps, high-compliance environments |
+
+**Balanced** is applied by default. Start there, watch **Activity**, and move to
+Strict only if real threats are getting through — not preemptively.
+
+The firewall provider and its credentials are **not** part of this form. They are
+configured globally for the workspace and keep their defaults per detector.
+
+## Create a detector
+
+The same four steps for every detector on this page:
+
+1. Open **Detectors** and click **New detector** — or open the **Catalog** tab and
+   click **Add detector** on the card you want.
+2. On **Basics**, give it a **Name**. Use one that says how it is tuned, not what it
+   is: *Jailbreak — strict* beats *Prompt Guard 2*, because the type is already
+   shown next to it.
+3. On **Configuration**, set what that detector exposes (below).
+4. Click **Create detector**, then add it to a
+   [policy](/trustguard/concepts/policies) rule with an action.
+
+A detector on its own inspects nothing. Until a policy references it and that
+policy is attached to a collector, it is inert.
+
+## Prompt Guard
 
 ### What it protects against
 
@@ -29,27 +65,11 @@ Someone talking the model out of its instructions — "ignore your rules",
 role-play framing, encoded or obfuscated attempts. This is the risk people mean
 by *prompt injection*, and it comes from whoever is typing.
 
-### How it works
+### Configure
 
-Scores input/output with the NeuralTrust Firewall jailbreak detector and reports
-a finding (`signal.type: "jailbreak"`) above a threshold.
+**Protection Sensitivity** only. Pick a preset and save.
 
-Detector **Sensitivity** in the console uses three levels for all detectors: **Permissive**, **Balanced** (recommended), and **Strict**. The API `jailbreak.threshold` (and similar threshold fields) maps to the same sensitivity knob for automation — prefer the console Sensitivity control when configuring from the UI.
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `jailbreak.threshold` | number | ✅ | Score in `[0, 1]` above which content is flagged. |
-| `credentials.{base_url,token,openai_api_key}` | string | — | Override global firewall creds. |
-
-```json
-{
-  "name": "Jailbreak — strict",
-  "plugin_slug": "prompt_guard",
-  "settings": { "jailbreak": { "threshold": 0.6 } }
-}
-```
-
-## Toxicity — `toxicity`
+## Toxicity Detection
 
 ### What it protects against
 
@@ -58,18 +78,15 @@ reaching a person on the output side. The two directions answer different
 questions: one is abuse of the service, the other is what your agent is willing
 to say.
 
-### How it works
+Findings name the category that scored highest — hate, violence, harassment,
+self-harm, or sexual — so **Activity** tells you which kind of problem you have,
+not just that you have one.
 
-Scores content with the NeuralTrust Firewall toxicity detector and reports a
-finding above threshold. The `signal.type` is the firewall category that scored
-highest (e.g. `hate`, `violence`, `harassment`, `self_harm`, `sexual`).
+### Configure
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `toxicity.threshold` | number | ✅ | Score in `[0, 1]`. |
-| `credentials.*` | object | — | Override global firewall creds. |
+**Protection Sensitivity** only.
 
-## Moderation — `prompt_moderation`
+## Moderation
 
 ### What it protects against
 
@@ -77,21 +94,25 @@ Your agent being pulled outside what it exists for — answering about a
 competitor, a regulated subject, or anything you have decided is not its job.
 Scope control, not safety.
 
-### How it works
+### Configure
 
-Dual‑mode moderation — enable at least one mode.
+Choose from **Topics**, a fixed list of thirteen:
 
-| Field | Type | Default | Notes |
-|---|---|---|---|
-| `keyreg_moderation.enabled` | boolean | `false` | Keyword/regex matching (`signal.type: "keyreg"`). |
-| `keyreg_moderation.keywords` | array&lt;string&gt; | — | |
-| `keyreg_moderation.regex` | array&lt;string&gt; | — | Each must compile. |
-| `keyreg_moderation.similarity_threshold` | number | `0.8` | |
-| `nt_topic_moderation.enabled` | boolean | `false` | NeuralTrust topic probability (`signal.type: "nt_topic"`). |
-| `nt_topic_moderation.topics` | array&lt;string&gt; | — | |
-| `nt_topic_moderation.thresholds` | map&lt;string, number&gt; | — | Per‑topic threshold. |
+| | | |
+|---|---|---|
+| Religion | Code Generation | Language Translation |
+| Politics | Violence & Harm | Adult Content |
+| Financial Advice | Medical Advice | Illegal Activities |
+| Hate Speech | Misinformation | Personal Information |
+| Academic Dishonesty | | |
 
-## Custom Moderation — `prompt_moderation_v2`
+Select at least one — the console will not save the detector otherwise. Then set
+**Protection Sensitivity**, which applies to every topic you selected rather than
+per topic.
+
+Need a subject that is not on that list? That is **Custom Moderation**, below.
+
+## Custom Moderation
 
 **Beta.**
 
@@ -99,69 +120,101 @@ Dual‑mode moderation — enable at least one mode.
 
 A subject specific to your business that no built-in topic describes — a
 competitor's product line, an internal project name, a regulated matter
-particular to your sector. Where `prompt_moderation` asks *is this off-topic*,
-this asks *is this the topic I described*.
+particular to your sector. Where **Moderation** asks *is this off-topic*, this
+asks *is this the topic I described*.
 
-### How it works
+### Configure
 
-Moderates content against topics **you define yourself**, rather than the
-built-in NeuralTrust topics. Each topic is a name, a definition and a few
-examples, and the Firewall's topic guard scores content against them.
+Every topic here is yours, up to 128 of them. That is the whole difference from
+**Moderation**: there the thirteen subjects are fixed and their definitions live
+in the product, so you can only switch them on and off. Here you own the
+definition.
 
-| Field | Type | Default | Notes |
-|---|---|---|---|
-| `topics` | array&lt;object&gt; | — | Each entry takes a `name`, a `definition`, and `examples`. |
-| `thresholds` | map&lt;string, number&gt; | — | Per-topic score threshold, keyed by topic name. |
+To save you starting from a blank page, the console pre-loads those same thirteen
+as **editable drafts**. Add one and **Customize** it, or **Add new topic** and
+write your own. Either way, what gets saved is your version.
 
-## URL Analyzer — `url_analyzer`
+Each topic opens a form in three parts:
+
+| Section | What goes in it |
+|---|---|
+| **Name** | **Topic name** — *Politics*, *Competitor pricing* |
+| **Instructions** | **Definition** — describe what the topic covers |
+| **Examples** | Phrases that belong to it, one per line |
+
+The examples matter more than the definition: they are what the topic guard
+actually scores against, so two or three realistic ones beat a carefully worded
+description.
+
+Then set [**Protection Sensitivity**](#protection-sensitivity). As with
+Moderation it applies to every topic you defined, not per topic.
+
+## URL Analyzer
 
 ### What it protects against
 
 An instruction hidden in a page the agent is asked to read. The link looks
 harmless; the payload is on the other side of it.
 
-### How it works
+It reads URLs out of the request body and messages — not out of attachments —
+fetches each page under an SSRF guard, and screens the text that comes back.
+Up to ten URLs per request, **input side only**.
 
-Extracts URLs from the request **body / messages** (not from
-`payload.attachments`), fetches each page (SSRF-guarded, size/timeout-bounded,
-up to 10 URLs per request), and screens the fetched text for **indirect prompt
-injection** and PII. **Input side only.**
+### Configure
 
-| Field | Type | Default | Notes |
-|---|---|---|---|
-| `threshold` | number | `0.7` | Indirect prompt injection score threshold. |
-| `url.timeout` | integer | `20000` | Milliseconds. |
-| `url.max_content_size` | integer | `1048576` | Bytes (1 MiB). |
-| `url.allowed_domains` / `url.blocked_domains` | array&lt;string&gt; | — | Allow/deny lists. |
-| `pii.entities` | array&lt;enum&gt; | — | PII entities to check in fetched content. |
+This detector does not carry its own sensitivity or entity list. Instead you point
+it at two detectors you have already created:
 
-## Document Analyzer — `doc_analyzer`
+| Field | What to select | Used for |
+|---|---|---|
+| **Protection Sensitivity** | An existing **Prompt Guard** detector | Scoring fetched pages for indirect prompt injection |
+| **Data Categories** | An existing **Data Loss Prevention** detector | Which PII to look for in fetched pages |
+
+If you have neither yet, the console offers **Create a Prompt Guard detector** and
+**Create a Data Loss Prevention detector** inline.
+
+<Warning>
+Linked detectors are shared, not copied. Retuning the Prompt Guard detector you
+selected here also changes how this analyzer scores — and changes every other
+detector and policy pointing at it. The console says as much when you select one.
+</Warning>
+
+Optionally restrict **Domains** with an allow list, a block list, or both. An empty
+allow list permits every domain that is not blocked.
+
+## Document Analyzer
 
 ### What it protects against
 
 An instruction hidden inside a file someone uploads — including one rendered as
-an image, which is why OCR is part of it. Content risk, not malware scanning.
+an image, which is why OCR is part of it. This is content risk, not malware
+scanning: a clean file can carry a hostile sentence.
 
-### How it works
+It extracts text from attachments — PDF, Office documents, images via OCR, plain
+text — and screens it. **Input side only.**
 
-Extracts text from uploaded documents (PDF, Office, images via OCR, plain text)
-sent as `payload.attachments`, then screens for PII and (optionally) **indirect
-prompt injection**. **Input side only.**
+### Configure
 
-| Field | Type | Default | Notes |
-|---|---|---|---|
-| `max_file_size` | integer | `52428800` (50 MiB) | Bytes. |
-| `entities` | array&lt;enum&gt; | — | PII entities to detect. |
-| `firewall.enabled` | boolean | `false` | Indirect prompt injection screening of extracted text. |
-| `firewall.threshold` | number | `0.7` | |
-| `ocr.enabled` | boolean | `false` | OCR for images/scans (requires the OCR build). |
-| `ocr.languages` | array&lt;string&gt; | — | Tesseract language codes. |
+The same linked-detector model as URL Analyzer: select an existing **Prompt Guard**
+detector for injection screening and an existing **Data Loss Prevention** detector
+for PII. The warning above applies here too.
+
+There is nothing else to set. OCR and injection screening are always on for this
+detector — there is no switch to forget, and no file-size or language list to
+tune.
 
 ## When to use
 
-- **`prompt_guard`** is the baseline jailbreak defense for chat traffic.
-- **`url_analyzer` / `doc_analyzer`** for RAG and agent flows that ingest
-  links/files (content risk in untrusted text — not malware scanning).
-- **`toxicity`** on input and/or output for abuse and safety.
-- **Moderation** (`prompt_moderation`) for topic/scope control ("only answer about X").
-- Tool-result IPI → [Indirect Prompt Injection](/trustguard/detectors/agent-mcp-security).
+- **Prompt Guard** is the baseline for any chat traffic. If you deploy one
+  detector, deploy this one.
+- **Toxicity Detection** on output when your agent talks to the public; on input when abuse
+  of the service is the concern.
+- **Moderation** for scope control — "only answer about X". **Custom Moderation**
+  when the subject is specific to your business.
+- **URL Analyzer** and **Document Analyzer** for RAG and agent flows that ingest
+  links or files.
+- Tool results are a different detector:
+  [Indirect Prompt Injection](/trustguard/detectors/agent-mcp-security).
+
+Start every one of them with the policy in **Observe**. Move to **Enforce** once
+**Activity** shows you are catching what you expected and not much else.

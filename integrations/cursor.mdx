@@ -17,7 +17,7 @@ TrustGuard firewall hooks evaluate local prompts and actions.
 | Product | Scope | Controls |
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | Evaluates prompts, tool calls, and tool results against an organization [policy](/trustguard/concepts/policies) through a plugin on the developer's machine. | Monitor · Block · Ask on tool calls |
-| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer. MCP (Model Context Protocol) connects Cursor to systems such as trackers, databases, and internal APIs. | Tool availability · identity-based access · per-tool rate limits |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer. MCP (Model Context Protocol) connects Cursor to systems such as trackers, databases, and internal APIs. | Tool availability · consumer authentication · per-tool rate limits |
 
 The [trustguard-cursor-plugin](https://github.com/NeuralTrust/trustguard-cursor-plugin)
 package provides the firewall hooks and can also register TrustGate as an MCP
@@ -264,7 +264,7 @@ tools are available.
 
 | Cursor hook | TrustGuard | What you can stop | Enforcement |
 | --- | --- | --- | --- |
-| `beforeSubmitPrompt` | `protocol: llm`, `direction: input` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard--prompt_guard)); secrets and PII pasted into the agent ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** |
+| `beforeSubmitPrompt` | `protocol: llm`, `direction: input` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard)); secrets and PII pasted into the agent ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** |
 | `preToolUse` (Shell) | `protocol: all`, `{ "input": "<command>" }`, `direction: input` | Dangerous or out-of-policy shell commands | **Block** or **Ask** |
 | `preToolUse` (other tools, including TrustGate MCP) | `protocol: mcp`, `tools/call` (`params.name` = last MCP segment) | Risky MCP tool calls | **Block** or **Ask** |
 | `postToolUse` | `protocol: mcp`, tool result, `direction: output` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) in MCP or tool output | **Warn only.** Finding is added as untrusted context; no permission decision is emitted. |
@@ -318,9 +318,9 @@ not need to be allowlisted per developer. Cursor's static `auth` block
 needed here. The consumer configuration determines which IdP handles the login.
 See [Auth](/trustgate/concepts/auth).
 
-Use OAuth for consumers that resolve tools per user. The identity used to log in
-selects the roles, and therefore the registries and tools, on
-Identity-based consumers.
+Use OAuth for consumers whose users sign in individually. Every caller a consumer
+admits sees the same registries and toolkit; per-person self-service lives in the
+[MCP Store](/trustgate/mcp/store) and is governed from [Access](/trustgate/mcp/access).
 
 Authenticating to TrustGate is not the same as authenticating to the upstream
 servers. When a registry uses **OAuth (forwarded)**, the first call for a user
@@ -342,7 +342,7 @@ the local machine:
 
 | Decision | Where it lives | Notes |
 |---|---|---|
-| Which tools the consumer exposes | **NeuralTrust console**, under consumer **Routing**, or a [role](/trustgate/concepts/roles) for Identity-based consumers | Bind MCP registries. **Restrict tools** narrows a registry to named tools; leave it empty to grant the whole server |
+| Which tools the consumer exposes | **NeuralTrust console**, under consumer **Routing** | Bind MCP registries. **Restrict tools** narrows a registry to named tools; leave it empty to grant the whole server |
 | The tool names Cursor sees | **TrustGate**, automatically | Unique names pass through; a collision becomes `<registry>_<tool>` |
 | Whether a call needs confirmation | **Cursor**, through the agent's Run Mode | Approval is requested by default. In **Auto-review**, allowlisted tools run immediately; Cursor's built-in review determines whether other calls need confirmation |
 | Hiding a tool from this editor | **Cursor**, through the server toggle in **Customize** | Local only; the consumer still grants it |

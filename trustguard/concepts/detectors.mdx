@@ -1,72 +1,85 @@
 ---
 title: "Detectors"
-description: "Configure reusable detector instances and attach them to TrustGuard policies"
+description: "Create reusable detector instances in the console and attach them to TrustGuard policies."
 ---
 
-A **detector** is a reusable, named instance you create from one entry in the
-[detector catalog](/trustguard/detectors/overview), such as `prompt_guard`, plus
-its settings. Settings can include thresholds, entity lists, and allow or deny
-lists. You
-create and edit detectors in the console's **Detectors** screen, and the same
-detector can be referenced by many [policies](/trustguard/concepts/policies).
+A **detector** is a named, reusable instance you create from one entry in the
+[detector catalog](/trustguard/detectors/overview) — **Prompt Guard**, **Data Loss
+Prevention**, and so on — plus how you tuned it. You create and edit detectors in
+the console's **Detectors** screen, and the same detector can be referenced by
+many [policies](/trustguard/concepts/policies).
 
-Detectors report what they find and their confidence. They do not decide whether
-to block, mask, or allow traffic. That
-decision lives on the [policy](/trustguard/concepts/policies) that uses the
-detector (its **Gates** and **Detectors** tabs). This separation lets you reuse
-one well-tuned detector across many policies with different enforcement.
+Detectors report what they find. They do **not** decide whether to block, mask, or
+allow. That decision lives on the [policy](/trustguard/concepts/policies) that uses
+the detector. The separation is the point: tune one detector well, then enforce it
+differently in each policy that references it.
 
 ## What defines a detector
 
-| Property | Values | Meaning |
-|---|---|---|
-| **Type** | one entry from the [catalog](/trustguard/detectors/overview) | The catalog detector, such as `prompt_guard` or `data_loss_prevention`. Its type is fixed after creation; its settings remain configurable. Sent to the API as `plugin_slug`. |
-| **Name** | free text | A label that distinguishes configured instances of the same detector type. |
-| **Settings** | type-specific | Thresholds, entity lists, keyword or regular-expression lists, and other detector-specific values. The console renders and validates the form. |
-| **Enabled** | on / off | A disabled detector is skipped everywhere it's referenced. |
+| Property | What it is |
+|---|---|
+| **Type** | Which catalog entry it came from. Fixed once created — you cannot turn a Prompt Guard into a Toxicity Detection one — you create a second detector. |
+| **Name** | Free text, set on the **Basics** tab. This is what you pick from in a policy, so name it for how it is tuned: *Jailbreak — strict* rather than *Prompt Guard 2*. |
+| **Configuration** | Whatever that type exposes on its **Configuration** tab. Some have a single control; some have none at all, and say so. |
+| **Enabled** | A disabled detector is skipped everywhere it is referenced, without removing it from any policy. |
 
-A detector does **not** carry a mode, a direction, or a protocol. Those belong
-to the [policy](/trustguard/concepts/policies) rule that puts the detector to
-work (the **Input** / **Output** phase). At request time, the collector must send
-the matching `direction` on `/v1/evaluate`. [TrustGate](/integrations/trustgate)
-sets it automatically; [application SDKs](/integrations/python-sdk) and other
-collectors must set it themselves.
+A detector carries no phase and no protocol. Those belong to the
+[policy](/trustguard/concepts/policies) rule that puts it to work — **Input** for
+the prompt, **Output** for the response.
 
-## Settings
+Whether both phases actually run depends on the
+[collector](/trustguard/concepts/collectors). A gateway sees the request and the
+response, so both do. A hook that only fires on the prompt has nothing to
+evaluate on Output, and an Output rule there will simply never match.
 
-Every catalog detector exposes its own settings schema (the catalog API,
-`GET /v1/plugins`, returns each detector type and its fields). Examples:
+## What you actually configure
 
-- `prompt_guard`, `toxicity`: a `threshold` in `[0, 1]`.
-- `data_loss_prevention`: which PII entities to detect or mask, plus custom
-  keyword/regex rules.
-- Moderation (`prompt_moderation`): keyword or regular-expression lists and
-  NeuralTrust topic thresholds.
+Far less than people expect. Most detectors have one control:
 
-See each detector's full settings on its
-[category page](/trustguard/detectors/overview).
+| Configuration tab shows | Detectors |
+|---|---|
+| [**Protection Sensitivity**](/trustguard/detectors/content-security#protection-sensitivity) — three preset cards, nothing else | Prompt Guard, Toxicity Detection, Indirect Prompt Injection |
+| A list of subjects, **plus** Protection Sensitivity | Moderation, Custom Moderation |
+| Lists of what to look for, no sensitivity | Data Loss Prevention (**Data Categories** and **Custom rules**) |
+| Two **linked detectors** you created earlier | URL Analyzer, Document Analyzer |
 
-## Mutable (transform-capable) detectors
+Two consequences worth knowing before you start:
 
-Most detectors only read the payload. A **mutable** detector can rewrite it.
-Currently, only [`data_loss_prevention`](/trustguard/detectors/data-loss-prevention)
-which masks matched values in flight and populates `transformed_payload`.
+- **There are no thresholds to type.** Sensitivity is three cards — Permissive,
+  Balanced, Strict. Balanced is applied by default.
+- **Linked detectors are shared, not copied.** URL Analyzer and Document Analyzer
+  point at a Prompt Guard detector and a Data Loss Prevention detector you already
+  made. Retuning either one changes the analyzers too, along with every policy
+  using them.
 
-Only a mutable detector can be used with the **Transform** action in a policy;
-choosing Transform for any other detector is rejected when you save the policy.
+Full detail is on each category page: [data loss
+prevention](/trustguard/detectors/data-loss-prevention), [content
+security](/trustguard/detectors/content-security), and [agent and MCP
+security](/trustguard/detectors/agent-mcp-security).
+
+## Detectors that can mask
+
+Most detectors only read the payload. **Data Loss Prevention** is the only one that
+can rewrite it, masking matched values in flight.
+
+That is why **Transform** is available only on a policy rule that references Data
+Loss Prevention. Choosing Transform for any other detector is rejected when you
+save the policy.
 
 ## Putting a detector to work
 
-Creating a detector doesn't run it. To evaluate traffic you reference the
-detector from a [policy](/trustguard/concepts/policies):
+Creating a detector does not run it. Nothing is evaluated until a policy
+references it **and** that policy is attached to a collector:
 
-1. Open a policy and select the **Detectors** tab.
-2. Pick an **evaluation phase**: **Input** (prompt/request) or **Output**
-   (completion/response).
-3. Add a rule that selects the detector and an **action**: **Monitor**
-   (record a finding only), **Block**, or **Transform** (mutable detectors).
+1. Open a [policy](/trustguard/concepts/policies) and select the **Detectors** tab.
+2. Pick the phase: **Input** for the prompt or request, **Output** for the
+   completion or response.
+3. Add a rule selecting the detector and an action — **Monitor** to record a
+   finding only, **Block**, or **Transform**.
 4. Optionally add **conditions** so the rule only runs for certain consumers,
    models, collectors, protocols, sessions, directions, or tools.
+5. Attach the policy to a [collector](/trustguard/concepts/collectors).
 
-Then attach the policy to a [collector](/trustguard/concepts/collectors) so its
-traffic is evaluated.
+Leave the policy in **Observe** until **Activity** shows the findings you expected.
+A detector that looked well-tuned in testing can be noisy on real traffic, and
+Observe is where you find that out without blocking anyone.

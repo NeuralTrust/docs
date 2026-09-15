@@ -1,29 +1,79 @@
 ---
 title: "Tool governance"
-description: "Govern LLM function tools at the gateway — inject operator-authored tools, and rate-limit tool executions. Distinct from MCP toolkit grants on consumers and roles."
+description: "Govern LLM function tools at the gateway — filter client tools with allow/deny patterns, inject operator-authored tools, and rate-limit tool executions. Distinct from MCP toolkit grants on consumers."
 ---
 
 For **LLM** function-calling traffic, TrustGate can shape which tools the model sees and
 how often they run. Create policies under **Policies** → **Catalog**, or attach them from a
 consumer **Policies** tab.
 
-| Policy in the catalog | Slug | Catalog group | What it does |
+| Policy | Slug | Catalog group | What it does |
 |---|---|---|---|
+| **[Tool Allowlist](#tool-allowlist)** | `tool_allowlist` | Not in the Catalog tab — Admin API | Keep only client tools that match allow / deny glob patterns; decide what happens when none remain. |
 | **[Tool Injection](#tool-injection)** | `tool_injection` | Tool Governance | Append operator-authored function tools to the request before the model runs. |
 | **[Per-Tool Rate Limiter](#per-tool-rate-limiter)** | `per_tool_rate_limiter` | Traffic Control | Limit how often a tool name/pattern may execute (LLM and MCP). |
 
 These policies apply to the **LLM request `tools[]` / tool-call path** (and, for the rate
 limiter, to **MCP tool executions**). They are **not** the same as MCP **toolkit** grants
-on a consumer or [role](/trustgate/concepts/roles), which control which MCP server tools an
-agent may list and call — see [MCP](/trustgate/mcp/overview).
+on a consumer, which control which MCP server tools an agent may list and call — see
+[MCP](/trustgate/mcp/overview).
+
+---
+
+## Tool Allowlist
+
+**`tool_allowlist`** filters the **client-supplied** tools on an LLM request against glob
+patterns before the model sees them. Deny always wins over allow. It is the counterpart of
+[Tool Injection](#tool-injection), which only adds tools.
+
+The policy is not offered in the console **Catalog** tab. Create it through the
+[Admin API](/trustgate/api/credentials) with the settings below; the console shows an
+existing policy's **Allow** / **Deny** / **Behaviour** fields in its detail panel.
+
+### Settings
+
+| Setting | Meaning |
+|---|---|
+| `allow_tools` | Glob patterns (e.g. `github/*`, `search_*`). When set, only matching tools pass. |
+| `deny_tools` | Glob patterns removed after `allow_tools`. A tool matching both lists is removed. |
+| `on_empty_after_filter` | What to do when filtering removes every tool: `reject` (default, **403** `no_tools_allowed`), `pass_through_empty` (send `"tools": []`), or `strip_tools_field` (remove `tools`, `tool_choice`, `parallel_tool_calls`, and Gemini `toolConfig`). |
+| `scope` | Informational (`consumer` or `global`); the effective scope comes from the policy coverage. |
+
+At least one of `allow_tools` or `deny_tools` is required. Patterns must not be blank.
+Tool names containing non-printable characters are never kept.
+
+Stage: `pre_request`. Protocol: **LLM** only. Modes: **Enforce** and **Observe**.
+
+### Body handling in Enforce mode
+
+| Request body | Result |
+|---|---|
+| `tools` / `tool_choice` / `parallel_tool_calls` / `toolConfig` present once, exact case | Filtered as configured. |
+| Any of those keys duplicated or in a different case (e.g. `Tools`) | **400** `invalid_tools_field` — the request is rejected rather than filtered ambiguously. |
+| Body carries one of those keys but cannot be decoded for its wire format | **400** `invalid_tools_field` (fails closed). |
+| No tool keys | Passes untouched. |
+
+**Observe** mode never rewrites or rejects; it records what Enforce would have done.
+
+```json
+{
+  "slug": "tool_allowlist",
+  "settings": {
+    "allow_tools": ["github/*", "search_*"],
+    "deny_tools": ["github/delete_*"],
+    "on_empty_after_filter": "reject"
+  }
+}
+```
 
 ---
 
 ## Tool Injection
 
 **`tool_injection`** injects operator-authored **function** tools into the outbound request
-so the model can call them. It does **not** filter or deny client-supplied tools — it only
-adds gateway tools (and resolves name collisions).
+so the model can call them. It does **not** filter or deny client-supplied tools — use
+[Tool Allowlist](#tool-allowlist) for that — it only adds gateway tools (and resolves name
+collisions).
 
 ### Configure in the console
 
@@ -120,8 +170,8 @@ consumer**.
 
 | Control | Where it lives |
 |---|---|
-| **MCP toolkit** (which MCP tools/prompts/resources an agent may use) | Consumer **Routing** / MCP binding, or [Roles](/trustgate/concepts/roles) `mcp_policies` — see [MCP](/trustgate/mcp/overview). |
-| **Which LLM models** a consumer may call | **Filter by available models** / **default model** on the consumer (or role) **Routing** tab — see [Model resolution](/trustgate/routing/model-resolution). |
+| **MCP toolkit** (which MCP tools/prompts/resources an agent may use) | Consumer **Routing** / MCP binding — see [MCP](/trustgate/mcp/overview). |
+| **Which LLM models** a consumer may call | **Filter by available models** / **default model** on the consumer **Routing** tab — see [Model resolution](/trustgate/routing/model-resolution). |
 
 ---
 
