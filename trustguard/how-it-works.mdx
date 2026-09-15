@@ -231,63 +231,6 @@ bound tools, and the
 Developer-machine plugins send tool calls and results, but not tool listings.
 Claude Enterprise can respond to a finding only by denying the entire inference.
 
-## Integration limitations
-
-**TrustGate:** Covers LLM and MCP input and non-streaming output inline. Streamed
-output is monitored after delivery. Transport and service errors follow the
-policy's `on_error` setting, which defaults to `fail_open`. Authentication,
-rate-limit, and entitlement responses always block. In **Observe** mode,
-`transform` is logged but not applied. A transformation that cannot be applied
-safely blocks rather than forwarding unmasked content.
-
-**Portkey:** The BYOG webhook converts the TrustGuard status to Portkey's boolean
-verdict. Enforcement requires `deny: true` on the hook. The webhook does not
-apply `transformed_payload`, and streamed responses are not inspected.
-
-**LiteLLM:** The custom guardrail runs before and after model calls and applies
-verdicts at the request level. It does not apply `transformed_payload`.
-Streamed output is evaluated after delivery for monitoring only; its verdict
-cannot block chunks that have already been sent.
-
-**Kong:** Requires AI Proxy on the route. Its boolean verdict does not support
-redaction.
-
-**Apigee:** Coverage is per proxy unless you attach the Shared Flow through an
-environment flow hook. Its boolean verdict does not support redaction.
-
-**Azure APIM:** The inbound policy supports redaction by replacing the request
-body with `transformed_payload.input`. Add the outbound policy to inspect model
-responses; output redaction is not supported.
-
-**Claude Enterprise:** Returns allow or deny for an entire inference. It does
-not support redaction, `ask`, output evaluation, or per-tool verdicts. Tool
-content in the transcript can be blocked only by denying the entire inference.
-Attachments arrive as metadata and extracted text rather than raw bytes.
-
-**Claude Code, Cursor, Codex, and Copilot:** These integrations capture lifecycle
-hook events, not model responses, system prompts, token usage, or extended
-thinking. They do not support field-level redaction. A `transform` verdict
-becomes a warning or permission decision instead. For a native Copilot payload,
-the tool-result hook replaces the entire output with
-`[Tool result redacted by TrustGuard]`; it does not mask individual spans. See
-the `ask` table above for approval behavior.
-
-**LangChain:** Runs inside the agent and covers only the application where it is
-installed. It applies `transform` by rewriting messages in place, and
-`check_tool_calls` can stop a tool call before execution. Output redaction is
-conditional because streamed content may already have reached the client.
-
-**n8n:** Routes the verdict to a named output instead of enforcing it. Blocking
-and redaction depend on the workflow connections. For example, reconnecting a
-**Block** branch to the agent allows the interaction to continue. The integration
-has no hook inside an AI Agent node's loop, so it covers only tool activity made
-explicit in the graph.
-
-**Application integrations:** Your code owns the payload and must enforce each
-verdict. Logging a `block` before calling the model provides monitoring only.
-Ignoring `transformed_payload` forwards the original data. Middleware covers HTTP
-routes, so background jobs and queue consumers bypass it.
-
 ## Choose an integration
 
 | If you need | Use |
@@ -301,6 +244,11 @@ routes, so background jobs and queue consumers bypass it.
 | Stopping a specific shell command or MCP call | [Claude Code](/integrations/claude-code), [Cursor](/integrations/cursor), [Codex](/integrations/codex), [Copilot](/integrations/github-copilot) |
 | A policy decision that needs application context | An [SDK](/integrations/python-sdk) or [REST](/integrations/rest) integration |
 | Coverage without touching application code | A [gateway](/integrations/trustgate) collector |
+
+Every integration page states what that host can actually enforce, in the
+capability row at the top — **Monitor**, **Block**, and whether redaction is
+supported at all. Read that row before committing to an integration: a host that
+lists only Monitor and Block cannot mask, whatever the policy says.
 
 Create the policy in **Observe** mode. Observe records decisions in **Activity**
 without enforcing them. Review the results, then switch the policy to **Enforce**.

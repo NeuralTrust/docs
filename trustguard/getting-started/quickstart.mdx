@@ -1,0 +1,159 @@
+---
+title: "Quickstart"
+description: "Protect a TrustGate gateway end to end: build a security policy, connect the collector, watch it in Observe, then enforce."
+---
+
+<p className="nt-lead">
+  One complete pass: two detectors, one policy, a TrustGate collector, and the
+  switch from watching to blocking. Twenty minutes, and nothing is enforced until
+  the last step.
+</p>
+
+This walks the [TrustGate](/integrations/trustgate) path because it is the only
+one where nothing is deployed and no code changes — the gateway already sits in
+front of your model, so it can both send traffic and enforce the answer. Every
+other [collector](/trustguard/concepts/collectors) follows the same four ideas in
+a different order.
+
+**Before you start** you need TrustGuard entitled — if **Agent Runtime** is not in
+the console sidebar, your team does not have it — and a
+[TrustGate gateway](/trustgate/getting-started/quickstart) already routing traffic.
+
+<Steps>
+
+<Step title="Create a jailbreak detector">
+Open **Agent Runtime → Detectors** and click **New detector**. Pick **Prompt
+Guard** from the catalog.
+
+On **Basics**, set **Name** to something that says how it is tuned — `Jailbreak —
+balanced` — because this is the name you will pick from inside the policy, and
+*Prompt Guard 2* will mean nothing to you in a month.
+
+On **Configuration** you get one control:
+[**Protection Sensitivity**](/trustguard/detectors/content-security#protection-sensitivity).
+Leave it on **Balanced**. It is the recommended preset and the right starting
+point; tightening it before you have seen real traffic only buys false positives.
+
+Click **Create detector**.
+</Step>
+
+<Step title="Create a secrets detector">
+Repeat with **Data Loss Prevention**, named `Secrets — block`.
+
+On **Configuration**, open **Data Categories** and enable the **Secrets &
+credentials** group — API key, access token, JWT token, Stripe key. Leave the rest
+off for now: a first policy that flags every email address in every prompt is a
+policy people learn to ignore.
+
+Click **Create detector**.
+</Step>
+
+<Step title="Build the policy">
+Open **Agent Runtime → Policies** and create one. On **Basics**, name it
+`Gateway — baseline` and leave **Enforcement mode** on **Observe**.
+
+Observe is the whole point of this step: every action is recorded and none is
+applied, so you can be wrong about your own traffic without anyone noticing.
+
+Open the **Detectors** tab and add two rules under **Input**:
+
+| Detector | Action | Why |
+|---|---|---|
+| `Jailbreak — balanced` | **Monitor** | You want to see the volume before you block on it |
+| `Secrets — block` | **Block** | A credential in a prompt is a bug, not traffic to clean up |
+
+Save the policy.
+
+<Note>
+**Block** on the secrets rule is not enforced yet — the policy is in Observe, so it
+is recorded as a report. That is intentional: configure the end state now, review
+it, and flip one switch at the end.
+</Note>
+</Step>
+
+<Step title="Connect the TrustGate collector">
+Open **Agent Runtime → Collectors → Catalog**, find **TrustGate** under
+**Gateway**, and click **Add collector**. Select the gateway you want to protect.
+
+TrustGate is the one collector with no **Auth** step — it is native, so it
+authenticates through the platform and never needs a `tgk_` API key.
+
+On the collector's **Policies** tab, set `Gateway — baseline` as the **default
+policy**.
+
+<Warning>
+A collector with no matching policy is not protected — it returns `allow` and
+inspects nothing, silently. This step is what makes the previous three do
+anything.
+</Warning>
+</Step>
+
+<Step title="Turn the guardrail on in TrustGate">
+The collector says *which* policy evaluates the traffic. The gateway still has to
+send it.
+
+In **TrustGate**, open **Policies → Catalog** — guardrails are listed first — and
+enable the **TrustGuard** guardrail on the routes you want covered. See
+[TrustGate integration](/integrations/trustgate) for the route-level detail.
+</Step>
+
+<Step title="Send traffic and read Activity">
+Make a few normal calls through the gateway, then something that should trip a
+rule — ask the model to ignore its instructions, or paste a fake API key.
+
+Open **Activity**. You should see one finding per trip, each showing the detector,
+the outcome, and the request behind it.
+
+Nothing was blocked. The policy is in Observe, so this is a rehearsal — and the
+question to answer here is not "did it catch the obvious test", it is **how many
+findings did normal traffic produce**. That number is what tells you whether
+Balanced was the right preset.
+</Step>
+
+<Step title="Check the edges before enforcing">
+Open the policy's **Test** tab and try the prompts you are unsure about.
+
+Test evaluates the **last saved** policy, not your unsaved edits. If you changed a
+rule and the result surprises you, save first and try again.
+</Step>
+
+<Step title="Enforce">
+When Activity looks right, open the policy's **Basics** tab and switch
+**Enforcement mode** to **Enforce**.
+
+From this point the secrets rule blocks, and the jailbreak rule keeps recording.
+Promote the jailbreak rule from **Monitor** to **Block** when you have seen enough
+of its findings to trust it — as a separate change, so that if blocking starts
+biting you know exactly which change caused it.
+</Step>
+
+</Steps>
+
+## What you built
+
+| Piece | What it does |
+|---|---|
+| Two [detectors](/trustguard/concepts/detectors) | Find things. They never decide anything |
+| One [policy](/trustguard/concepts/policies) | Decides the action, and holds the Observe/Enforce switch |
+| One [collector](/trustguard/concepts/collectors) | Sends the traffic and applies the verdict |
+
+The detectors are reusable. The next policy — a stricter one for a
+customer-facing route, say — references the same two, and retuning one improves
+every policy that uses it.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Detector catalog" icon="list" href="/trustguard/detectors/overview">
+    The other six detectors, and how much each one has to configure.
+  </Card>
+  <Card title="Policies" icon="file-text" href="/trustguard/concepts/policies">
+    Gates, per-consumer routing, and which action wins when several fire.
+  </Card>
+  <Card title="Other collectors" icon="plug" href="/integrations/overview">
+    Coding agents, agent platforms, SDKs, and other gateways.
+  </Card>
+  <Card title="How verdicts are enforced" icon="workflow" href="/trustguard/how-it-works">
+    What each host can actually apply — not every one can mask.
+  </Card>
+</CardGroup>
