@@ -23,7 +23,7 @@ step-by-step install, and high availability.
 />
 <img
   src="/images/static/img/external-architecture-dark.svg"
-  alt=""
+  alt="External architecture: everything runs in your environment. Clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, TrustGate calls TrustGuard on :8081, and TrustGuard calls the Firewall on :8000. An in-cluster control plane — console and API on :8000, AgentGateway admin on :8080, and the TrustGuard control plane on :8080 — serves configuration to TrustGate and TrustGuard. TrustGate and TrustGuard emit OTLP to a collector on :4317 and :4318 that writes to in-cluster ClickHouse; DataCore and AlertEngine read from it. PostgreSQL and Redis are recommended datastores outside the cluster. There is no DataAgent and no runtime dependency on NeuralTrust SaaS."
   className="hidden dark:block"
 />
 
@@ -432,88 +432,39 @@ meet. Each has a workaround in
 
 ## High availability
 
-Availability is a ladder, not a single design. Climb it only as far as the
-failure you actually have to survive.
+The availability ladder is the same for every self-hosted model, so it lives on
+one page: what each tier survives, the replica and disruption settings the chart
+does and does not expose, the failure table, and the promotion runbook.
 
-| Tier | Survives | Cost |
-| --- | --- | --- |
-| **1. One cluster, multi-AZ** | Node and zone loss | Node pools in three zones; nothing else to run |
-| **2. Twin clusters, one region** | Cluster loss, bad upgrades | A second cluster and a traffic switch |
-| **3. Two regions, active/passive** | Regional loss | The above, plus DNS promotion and a datastore runbook |
+<Card title="High availability" icon="layer-group" href="/neuraltrust/deployment/high-availability">
+  The four tiers, from one cluster across zones to two active regions, the two invariants, and exactly what you change in the chart.
+</Card>
 
-<img
-  src="/images/static/img/ha-ladder.svg"
-  alt="The three availability tiers side by side. Tier 1, one cluster multi-AZ: node pools in three availability zones, two or more replicas of TrustGate, TrustGuard and Firewall, and managed PostgreSQL and Redis with automatic failover inside the region; it survives node and zone loss and needs no promotion procedure or DNS work. Tier 2, twin clusters in one region: a serving cluster plus a second cluster to roll upgrades through, both against one PostgreSQL primary and one Redis primary shared inside the region; it survives cluster loss and bad upgrades. Tier 3, two regions active/passive: an active region running the only DataAgent, a warm passive region with no traffic, one writable PostgreSQL primary with a cross-region read replica, and region-local Redis per cluster; it survives regional loss and adds DNS promotion and a datastore runbook. Two invariants hold at every tier: exactly one writable PostgreSQL primary, and exactly one active DataAgent per gateway scope."
-  className="block dark:hidden"
-/>
-<img
-  src="/images/static/img/ha-ladder-dark.svg"
-  alt=""
-  className="hidden dark:block"
-/>
+Four things are specific to External.
 
-### Tier 1 — one cluster across zones
+### Configuration lives in PostgreSQL
 
-Spread the node pool over three availability zones, run at least two replicas of
-the request path and both product control planes, and use managed PostgreSQL and
-Redis with automatic failover inside the region. No promotion procedure, no DNS
-work. **This is enough for most deployments.**
+External keeps its entire configuration state in the database rather than
+pulling it from anywhere, so a second cluster is already looking at the same
+policies the moment it starts. Nothing dials NeuralTrust, and there is no
+last-known-good cache to worry about — the trade is that the database is now the
+thing that must not be lost.
 
-### Tier 2 — twin clusters in one region
-
-Two clusters against **one PostgreSQL primary and one Redis primary**. Sharing
-both stores inside a region costs no extra hop and keeps state identical from
-either side, which is what makes a blue/green upgrade safe here: External keeps
-its entire configuration state in PostgreSQL, so the second cluster is already
-looking at the same policies the moment it starts.
-
-### Tier 3 — two regions, active/passive
-
-<img
-  src="/images/static/img/external-high-availability.svg"
-  alt="External in active/passive across two regions. A traffic manager you operate points the gateway, MCP and console hostnames at the active cluster. Each cluster holds a full copy of every component: the request path, both product control planes, the console and API, its own region-local Redis, and its own in-cluster ClickHouse. Both clusters read and write one shared PostgreSQL primary, which holds configuration, console data, payloads and detections, with a cross-region read replica promoted on failover. Four consequences of a promotion: ClickHouse does not follow it, so each cluster only has the telemetry its own collector received; rate limits are counted per region; console sessions live in the region that issued them; and nothing dials NeuralTrust, because both clusters are self-contained."
-  className="block dark:hidden"
-/>
-<img
-  src="/images/static/img/external-high-availability-dark.svg"
-  alt=""
-  className="hidden dark:block"
-/>
-
-The two stores are treated differently on purpose.
-
-**PostgreSQL: one writable primary, one cross-region read replica.** It holds
-every piece of durable state this mode has — configuration, console data,
-payloads, detections — so a single writer is what prevents split-brain. Both
-clusters run the same components against the same authoritative state, so there
-is nothing to reconcile after a promotion. Your RPO is the replication lag.
-
-**Redis: region-local, one per cluster.** Redis carries semantic cache,
-rate-limit counters and evaluation progress, and it has
-[no persistence requirement](/neuraltrust/deployment/architecture#datastore-sizing-floors).
-Crossing a region for that on every request costs latency on the hot path to
-protect data that is worth seconds. After a promotion the new active cluster
-rebuilds its counters in seconds.
-
-Two consequences to accept: rate limits are counted per region, and console
-sessions live in the region that issued them, so a promotion signs operators out
-and they sign in again against the same PostgreSQL.
-
-| Component | How it is made available |
-| --- | --- |
-| Request path and control planes | Multiple replicas per cluster, across zones; full copies in both clusters |
-| PostgreSQL | One managed primary, multi-AZ, with a cross-region read replica |
-| Redis | One managed instance **per region**, each with automatic failover |
-| ClickHouse | In-cluster and therefore **per cluster** — see the caveat below |
-| Console traffic | One hostname, pointed at the active cluster by your traffic manager |
+### ClickHouse does not follow a promotion
 
 <Warning>
-**ClickHouse does not follow a promotion.** It is an in-cluster store, so each
-cluster holds only the telemetry its own collector received. After a failover the
-console works and enforcement is unaffected, but dashboards show the promoted
-cluster's history rather than the failed one's. Either accept that, or configure
-ClickHouse replication between the two clusters.
+**ClickHouse is in-cluster, and therefore per cluster.** Each cluster holds only
+the telemetry its own collector received. After a failover the console works and
+enforcement is unaffected, but dashboards show the promoted cluster's history
+rather than the failed one's. Either accept that, or configure ClickHouse
+replication between the two clusters.
 </Warning>
+
+### Console sessions live in the region that issued them
+
+A promotion signs operators out. They sign in again against the same PostgreSQL
+and everything is there — but plan for it in the runbook rather than discovering
+it mid-incident.
 
 ### Upgrades and migrations with two clusters
 
@@ -524,42 +475,26 @@ cluster's init container no-ops, but running both simultaneously against one
 schema is worth avoiding — and the console rolls with `maxUnavailable: 0`, so a
 failed migration blocks that cluster rather than serving a half-migrated schema.
 
-### Promote the passive cluster
+### External at tier 3
 
-<Steps>
-<Step title="Detect and fence">
-Health check both request paths and the console. Remove the failed cluster from
-the traffic manager so it cannot take traffic during a partial recovery.
-</Step>
+<img
+  src="/images/static/img/external-high-availability.svg"
+  alt="External in active/passive across two regions. A traffic manager you operate points the gateway, MCP and console hostnames at the active cluster. Each cluster holds a full copy of every component: the request path, both product control planes, the console and API, its own region-local Redis, and its own in-cluster ClickHouse. Both clusters read and write one shared PostgreSQL primary, which holds configuration, console data, payloads and detections, with a cross-region read replica promoted on failover. Four consequences of a promotion: ClickHouse does not follow it, so each cluster only has the telemetry its own collector received; rate limits are counted per region; console sessions live in the region that issued them; and nothing dials NeuralTrust, because both clusters are self-contained."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/external-high-availability-dark.svg"
+  alt="External in active/passive across two regions. A traffic manager you operate points the gateway, MCP and console hostnames at the active cluster. Each cluster holds a full copy of every component: the request path, both product control planes, the console and API, its own region-local Redis, and its own in-cluster ClickHouse. Both clusters read and write one shared PostgreSQL primary, which holds configuration, console data, payloads and detections, with a cross-region read replica promoted on failover. Four consequences of a promotion: ClickHouse does not follow it, so each cluster only has the telemetry its own collector received; rate limits are counted per region; console sessions live in the region that issued them; and nothing dials NeuralTrust, because both clusters are self-contained."
+  className="hidden dark:block"
+/>
 
-<Step title="Point PostgreSQL at a writable primary">
-If the primary is in the failed region, promote the read replica and update
-`global.postgresql.host` in the surviving cluster. If the primary is unaffected,
-there is nothing to do here. Redis needs no attention either way, because the
-surviving cluster already has its own.
-</Step>
-
-<Step title="Switch traffic">
-Route the gateway, MCP, and console hostnames to the promoted cluster. Keep them
-together.
-</Step>
-
-<Step title="Verify">
-Sign in to the console, run representative allowed and blocked requests, and
-confirm new telemetry is arriving in the promoted cluster's ClickHouse.
-</Step>
-</Steps>
-
-### Before you rely on it
-
-- [ ] Both clusters are deployed and health checked against the same primary.
-- [ ] PostgreSQL is managed, with one primary and a cross-region read replica.
-- [ ] Each region has its own managed Redis, and you accept per-region counters
-      and sessions.
-- [ ] Certificates and DNS cover the published hostnames from both clusters.
-- [ ] You have decided whether ClickHouse history needs replicating.
-- [ ] Backups of PostgreSQL and ClickHouse are running and have been restored once.
-- [ ] You have rehearsed a promotion, including the datastore step.
+| Component | How it is made available |
+| --- | --- |
+| Request path and control planes | Multiple replicas per cluster, across zones; full copies in both clusters |
+| PostgreSQL | One managed primary, multi-AZ, with a cross-region read replica |
+| Redis | One managed instance **per region**, each with automatic failover |
+| ClickHouse | In-cluster and therefore **per cluster** — see the caveat above |
+| Console traffic | One hostname, pointed at the active cluster by your traffic manager |
 
 ## Next steps
 
