@@ -1,6 +1,6 @@
 ---
 title: Hybrid
-description: Run the request path in your cluster with the control plane on NeuralTrust SaaS — architecture, network, install, and high availability.
+description: Run the request path in your cluster with the control plane on NeuralTrust SaaS — architecture, network, and install.
 ---
 
 Hybrid runs the **data plane** in your environment and keeps the **control
@@ -20,7 +20,7 @@ high-availability configuration for a Hybrid deployment.
 />
 <img
   src="/images/static/img/platform-architecture-dark.svg"
-  alt=""
+  alt="Hybrid architecture: in your cluster, clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, TrustGate calls TrustGuard on :8081, and TrustGuard calls the Firewall on :8000. TrustGate calls your upstream LLM providers. DataAgent hosts the OTLP egress collector on :4317 and :4318 and serves authorized retrieval. PostgreSQL and Redis are recommended datastores outside the cluster. Four outbound connections on 443 reach NeuralTrust SaaS — a config-sync endpoint for AgentGateway, a second one for TrustGuard, telemetry ingest, and DataBridge — all initiated from your environment."
   className="hidden dark:block"
 />
 
@@ -457,44 +457,48 @@ kubectl -n neuraltrust rollout restart deploy/agentgateway-proxy
 
 ## High availability
 
-Availability is a ladder, not a single design. Climb it only as far as the
-failure you actually have to survive — each rung costs more to operate than the
-one below it.
+The availability ladder is the same for every self-hosted model, so it lives on
+one page: what each tier survives, the replica and disruption settings the chart
+does and does not expose, the failure table, and the promotion runbook.
 
-| Tier | Survives | Cost |
-| --- | --- | --- |
-| **1. One cluster, multi-AZ** | Node and zone loss | Node pools in three zones; nothing else to run |
-| **2. Twin clusters, one region** | Cluster loss, bad upgrades | A second cluster and a traffic switch |
-| **3. Two regions, active/passive** | Regional loss | The above, plus DNS promotion and a datastore runbook |
+<Card title="High availability" icon="layer-group" href="/neuraltrust/deployment/high-availability">
+  The four tiers, from one cluster across zones to two active regions, the two invariants, and exactly what you change in the chart.
+</Card>
 
-<img
-  src="/images/static/img/ha-ladder.svg"
-  alt="The three availability tiers side by side. Tier 1, one cluster multi-AZ: node pools in three availability zones, two or more replicas of TrustGate, TrustGuard and Firewall, and managed PostgreSQL and Redis with automatic failover inside the region; it survives node and zone loss and needs no promotion procedure or DNS work. Tier 2, twin clusters in one region: a serving cluster plus a second cluster to roll upgrades through, both against one PostgreSQL primary and one Redis primary shared inside the region; it survives cluster loss and bad upgrades. Tier 3, two regions active/passive: an active region running the only DataAgent, a warm passive region with no traffic, one writable PostgreSQL primary with a cross-region read replica, and region-local Redis per cluster; it survives regional loss and adds DNS promotion and a datastore runbook. Two invariants hold at every tier: exactly one writable PostgreSQL primary, and exactly one active DataAgent per gateway scope."
-  className="block dark:hidden"
-/>
-<img
-  src="/images/static/img/ha-ladder-dark.svg"
-  alt=""
-  className="hidden dark:block"
-/>
+Three things are specific to Hybrid.
 
-### Tier 1 — one cluster across zones
+### Each cluster pulls its own configuration
 
-Spread the node pool over three availability zones, run at least two replicas of
-TrustGate, TrustGuard and Firewall, and use managed PostgreSQL and Redis with
-automatic failover inside the region. There is no promotion procedure and no DNS
-work. **This is enough for most deployments** — start here and stop here unless
-a regional requirement says otherwise.
+Both clusters use the same gateway scope and the same credentials for it, and
+each pulls from NeuralTrust SaaS independently, keeping its own last-known-good
+copy. There is no shared configuration store between them and nothing to
+replicate — which is why a second cluster costs you no configuration work.
 
-### Tier 2 — twin clusters in one region
+The passive cluster is warm: its workloads run, pass health checks, and keep
+synchronizing, but it receives no production traffic.
 
-Two clusters side by side, both pointed at **one PostgreSQL primary and one
-Redis primary**. Because they are in the same region, sharing both stores adds no
-network hop and loses nothing on a switch: state is identical from either side.
-It buys you an escape from a broken cluster or a bad upgrade — roll the second
-cluster, move traffic, and keep the first as your way back.
+### Only the active cluster runs DataAgent
 
-### Tier 3 — two regions, active/passive
+Two DataAgents on one gateway scope register duplicate streams. Stop it in the
+passive cluster and start it only as a step in the promotion — never leave both
+running "ready to go".
+
+### Losing SaaS is not losing the request path
+
+If the control plane or your egress to it goes down, both clusters keep
+enforcing their last synchronized configuration and traffic is unaffected. Only
+configuration *changes* stop, and they apply once sync resumes.
+
+The exception is a pod that **restarts** during the outage: it needs the
+last-known-good file on persistent storage, or it will not become Ready. See
+[restarts during a control-plane outage](/neuraltrust/deployment/high-availability#restarts-during-a-control-plane-outage).
+
+<Warning>
+Do not make configuration changes directly in one data plane during a
+control-plane outage. The control plane remains the source of truth.
+</Warning>
+
+### Hybrid at tier 3
 
 <img
   src="/images/static/img/hybrid-high-availability.svg"
@@ -503,30 +507,9 @@ cluster, move traffic, and keep the first as your way back.
 />
 <img
   src="/images/static/img/hybrid-high-availability-dark.svg"
-  alt=""
+  alt="Two Hybrid data-plane clusters in active/passive across two regions. Clients reach global LLM and MCP URLs that a customer-operated traffic manager points at the active cluster. Both clusters pull the same gateway-scoped configuration from NeuralTrust SaaS over outbound 443 and keep their own last-known-good copy. Both use one shared writable PostgreSQL primary with a cross-region read replica promoted on failover, while each cluster runs its own region-local Redis. Only the active cluster runs DataAgent."
   className="hidden dark:block"
 />
-
-The two stores are treated differently on purpose.
-
-**PostgreSQL: one writable primary, one cross-region read replica.** It holds
-durable state — payloads, detections, product data — so a single writer is what
-prevents split-brain. There is only one place to write, two clusters cannot
-diverge, and promotion is a datastore operation rather than a distributed
-decision. Your RPO is the replication lag.
-
-**Redis: region-local, one per cluster.** Redis carries semantic cache,
-rate-limit counters and evaluation progress, and it has
-[no persistence requirement](/neuraltrust/deployment/architecture#datastore-sizing-floors).
-Reaching across a region for that on every request costs latency on the hot path
-and buys nothing, because the data is worth seconds. After a promotion the new
-active cluster starts with cold counters and rebuilds them in seconds.
-
-The consequence is that rate limits are counted per region. With one active
-region at a time that is invisible, except in the switchover window, when a
-client could briefly get a fresh allowance. If you need a globally exact counter
-across two simultaneously active regions, that is a different design — talk to
-us before building it.
 
 | Component | How it is made available |
 | --- | --- |
@@ -537,87 +520,9 @@ us before building it.
 | DataAgent | Active cluster only — two would register duplicate streams |
 | LLM and MCP URLs | One global URL each, pointed at the active cluster by your traffic manager |
 
-Both clusters use the same gateway scope and the same credentials for it. The
-passive cluster is warm: its workloads run, pass health checks, and keep
-synchronizing, but it receives no production traffic.
-
-### What each failure looks like
-
-| Failure | Effect |
-| --- | --- |
-| A node or zone | Remaining replicas absorb the traffic; no operator action |
-| The SaaS control plane, or your egress to it | Both clusters keep enforcing their last synchronized configuration. Changes apply once sync resumes |
-| The active cluster | Your traffic manager and promotion automation switch both global URLs to the passive cluster |
-| The PostgreSQL primary | Managed failover inside the region; losing the region means promoting the read replica and repointing both clusters |
-| A region's Redis | That cluster loses cache and counters and rebuilds them; the other region is untouched |
-
-Running pods survive a control-plane outage from their in-memory configuration,
-but a pod that **restarts** during one needs the last-known-good file on disk.
-The chart mounts it on an `emptyDir`, which does not survive a restart, so a
-restarted pod with no control-plane connectivity will not become Ready. If a
-cluster has to tolerate restarts mid-outage, move that mount to persistent
-storage. The `CONFIG_SYNC_LKG_KEY` that encrypts it is generated per cluster and
-needs no distribution.
-
-<Warning>
-Do not make configuration changes directly in one data plane during a
-control-plane outage. The control plane remains the source of truth.
-</Warning>
-
-### Promote the passive cluster
-
-<Steps>
-<Step title="Detect and fence">
-Use regional health checks backed by Kubernetes readiness on both request paths.
-Remove the failed cluster from both global endpoints and stop its DataAgent, so
-it cannot come back mid-recovery and register a second stream.
-</Step>
-
-<Step title="Point PostgreSQL at a writable primary">
-If the primary is in the failed region, promote the read replica and update
-`global.postgresql.host` in the surviving cluster. If the primary is unaffected,
-there is nothing to do here — this is the case the single-primary design is
-buying you. Redis needs no attention either way, because the surviving cluster
-already has its own.
-</Step>
-
-<Step title="Verify configuration and start active-only services">
-Confirm TrustGate and TrustGuard are Ready with a current or last-known-good
-configuration, then enable DataAgent. Only one DataAgent may be active.
-</Step>
-
-<Step title="Switch both traffic endpoints">
-Route the global LLM/proxy and MCP URLs to the promoted cluster. Keep both
-protocols on the same cluster, and remember that DNS-based promotion is delayed
-by resolver and client caching.
-</Step>
-
-<Step title="Verify enforcement">
-Run representative allowed and blocked requests, then confirm policy decisions
-and metadata export before declaring the failover complete.
-</Step>
-</Steps>
-
-Requests already in flight in the failed cluster fail. Clients should use bounded
-retries appropriate for their LLM or MCP operation.
-
-### Before you rely on it
-
-- [ ] Both clusters are deployed, health checked, and pulling the same gateway scope.
-- [ ] TrustGate and TrustGuard have redundant replicas across zones in each cluster.
-- [ ] PostgreSQL is managed, with one primary and a cross-region read replica.
-- [ ] Each region has its own managed Redis, and you accept per-region counters.
-- [ ] Both cluster edges accept the NeuralTrust inbound source IP.
-- [ ] Last-known-good configuration is on persistent storage.
-- [ ] Only the active cluster runs DataAgent.
-- [ ] The global LLM and MCP URLs resolve to exactly one cluster.
-- [ ] You have rehearsed: block egress to the control plane and confirm traffic
-      still flows; restart a pod during that outage; promote the passive cluster
-      and switch both URLs.
-
-Recovery time depends on health-check intervals, traffic-manager convergence,
-client DNS behavior, and datastore promotion. Measure yours rather than assuming
-it.
+Both cluster edges must accept the NeuralTrust inbound source IP, and the global
+LLM/proxy and MCP URLs must resolve to the same cluster — keep both protocols
+together through a promotion.
 
 ## Next steps
 
