@@ -1,6 +1,6 @@
 ---
 title: "Content security detectors"
-description: "Jailbreak detection, toxicity, Moderation, and document/URL screening for indirect prompt injection and PII. Configured from the console."
+description: "Jailbreak detection, toxicity, custom topic moderation, and document/URL screening for indirect prompt injection and PII. Configured from the console."
 ---
 
 Content-security detectors are the LLM-aware core of TrustGuard. They score prompts
@@ -14,7 +14,6 @@ Create them in the console under **Detectors**, then attach them from a
 |---|---|---|---|
 | **Prompt Guard** | Input, Output | All | Protection Sensitivity |
 | **Toxicity Detection** | Input, Output | All | Protection Sensitivity |
-| **Moderation** | Input, Output | All | Topics + Protection Sensitivity |
 | **Custom Moderation** (Beta) | Input, Output | All | Topics you define + Protection Sensitivity |
 | **URL Analyzer** | Input | LLM, MCP | Domains + two linked detectors |
 | **Document Analyzer** | Input | LLM | Two linked detectors |
@@ -35,11 +34,43 @@ control everywhere: three preset cards. You pick one; there is no number to type
 | **Balanced** | Recommended | Good coverage without over-blocking. The right starting point for most apps. | Employee-facing chatbots, B2B SaaS products, general-purpose assistants |
 | **Strict** | High coverage | Catches everything possible. Expect some legitimate requests to be flagged. | Customer-facing chatbots, finance and healthcare apps, high-compliance environments |
 
-**Balanced** is applied by default. Start there, watch **Activity**, and move to
-Strict only if real threats are getting through — not preemptively.
+**Balanced** is applied by default, and it is the right answer far more often
+than people expect.
 
-The firewall provider and its credentials are **not** part of this form. They are
-configured globally for the workspace and keep their defaults per detector.
+### What actually changes
+
+The preset moves one thing: **how sure the detector has to be before it says
+something**. It does not change what the detector looks for, and it does not make
+it smarter — Strict does not catch a different *class* of attack, it catches the
+same class earlier and less certainly.
+
+That is why the trade runs in both directions:
+
+- **Permissive** only reports what it is confident about. You will miss borderline
+  attempts, and almost never argue with a finding.
+- **Strict** reports things it is unsure about. You will catch more real attempts,
+  and you will also flag someone quoting an article about prompt injection, a
+  developer testing your agent, or a support ticket that happens to contain the
+  word "ignore".
+
+### Choosing one
+
+Start on **Balanced** and leave it there until **Activity** gives you a reason to
+move. The reason should be evidence, not caution:
+
+| What you see in Activity | What to do |
+|---|---|
+| Real attempts getting through | Move to **Strict** |
+| Findings you keep dismissing | Move to **Permissive**, or narrow the policy with a gate |
+| A handful of findings that all look right | Leave it |
+
+Going straight to Strict "to be safe" is the most common mistake here, and it
+backfires in a specific way: the findings are not wrong so much as numerous, the
+team stops reading them, and the one that mattered scrolls past unnoticed. A
+detector nobody trusts is worse than one tuned slightly loose.
+
+The provider behind these detectors and its credentials are **not** part of this
+form. They are configured once for the workspace.
 
 ## Create a detector
 
@@ -59,44 +90,140 @@ policy is attached to a collector, it is inert.
 
 ## Prompt Guard
 
-### What it protects against
+### The risk
 
-Someone talking the model out of its instructions — "ignore your rules",
-role-play framing, encoded or obfuscated attempts. This is the risk people mean
-by *prompt injection*, and it comes from whoever is typing.
+Someone talking the model out of its instructions. "Ignore your rules and…",
+role-play framing that makes the rule-breaking hypothetical, instructions hidden
+in another language or spelled out character by character to slip past a filter
+looking for phrases.
+
+What makes this worth a detector rather than a keyword list is that the
+successful attempts rarely look like the famous ones. They are rephrased,
+translated, or buried, and the wording that works changes faster than any list
+you would maintain.
+
+### What it looks for
+
+Attempts to override the instructions the agent was given. Direct ones — *"ignore
+everything above"* — but mostly not: the same intent framed as a story or a
+hypothetical, written in another language, spelled out character by character,
+encoded, or simply reworded until it no longer resembles anything a filter would
+recognise.
+
+It judges intent rather than matching phrases, which is the point. A keyword list
+catches the attempt you have already seen; the wording that works changes faster
+than you can maintain one.
+
+### Where it looks
+
+**Input:** the message, before it is sent to the model.
+**Output:** the reply, after the model produces it and before it reaches the
+person.
+
+Those are two different questions: on the way in, *is someone
+attacking my agent*; on the way back, *did my agent get talked into something*.
+Both are worth running, and the Output side is the one people forget.
+
+It does not read tool results. An instruction that arrives inside a search
+result or a ticket is a different problem with a different detector —
+[Indirect Prompt Injection](/trustguard/detectors/agent-mcp-security).
+
+<Note>
+**A long, innocent preamble does not hide an attack.** Long text is scanned in
+overlapping passes rather than only at the start, so padding an instruction
+behind a wall of harmless prose does not get it through. This is a common bypass
+and it is worth knowing it is covered, because it means a long prompt is not
+automatically a safer prompt.
+</Note>
 
 ### Configure
 
-**Protection Sensitivity** only. Pick a preset and save.
+**Protection Sensitivity**, and nothing else. Start on **Balanced**.
+
+Move to **Strict** when you see attempts getting through in **Activity** — not
+before. Strict on a public chatbot will also flag people quoting an article
+about prompt injection, or testing your agent out of curiosity, and a stream of
+those trains everyone to ignore the findings.
 
 ## Toxicity Detection
 
-### What it protects against
+### The risk
 
-Abusive, hateful or unsafe language — reaching your agent on the input side, or
-reaching a person on the output side. The two directions answer different
-questions: one is abuse of the service, the other is what your agent is willing
-to say.
+Two different problems that happen to share a detector.
 
-Findings name the category that scored highest — hate, violence, harassment,
-self-harm, or sexual — so **Activity** tells you which kind of problem you have,
-not just that you have one.
+On the way **in**, abuse of your service: someone using your agent to generate
+hateful or harmful material, or simply abusing it. That is a conduct question,
+and the useful response is usually to record it against the consumer rather than
+to block a single message.
+
+On the way **out**, what your agent is willing to say. A model that produces
+something hateful, graphic, or harmful in a customer-facing reply is a far more
+expensive problem than the same text arriving as input, and it is the direction
+people most often leave unguarded.
+
+### What it looks for
+
+Toxic language — abusive, hateful, degrading or otherwise harmful.
+
+It answers **one question**: is this toxic. There is no breakdown by kind, so a
+finding tells you that a message crossed the line, not which flavour of harm it
+was. If you need to separate, say, hate speech from violent content, that is
+[**Custom Moderation**](#custom-moderation), where you define those subjects
+yourself, not this detector.
+
+### Where it looks
+
+**Input:** the message, before it reaches the model.
+**Output:** the reply, before it reaches the person.
+
+Reading the findings in **Activity** is therefore about *who* and *how often*
+rather than *what kind* — the useful pattern is a single consumer producing them
+repeatedly, or a rise after a prompt change.
 
 ### Configure
 
-**Protection Sensitivity** only.
+**Protection Sensitivity**, and nothing else.
 
-## Moderation
+Consider running it in both directions but with different policy actions:
+**Monitor** on input, where you mostly want the record, and **Block** on output,
+where the cost of one bad reply is real.
 
-### What it protects against
+## Custom Moderation
 
-Your agent being pulled outside what it exists for — answering about a
-competitor, a regulated subject, or anything you have decided is not its job.
-Scope control, not safety.
+**Beta.**
+
+### The risk
+
+A subject specific to your business — a
+competitor's product line, an internal project name, a regulated matter
+particular to your sector, a product you discontinued and do not want discussed.
+
+It answers one question per subject: *is this the topic I described*. That makes
+it scope control rather than safety — nothing here is an attack, it is your agent
+working correctly on something you never signed up to answer for.
+
+### What it looks for
+
+Whether the text belongs to a subject **you** described — judged against the
+words in your definition, one answer per topic you defined.
+
+### Where it looks
+
+**Input:** the message, before it reaches the model.
+**Output:** the reply, before it reaches the person — worth enabling, because
+scope is as easily broken by what your agent says as by what it is asked.
+
+On the coding-agent and agent platform collectors it sees the user's latest
+message only, so a subject that comes up purely inside tool activity is not what
+this detector is for.
 
 ### Configure
 
-Choose from **Topics**, a fixed list of thirteen:
+Every topic here is yours — its name, and crucially its definition. You can hold
+**up to 128** of them on one detector.
+
+You do not start from a blank page. Thirteen common subjects come ready as
+**editable drafts**:
 
 | | | |
 |---|---|---|
@@ -106,33 +233,10 @@ Choose from **Topics**, a fixed list of thirteen:
 | Hate Speech | Misinformation | Personal Information |
 | Academic Dishonesty | | |
 
-Select at least one — the console will not save the detector otherwise. Then set
-**Protection Sensitivity**, which applies to every topic you selected rather than
-per topic.
-
-Need a subject that is not on that list? That is **Custom Moderation**, below.
-
-## Custom Moderation
-
-**Beta.**
-
-### What it protects against
-
-A subject specific to your business that no built-in topic describes — a
-competitor's product line, an internal project name, a regulated matter
-particular to your sector. Where **Moderation** asks *is this off-topic*, this
-asks *is this the topic I described*.
-
-### Configure
-
-Every topic here is yours, up to 128 of them. That is the whole difference from
-**Moderation**: there the thirteen subjects are fixed and their definitions live
-in the product, so you can only switch them on and off. Here you own the
-definition.
-
-To save you starting from a blank page, the console pre-loads those same thirteen
-as **editable drafts**. Add one and **Customize** it, or **Add new topic** and
-write your own. Either way, what gets saved is your version.
+Add the ones that apply to your agent and **Customize** them, or **Add new
+topic** and write your own. Either way what gets saved is your version — a
+preloaded subject you never edit is still yours to tighten later, and the wording
+you leave in it is the wording that gets scored.
 
 Each topic opens a form in three parts:
 
@@ -142,23 +246,56 @@ Each topic opens a form in three parts:
 | **Instructions** | **Definition** — describe what the topic covers |
 | **Examples** | Phrases that belong to it, one per line |
 
-The examples matter more than the definition: they are what the topic guard
-actually scores against, so two or three realistic ones beat a carefully worded
-description.
+<Warning>
+**The definition is what gets scored.** Content is matched against the words you
+write in **Definition** — that field is doing all the work. The **Examples**
+field is accepted and stored, but the detector does not currently read it.
 
-Then set [**Protection Sensitivity**](#protection-sensitivity). As with
-Moderation it applies to every topic you defined, not per topic.
+So spend your effort on the definition. *"Political content"* will behave far
+worse than *"Discussion of elections, political parties, candidates, government
+policy, or partisan opinion."* Write it as if you were explaining the boundary
+to a new colleague, and put the edge cases in the definition rather than
+trusting an example to carry them.
+</Warning>
+
+Then set [**Protection Sensitivity**](#protection-sensitivity). It applies to
+every topic you defined rather than per topic, so a subject you want watched more
+closely than the rest is better written as a tighter definition than chased with
+the sensitivity control.
 
 ## URL Analyzer
 
-### What it protects against
+### The risk
 
 An instruction hidden in a page the agent is asked to read. The link looks
-harmless; the payload is on the other side of it.
+harmless — a documentation page, a ticket, a shared doc — and the payload is on
+the other side of it. Nobody in the conversation typed anything suspicious, which
+is exactly why a prompt-side detector never sees it.
 
-It reads URLs out of the request body and messages — not out of attachments —
-fetches each page under an SSRF guard, and screens the text that comes back.
-Up to ten URLs per request, **input side only**.
+The same fetch also picks up personal data: a page the agent pulls into its
+context can carry someone's details into a model that was never meant to see
+them.
+
+### What it looks for
+
+Two things, in the text of the page it fetched: instructions aimed at the agent,
+and personal data. The URL itself is not what is being judged — a perfectly
+ordinary link to a page someone edited is the whole problem.
+
+### Where it looks
+
+Links in the message, **Input side only**, at the moment the message is
+evaluated — before the model sees it. The page is fetched right then and scored
+as it reads *at that instant*, so a page that changes after you tested it is a
+different page.
+
+Two consequences worth planning around. Links inside an uploaded file are not
+covered here — that is **Document Analyzer**. And fetching happens at evaluation
+time, so a page that changes after you tested it is scored as it is *now*.
+
+Fetches run under an SSRF guard: HTTPS only, with internal, private and
+cloud-metadata addresses refused, so a link cannot be used to make TrustGuard
+reach into your network.
 
 ### Configure
 
@@ -184,14 +321,31 @@ allow list permits every domain that is not blocked.
 
 ## Document Analyzer
 
-### What it protects against
+### The risk
 
-An instruction hidden inside a file someone uploads — including one rendered as
-an image, which is why OCR is part of it. This is content risk, not malware
-scanning: a clean file can carry a hostile sentence.
+An instruction hidden inside a file someone uploads. A CV with white text on a
+white background telling the screening agent to recommend the candidate; an
+invoice carrying a line aimed at the assistant rather than the reader.
 
-It extracts text from attachments — PDF, Office documents, images via OCR, plain
-text — and screens it. **Input side only.**
+**This is content risk, not malware scanning.** A file can be perfectly clean by
+every antivirus measure and still carry a hostile sentence — that sentence is
+what this detector is for. It does not tell you whether a file is safe to open.
+
+### What it looks for
+
+The same two things as **URL Analyzer**, in the text it pulls out of the file:
+instructions aimed at the agent, and personal data. Not viruses, not file
+structure — what the document *says*.
+
+### Where it looks
+
+Files attached to the message, **Input side only**, before the model reads them.
+It extracts the text first — PDFs, Office documents, plain text, and images
+through OCR — and screens what it extracts.
+
+OCR is the part that matters: an instruction rendered as a picture, or inside a
+scanned page, is invisible to anything reading the file as text. It is also why
+the same attack in a screenshot is caught here and nowhere else.
 
 ### Configure
 
@@ -199,18 +353,23 @@ The same linked-detector model as URL Analyzer: select an existing **Prompt Guar
 detector for injection screening and an existing **Data Loss Prevention** detector
 for PII. The warning above applies here too.
 
-There is nothing else to set. OCR and injection screening are always on for this
-detector — there is no switch to forget, and no file-size or language list to
-tune.
+**There is no sensitivity setting of its own.** How strict this detector is comes
+from the Prompt Guard detector you linked, so the way to tighten document
+screening is to raise that detector's
+[**Protection Sensitivity**](#protection-sensitivity) — which also tightens
+everything else pointing at it.
+
+Nothing else to set. OCR and injection screening are always on — there is no
+switch to forget, and no file-size or language list to tune.
 
 ## When to use
 
 - **Prompt Guard** is the baseline for any chat traffic. If you deploy one
   detector, deploy this one.
-- **Toxicity Detection** on output when your agent talks to the public; on input when abuse
-  of the service is the concern.
-- **Moderation** for scope control — "only answer about X". **Custom Moderation**
-  when the subject is specific to your business.
+- **Toxicity Detection** on output when your agent talks to the public; on input
+  when abuse of the service is the concern.
+- **Custom Moderation** for scope control — "only answer about X" — with the
+  subjects written for your business.
 - **URL Analyzer** and **Document Analyzer** for RAG and agent flows that ingest
   links or files.
 - Tool results are a different detector:
