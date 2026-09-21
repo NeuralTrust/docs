@@ -1,100 +1,77 @@
 ---
 title: "Chat"
-description: "Use OpenAI, Anthropic, Cohere, or Gemini request formats while TrustGate selects and adapts the upstream provider."
+description: "One application URL accepts OpenAI, Anthropic, Responses, Cohere and Gemini request shapes. The shape the client speaks and the provider that answers are independent."
 ---
 
-TrustGate accepts several provider-shaped chat APIs on the same consumer. The endpoint you
-call defines the request and response format your application uses; it does not force
-TrustGate to route to that provider.
+A client talks to the gateway in whichever provider dialect it already speaks.
+The gateway routes to whatever registry the application's strategy picks, and
+translates in both directions. An Anthropic Messages request can land on an
+OpenAI registry and come back as an Anthropic response, streaming included.
 
-```text
-/{consumer_slug}/{fixed_route}
-```
+That independence is the point: moving traffic between providers becomes a
+routing change, not a client release.
 
-For example, an Anthropic Messages request can be routed to an OpenAI registry. TrustGate
-adapts the request, response, and supported streaming events while preserving the client
-format.
+## Shapes the gateway accepts
 
-## Endpoints and client formats
+| Path after the application slug | Client dialect |
+|---|---|
+| `/v1/chat/completions` | OpenAI Chat Completions |
+| `/v1/responses` | OpenAI Responses |
+| `/v1/messages` | Anthropic Messages |
+| `/v2/chat` | Cohere Chat v2 |
+| `/v1beta/models/{model}:generateContent` · `:streamGenerateContent` | Gemini |
 
-| Method | Path after consumer slug | Client format |
-|---|---|---|
-| `POST` | `/v1/chat/completions` | OpenAI Chat Completions |
-| `POST` | `/v1/messages` | Anthropic Messages |
-| `POST` | `/v1/responses` | OpenAI Responses |
-| `POST` | `/v2/chat` | Cohere Chat v2 |
-| `POST` | `/v1beta/models/{model}:generateContent` | Gemini generateContent |
-| `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini streamGenerateContent |
-
-Only these fixed shapes are accepted. Similar but unlisted paths, such as
-`/v2/chat/completions`, return **404**.
-
-## Send a request
-
-Use the **LLM URL** and credentials from the consumer **Connect** tab:
+Only these exact paths exist; a near miss such as `/v2/chat/completions` is a
+404, not a guess.
 
 ```bash
-curl -X POST "https://<llm-host>/<consumer-slug>/v1/chat/completions" \
-  -H "X-AG-API-Key: <consumer-api-key>" \
+curl -X POST "https://<llm-host>/<application-slug>/v1/chat/completions" \
+  -H "X-AG-API-Key: <application key>" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "auto",
-    "messages": [{"role": "user", "content": "Explain zero trust in one sentence."}]
-  }'
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "Explain zero trust in one sentence."}]}'
 ```
 
-TrustGate accepts `X-AG-API-Key`, `x-api-key`, or
-`Authorization: Bearer ag_…`. Bearer JWTs from an OAuth2 identity provider are also accepted
-when configured. Private deployments may require `X-AG-Gateway-Slug`.
+The key may travel as `X-AG-API-Key`, `x-api-key`, or `Authorization: Bearer`,
+which is what lets stock SDKs point at the gateway unchanged. Copy the exact form
+from the application's **Connect** tab; it already reflects the strategy and the
+deployment.
 
-See [Auth](/trustgate/concepts/auth) and [Quickstart](/trustgate/getting-started/quickstart).
+## The model field
 
-## Model selection and routing
+`model` is where the client meets [routing](/trustgate/llm/routing#what-the-client-sends):
+`auto` hands the choice to the gateway, a short name resolves to the first
+registry that serves it, `@provider/model` prefers a provider. Gemini puts the
+model in the path rather than the body; the rule is the same.
 
-The consumer controls which registries and models can serve the request:
+Model restrictions on the application apply before any provider is called. The
+response carries `X-Selected-Provider` and `X-Selected-Model`, which is the first
+thing to read when a request went somewhere you did not expect.
 
-- Use `"model": "auto"` for load balancing or Smart routing.
-- Use an allowed model ID to request a specific model.
-- Gemini puts the model in the URL path instead of the request body.
-- Model allowlists and defaults are enforced before TrustGate calls the provider.
+## What translation costs you
 
-Routing references are resolved by TrustGate and are not forwarded upstream. Successful
-responses include `X-Selected-Provider` and `X-Selected-Model`, which are useful when
-debugging routing decisions.
+Because the dialect and the provider can differ, the gateway normalises a few
+things once it knows which model it is talking to:
 
-### Cross-format limits and errors
-
-Because the client format and the upstream provider can differ, TrustGate normalises a few
-things after the model is resolved:
-
-| Behaviour | Detail |
+| Behaviour | What happens |
 |---|---|
-| **Output limit clamp** | The requested output-token cap (`max_tokens` and its equivalents) is clamped to the resolved model's limit. When that happens the response carries `X-Max-Tokens-Clamped: <limit>`. |
-| **Context-window preflight** | A prompt that clearly cannot fit the resolved model's context window is rejected before the upstream call with **400** `context_length_exceeded`. Not applied to **Custom / OpenAI-compatible** registries or models without a known window. |
-| **Error envelopes** | Upstream errors are returned in the **client's** format — Anthropic, Gemini, and Cohere envelopes — including mid-stream error events. OpenAI-shaped clients receive the upstream body as-is. |
-| **Anthropic server tools** | Anthropic tool blocks declared by `type` alone (no function name, e.g. web search) are dropped when the request is routed to OpenAI or Gemini. Anthropic-to-Anthropic traffic is untouched. |
+| **Output cap clamp** | A requested `max_tokens` above the model's limit is clamped to it; the response says so in `X-Max-Tokens-Clamped`. |
+| **Context preflight** | A prompt that cannot fit the model's window is rejected with `400 context_length_exceeded` before any upstream call. Not applied where the window is unknown — OpenAI-compatible endpoints included. |
+| **Errors in your dialect** | Upstream errors come back in the client's envelope, mid-stream too. OpenAI-shaped clients get the upstream body as is. |
+| **Provider-only features** | An Anthropic server tool declared by `type` alone (web search, say) is dropped when routed to OpenAI or Gemini. Same-provider traffic is untouched. |
 
-See [Model resolution](/trustgate/routing/model-resolution),
-[Load balancing](/trustgate/routing/load-balancing), and
-[Smart routing](/trustgate/routing/smart-routing).
+The last row is the honest limit of translation: fields that exist in one
+provider's API and nowhere else cannot be carried across. Everything in the
+common core — messages, tools with names, temperature, streaming — is.
 
 ## Streaming
 
-For OpenAI, Anthropic, Cohere, and Responses clients, set `"stream": true` in the request.
-For Gemini, call `:streamGenerateContent` or add `?alt=sse`.
+Set `"stream": true` on OpenAI, Anthropic, Cohere and Responses; on Gemini call
+`:streamGenerateContent` or add `?alt=sse`. Events are re-encoded to the client's
+format.
 
-TrustGate adapts normal server-sent events to the format expected by the client. If an
-upstream stream stops unexpectedly after the HTTP response has started, TrustGate emits a
-fixed error event in the client's format; the already-sent HTTP status remains `200`. For
-OpenAI, Responses, and Cohere clients:
-
-```text
-data: {"error":{"message":"upstream stream terminated unexpectedly","type":"upstream_error"}}
-```
-
-Anthropic clients receive an `event: error` with `{"type":"error","error":{"type":"api_error",…}}`;
-Gemini clients receive `data: {"error":{"code":500,"message":…,"status":…}}`.
-
-Provider-specific features can differ. TrustGate adapts supported request and response
-fields, but does not guarantee every provider extension is portable across every provider.
-
+If an upstream stream dies after the response has started, the HTTP status is
+already `200` and cannot change. The gateway emits a final error event in the
+client's format instead — `upstream_error` for OpenAI-shaped clients, an
+`event: error` for Anthropic, an error object for Gemini — so a client that
+handles errors mid-stream sees one, and one that does not sees a truncated
+response rather than a hang.

@@ -58,15 +58,56 @@ contract needs only the discount. Add overrides for the models priced outside it
 This matters beyond reporting: a budget policy that stops spend at a threshold is
 counting with these numbers.
 
-## The catalog
-
-Every provider the gateway knows how to talk to is listed in the
-[model provider catalog](/trustgate/registry/model-catalog), with what each one
-needs and which wire format it speaks.
-
 ## Instances
 
 A provider entry holds as many instances as you need — production and staging
 keys, two Azure deployments, one key per cost centre. Each is configured and
 tested on its own, and each is selectable independently when routing or an
 application picks a destination.
+
+## Every provider
+
+These are the providers the gateway knows how to talk to. Anything not listed
+connects through **OpenAI Compatible**, which is the entry for self-hosted models
+and vendors that expose an OpenAI-shaped API.
+
+The **format** column is the wire protocol the gateway translates to. It matters
+in exactly one situation: a provider speaking the `openai` format accepts an
+OpenAI-shaped request unchanged, so moving traffic between two of them is a
+routing change and nothing else.
+
+| Provider | Code | Format | What it needs |
+|---|---|---|---|
+| <img src="/images/registry/providers/openai.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**OpenAI** | `openai` | openai | API key. Optional base URL for a proxy or regional endpoint. |
+| **OpenAI Compatible** | `openai_compatible` | openai | Base URL, plus whatever that endpoint expects — including nothing. This is the entry for self-hosted and unlisted vendors. |
+| <img src="/images/registry/providers/gemini.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**Google AI Studio** | `google` | google | API key. |
+| <img src="/images/registry/providers/google_cloud.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**Google Vertex AI** | `vertex` | google | A GCP service-account JSON, uploaded or pasted, and a location. Project ID is read from the file. |
+| <img src="/images/registry/providers/anthropic.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**Anthropic** | `anthropic` | anthropic | API key. |
+| <img src="/images/registry/providers/aws.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**AWS Bedrock** | `bedrock` | anthropic | Access key ID, secret access key and region; a session token for temporary credentials. |
+| <img src="/images/registry/providers/azure_openai.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**Azure OpenAI** | `azure` | openai | Azure endpoint and API version, then either an API key or a service principal (tenant, client ID, client secret). |
+| <img src="/images/registry/providers/mistral.png" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**Mistral** | `mistral` | openai | API key. |
+| <img src="/images/registry/providers/groq.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**Groq** | `groq` | openai | API key. |
+| <img src="/images/registry/providers/deepseek.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**DeepSeek** | `deepseek` | openai | API key. |
+| <img src="/images/registry/providers/xai.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**xAI** | `xai` | openai | API key. |
+| <img src="/images/registry/providers/cerebras.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**Cerebras** | `cerebras` | openai | API key. |
+| <img src="/images/registry/providers/openrouter.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**OpenRouter** | `openrouter` | openai | API key. |
+| <img src="/images/registry/providers/cohere.svg" alt="" width="18" height="18" style={{display:"inline",verticalAlign:"middle",marginRight:"8px"}} />**Cohere** | `cohere` | cohere | API key. |
+
+### Notes worth having before you connect
+
+**Azure OpenAI** is the one that catches people out. It is deployment-scoped
+rather than model-scoped: the endpoint and API version you enter decide which
+models exist, so a model missing from the picker is usually a missing deployment
+on the Azure side rather than anything wrong here.
+
+**Vertex AI** and **Bedrock** authenticate as a cloud identity rather than with a
+product key, which means their permissions are managed in GCP and AWS. A model
+that fails only for some calls is usually an IAM problem, not a gateway one.
+
+**OpenAI Compatible** trusts you about the base URL. Nothing validates that the
+endpoint behind it actually implements the whole API, so test the connection
+before you route anything real through it.
+
+Each provider entry can hold several [instances](/trustgate/registry/overview#instances),
+which is how you keep production and staging keys — or two Azure deployments —
+apart without a second gateway.
