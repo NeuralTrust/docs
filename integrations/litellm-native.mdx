@@ -54,7 +54,7 @@ guardrails:
       collector_key: os.environ/TRUSTGUARD_COLLECTOR_KEY
       unreachable_fallback: fail_closed
       timeout: 5
-      streaming_transform_mode: block_only
+      streaming_transform_mode: incremental_diff
       default_on: true
 ```
 
@@ -105,7 +105,7 @@ caller requests `stream: true`. Output behavior depends on the streaming mode
 | **When text reaches the client** | After the full completion is inspected | As model chunks arrive, with periodic inspection | After generation and the final inspection finish |
 | **Output `block` / `ask`** | The completion is withheld | Stops later chunks; text already sent cannot be pulled back | No completion text or tool-call arguments are released |
 | **Output `transform`** | The client receives the rewritten completion | Text rewrites are discarded; the client receives raw model text | The client receives the final rewritten text |
-| **Output tool calls** | Inspected before delivery; transformed arguments can be applied | Tool-call deltas can reach the client before inspection | Buffered until all required inspections succeed, then delivered with their original arguments |
+| **Output tool calls** | Inspected before delivery; transformed arguments can be applied | Tool-call deltas can reach the client before inspection | Buffered until all required inspections succeed, then delivered with rewritten arguments when applicable |
 
 ### Enable inspected streaming output
 
@@ -138,9 +138,10 @@ surfaces
 With `incremental_diff`, LiteLLM buffers tool-call deltas until it inspects the
 assembled response and completes the remaining stream checks. A blocking
 verdict releases neither the arguments nor a successful finish signal. Allowed
-tool calls retain their original deltas and order. **Streamed tool-call
-rewrites are not supported**: use non-streaming requests when a policy must
-transform tool arguments
+tool calls retain their IDs and order. Argument rewrites are applied to the
+buffered deltas before delivery. An unsupported rewrite fails closed without
+releasing the original arguments. Parallel tool calls and multiple completion
+choices retain their own argument rewrites
 
 The connector uses LiteLLM's default sampling interval of five chunks for
 text streams, plus a final inspection. Each scan sees the accumulated text,
@@ -231,7 +232,7 @@ On `/v1/responses`, send `x-litellm-session-id` explicitly.
 
 `transformed_payload.messages` replaces the evaluated messages one for one and
 writes back any tool-call arguments it changed on non-streaming responses and
-requests. Streamed tool calls keep their original arguments, even with
+requests. Buffered streamed tool calls also apply rewritten arguments with
 `incremental_diff`
 
 `transformed_payload.input` rewrites the last user message on the request side,
@@ -292,7 +293,8 @@ An input block alone does not verify output enforcement
 For tools, have the model propose a tool call without executing it. With an
 output blocking rule, confirm that no tool-call deltas or arguments arrive.
 With the rule disabled, confirm that the original tool call arrives after
-inspection. Use a non-streaming request to test transformed tool arguments
+inspection. Test transformed tool arguments with both non-streaming requests and
+`incremental_diff` streams
 
 ## Reference
 
@@ -311,8 +313,8 @@ requests and on OpenAI-style chat streams with `incremental_diff`. With
 
 Tool content is covered when LiteLLM includes it in the extracted messages,
 including tool declarations and tool-call arguments. Streamed tool calls can
-be blocked before delivery with `incremental_diff`, but argument transforms
-require a non-streaming response. Tool results are evaluated when the client
+be blocked before delivery with `incremental_diff`, and argument transforms
+are applied to the buffered response. Tool results are evaluated when the client
 sends them back through LiteLLM. Enforcement applies to the LiteLLM request;
 the connector does not intercept local tool execution
 
@@ -323,7 +325,7 @@ the connector does not intercept local tool execution
 | `pre_call` | `direction: input` | Jailbreaks, DLP, indirect prompt injection in tool results | **Block** / **transform** before the model call |
 | `post_call`, non-streaming | `direction: output` | Policy violations in the completion | **Block** / **transform** before the completion is returned |
 | `post_call`, stream with `block_only` | `direction: output` | Policy violations in the growing completion | **Block** stops later chunks. **Transform** is not applied |
-| `post_call`, chat stream with `incremental_diff` | `direction: output` | Policy violations in the buffered completion and tool calls | **Block** before delivery; **transform** on text only. Tool arguments are delivered unchanged if allowed |
+| `post_call`, chat stream with `incremental_diff` | `direction: output` | Policy violations in the buffered completion and tool calls | **Block** before delivery; **transform** text and tool arguments. Tool arguments are rewritten before delivery |
 
 ### Attributes
 
@@ -345,7 +347,7 @@ the connector does not intercept local tool execution
 | `503` with `TrustGuard guardrail service unreachable` | `fail_closed` and TrustGuard timed out, could not be reached, returned `502` or `504`, or returned a `200` whose body is not JSON |
 | A masking policy leaves streamed text unchanged | Set `streaming_transform_mode: incremental_diff` and use OpenAI-style chat completions; other streaming surfaces fall back to `block_only` |
 | The client waits until generation finishes to show any text | Expected with native `incremental_diff`: the whole reply waits for final inspection |
-| Streamed tool arguments are not redacted | Streamed tool-call rewrites are unsupported. Use a non-streaming request |
+| Streamed tool arguments are not redacted | Use `incremental_diff`; an unappliable rewrite fails closed |
 | A blocked stream already exposed text or tool arguments | `block_only` can deliver chunks before inspection. Use `incremental_diff` on chat completions or a non-streaming request |
 | **Activity** groups by conversation but not by key | The virtual key has no alias, user email, user id, or team alias |
 | Every turn is its own conversation in **Activity** | The caller sends no session key. Send `x-litellm-session-id` |
