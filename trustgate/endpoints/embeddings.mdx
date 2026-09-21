@@ -1,59 +1,39 @@
 ---
 title: "Embeddings"
-description: "Call POST /{application}/v1/embeddings with an OpenAI-shaped body. TrustGate routes only to registries that can embed."
+description: "The OpenAI embeddings body, routed only to registries that can embed. A mixed pool is fine; a pinned registry that cannot embed is a 400."
 ---
 
-Clients send the same OpenAI embeddings body they would send to OpenAI. Auth and the
-application slug are the same as [chat](/trustgate/getting-started/quickstart#call-from-your-application).
+Clients send the OpenAI embeddings body to `/v1/embeddings` on the application
+URL, with the same key they use for chat.
 
 ```bash
-curl -X POST "https://<gateway-host>/<application-slug>/v1/embeddings" \
-  -H "X-AG-API-Key: <your-api-key>" \
+curl -X POST "https://<llm-host>/<application-slug>/v1/embeddings" \
+  -H "X-AG-API-Key: <application key>" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "text-embedding-3-small",
-    "input": ["Hello from TrustGate"]
-  }'
+  -d '{"model": "text-embedding-3-small", "input": ["Hello from TrustGate"]}'
 ```
 
-On a Private data plane, add `X-AG-Gateway-Slug` as in the chat snippets.
+## Which registries can serve it
 
-## Providers
-
-| Registry | Upstream |
+| Provider | Notes |
 |---|---|
-| **OpenAI** | `{base_url}/embeddings` (default `https://api.openai.com/v1/embeddings`) |
-| **Azure OpenAI** | `{endpoint}/openai/deployments/{model}/embeddings?api-version=…` |
-| **Mistral** | `https://api.mistral.ai/v1/embeddings` (chat host unchanged) |
-| **Custom / OpenAI-compatible** | `{base_url}/embeddings` |
-| **Cohere** | Same OpenAI body, adapted to Cohere `/v2/embed` |
-| **Vertex AI** | Gemini `:embedContent` (one input) or `:batchEmbedContents` (many) |
-| **Amazon Bedrock** | Titan **embed** only (`InvokeModel` with `{inputText}`). Model IDs that contain `titan-embed`, including `eu.` / `us.` prefixes. |
+| **OpenAI**, **Azure OpenAI**, **Mistral**, **OpenAI-compatible** | Native embeddings endpoints. |
+| **Cohere** | Same body, adapted to Cohere's embed API. |
+| **Vertex AI** | Gemini embed — one input or a batch. |
+| **Amazon Bedrock** | **Titan embed** models only; a non-Titan model is a 400 from Bedrock. |
 
-Anthropic, Gemini (AI Studio), Bedrock Claude / Nova / Titan **text**, and other chat-only
-providers do not embed. They are left out of the candidate pool.
+Anthropic, Gemini AI Studio, and Bedrock's chat models do not embed and are left
+out of the candidate pool automatically.
 
-Bedrock rejects a non–Titan-embed model with a 400. Vertex embeddings ignore the chat
-`provider_options.action` — they always call the embed endpoints.
+## How it routes
 
-## Routing
+The application's registries are narrowed to those that advertise embeddings,
+then [routing](/trustgate/llm/routing) runs on that pool as usual. Two edges:
 
-1. The application's registries are filtered to those that advertise embeddings.
-2. [Model resolution](/trustgate/llm/routing#what-the-client-sends) and
-   [load balancing](/trustgate/llm/routing#load-balancing) run on that pool.
-3. Pinning a registry that cannot embed is a **400**, not a failover.
-4. An empty capable pool is a **503**.
+- **Pinning** a registry that cannot embed — with `@provider/model` — is a `400`,
+  not a silent failover. You asked for something impossible; the gateway says so.
+- **No capable registry** at all is a `503`. Attach one.
 
-Attach at least one embeddings-capable registry to the application. A mixed chat + embeddings
-pool is fine: chat still uses every chat-capable member; embeddings skip the rest.
-
-## Related
-
-- [Providers](/trustgate/concepts/providers) — which adapters can embed
-- [Registries](/trustgate/concepts/registries)
-- [Applications](/trustgate/access/applications) — Connect tab
-- [Rerank](/trustgate/endpoints/rerank)
-- [Files](/trustgate/endpoints/files)
-- [Audio](/trustgate/endpoints/audio)
-- [Models](/trustgate/endpoints/models)
-- [Quickstart](/trustgate/getting-started/quickstart)
+A pool that mixes chat and embeddings providers is the normal case. Chat uses
+every chat-capable member; embeddings skip the rest. Use the **Capability** filter
+in Registry to see which providers qualify.

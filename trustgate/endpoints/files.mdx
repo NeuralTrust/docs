@@ -1,93 +1,37 @@
 ---
 title: "Files"
-description: "Call /{application}/v1/files to upload, list, retrieve, delete, and download content. TrustGate routes only to registries that expose a Files store."
+description: "Upload, list, fetch, download and delete files through the gateway. The provider owns the file; the gateway owns nothing but the route."
 ---
 
-Clients send the same OpenAI Files requests they would send to OpenAI. Auth and the
-application slug are the same as [chat](/trustgate/getting-started/quickstart#call-from-your-application).
+Files use the OpenAI shape on the application URL and key: multipart upload to
+`/v1/files`, then list, retrieve, `/content` download and delete by id.
 
 ```bash
-curl -X POST "https://<gateway-host>/<application-slug>/v1/files" \
-  -H "X-AG-API-Key: <your-api-key>" \
-  -F purpose=assistants \
-  -F file=@notes.txt
+curl -X POST "https://<llm-host>/<application-slug>/v1/files" \
+  -H "X-AG-API-Key: <application key>" \
+  -F purpose=assistants -F file=@notes.txt
 ```
 
-List, retrieve, download, and delete use the same host and key:
+## What the gateway does not own
 
-```bash
-curl "https://<gateway-host>/<application-slug>/v1/files?purpose=assistants" \
-  -H "X-AG-API-Key: <your-api-key>"
+File identity and retention belong to the provider. The gateway returns the
+upstream file id as-is, keeps the upstream content type on download, and never
+rewrites the multipart body. A file uploaded through one registry is not visible
+through another, because it never existed anywhere but at that provider.
 
-curl "https://<gateway-host>/<application-slug>/v1/files/<file-id>" \
-  -H "X-AG-API-Key: <your-api-key>"
+## Which registries can serve it
 
-curl "https://<gateway-host>/<application-slug>/v1/files/<file-id>/content" \
-  -H "X-AG-API-Key: <your-api-key>"
+**OpenAI**, **Azure OpenAI**, **OpenRouter**, **xAI**, **Mistral** and
+**Anthropic** expose a files store. OpenAI-compatible endpoints, Groq, Gemini,
+Vertex, Bedrock and Cohere do not.
 
-curl -X DELETE "https://<gateway-host>/<application-slug>/v1/files/<file-id>" \
-  -H "X-AG-API-Key: <your-api-key>"
-```
+Anthropic is the one that answers in its own shape — `type`, `mime_type`,
+`size_bytes` rather than OpenAI's `object` and `purpose` — and the gateway does not
+translate that. Claude files are not available through Bedrock or Vertex.
 
-On a Private data plane, add `X-AG-Gateway-Slug` as in the chat snippets.
+## How it routes
 
-| Method | Path | Result |
-|---|---|---|
-| `POST` | `/v1/files` | Multipart upload, forwarded as-is |
-| `GET` | `/v1/files` | List (query string passed through, including `purpose`) |
-| `GET` | `/v1/files/{id}` | Retrieve metadata |
-| `GET` | `/v1/files/{id}/content` | Download bytes; upstream `Content-Type` is kept |
-| `DELETE` | `/v1/files/{id}` | Delete |
-
-Wrong methods are **400**. Extra path tails (`/files/{id}/other`) are **404**.
-
-TrustGate does **not** rewrite the multipart body and does not own file identity or
-retention — upstream file IDs are returned as-is.
-
-OpenAI SDKs use the same application base URL: `client.files.create()`, `list()`,
-`retrieve()`, `content()`, and `delete()`.
-
-## Providers
-
-| Registry | Upstream |
-|---|---|
-| **OpenAI** | `{base_url or https://api.openai.com/v1}/files…` |
-| **Azure OpenAI** | `{endpoint}/openai/files…?api-version=…` (not deployment-scoped) |
-| **OpenRouter** | `https://openrouter.ai/api/v1/files` (query passthrough, including `provider=`) |
-| **xAI** | `https://api.x.ai/v1/files` |
-| **Mistral** | `{base_url or https://api.mistral.ai/v1}/files` |
-| **Anthropic** | `{base_url or https://api.anthropic.com/v1}/files` (`x-api-key`, `anthropic-version: 2023-06-01`) |
-
-Custom / OpenAI-compatible, Groq, Gemini / Vertex, Bedrock, Cohere, and other chat-only
-providers do not expose a Files store. They are left out of the candidate pool.
-
-Anthropic Files is GA on the Claude API — TrustGate does not send the old
-`files-api-2025-04-14` beta header. The response is Anthropic-shaped (`type`, `mime_type`,
-`size_bytes`); it is not rewritten to OpenAI `object` / `purpose`. `purpose` is optional.
-Claude Files is **not** available on Bedrock or Vertex.
-
-Gemini `files.upload` uses a different wire format and is out of scope.
-
-A JSON `model` field (including `@provider/model`) is used only to pin a registry. Upload
-itself is multipart and has no model rewrite.
-
-## Routing
-
-1. The application's registries are filtered to those that advertise files.
-2. [Model resolution](/trustgate/llm/routing#what-the-client-sends) and
-   [load balancing](/trustgate/llm/routing#load-balancing) run on that pool.
-3. Pinning a registry that cannot store files is a **400**, not a failover.
-4. An empty capable pool is a **503**.
-
-Attach at least one files-capable registry to the application. A mixed chat + files pool is
-fine: chat still uses every chat-capable member; files skip the rest.
-
-## Related
-
-- [Providers](/trustgate/concepts/providers) — which adapters expose files
-- [Registries](/trustgate/concepts/registries)
-- [Applications](/trustgate/access/applications) — Connect tab
-- [Models](/trustgate/endpoints/models) — discovery does not list file ids
-- [Images](/trustgate/endpoints/images)
-- [Audio](/trustgate/endpoints/audio)
-- [Quickstart](/trustgate/getting-started/quickstart)
+Narrow to files-capable registries, then [routing](/trustgate/llm/routing). A JSON
+`model` field, including `@provider/model`, is honoured only to pin a registry;
+the upload itself has no model. Pinning an incapable registry is a `400`, an empty
+pool a `503`.

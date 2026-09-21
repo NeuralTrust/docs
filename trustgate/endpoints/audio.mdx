@@ -1,87 +1,39 @@
 ---
 title: "Audio"
-description: "Call POST /{application}/v1/audio/speech (TTS, raw bytes) and /v1/audio/transcriptions (STT, multipart). TrustGate routes only to registries that can speak or transcribe."
+description: "Speech and transcription in the OpenAI shape, each routed to registries that advertise that specific capability."
 ---
 
-Clients send the same OpenAI Audio requests they would send to OpenAI. Auth and the
-application slug are the same as [chat](/trustgate/getting-started/quickstart#call-from-your-application).
+Two capabilities, two paths, both on the application URL and key.
+
+**Speech** (`/v1/audio/speech`) takes JSON and returns raw audio bytes with the
+upstream content type — not a JSON wrapper, so pipe it straight to a file.
+**Transcriptions** (`/v1/audio/transcriptions`) is multipart with `model` and
+`file`.
 
 ```bash
-curl -X POST "https://<gateway-host>/<application-slug>/v1/audio/speech" \
-  -H "X-AG-API-Key: <your-api-key>" \
+curl -X POST "https://<llm-host>/<application-slug>/v1/audio/speech" \
+  -H "X-AG-API-Key: <application key>" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "tts-1",
-    "input": "Hello from TrustGate",
-    "voice": "alloy"
-  }' \
+  -d '{"model": "tts-1", "input": "Hello from TrustGate", "voice": "alloy"}' \
   --output speech.mp3
 ```
 
-Speech returns **raw audio bytes** with the upstream `Content-Type` (for example `audio/mpeg`).
-TrustGate does not wrap the body in JSON.
+`/v1/audio/translations` is not served.
 
-Transcriptions are multipart, same host and key:
+## Which registries can serve it
 
-```bash
-curl -X POST "https://<gateway-host>/<application-slug>/v1/audio/transcriptions" \
-  -H "X-AG-API-Key: <your-api-key>" \
-  -F model=whisper-1 \
-  -F file=@speech.mp3
-```
+**OpenAI**, **Azure OpenAI**, **OpenRouter**, **Groq**, **Mistral** and
+**OpenAI-compatible** endpoints do both speech and transcription. The gateway
+smooths the one real difference: Mistral wants `voice_id` and returns base64 in
+JSON; a client sends OpenAI's `voice` and receives raw bytes regardless.
 
-On a Private data plane, add `X-AG-Gateway-Slug` as in the chat snippets.
+xAI's voice API is a different wire and not covered. Anthropic, Gemini, Vertex,
+Bedrock, Cohere, DeepSeek and Cerebras have no audio routes.
 
-`GET` is rejected with **400**. `/v1/audio/translations` and extra path tails are **404**.
+## How it routes
 
-OpenAI SDKs use the same application base URL: `client.audio.speech.create()` and
-`client.audio.transcriptions.create()`.
-
-## Providers
-
-| Registry | Speech (TTS) | Transcriptions (STT) |
-|---|---|---|
-| **OpenAI** | `{base_url or https://api.openai.com/v1}/audio/speech` | `.../audio/transcriptions` |
-| **Azure OpenAI** | `{endpoint}/openai/deployments/{model}/audio/speech?api-version=…` | `.../audio/transcriptions` |
-| **Custom / OpenAI-compatible** | `{base_url}/audio/speech` | `{base_url}/audio/transcriptions` |
-| **OpenRouter** | `https://openrouter.ai/api/v1/audio/speech` | `.../audio/transcriptions` |
-| **Groq** | `https://api.groq.com/openai/v1/audio/speech` | `.../audio/transcriptions` |
-| **Mistral** | `https://api.mistral.ai/v1/audio/speech` | `.../audio/transcriptions` |
-
-Mistral speech uses `voice_id` upstream. If the client sends OpenAI `voice`, TrustGate copies
-it to `voice_id`. Mistral's JSON `{audio_data}` (base64) is unwrapped to raw bytes so the
-gateway response stays OpenAI-shaped.
-
-xAI voice is a different wire (`/v1/tts`, `/v1/stt`). Anthropic, Gemini / Vertex, Bedrock,
-Cohere, DeepSeek, Cerebras, and other chat-only providers do not expose these routes. They
-are left out of the candidate pool.
-
-Chat `input_audio` parts are a different surface.
-
-The JSON `model` field is allowlisted as usual. For multipart transcriptions, TrustGate
-reads the form `model` field for allowlists, Azure deployment names, and `@provider/model`
-pins. It does **not** rewrite the multipart body.
-
-## Routing
-
-1. The application's registries are filtered to those that advertise the matching capability
-   (`audio_speech` or `audio_transcription`).
-2. [Model resolution](/trustgate/llm/routing#what-the-client-sends) and
-   [load balancing](/trustgate/llm/routing#load-balancing) run on that pool.
-3. Pinning a registry that cannot serve that audio path is a **400**, not a failover — including
-   `@provider/model` in a multipart `model` field.
-4. An empty capable pool is a **503**.
-
-Attach at least one audio-capable registry to the application. A mixed chat + audio pool is
-fine: chat still uses every chat-capable member; speech and transcriptions skip the rest.
-
-## Related
-
-- [Providers](/trustgate/concepts/providers) — which adapters do speech and transcription
-- [Registries](/trustgate/concepts/registries)
-- [Applications](/trustgate/access/applications) — Connect tab
-- [Embeddings](/trustgate/endpoints/embeddings)
-- [Images](/trustgate/endpoints/images)
-- [Files](/trustgate/endpoints/files)
-- [Models](/trustgate/endpoints/models)
-- [Quickstart](/trustgate/getting-started/quickstart)
+Speech and transcription are **separate capabilities**. A registry can have one
+without the other, and the pool is narrowed per request to the one being asked
+for. From there [routing](/trustgate/llm/routing) applies; pinning an incapable
+registry is a `400`, an empty pool a `503`. Multipart bodies are forwarded
+unchanged.

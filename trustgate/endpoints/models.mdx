@@ -1,60 +1,43 @@
 ---
 title: "Models"
-description: "Call GET /{application}/v1/models to list the native model ids this application can actually call. This is gateway-owned discovery, not an upstream passthrough."
+description: "The list an application can actually call, computed by the gateway — not the provider's catalogue and not the admin picker."
 ---
 
-Clients that probe `client.models.list()` against an OpenAI-compatible `base_url` hit
-this route. Auth and the application slug are the same as
-[chat](/trustgate/getting-started/quickstart#call-from-your-application).
+`GET /v1/models` on the application URL returns the OpenAI-shaped list SDKs
+probe on startup. `GET /v1/models/{id}` is `200` for a listed id and `404`
+otherwise.
 
 ```bash
-curl "https://<gateway-host>/<application-slug>/v1/models" \
-  -H "X-AG-API-Key: <your-api-key>"
-
-curl "https://<gateway-host>/<application-slug>/v1/models/gpt-4o-mini" \
-  -H "X-AG-API-Key: <your-api-key>"
+curl "https://<llm-host>/<application-slug>/v1/models" -H "X-AG-API-Key: <application key>"
 ```
 
-On a Private data plane, add `X-AG-Gateway-Slug` as in the chat snippets.
+## What is in it
 
-`GET /v1/models` returns `{ "object": "list", "data": [{ "id", "object": "model", "owned_by" }] }`.
-`GET /v1/models/{id}` is **200** when that id is in the list, otherwise **404**.
-Non-`GET` methods are **400**. Extra path tails (`/models/{id}/extra`) are **404**.
+This is **gateway-owned discovery**. It is not a passthrough of any provider's
+`/v1/models`, and it is not the catalogue behind the console's model pickers. It
+is the set of native model ids this application can call right now, which is
+narrower than either:
 
-This is **not** a forward of the provider's `/v1/models` and **not** the admin models
-catalog. The list is the union of native slugs the application can actually call.
+1. For each registry the application may use — including fallback and pool
+   members — start from the application's model restriction if there is one,
+   otherwise from the provider catalogue.
+2. Keep only **native** ids. `auto`, `@provider/…` and pool references are
+   routing instructions, not models, and are excluded.
+3. Keep an id only if the registry's provider supports its capability: chat
+   always; embeddings and rerank only where the provider advertises them.
 
-The admin models catalog behind the console's model pickers is narrowed per registry to
-the models its credentials can list — Azure OpenAI shows deployments, and **Custom /
-OpenAI-compatible** lists the endpoint's live models. When the provider cannot be queried,
-the full catalog is shown.
+`owned_by` is the registry's provider — `openai`, `anthropic` — which is what a
+client needs to make sense of a mixed list.
 
-## What is listed
+## Why it differs from what you see in the console
 
-For each bound registry (plus fallbacks and load-balancing member models):
+The console's pickers are narrowed per registry to what its credentials can list
+— Azure shows deployments, an OpenAI-compatible endpoint shows its live models —
+and fall back to the full catalogue when a provider cannot be queried. This
+endpoint applies the application's restrictions on top. A model visible in the
+console but missing here is one the application is not allowed to use; that is
+the restriction working, not a sync problem.
 
-1. If the application has an allow-list, those ids are candidates.
-2. If the policy is open, TrustGate expands from the provider catalog.
-3. Only **native** slugs are kept — no `auto`, no `@provider/…`, no `pool:…`.
-4. A slug is kept only when the registry's provider supports that modality (chat always;
-   [embeddings](/trustgate/endpoints/embeddings) / [rerank](/trustgate/endpoints/rerank) only
-   when the provider advertises them). Catalog flags win; otherwise the slug is inferred
-   (`embed` → embeddings, `rerank` → rerank, else chat).
-
-`owned_by` is the registry **provider** (for example `openai` or `anthropic`).
-
-A listed id sent without a provider prefix resolves by walking the application's registries in
-configured order; a name no registry serves is **404** `model_not_supported` on the chat
-path — see [Model resolution](/trustgate/llm/routing#what-the-client-sends).
-
-[Files](/trustgate/endpoints/files) have no model ids and are not listed.
-[Images](/trustgate/endpoints/images) ids appear only when the catalog (or allow-list) includes
-them and the application has an images-capable registry.
-
-## Related
-
-- [Providers](/trustgate/concepts/providers)
-- [Model resolution](/trustgate/llm/routing#what-the-client-sends)
-- [Applications](/trustgate/access/applications) — Connect tab
-- [Registries](/trustgate/concepts/registries)
-- [Quickstart](/trustgate/getting-started/quickstart)
+Files have no model ids and are never listed. Image models appear only when the
+catalogue or restriction includes them and an images-capable registry is
+attached.
