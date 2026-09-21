@@ -1,0 +1,66 @@
+---
+title: "Model providers"
+description: "What each provider needs to authenticate, why a connection test is worth the extra click, and the contract pricing that decides whether your cost reporting is true."
+---
+
+A model provider entry gives the gateway somewhere to send inference, and the
+credential to send it with. Catalog providers know their own connection details;
+an OpenAI-compatible endpoint needs a base URL as well.
+
+## What a provider needs
+
+Most take a **name** and an **API key**. The name is not cosmetic — it is what
+appears in routes and in every trace, so `openai-prod` will serve you better than
+`OpenAI` the first time two entries exist.
+
+Some providers do not authenticate with a single key:
+
+| Provider | What it needs |
+|---|---|
+| **Azure OpenAI** | The Azure endpoint and API version, then either an API key or a service principal (tenant, client ID, client secret). |
+| **Amazon Bedrock** | Access key ID, secret access key and region — plus a session token for temporary credentials. |
+| **Vertex AI** | A GCP service-account JSON, uploaded or pasted. Project ID is read from the file. |
+| **OpenAI-compatible** | A base URL, and whatever that endpoint expects, including nothing. |
+
+Keys are stored encrypted and never shown again. On an existing entry, leaving
+the key blank keeps the stored one; typing a new one replaces it. Rotating a
+credential is therefore an edit on the entry, and nothing downstream has to
+change — applications, policies and access all point at the entry, never at the
+secret.
+
+## Test the connection
+
+A provider saved with a bad credential looks fine until real traffic hits it, and
+then the failure reaches your callers as provider errors. The connection test
+calls the provider with exactly what you typed and reports the round trip, which
+is the cheapest possible way to find out.
+
+Common failures are translated rather than passed through raw, so an Azure tenant
+that cannot be found, an invalid client secret, an unauthorized client-credentials
+sign-in, a bad scope, an unreachable endpoint and a timeout each read as
+themselves. A few providers cannot be tested yet; those say so rather than
+reporting a false success.
+
+## Contract pricing
+
+Cost in Analytics, on every trace, and in any budget policy is only as true as
+the rates behind it. By default TrustGate prices traffic at list rates. If you
+negotiated something else, the reporting is wrong until you say so here.
+
+| Setting | Meaning |
+|---|---|
+| **List discount** | A percentage off list, applied to every model on this provider. |
+| **Model override** | A model slug with explicit input and output rates, in USD per million tokens. A trailing `*` covers a family, so `gpt-4o-mini*` catches the variants. |
+
+Overrides win wherever they match; the discount covers everything else. A flat
+contract needs only the discount. Add overrides for the models priced outside it.
+
+This matters beyond reporting: a budget policy that stops spend at a threshold is
+counting with these numbers.
+
+## Instances
+
+A provider entry holds as many instances as you need — production and staging
+keys, two Azure deployments, one key per cost centre. Each is configured and
+tested on its own, and each is selectable independently when routing or an
+application picks a destination.

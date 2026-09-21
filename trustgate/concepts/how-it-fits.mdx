@@ -1,0 +1,104 @@
+---
+title: "How TrustGate fits together"
+description: "Five objects — gateway, registry entry, application, access, policy — and the one question each of them answers."
+---
+
+TrustGate has five objects. Each answers exactly one question, and most confusion
+about the product comes from expecting one of them to answer another's.
+
+| Object | The question it answers |
+|---|---|
+| **Gateway** | Where does traffic physically go? |
+| **Registry entry** | What may the gateway reach, and with whose credential? |
+| **Application** | What did your team build, and what is it allowed to use? |
+| **Access** | Which *people* may reach which servers? |
+| **Policy** | What are the rules for traffic that is already allowed? |
+
+## Gateway
+
+A **gateway** is a running deployment: the thing clients send requests to. It is
+the boundary of everything else — a provider connected on one gateway does not
+exist on another, and neither do its credentials, its applications or its
+policies.
+
+Most teams need one. A second gateway is for a genuinely separate environment —
+different network, different data residency, different blast radius — not for
+separating teams or projects, which applications and access already do.
+
+## Registry entry
+
+A **registry entry** is a destination plus the credential to reach it: a model
+provider, or an MCP server. Nothing routes anywhere until it exists here.
+
+One entry can hold several **instances** — the same provider configured more than
+once, each with its own credential. Two Azure deployments, a production and a
+staging key, one MCP server registered against two different accounts.
+
+The credential is the interesting part, because it decides what the destination
+sees. A shared key means every caller acts as one identity upstream. A per-user
+connection means each person acts as themselves, and reaches exactly what their
+own account reaches. Forwarding the caller's own token means TrustGate holds no
+credential at all.
+
+A registry entry does **not** decide who may use it.
+
+## Application
+
+An **application** is something your team built that calls the gateway. It gets
+an endpoint on each plane it uses — **Models**, **Tools**, or both — and one key
+that opens all of them, so a client holds one secret however many planes it
+touches.
+
+An application also narrows what it may use: which registry entries, and
+optionally which models or tools within them. That narrowing is the difference
+between "this service can reach our OpenAI account" and "this service can call
+`gpt-4o-mini` and nothing else".
+
+Applications are for **machine callers**. They authenticate with a key, not as a
+person.
+
+## Access
+
+**Access** is the other half, and the one most often confused with applications:
+it governs which **people** — users and groups from your identity provider — can
+reach which MCP servers and skills.
+
+Each user or group has an access level:
+
+| Level | Meaning |
+|---|---|
+| **All** | Every resource, including ones added later. |
+| **Selected** | Only the resources assigned. Anything else must be requested and approved. |
+| **None** | Nothing. They cannot install or request. |
+
+Levels inherit. A user with no level of their own follows their groups'; a group
+with none follows the gateway's default. So the common setup is one default at
+the gateway, exceptions on a few groups, and almost nothing per person.
+
+When someone with **Selected** wants a server outside their selection, they
+request it, and the request lands in **Approvals**. Approving can grant the
+server to that person alone or to one of their groups — the second is how a
+one-off request becomes a standing rule.
+
+## Policy
+
+A **policy** is the rules for traffic that is already allowed: budgets and rate
+limits, which models or tools may be used, guardrails against what is in the
+request itself.
+
+Access and applications decide *whether* a call is permitted at all. A policy
+decides what happens to the calls that are. Attaching a policy to an application
+is what puts it in the path.
+
+## Putting it together
+
+A request arrives at a **gateway**. It carries an application's key, so the
+gateway knows which **application** it is and therefore which **registry entries**
+that application may use. When the caller is a person using a tool rather than a
+service, **access** decides which servers they can reach. The **policies**
+attached decide the rest — the budget, the allowed models, the guardrails — and
+what survives all of that is routed to a registry entry, using that entry's
+credential.
+
+Every step of that is recorded, which is what [Activity](/trustgate/observability/end-user-attribution)
+and Analytics are reading.
