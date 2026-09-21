@@ -1,0 +1,158 @@
+---
+title: "Connect an agent"
+description: "Two ways in. An agent with its own MCP client needs a URL and a way to sign in. Your own code gets the TrustGate SDK, which answers the three questions MCP does not: which actor, which credential, and what to do when an account is not connected."
+---
+
+Every application on the MCP plane has one URL. What connects to it decides
+which of two paths you take.
+
+## An agent that already speaks MCP
+
+Claude Code, Claude, Cursor, Codex, Gemini, VS Code — anything with an MCP client
+— is pointed at the application's URL and nothing else. The Connect tab has the
+exact snippet for each; they all reduce to one of these shapes:
+
+```bash
+claude mcp add --transport http TrustGate https://<mcp-host>/<application-slug>/mcp
+```
+
+```json
+{ "mcpServers": { "TrustGate": { "type": "http", "url": "https://<mcp-host>/<application-slug>/mcp" } } }
+```
+
+How the agent authenticates follows from the application:
+
+| Application's authentication | What happens on first connect |
+|---|---|
+| **NeuralTrust login** or an **identity provider** | The client runs an OAuth sign-in; the person uses their own account. No key anywhere. |
+| **API key** | The client sends the key in a header. The agent acts as the application. |
+
+With a per-person sign-in, the agent then sees exactly what that person may use
+— governed by [Access](/trustgate/access/overview) — and connects their own
+upstream accounts on first use. Claude's organisation connector, Copilot Studio
+and Windsurf have their own pages under [Integrations](/integrations/overview).
+
+## Your own code: the TrustGate SDK
+
+When you are writing the agent yourself, the URL is the easy part. MCP does not
+carry **which actor** a call speaks as, **which credential** it travels with, or
+**what to do when an upstream account is not connected** — and the SDK exists to
+answer those three.
+
+```bash
+npm install @neuraltrust/trustgate     # TypeScript, Node 18+, no runtime dependencies
+pip install trustgate                  # Python 3.10+, standard library only
+```
+
+One secret, nothing else:
+
+```ts
+const tg = new TrustGate({ baseUrl: "https://gw.acme.ai", apiKey: "ag_…" })
+```
+
+The applications behind a key were created in the console and their slugs never
+travelled with it, so the SDK asks the gateway what the key reaches. You name a
+slug only when one key reaches two applications on the same plane, and the SDK
+refuses to guess rather than pick.
+
+### `connect()` proves three things before anything runs
+
+```python
+try:
+    agent = tg.connect(requires=["search", "create_issue"])
+except MissingToolsError as e:
+    sys.exit(f"the application is missing {e.missing}; ask your admin")
+except UpstreamNotConnectedError as e:
+    sys.exit(f"nobody has signed in to {e.providers}; open {e.connect_url}")
+```
+
+1. **Which actor the application is** — acting as itself, or for its own end
+   users. The application decides this, not your code; the SDK reads it and
+   hands back the matching handle.
+2. **That the tools you need are there.** The tool set belongs to an admin and
+   can be narrowed without warning. `requires` turns that into a refusal at
+   startup instead of a failure mid-conversation.
+3. **That the accounts are signed in** — for an application acting as itself.
+   A batch has nobody to open a connect link once it is running, so the check
+   belongs before the first row.
+
+Tools are named as their own server names them — `search`, not the prefixed
+name the gateway publishes when several servers are bound. The SDK adds the
+prefix; the one case it asks instead is a tool two of your servers both serve.
+
+### Hand the endpoint to a framework
+
+If your framework brings its own MCP client — the OpenAI Agents SDK, the Claude
+Agent SDK, LangChain, Mastra — all the SDK contributes is a checked URL and its
+headers:
+
+```ts
+const agent = await tg.connect({ requires: ["search"] })
+new MCPServerStreamableHttp({ url: agent.mcp.url, headers: agent.mcp.headers })
+```
+
+No adapter per framework, because the framework already is one.
+
+### Or translate the tools for a model call
+
+When you call a provider's API directly there is no MCP client in the picture.
+The SDK lists the tools, translates them into that provider's function-calling
+dialect, and runs the calls — every one of them back through the gateway:
+
+```ts
+const { tools, execute } = agent.toolkit(ToolFormat.OpenAIResponses)
+
+let res = await openai.responses.create({ model: "gpt-5.2", tools, input })
+while (res.output.some((o) => o.type === "function_call")) {
+  res = await openai.responses.create({
+    model: "gpt-5.2", tools, previous_response_id: res.id,
+    input: await execute(res.output),
+  })
+}
+```
+
+`ToolFormat` names providers — `OpenAIResponses`, `OpenAIChat`,
+`AnthropicMessages`, `Gemini` — because translation is only needed on that path.
+The SDK depends on no provider package; `tools` and what `execute()` returns are
+whatever types you name at the call. `strict: true` closes every schema so the
+model cannot invent an argument, and lists the tools that could not be made
+strict rather than dropping them.
+
+### Acting for your users
+
+When the application is set to act for its own end users, `connect()` returns a
+factory instead of a surface: every call belongs to one named person.
+
+```ts
+const handle = await tg.connect()
+const alice = await handle.forEndUser("user_123")
+
+try {
+  await alice.toolkit(ToolFormat.OpenAIResponses).execute(response.output)
+} catch (error) {
+  if (error instanceof ConsentRequiredError) {
+    reply(`I need access to ${error.provider}: ${error.connectUrl}`)
+  }
+}
+```
+
+The connect link arrives inside the error because that is where the gateway
+mints it. `alice.connections()` and `alice.connectLink()` do the same ahead of
+time, when you would rather ask than fail. This is the code side of
+[acting for end users](/trustgate/mcp/end-users).
+
+### What can go wrong, by name
+
+| Error | When |
+|---|---|
+| `MissingToolsError` | `requires` names a tool the application does not serve. |
+| `UpstreamNotConnectedError` | The application's own accounts are not signed in. |
+| `ConsentRequiredError` | An end user has not connected; carries the link. |
+| `PolicyBlockedError` | A gateway policy refused the call. |
+| `ToolNotFoundError` | The tool left the tool set under a running agent. |
+| `PlaneUnavailableError` | The key reaches no application on that plane. |
+
+The [SDK repository](https://github.com/NeuralTrust/trustgate-sdk) has four
+runnable examples, two per language: a batch job acting as itself, and an
+assistant acting for its users — plus `whoami`, which prints what a key reaches
+and is the first thing to run when something is off.
