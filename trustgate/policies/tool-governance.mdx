@@ -149,6 +149,49 @@ request rate limiter.
 Counters follow policy scope: **gateway-wide** for global policies, otherwise **per
 consumer**.
 
+### Counting when both protocols are in play
+
+One tool execution can reach the gateway twice: once as the MCP `tools/call` that runs
+it, and again as the `role: tool` message carrying its result in the next LLM request.
+What that costs depends on the policy's scope.
+
+| Scope | What the counters do |
+|---|---|
+| **Per consumer** (policy attached to a consumer) | The LLM consumer and the MCP consumer have **separate budgets**, and each charges what it observes. This is by design: a per-consumer limit is a promise about that consumer. |
+| **Global** (policy attached gateway-wide) | Both paths share one counter, so the execution would be charged **twice** unless the agent correlates the two observations. |
+
+To make a global policy count the execution once, the agent sends the LLM
+`tool_call_id` it is executing in the `_meta` of the `tools/call`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "execute_code",
+    "arguments": { "source": "print(1)" },
+    "_meta": { "ai.neuraltrust/toolCallId": "call_abc123" }
+  }
+}
+```
+
+The gateway charges the execution when it sees the `tools/call` and remembers that
+`tool_call_id`, so the `role: tool` message for the same id in a later LLM request adds
+nothing. The id is used for accounting only — it is never forwarded to the upstream
+tool.
+
+Two limits are worth knowing:
+
+- **The `tools/call` is always charged.** The id can only cancel the *second*
+  observation, never the first, so repeating one does not buy uncounted executions.
+- **Correlation lasts as long as the rule's longest window.** An execution whose
+  `role: tool` message arrives after that window has passed is charged again, in the
+  window it arrives in.
+
+Without the `_meta` field a global policy charges both observations. Attaching the
+policy per consumer instead of globally also avoids the double charge.
+
 ```json
 {
   "slug": "per_tool_rate_limiter",
