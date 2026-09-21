@@ -1,119 +1,78 @@
 ---
 title: "MCP servers"
-description: "Add MCP servers to a gateway from the console: catalog servers, servers users install themselves, custom servers by URL or OpenAPI document, and who holds the credential."
+description: "Who holds the credential is the decision that shapes an MCP entry: you, each user, or nobody. Plus registering your own server, including an HTTP API described by OpenAPI."
 ---
 
-**Registry → MCP** lists every MCP server this gateway can route tools and
-resources from. Some come from the catalog, some you register yourself, and they
-differ mainly in **who supplies the credential**.
+An MCP entry exposes a server's tools and resources to the agents behind your
+gateway. What distinguishes one entry from another is **who supplies the
+credential**.
 
-## Who holds the credential
+## Three kinds, by who signs in
 
-This is the decision that shapes everything else about an MCP entry.
-
-| Kind | Who signs in | What an admin does |
+| Kind | Who signs in | What you do |
 |---|---|---|
-| **Built-in** | Each user, with their own account | Nothing. Users install the server themselves from the Portal. |
-| **Setup required** | A shared credential you supply | Add the credential before anyone can use the server. |
-| **Optional config** | Each user, unless you configure a shared instance | Nothing, or configure one shared instance for everyone. |
+| **Built-in** | Each user, with their own account | Nothing. People install the server themselves from the Portal. |
+| **Setup required** | You, once | Supply the credential. Until you do, the server is visible and unusable. |
+| **Optional config** | Each user, unless you decide otherwise | Nothing, or configure one shared instance everyone uses. |
 
-A card that reads **Setup required** is not broken — it is waiting for you. Until
-the credential is there the server is visible and unusable.
-
-The **Installation** each user performs on a built-in server creates that
-server's default instance the first time it happens. You will see it appear
-without having made it.
-
-## Installing a catalog server
-
-**Add MCP** opens the catalog. Choosing a server opens **Install**, which asks
-for:
-
-| Field | Notes |
-|---|---|
-| **Instance name** | How you will recognise it later — `Linear – Production`. |
-| **Authentication** | **API key** for one shared key, or **OAuth**. |
-
-When the server uses OAuth, one more choice follows:
-
-- **User account** — each person connects their own account the first time they
-  use the server. Nobody shares a credential, and what each person can reach
-  upstream is whatever their own account can reach.
-- **Shared account** — machine-to-machine OAuth. You supply the client ID and
-  secret, and every caller acts as that one identity.
-
-Some providers require a pre-registered OAuth app rather than dynamic
-registration; the panel says so and asks for the client ID, and the secret when
-one applies.
-
-A server that is one URL with one sign-in holds a single instance, and the panel
-tells you so rather than offering an **Add instance** that would do nothing.
+The choice is not really about convenience. A shared credential gives every
+caller the same upstream permissions and one line in the destination's audit log;
+per-user accounts give each person their own permissions and their own line. For
+anything that reads or writes real data — issues, repositories, customer records
+— that difference is usually the whole decision.
 
 ## Registering your own server
 
-**Custom MCP** registers a server the catalog does not have. **Source** decides
-what you are pointing at:
+A custom entry points at either an MCP endpoint or an HTTP API.
 
-### An MCP server URL
+**An MCP server URL** is an `http(s)` streamable-HTTP endpoint. Name it, point at
+it, choose how it authenticates.
 
-An `http(s)` streamable-HTTP MCP endpoint, plus a name and an optional
-description that shows on the card.
+**An OpenAPI document** is how you get tools out of an API that has never heard
+of MCP. Give TrustGate a URL to an OpenAPI 3.x document and it compiles the
+operations into tools. Validation runs before you can save and fails at a named
+stage — **fetch**, **parse** or **compile** — and on success reports how many
+tools it produced. That count is the number to read: a document that compiles to
+far fewer tools than the API has operations usually describes them too loosely
+for them to be exposed safely, and the fix is in the spec, not here.
 
-### An OpenAPI document
+An **API base URL** overrides `servers[0]` from the spec, for the common case
+where the document is published with a placeholder host.
 
-TrustGate can turn an existing HTTP API into MCP tools. Give it a URL to an
-OpenAPI 3.x document it can fetch, and optionally an **API base URL** that
-overrides `servers[0]` from the spec.
-
-**Validate OpenAPI** has to pass before you can save. It reports which stage
-failed — **fetch**, **parse** or **compile** — and on success shows the version,
-how many tools the document produced, and the base URL it resolved. The tool
-count is the useful number: a document that compiles to far fewer tools than you
-expected usually has operations the spec does not describe well enough to expose.
-
-### Authentication
+### Authentication modes
 
 | Mode | What the gateway sends |
 |---|---|
 | **None** | Nothing. |
-| **Static header** | A header name and value you supply, the same for every caller. |
-| **OAuth (forwarded)** | Each user connects their own account. Registration is **Automatic (DCR)** where the server supports it, otherwise **Manual**. |
-| **Client credentials** | A client ID, secret and token URL; every caller acts as that identity. |
+| **Static header** | A header name and value you supply, identical for every caller. |
+| **OAuth (forwarded)** | Each user connects their own account. Registration is automatic where the server supports dynamic client registration, otherwise you supply the client ID, authorize URL and token URL. |
+| **Client credentials** | A client ID, secret and token URL. Every caller acts as that one identity. |
 
-Manual OAuth registration asks for the client ID, **Authorize URL** and **Token
-URL**, and optionally scopes, an [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)
-resource indicator, and whether the token endpoint takes the secret as
-**client secret basic** or **client secret post**.
+Manual OAuth registration also takes optional scopes, an
+[RFC 8707](https://www.rfc-editor.org/rfc/rfc8707) resource indicator, and whether
+the token endpoint expects the secret as basic auth or as a form field.
 
-On an edit, secret fields read *leave blank to keep current*. Blank means keep —
-you will not silently clear a stored credential by not retyping it.
+When you edit an entry, blank secret fields mean *keep what is stored*. You will
+not clear a credential by not retyping it.
 
-A server that authenticates with the **caller's own token** cannot be switched to
-another mode from this panel, and it says so.
+An entry that forwards the caller's own token cannot be switched to another mode
+after the fact.
 
-## What users can install for themselves
+## What people can install for themselves
 
-A gateway's Store can be **Open** — people install anything in it — or
-**Curated**, where they install from a selection. That mode is a gateway setting;
-Registry shows which one is in force.
+A gateway's Store is either **open** — anyone may install anything in it — or
+**curated**, where each person installs from the resources assigned to them.
 
-On a curated gateway, when someone wants a server outside their selection they
-raise a **request**, and pending requests appear in Registry with the server, the
-requester and when they asked. **Approve** grants that server to them; **Deny**
-does not. Decided requests move to history.
+On a curated gateway, wanting something outside that assignment produces a
+**request** rather than a refusal. Approving it grants the server to the person
+who asked, or to one of their groups; the second turns a one-off into a standing
+rule and is usually what you want the third time the same request appears.
 
-Approving grants the server to the person who asked — it does not open the server
-to everyone.
+Requests and their history live under [Access](/trustgate/mcp/access), which is
+also where the assignments themselves are set.
 
-## Access is set elsewhere
+## Tools are exposed here, governed elsewhere
 
-The **Access** tab in a server's Instances panel is deliberately empty, and says
-so: who may use a server is decided on the [Access](/trustgate/mcp/access) page.
-Applications that route through a server are listed there too, and are bound from
-the Applications side rather than here.
-
-## Tools
-
-An MCP entry exposes whatever tools its server advertises. What an application is
-allowed to *call* is a policy question, not a registry one — see
+An entry exposes whatever tools its server advertises. Which of them a given
+application may actually call is a policy question — see
 [tool governance](/trustgate/policies/tool-governance).

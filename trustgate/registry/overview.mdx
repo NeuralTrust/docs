@@ -1,116 +1,81 @@
 ---
 title: "Registry"
-description: "Everything a gateway is allowed to route to — model providers and MCP servers — on one page, with a card per destination and the credential behind it."
+description: "A registry entry is a destination plus the credential to reach it. What that credential is decides what the destination sees — and it is the only decision here that you cannot quietly change later."
 ---
 
-**Registry** is the list of everything this gateway can reach. Nothing routes
-anywhere until it exists here.
+The **registry** is what a gateway is allowed to reach: model providers, and MCP
+servers. Nothing routes anywhere until it exists here.
 
-A registry entry says *what the destination is and how the gateway authenticates
-to it*. It does not say who may use it — that is [Access](/trustgate/mcp/access), and
-the Registry panels will tell you so when you look for it there.
+An entry is two things — a **destination** and a **credential**. Everything else
+about it follows from the second.
 
-## The two tabs
+## The credential decides what upstream sees
 
-| Tab | What it holds |
-|---|---|
-| **Models** | Model providers the gateway routes inference to — OpenAI, Anthropic, Azure OpenAI, Bedrock, Vertex, Gemini, Mistral, Groq, Cohere, or any OpenAI-compatible endpoint. |
-| **MCP** | MCP servers that expose tools and resources to agents. |
-
-Each tab counts its entries, and the toolbar's **Search** and **Filter** apply to
-the tab you are on.
-
-## One gateway at a time
-
-The **Gateway** selector sits in the page header, and everything below it belongs
-to the gateway you picked. A provider connected on one gateway does not exist on
-another — including its credentials.
-
-If you have no gateway yet, Registry says so and offers to create one; you cannot
-connect anything without one.
-
-## Cards, not rows
-
-Each card is one provider or server, and carries its status:
-
-| Status | Meaning |
-|---|---|
-| **Connected** | Configured and routable. |
-| **Available** | In the catalog, not configured here yet. |
-| **Setup required** | MCP only: a catalog server waiting for a credential an admin has to supply. |
-| **Last test failed** | The stored credentials did not work the last time the gateway tried them. |
-
-**Last test failed** is worth acting on the moment you see it. The entry stays in
-place and traffic keeps being routed to it, so the failure surfaces to callers as
-provider errors rather than as anything obviously wrong with the gateway.
-
-The card's button changes with that status — **Connect** or **Install** for
-something not yet configured, **Settings** for something that is.
-
-## Built-in and custom
-
-**Origin** splits the catalog from what you added:
-
-- **Built-in** entries come from the NeuralTrust catalog. For MCP, built-in also
-  means users can install the server themselves from the Portal and sign in with
-  their own account, with no admin step.
-- **Custom** entries are the ones you registered by URL, by OpenAPI document, or
-  as a custom model backend.
-
-## Filters
-
-| Filter | Tabs | Values |
+| Credential | What the destination sees | Use it when |
 |---|---|---|
-| **Status** | all | Connected, Available, and Setup required on MCP |
-| **Origin** | all | Built-in, Custom |
-| **Category** | MCP | Built from the categories of the servers actually listed |
-| **Capability** | Models | Chat, Embeddings, Rerank, Files, Images, Speech, Transcription |
+| **API key** | One identity for every caller. | The destination has no per-person concept, or you want one bill and one rate limit. |
+| **Shared account** (client credentials) | One identity, obtained by OAuth. | Same, where the provider wants OAuth rather than a key. |
+| **User account** | Each person as themselves. | The destination has per-user permissions worth keeping — a ticket tracker, a repo host, a CRM. |
+| **Caller's own token** | Whatever the caller already had. | The caller is already authenticated upstream and TrustGate should stay out of it. |
+| **None** | An unauthenticated caller. | Internal services on a trusted network. |
 
-**Capability** is the one to reach for when a routing decision depends on what a
-provider can actually do: a provider that does not list *Embeddings* will not
-serve an embeddings call no matter how the policy routes it.
+The practical consequence: with a shared key, the destination's audit log says
+*TrustGate* and every user inherits the same permissions. With per-user accounts
+it says who it actually was, and each person reaches exactly what their own
+account reaches — which is also why someone who has not connected an account yet
+gets nothing until they do.
 
 ## Instances
 
-One provider card can hold several **instances** — separate configurations of the
-same provider, each with its own credentials and its own name. Two Azure OpenAI
-deployments, a production and a staging OpenAI key, one MCP server registered
-twice against different accounts.
+One entry can hold several **instances**: the same provider configured more than
+once, each with its own credential and name. Two Azure OpenAI deployments,
+production and staging keys, one MCP server registered against two accounts.
 
-Open **Instances** from the card to add, edit or delete them. Each instance shows
-how it authenticates:
+Instances are how you separate environments without separating gateways. Routing
+picks between them, and applications and policies refer to them individually.
 
-| Pill | Meaning |
-|---|---|
-| **API key** | Everyone using this instance shares one stored key. |
-| **User account** | Each person connects their own account the first time they use it. |
-| **Shared account** | Machine-to-machine OAuth with a client ID and secret you supply. |
-| **Caller's own token** | The gateway forwards the credential the caller arrived with. |
-| **No authentication** | The destination needs none. |
+A server that is a single URL with a single sign-in holds exactly one instance,
+and a server people install themselves gets its instance created on first
+install.
 
-A built-in server that people install themselves gets its default instance created
-automatically the first time someone installs it — you do not have to make one.
+## Built-in and custom
 
-## Access is not here
+**Built-in** entries come from the NeuralTrust catalog: the connection details are
+already known, so you supply a credential — or, for many MCP servers, nobody
+does, and each person connects their own account the first time they use it.
 
-The **Access** tab inside a server's Instances panel, and the empty states across
-Registry, all say the same thing: who may use an entry is decided on the
-[Access](/trustgate/mcp/access) page, not here. Registry is about reachability and
-credentials only.
+**Custom** entries are the ones you register yourself: an OpenAI-compatible
+endpoint, a self-hosted model, an MCP server by URL, or an HTTP API described by
+an OpenAPI document that TrustGate turns into tools.
 
-## Deleting
+## What the registry does not decide
 
-Deleting an entry permanently removes it from the gateway and stops all routing
-through it. There is no disable-and-keep: the dialog asks you to confirm because
-the only way back is to configure it again.
+Two things live elsewhere, and looking for them here is the most common wrong
+turn:
+
+- **Who may use an entry.** People are governed by [Access](/trustgate/mcp/access);
+  machine callers by the application's own list of entries.
+- **What may be done with it.** Budgets, allowed models, allowed tools and
+  guardrails are [policies](/trustgate/policies/overview).
+
+A registry entry makes something *reachable*. That is all it does.
+
+## Failure worth watching
+
+An entry whose stored credentials stopped working keeps its place and keeps
+receiving traffic. The failure reaches your callers as provider errors rather
+than as anything that looks like a gateway problem, so a failed connection test
+is worth acting on when you notice it, not when someone reports it.
+
+Deleting an entry is permanent and stops all routing through it immediately.
 
 ## Next
 
 <CardGroup cols={2}>
-  <Card title="Connect a model provider" icon="plug" href="/trustgate/registry/models">
-    Credentials per provider, connection tests, and contract pricing.
+  <Card title="Model providers" icon="plug" href="/trustgate/registry/models">
+    What each provider needs, and the contract pricing that makes cost reporting true.
   </Card>
-  <Card title="Add an MCP server" icon="bot" href="/trustgate/registry/mcp">
-    Catalog servers, custom servers, OpenAPI documents, and who installs what.
+  <Card title="MCP servers" icon="bot" href="/trustgate/registry/mcp">
+    Who holds the credential, and turning an OpenAPI document into tools.
   </Card>
 </CardGroup>
