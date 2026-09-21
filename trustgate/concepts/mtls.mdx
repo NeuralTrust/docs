@@ -1,30 +1,30 @@
 ---
 title: "mTLS"
-description: "Authenticate callers to TrustGate with a client certificate — CA, optional allowlists, per-consumer certificate subjects, and X-Forwarded-Client-Cert when TLS terminates in front of the gateway."
+description: "Authenticate callers to TrustGate with a client certificate — CA, optional allowlists, per-application certificate subjects, and X-Forwarded-Client-Cert when TLS terminates in front of the gateway."
 ---
 
-**mTLS** is a consumer [auth](/trustgate/concepts/auth) type. The caller presents a client
+**mTLS** is a application [auth](/trustgate/concepts/auth) type. The caller presents a client
 certificate. TrustGate verifies it against your CA and optionally against CN, DNS SAN, or
-SHA-256 fingerprint allowlists on the CA, then against the consumer's own **Allowed
+SHA-256 fingerprint allowlists on the CA, then against the application's own **Allowed
 certificate subjects**. It works on the LLM proxy plane and on the MCP plane.
 
 This is **client → TrustGate**. It is not how TrustGate authenticates to an upstream MCP
 server, and it is not a TrustGuard evaluate-API method.
 
 The **Machine identity** create form offers **IdP (JWT)** anchors only. Create the CA anchor
-with the [Admin API](/trustgate/api/credentials), then attach it to a consumer; an attached
-CA shows on the consumer as **Client certificate (mTLS)**.
+with the [Admin API](/trustgate/api/credentials), then attach it to a application; an attached
+CA shows on the application as **Client certificate (mTLS)**.
 
 ## Quick path
 
 1. Issue a client certificate from a CA you control. Keep the CA PEM.
 2. `POST /v1/gateways/{gateway_id}/auths` with `type: mtls` and `config.mtls.ca_cert`.
-3. `POST /v1/gateways/{gateway_id}/consumers/{id}/auths/{auth_id}` on the consumer.
-   Optionally set `auth_binding.allowed_certificate_subjects` on the consumer.
+3. `POST /v1/gateways/{gateway_id}/consumers/{id}/auths/{auth_id}` on the application.
+   Optionally set `auth_binding.allowed_certificate_subjects` on the application.
 4. Terminate TLS in front of TrustGate (or on the process). If a proxy terminates TLS, set
    `TRUST_XFCC_FROM` to that proxy's IPs and forward `X-Forwarded-Client-Cert`.
 5. Call the proxy or MCP plane with the client certificate. A valid cert and matching
-   allowlists authenticate as that consumer.
+   allowlists authenticate as that application.
 
 ## What TrustGate checks
 
@@ -38,14 +38,14 @@ cert from this CA”.
 | `allowed_dns_names` | No | At least one DNS SAN must be in this list. |
 | `allowed_fingerprints` | No | SHA-256 of the leaf DER. Hex, optional colons, case-insensitive. |
 
-These lists live on the CA anchor and apply to every consumer that attaches it. To narrow one
-consumer further, set `auth_binding.allowed_certificate_subjects` on the
-[consumer](/trustgate/concepts/consumers#auth-binding): the CN or one of the SAN DNS names
+These lists live on the CA anchor and apply to every application that attaches it. To narrow one
+application further, set `auth_binding.allowed_certificate_subjects` on the
+[application](/trustgate/access/applications#auth-binding): the CN or one of the SAN DNS names
 must be in that list, or the request gets `403`. An empty list accepts any certificate the
 CA verified.
 
 The principal **subject** is the certificate CN, or the first DNS SAN if CN is empty.
-Telemetry records `trustgate.principal.method` = `mtls`. An MCP consumer entered with a
+Telemetry records `trustgate.principal.method` = `mtls`. An MCP application entered with a
 certificate runs as principal `app:<consumer_id>`.
 
 Auth resolution differs per plane:
@@ -53,7 +53,7 @@ Auth resolution differs per plane:
 | Plane | Order |
 |---|---|
 | MCP (`:8082`) | **client certificate → bearer token → API key**. A certificate, when present, is the credential checked. |
-| LLM proxy (`:8081`) | **API key header → client certificate → bearer token**. The certificate is consulted only when the request carries no `Authorization` header and the consumer has an mTLS auth attached; an explicit credential wins. |
+| LLM proxy (`:8081`) | **API key header → client certificate → bearer token**. The certificate is consulted only when the request carries no `Authorization` header and the application has an mTLS auth attached; an explicit credential wins. |
 
 ## How the certificate arrives
 
@@ -105,17 +105,17 @@ Content-Type: application/json
 }
 ```
 
-Then attach to the consumer:
+Then attach to the application:
 
 ```http
-POST /v1/gateways/{gateway_id}/consumers/{consumer_id}/auths/{auth_id}
+POST /v1/gateways/{gateway_id}/applications/{consumer_id}/auths/{auth_id}
 Authorization: Bearer <admin-jwt>
 ```
 
-To restrict which certificates from that CA may enter this consumer:
+To restrict which certificates from that CA may enter this application:
 
 ```http
-PUT /v1/gateways/{gateway_id}/consumers/{consumer_id}
+PUT /v1/gateways/{gateway_id}/applications/{consumer_id}
 Content-Type: application/json
 ```
 
@@ -132,13 +132,13 @@ Content-Type: application/json
 | Surface | mTLS |
 |---|---|
 | LLM proxy (`:8081`) | Yes. |
-| MCP plane (`:8082`), inbound | Yes — the consumer acts as the application, or names its end users with `X-NeuralTrust-End-User` (`identity.source: app`). Interactive agents (Cursor, etc.) still need [OAuth2](/trustgate/concepts/auth) to broker login. |
-| Consumer whose users sign in (`identity.source: platform`) | No — it needs an OAuth2 provider that can broker the login, or the built-in NeuralTrust login. |
+| MCP plane (`:8082`), inbound | Yes — the application acts as the application, or names its end users with `X-NeuralTrust-End-User` (`identity.source: app`). Interactive agents (Cursor, etc.) still need [OAuth2](/trustgate/concepts/auth) to broker login. |
+| Application whose users sign in (`identity.source: platform`) | No — it needs an OAuth2 provider that can broker the login, or the built-in NeuralTrust login. |
 | TrustGate → upstream MCP (`mcp_target.auth`) | No — modes are `none`, `static`, `passthrough`, `exchange`, `forwarded`, `client_credentials`. |
 | TrustGuard `/v1/evaluate` | No — collector API key or service token. |
 
 ## Next step
 
 - [Auth](/trustgate/concepts/auth) — the other credential types.
-- [Consumers](/trustgate/concepts/consumers) — attach, bind, and route.
+- [Applications](/trustgate/access/applications) — attach, bind, and route.
 - [API authentication](/trustgate/api/credentials) — admin JWT and machine credentials.
