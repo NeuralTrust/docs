@@ -54,6 +54,7 @@ guardrails:
       collector_key: os.environ/TRUSTGUARD_COLLECTOR_KEY
       unreachable_fallback: fail_closed
       timeout: 5
+      streaming_transform_mode: block_only
       default_on: true
 ```
 
@@ -66,8 +67,10 @@ relying on.
 
 Proxy admins can do the same from **Guardrails** → **Guardrail Garden** →
 **NeuralTrust** → **Create Guardrail**. The form offers the API key, the
-collector key, the API base, the unreachable fallback, and the timeout. The same
-fields are editable on an existing guardrail.
+collector key, the API base, the unreachable fallback, the timeout, and
+`streaming_transform_mode`. Choose `incremental_diff` when streamed text or tool
+calls must wait for inspection. The same fields are editable on an existing
+guardrail
 
 ### What the guardrail sends
 
@@ -90,24 +93,69 @@ setting: every input evaluation sends the full message array.
 | `collector_key` | `TRUSTGUARD_COLLECTOR_KEY` | omitted when unset |
 | `unreachable_fallback` | none | `fail_closed` |
 | `timeout` | none | `5` seconds, must be positive |
+| `streaming_transform_mode` | none | `block_only`; set `incremental_diff` for buffered, inspected chat output |
 
 ## Ordinary completions vs streamed completions
 
-The native guardrail implements `apply_guardrail`, so LiteLLM scans accumulated
-output during a stream. You do not chunk TrustGuard yourself. On `stream: true`
-LiteLLM evaluates the growing completion every fifth chunk and once more when
-the stream ends, so one streamed response costs several output evaluations.
+Input `block` and `transform` run before the model call, including when the
+caller requests `stream: true`. Output behavior depends on the streaming mode
 
-| | Non-streaming | Streaming (`stream: true`) |
-|---|---|---|
-| **Input `block` / `transform`** | Before the model is called. | Same. |
-| **Output `block`** | The client never sees the completion. | Later chunks stop with an in-stream error frame. Tokens already sent cannot be pulled back. |
-| **Output `transform`** | The client receives the redacted completion. | Not applied. LiteLLM stays on `block_only`. |
+| | Non-streaming | Streaming: `block_only` (default) | Streaming: `incremental_diff` |
+|---|---|---|---|
+| **When text reaches the client** | After the full completion is inspected | As model chunks arrive, with periodic inspection | After generation and the final inspection finish |
+| **Output `block` / `ask`** | The completion is withheld | Stops later chunks; text already sent cannot be pulled back | No completion text or tool-call arguments are released |
+| **Output `transform`** | The client receives the rewritten completion | Text rewrites are discarded; the client receives raw model text | The client receives the final rewritten text |
+| **Output tool calls** | Inspected before delivery; transformed arguments can be applied | Tool-call deltas can reach the client before inspection | Buffered until all required inspections succeed, then delivered with their original arguments |
 
-Use a non-streaming request when DLP must reach the client. If the client must
-not see any output token until inspection finishes, use
-[TrustGate](/integrations/trustgate). LiteLLM scans during the stream. It does
-not buffer the full answer first.
+### Enable inspected streaming output
+
+Set this field under the guardrail's `litellm_params`, or select it in Guardrail
+Garden:
+
+```yaml
+      streaming_transform_mode: incremental_diff
+```
+
+For the native NeuralTrust connector, `incremental_diff` holds the **whole
+reply** until final inspection. It does not release a partly inspected prefix.
+An early `allow` or `report` keeps the text buffered, so a later `block`, `ask`,
+or redaction can still apply before any completion text reaches the client
+
+The request still uses the streaming response format, but the client waits for
+the model to finish and TrustGuard to evaluate the final response before seeing
+the reply. This trades first-token latency for inspection before delivery.
+There is no additional holdback setting to configure
+
+<Warning>
+This mode supports **OpenAI-style chat completions streaming**. Other API
+surfaces, including `/v1/responses`, fall back to `block_only` with a proxy log
+warning. Use non-streaming requests when you need output redaction on those
+surfaces
+</Warning>
+
+### Tool calls and sampling
+
+With `incremental_diff`, LiteLLM buffers tool-call deltas until it inspects the
+assembled response and completes the remaining stream checks. A blocking
+verdict releases neither the arguments nor a successful finish signal. Allowed
+tool calls retain their original deltas and order. **Streamed tool-call
+rewrites are not supported**: use non-streaming requests when a policy must
+transform tool arguments
+
+The connector uses LiteLLM's default sampling interval of five chunks for
+text streams, plus a final inspection. Each scan sees the accumulated text,
+not just the latest chunk. Once a tool call appears in `incremental_diff`,
+inspection waits for the assembled response. Buffering therefore does not
+mean a single evaluation per response
+
+The native connector exposes `streaming_transform_mode`, but does not expose
+`streaming_sampling_rate` as a configuration field. A chunk is an upstream
+stream event, not a fixed number of tokens or characters
+
+The delivery guarantees above require the guardrail to run in `post_call` and
+TrustGuard to enforce the policy. Keep `unreachable_fallback: fail_closed` when
+inspection is required: `fail_open` can release uninspected output after a
+transport failure
 
 ## Multi-turn conversations
 
@@ -177,15 +225,20 @@ On `/v1/responses`, send `x-litellm-session-id` explicitly.
 |---|---|
 | `allow` | Forwards untouched. |
 | `report` | Forwards, and logs the `trace_id`. |
-| `block` | HTTP `400` with `verdict`, `trace_id`, and `request_id`. Findings are not echoed. |
-| `ask` | Same HTTP `400` as `block`, with `verdict: ask`. |
+| `block` | Rejects with `verdict`, `trace_id`, and `request_id`. HTTP `400` before the response starts; an already-started stream terminates with an error. Findings are not echoed. |
+| `ask` | Same rejection as `block`, with `verdict: ask`. There is no interactive approval flow. |
 | `transform` | Rewrites from `transformed_payload`, then continues. Fails closed if the payload cannot be applied. |
 
 `transformed_payload.messages` replaces the evaluated messages one for one and
-writes back any tool-call arguments it changed. `transformed_payload.input`
-rewrites the last user message on the request side, leaving system and prior
-turns intact. A message the policy empties reaches the model or the client with
-empty content, never with the original text.
+writes back any tool-call arguments it changed on non-streaming responses and
+requests. Streamed tool calls keep their original arguments, even with
+`incremental_diff`
+
+`transformed_payload.input` rewrites the last user message on the request side,
+leaving system and prior turns intact. On the response side it rewrites the
+last completion text, even when LiteLLM also attaches the request conversation
+for context. A message the policy empties reaches the model or the client with
+empty content when transforms are applied, never with the original text
 
 <Warning>
 A transform that cannot be applied safely fails closed with HTTP `400` and the
@@ -212,6 +265,9 @@ verdict returns `503`; an unusable transform returns `400`.
 
 ## Verify
 
+After observing traffic, switch the test policy to **Enforce** with an input
+blocking rule before running the blocked-request check
+
 ```bash
 curl -s $PROXY/v1/chat/completions \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
@@ -227,6 +283,17 @@ guardrail writes a proxy log line only for `report` verdicts. `allow` and
 `block` show up in **Activity** and in the guardrail information LiteLLM
 attaches to the request log.
 
+To verify streamed output, set `streaming_transform_mode: incremental_diff`
+and send `stream: true` to `/v1/chat/completions`. Test an **output** DLP rule:
+the client should wait for the final inspection and receive only the rewritten
+text. Then test an output blocking rule: no completion text should arrive.
+An input block alone does not verify output enforcement
+
+For tools, have the model propose a tool call without executing it. With an
+output blocking rule, confirm that no tool-call deltas or arguments arrive.
+With the rule disabled, confirm that the original tool call arrives after
+inspection. Use a non-streaming request to test transformed tool arguments
+
 ## Reference
 
 ### Coverage
@@ -234,14 +301,20 @@ attaches to the request log.
 | Surface | Monitor | Block | Redact |
 | --- | :--: | :--: | :--: |
 | LLM input | ✅ | ✅ | ✅ |
-| LLM output | ✅ | ✅ | ⚠️ |
+| LLM output | ✅ | ⚠️ | ⚠️ |
 | Tool call | ⚠️ | ⚠️ | ⚠️ |
 | Tool result | ⚠️ | ⚠️ | ⚠️ |
 
-Output redaction does not apply on `stream: true`. Tool content is covered when
-LiteLLM includes it in the extracted messages, including tool declarations and
-tool-call arguments. Enforcement is request-level: a finding blocks the complete
-LiteLLM request.
+Output text can be blocked or redacted before delivery on non-streaming
+requests and on OpenAI-style chat streams with `incremental_diff`. With
+`block_only`, blocks stop later chunks and text rewrites are discarded
+
+Tool content is covered when LiteLLM includes it in the extracted messages,
+including tool declarations and tool-call arguments. Streamed tool calls can
+be blocked before delivery with `incremental_diff`, but argument transforms
+require a non-streaming response. Tool results are evaluated when the client
+sends them back through LiteLLM. Enforcement applies to the LiteLLM request;
+the connector does not intercept local tool execution
 
 ### What is evaluated
 
@@ -249,7 +322,8 @@ LiteLLM request.
 | --- | --- | --- | --- |
 | `pre_call` | `direction: input` | Jailbreaks, DLP, indirect prompt injection in tool results | **Block** / **transform** before the model call |
 | `post_call`, non-streaming | `direction: output` | Policy violations in the completion | **Block** / **transform** before the completion is returned |
-| `post_call`, `stream: true` | `direction: output` | Policy violations in the growing completion | **Block** stops later chunks. **Transform** is not applied |
+| `post_call`, stream with `block_only` | `direction: output` | Policy violations in the growing completion | **Block** stops later chunks. **Transform** is not applied |
+| `post_call`, chat stream with `incremental_diff` | `direction: output` | Policy violations in the buffered completion and tool calls | **Block** before delivery; **transform** on text only. Tool arguments are delivered unchanged if allowed |
 
 ### Attributes
 
@@ -269,7 +343,10 @@ LiteLLM request.
 | A blocking prompt returns `200` | `default_on: true` is missing, or the policy is in Observe |
 | `400` with `TrustGuard transform missing payload` | The payload was missing, the message or tool-call count did not match, or the `input` string was empty |
 | `503` with `TrustGuard guardrail service unreachable` | `fail_closed` and TrustGuard timed out, could not be reached, returned `502` or `504`, or returned a `200` whose body is not JSON |
-| A masking policy leaves streamed text unchanged | Streamed `transform` is not applied. Use a non-streaming request, or [TrustGate](/integrations/trustgate) |
+| A masking policy leaves streamed text unchanged | Set `streaming_transform_mode: incremental_diff` and use OpenAI-style chat completions; other streaming surfaces fall back to `block_only` |
+| The client waits until generation finishes to show any text | Expected with native `incremental_diff`: the whole reply waits for final inspection |
+| Streamed tool arguments are not redacted | Streamed tool-call rewrites are unsupported. Use a non-streaming request |
+| A blocked stream already exposed text or tool arguments | `block_only` can deliver chunks before inspection. Use `incremental_diff` on chat completions or a non-streaming request |
 | **Activity** groups by conversation but not by key | The virtual key has no alias, user email, user id, or team alias |
 | Every turn is its own conversation in **Activity** | The caller sends no session key. Send `x-litellm-session-id` |
 
@@ -277,5 +354,5 @@ LiteLLM request.
 
 - [Policies](/trustguard/concepts/policies)
 - [Evaluate API](/trustguard/api/evaluate)
-- [TrustGate](/integrations/trustgate): buffer a stream before the client sees tokens
+- [TrustGate](/integrations/trustgate): gateway integration and its enforcement limits
 - [LiteLLM proxy docs](https://docs.litellm.ai/docs/simple_proxy)
