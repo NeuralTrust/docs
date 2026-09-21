@@ -65,6 +65,7 @@ block:
 | [LangChain](/integrations/langchain) | **Blocked** — the middleware has no Ask case and fails closed on anything it does not recognise. |
 | [Inference Hooks](/integrations/claude-enterprise) | **Allowed** because this integration returns only allow or deny and has no interactive prompt. |
 | [TrustGate](/integrations/trustgate) | **Blocked in Enforce** because the gateway has no interactive approval flow. In Observe, the verdict is recorded and traffic continues. |
+| [LiteLLM](/integrations/litellm) | **Blocked.** The proxy has no approval flow, so `ask` is treated as `block`. |
 | Other gateways | **Allowed**, and recorded. There is nobody to prompt and the outcome is not Block, so the request passes through. |
 | Application collectors | **Whatever you build.** The outcome is advisory; your code has to implement the approval flow. |
 
@@ -111,7 +112,7 @@ response.
 | --- | :--: | :--: | :--: |
 | TrustGate | ✅ | ✅ | ✅ |
 | Portkey | ✅ | ✅ | ❌ |
-| LiteLLM | ✅ | ✅ | ❌ |
+| LiteLLM | ✅ | ✅ | ✅ |
 | Kong | ✅ | ✅ | ❌ |
 | Apigee | ✅ | ✅ | ❌ |
 | Azure APIM | ✅ | ✅ | ✅ |
@@ -135,7 +136,7 @@ response.
 | --- | :--: | :--: | :--: |
 | TrustGate | ✅ | ⚠️ | ⚠️ |
 | Portkey | ✅ | ✅ | ❌ |
-| LiteLLM | ✅ | ⚠️ | ❌ |
+| LiteLLM | ✅ | ⚠️ | ⚠️ |
 | Kong | ✅ | ✅ | ❌ |
 | Apigee | ✅ | ✅ | ❌ |
 | Azure APIM | ⚠️ | ⚠️ | ❌ |
@@ -153,9 +154,13 @@ response.
 | Python middleware | ✅ | ⚠️ | ⚠️ |
 | Node.js middleware | ✅ | ⚠️ | ⚠️ |
 
-**Streaming responses:** TrustGate and LiteLLM inspect a streamed response after
-it has been delivered to the client, so findings on streamed output are
-monitor-only. The other gateway integrations cover only non-streaming responses.
+**Streaming responses:** TrustGate buffers the stream and inspects after the
+client drain, so streamed output findings are monitor-only there.
+[LiteLLM](/integrations/litellm) scans accumulated output **during** the
+stream: `block` stops later chunks, and `transform` reaches streamed tokens
+when `streaming_transform_mode: incremental_diff` is set. Tokens already sent
+cannot be pulled back. The other gateway integrations cover only non-streaming
+responses.
 
 **Azure APIM output:** It can mask on the way in, but not on the way back —
 covering responses at all requires adding the outbound policy.
@@ -247,8 +252,8 @@ available response is to deny the whole inference.
 
 | If you need | Use |
 | --- | --- |
-| Masking sensitive data in flight | [TrustGate](/integrations/trustgate) for non-streaming LLM responses and MCP traffic |
-| Coverage of streaming completions | [TrustGate](/integrations/trustgate) or [LiteLLM](/integrations/litellm) for monitoring after delivery; place preventive rules on the request path |
+| Masking sensitive data in flight | [TrustGate](/integrations/trustgate) for non-streaming LLM responses and MCP traffic. [LiteLLM](/integrations/litellm) for LLM traffic, including streamed redaction when `streaming_transform_mode: incremental_diff` is set |
+| Coverage of streaming completions | [TrustGate](/integrations/trustgate) if the client must see no tokens until inspection finishes. [LiteLLM](/integrations/litellm) if scanning during the stream is enough |
 | A developer confirmation dialog | [Claude Code](/integrations/claude-code), [Cursor](/integrations/cursor), or [GitHub Copilot](/integrations/github-copilot). These integrations support **Ask** on tool calls |
 | Inspection of tool declarations for tool poisoning | [TrustGate](/trustgate/mcp/overview) on MCP, or [LangChain](/integrations/langchain) inside the agent |
 | Enforcement as a visible step in a low-code workflow | [n8n](/integrations/n8n), where the verdict becomes a branch on the canvas |
