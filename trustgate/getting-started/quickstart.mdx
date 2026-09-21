@@ -1,187 +1,75 @@
 ---
 title: "Quickstart"
-description: "Create a TrustGate gateway, connect a provider, send a request, and inspect its trace from the NeuralTrust console."
+description: "A gateway, a provider, a first request and its trace — then the one step that turns it into something an application can call."
 ---
 
-<p className="nt-lead">
-  Create a gateway in the console, connect a provider, send a request, and open
-  the first trace. Choose SaaS unless prompts must stay in your network.
-</p>
-
-- **SaaS** — NeuralTrust hosts the data plane. Nothing to install.
-- **Private (Hybrid)** — you run the data plane; the SaaS console still manages it.
-
-Choose **Private** for data residency, private networking, deterministic capacity,
-or a production SLA. See [Installation](/neuraltrust/deployment/overview).
-
 <Steps>
-<Step title="Open Getting started">
-In the NeuralTrust console, open **TrustGate** → **Getting started**.
+<Step title="Create a gateway">
+Open **TrustGate → Overview**. With no gateway yet, creation opens on its own;
+otherwise pick **New Gateway** from the selector. Name it and choose **SaaS**.
+
+Choose **Private** only when prompts must not leave your network. You then run
+the data plane yourself — Docker, Kubernetes or by hand, from the instructions the
+console generates — and paste its public URL. [Deployment](/neuraltrust/deployment/overview)
+covers what that involves. Everything else in this guide is the same either way.
 </Step>
 
-<Step title="Add a gateway">
-If you do not have a gateway, **Add new Gateway** opens automatically. Otherwise, open
-the gateway selector and choose **New Gateway**. Enter a **Name** and choose **SaaS**.
-
-For a Private data plane, choose **Private**, then select **Docker**, **Kubernetes**, or
-**Manual**. Deploy using the generated instructions, enter one bootstrap
-**Dataplane URL**, and select **Save and Finish**. Then open
-**Settings** → **Agent Gateway** → **General** to set or verify the separate **LLM URL**
-and **MCP URL**.
-
-The generated Docker quick path exposes the LLM/proxy service only. Use Kubernetes or a
-full deployment when you need MCP.
-
-See [Private deployment](/neuraltrust/deployment/overview) for infrastructure details.
+<Step title="Connect a provider">
+Pick a provider, enter its credential, and **Test connection** before you save.
+A credential that fails here fails later as provider errors your callers see, so
+the test is the cheap moment to find out. [Model providers](/trustgate/registry/models)
+has what each one asks for.
 </Step>
 
-<Step title="Step 1 · Connect a provider">
-Choose a provider and enter its credentials. Select **Test connection** to verify them,
-then select **Connect**.
+<Step title="Send a request">
+Pick one of the provider's models, type a question, send. The request goes
+through the gateway you just created.
 </Step>
 
-<Step title="Step 2 · Send request">
-Choose one of the provider's models, enter a question, and select **Send request**. The
-console sends the request through the selected gateway.
-</Step>
-
-<Step title="Step 3 · Traces">
-Review the first trace, including its status, model, latency, token count, trace ID, and
-response. Continue to **Playground**, **Application**, or **Security** from the next-step
-cards.
+<Step title="Read the trace">
+Status, model, latency, tokens, trace id, response. This is the shape of every
+row in [Activity](/trustgate/operate/activity) from now on.
 </Step>
 </Steps>
 
-## Call from your application
+## The step that matters
 
-<Warning>
-The request in **Getting started** uses an internal playground token. It does not create
-a reusable API key for your application.
-</Warning>
+The request you just sent used an internal session. **Nothing you have done so far
+gives an application anything to call with.** For that:
 
-For production traffic:
+1. Create an **[application](/trustgate/access/applications)** and add the provider
+   to it. Its type follows — it now serves LLM traffic.
+2. Issue it a **key**. It is shown once. Copy it somewhere safe.
+3. Open **Connect** and copy the snippet. It already carries the right URL, the
+   right header, and the right `model` value for the application's strategy.
 
-1. Open **Applications**.
-2. Select **Application**; the **New Application** panel opens. You can also open an existing
-   application.
-3. For a new application, select **API Key** under **Authentication** and copy the generated
-   key when it is shown—it appears only once. For an existing application, manage
-   credentials under **Auth**.
-4. Open **Connect** and use a snippet under **Connection details**.
-
-The provider credential remains in TrustGate. Keep the application API key secret and use
-placeholders in shared examples.
-
-### SaaS
-
-Use the SaaS gateway URL from **Connection details**. Do not add
-`X-AG-Gateway-Slug`.
+The provider's credential never leaves the gateway. The application holds only its
+own key, and rotating one never touches the other.
 
 ```bash
-curl -X POST "https://<gateway-host>/<application-slug>/v1/chat/completions" \
-  -H "X-AG-API-Key: <your-api-key>" \
+curl -X POST "https://<llm-host>/<application-slug>/v1/chat/completions" \
+  -H "X-AG-API-Key: <application key>" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "<model>",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-### Private (Hybrid)
+Clients that only take a base URL and an API key — OpenAI or Anthropic SDKs,
+Cursor, desktop chat apps — can send the same key as `Authorization: Bearer` or
+`x-api-key` instead. Nothing else about them changes.
 
-Use the configured LLM URL and include the gateway slug:
-
-```bash
-curl -X POST "<configured-llm-url>/<application-slug>/v1/chat/completions" \
-  -H "X-AG-Gateway-Slug: <gateway-slug>" \
-  -H "X-AG-API-Key: <your-api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "<model>",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
-
-Clients that only support a base URL plus an API key (OpenAI- or Anthropic-compatible
-SDKs, Cursor, Claude Desktop-style setups) can send the same `ag_…` key as
-`Authorization: Bearer ag_…` or `x-api-key: ag_…` instead of `X-AG-API-Key`. See
-[Auth](/trustgate/concepts/auth#api-keys).
-
-Embeddings use the same host, application slug, and key:
-
-```bash
-curl -X POST "https://<gateway-host>/<application-slug>/v1/embeddings" \
-  -H "X-AG-API-Key: <your-api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "text-embedding-3-small",
-    "input": ["Hello from TrustGate"]
-  }'
-```
-
-Providers, routing, and Bedrock / Vertex limits: [Embeddings](/trustgate/endpoints/embeddings).
-
-Images use the same host, application slug, and key:
-
-```bash
-curl -X POST "https://<gateway-host>/<application-slug>/v1/images/generations" \
-  -H "X-AG-API-Key: <your-api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "dall-e-3",
-    "prompt": "A minimal TrustGate logo",
-    "n": 1,
-    "size": "1024x1024"
-  }'
-```
-
-Providers and multipart edits/variations: [Images](/trustgate/endpoints/images).
-
-Files use the same host, application slug, and key:
-
-```bash
-curl -X POST "https://<gateway-host>/<application-slug>/v1/files" \
-  -H "X-AG-API-Key: <your-api-key>" \
-  -F purpose=assistants \
-  -F file=@notes.txt
-```
-
-Providers and list/get/content/delete: [Files](/trustgate/endpoints/files).
-
-Rerank (Cohere v2 body) and model discovery:
-
-```bash
-curl -X POST "https://<gateway-host>/<application-slug>/v1/rerank" \
-  -H "X-AG-API-Key: <your-api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "rerank-english-v3.0",
-    "query": "What is TrustGate?",
-    "documents": ["TrustGate is an LLM gateway"]
-  }'
-
-curl "https://<gateway-host>/<application-slug>/v1/models" \
-  -H "X-AG-API-Key: <your-api-key>"
-```
-
-[Rerank](/trustgate/endpoints/rerank) · [Models](/trustgate/endpoints/models).
-
-## Next steps
-
-From Getting started **What's next**, open **Playground**, **Application**, or **Security**
-(policies) — or continue below.
+## Then
 
 <CardGroup cols={2}>
-  <Card title="Endpoints" icon="plug" href="/trustgate/endpoints/chat">
-    Every route a client can call through a application.
-  </Card>
-  <Card title="Event schema" icon="activity" href="/platform/event-schema">
-    The per-request event behind Activity, Analytics and alerts.
-  </Card>
-  <Card title="Applications" icon="users" href="/trustgate/access/applications">
-    Auth, routing strategies, policies, Connect snippets.
+  <Card title="How TrustGate fits together" icon="shapes" href="/trustgate/concepts/how-it-fits">
+    The five objects and the one question each answers.
   </Card>
   <Card title="Policies" icon="shield" href="/trustgate/policies/overview">
-    Rate limits, budgets, guardrails, tool governance.
+    A budget, a rate limit, a guardrail — attached to the application you just made.
+  </Card>
+  <Card title="Routing" icon="route" href="/trustgate/llm/routing">
+    A second provider as fallback, or a cheaper model for easy prompts.
+  </Card>
+  <Card title="MCP Gateway" icon="bot" href="/trustgate/mcp/overview">
+    The same gateway in front of tools.
   </Card>
 </CardGroup>
