@@ -1,191 +1,66 @@
 ---
 title: "Guardrails"
-description: "Inspect or rewrite prompts and responses inline at the gateway with TrustGuard, OpenAI Moderation, Azure Content Safety, AWS Bedrock, or Regex Replace policies."
+description: "Inspect what goes in and what comes out. TrustGuard, a provider's moderation service, an AWS guardrail, or deterministic regex — and the one thing none of them can do."
 ---
 
-TrustGate guardrail policies inspect request or response content and can block or
-transform matching content. Add one or more guardrails to a
-[policy](/trustgate/policies/overview), either globally or per application.
+Applies to **LLM and MCP**. Each guardrail inspects the request, the response, or
+both, and blocks or transforms what matches.
 
-## Configure in the console
+## The one limit shared by all of them
 
-1. Open **Policies** → **Catalog** (guardrails are listed first).
-2. Pick **TrustGuard**, **OpenAI Moderation**, **Azure Content Safety**,
-   **Bedrock Guardrail**, or **Regex Replace**.
-3. For **TrustGuard**, select or create an **Agent Runtime** collector when prompted;
-   connection settings are platform-managed on SaaS.
-4. Set direction (request / response), mode (**Enforce** / **Observe**), and scope.
-5. Save. Test blocking behavior in the **Playground** and inspect
-   **Security** flags under **Activity**.
-
-| Policy (`slug`) | Provider | Stages |
-|---|---|---|
-| [`trustguard`](#trustguard) | NeuralTrust TrustGuard | `pre_request` · `pre_response` |
-| [`openai_moderation`](#openai-moderation) | OpenAI Moderations API | `pre_request` · `pre_response` |
-| [`azure_content_safety`](#azure-content-safety) | Azure AI Content Safety | `pre_request` |
-| [`bedrock_guardrail`](#aws-bedrock-guardrail) | AWS Bedrock Guardrails | `pre_request` · `pre_response` |
-| [`regex_replace`](#regex-replace) | Built-in RE2 rewrite | `pre_request` or `pre_response` |
-
-Streaming responses cannot be inspected or blocked in realtime by these policies. Apply
-guardrails on the request leg (or to non-streaming responses) for enforcement.
-
----
+**Streaming responses cannot be inspected or blocked in real time.** Tokens are
+already leaving when a detector would decide. Put guardrails on the request leg,
+or on non-streaming responses, for enforcement. A response guardrail on a
+streaming application observes; it does not protect.
 
 ## TrustGuard
 
-The **`trustguard`** policy evaluates request or response content using configured
-[TrustGuard](/trustguard/overview) detectors for jailbreaks, PII, toxicity, and
-tool abuse. It applies the action returned by TrustGuard.
+Runs [TrustGuard](/trustguard/overview) detectors — jailbreak, PII, secrets,
+toxicity, tool abuse, multi-turn attacks — against the request, the response, or
+both, and applies the action TrustGuard returns. It needs an Agent Runtime
+collector connected to this gateway; the policy creates one if none exists.
 
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `collector_id` | string | None | TrustGuard collector UUID bound to this policy. **Required.** |
-| `direction` | enum | `request_response` | `request`, `response`, or `request_response`. |
-| `on_error` | enum | `fail_open` | `fail_open` or `fail_closed` for transport and service errors. Authentication (`401`/`403`), rate-limit (`429`), and entitlement (`503`) responses always block. |
+**On error**: fail open (default) or fail closed for transport and service
+failures. Authentication, rate-limit and entitlement responses from TrustGuard
+always block regardless — a gateway that cannot prove it is allowed to call the
+detector does not get to guess.
 
-Transport failures, timeouts, and ordinary service errors follow `on_error`,
-which defaults to `fail_open`. Authentication, rate-limit, and entitlement
-responses always block. A missing base URL or gateway credential fails open.
-Connection settings come from the deployment's `TRUSTGUARD_*` environment. See
-the [TrustGate integration](/integrations/trustgate).
-
-```json
-{ "slug": "trustguard", "settings": { "collector_id": "<uuid>", "direction": "request_response", "on_error": "fail_open" } }
-```
+Findings correlate with [Telemetry alerts](/platform/alerts), which is the
+argument for this one over a provider's moderation API when you already run
+TrustGuard.
 
 ## OpenAI Moderation
 
-The **`openai_moderation`** policy screens text with the OpenAI Moderations API and blocks
-content that crosses configured category thresholds. **Text-only.**
+Screens text with OpenAI's moderation model against per-category thresholds; a
+score at or above a threshold blocks, and **block on flagged** blocks anything
+OpenAI flags even without a threshold. Needs an OpenAI key of its own. Text only.
 
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `api_key` | string | None | OpenAI credential (Bearer). **Required.** |
-| `model` | string | `omni-moderation-latest` | Moderations model. |
-| `stages` | enum[] | None | Legs to inspect: `pre_request`, `pre_response`. |
-| `categories` | string[] | None | Categories to evaluate (empty = all returned). |
-| `thresholds` | map | None | Per-category score threshold `0..1`; a score ≥ threshold blocks. |
-| `block_on_flagged` | bool | `false` | Block anything OpenAI marks flagged, even without a threshold. |
-| `action.message` | string | None | Block message returned to the caller. |
-
-In `enforce` mode this policy **fails closed** (HTTP 502) on any moderator error; `observe`
-mode records and passes through.
-
-```json
-{
-  "slug": "openai_moderation",
-  "settings": {
-    "api_key": "sk-…",
-    "stages": ["pre_request"],
-    "thresholds": { "harassment": 0.7, "hate": 0.5 },
-    "block_on_flagged": true
-  }
-}
-```
+In enforce mode it **fails closed** on any moderator error.
 
 ## Azure Content Safety
 
-The **`azure_content_safety`** policy screens request content with the Azure AI Content Safety
-Analyze Text API and blocks categories whose severity meets the configured threshold.
-
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `api_key` | string | None | Azure subscription key (`Ocp-Apim-Subscription-Key`). **Required.** |
-| `endpoint` | string | None | Absolute Analyze Text endpoint URL. **Required.** |
-| `output_type` | enum | `FourSeverityLevels` | `FourSeverityLevels` (0/2/4/6) or `EightSeverityLevels` (0–7). |
-| `categories` | enum[] | all | `Hate`, `Violence`, `SelfHarm`, `Sexual`. |
-| `category_severity` | map | None | Per-category severity threshold; only listed categories are enforced. **Required.** |
-| `message` | string | None | Optional block message. |
-
-Fails closed in `enforce` mode.
-
-```json
-{
-  "slug": "azure_content_safety",
-  "settings": {
-    "api_key": "…",
-    "endpoint": "https://<resource>.cognitiveservices.azure.com/contentsafety/text:analyze?api-version=2024-09-01",
-    "category_severity": { "Hate": 4, "Violence": 4 }
-  }
-}
-```
+Azure's Analyze Text against **Hate**, **Violence**, **SelfHarm** and **Sexual**,
+with a severity threshold per category; only the categories you list are
+enforced. Needs the endpoint and a subscription key. Request leg only. Fails
+closed in enforce mode.
 
 ## AWS Bedrock guardrail
 
-The **`bedrock_guardrail`** policy applies an AWS Bedrock guardrail to request prompts and/or
-responses. It inspects the topic,
-content, word, sensitive-information (PII), and contextual-grounding policy families configured
-on the guardrail, and blocks with a `403` or anonymizes PII in place. Streaming responses pass
-through untouched.
-
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `guardrail_id` | string | None | AWS Bedrock guardrail identifier. **Required.** |
-| `version` | string | `DRAFT` | Guardrail version. |
-| `pii_action` | enum | `block` | On sensitive-info match: `block` or `anonymize`. |
-| `message` | string | None | Optional block message. |
-| `credentials` | object | None | AWS auth (region, static keys **or** `use_role` + `role_arn`). **Required.** |
-
-```json
-{
-  "slug": "bedrock_guardrail",
-  "settings": {
-    "guardrail_id": "abcd1234",
-    "version": "DRAFT",
-    "pii_action": "anonymize",
-    "credentials": { "aws_region": "us-east-1", "use_role": true, "role_arn": "arn:aws:iam::…:role/…" }
-  }
-}
-```
+Reuses a guardrail you already defined in Bedrock — its topic, content, word,
+sensitive-information and grounding policies — against prompts and responses.
+Authenticate with static keys or an IAM role. The one distinctive option is
+**PII action**: block, or **anonymise in place**, which is the only guardrail here
+that redacts rather than refuses.
 
 ## Regex Replace
 
-The **`regex_replace`** policy (**Regex Replace** in the catalog) rewrites the request
-prompt **or** the LLM response with ordered [RE2](https://github.com/google/re2/wiki/Syntax)
-regular expressions. Rules chain: each rule sees the previous rule's output. A single policy
-instance targets one leg (`request` or `response`), not both. Streaming responses pass
-through untouched.
+Ordered RE2 rewrite rules on the request **or** the response — one leg per
+policy. Each rule sees the previous rule's output. No external service, fully
+deterministic, and it does exactly what the pattern says and nothing more, which
+is both its virtue and its limit.
 
-### Configure in the console
+## Combining them
 
-1. **Policies** → **Catalog** → **Regex Replace**.
-2. Choose the target leg (request or response) and add ordered rewrite rules
-   (pattern, replacement, optional case-insensitive / multiline).
-3. Set mode and scope, then save.
-
-| Setting | Type | Default | Notes |
-|---|---|---|---|
-| `target` | enum | None | `request` or `response`. **Required.** |
-| `rules` | array | None | Ordered `[{ pattern, replacement, case_insensitive, multiline }]`. **Required.** |
-| `rules[].pattern` | string | None | RE2 pattern (no backreferences or lookaround). **Required.** |
-| `rules[].replacement` | string | None | Replacement text; `$1` / `${name}` for capture groups. Empty removes the match. |
-| `rules[].case_insensitive` | bool | `false` | Match without regard to letter case (`(?i)`). |
-| `rules[].multiline` | bool | `false` | `^` and `$` match at line boundaries (`(?m)`). |
-
-```json
-{
-  "slug": "regex_replace",
-  "settings": {
-    "target": "request",
-    "rules": [
-      { "pattern": "\\b(ssn|social)\\b", "replacement": "[REDACTED]", "case_insensitive": true }
-    ]
-  }
-}
-```
-
----
-
-## Choose a guardrail
-
-- **`trustguard`:** evaluate content with TrustGuard detectors and correlate
-  findings with [Telemetry Alerts](/platform/alerts).
-- **`openai_moderation` / `azure_content_safety`:** apply the corresponding
-  provider's content-moderation service.
-- **`bedrock_guardrail`:** reuse guardrails defined in AWS Bedrock, including
-  in-place PII anonymization.
-- **`regex_replace`:** use deterministic string replacement for pattern-based
-  redaction or rewriting without an external moderator.
-
-A policy chain can contain multiple guardrails. For example, apply TrustGuard to
-the request and a Bedrock guardrail for PII anonymization to the response.
+A chain may hold several. TrustGuard on the request and a Bedrock guardrail
+anonymising PII on the response is a common pair: the first refuses what should
+not go out, the second cleans what comes back.

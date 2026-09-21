@@ -1,174 +1,62 @@
 ---
-title: "Rate limiting & budgets"
-description: "Limit request volume with Rate Limiter, and cap LLM spend over time with LLM Budget (token_rate_limiter) — tokens or dollars, aggregate or per-model."
+title: "Rate limits and budgets"
+description: "Two policies cap volume and spend: a request rate over a sliding window, and a token or dollar budget that can reject or downgrade when exceeded."
 ---
 
-Two catalog policies control volume and spend:
-
-| Catalog name | Slug | Group | What it does |
-|---|---|---|---|
-| **[Rate Limiter](#rate-limiter)** | `rate_limiter` | Traffic control | Max requests per sliding window. |
-| **[LLM Budget](#llm-budget)** | `token_rate_limiter` | Quota | Token or dollar budget over a time window; reject or downgrade when exceeded. |
-
-Both respect [policy](/trustgate/policies/overview) scope (**Gateway-wide** or **Targeted** applications) and support **Enforce** / **Observe** (and throttle where the plugin allows).
-
----
-
-## Configure in the console
-
-1. Open **Policies** → **Catalog**.
-2. Choose **Rate Limiter** or **LLM Budget**.
-3. Set **Scope** (mode + gateway-wide / targeted applications).
-4. Fill the form (details below).
-5. Save. Verify with **Playground** or
-   **Analytics → Policy** / **Cost**.
-
----
+Applies to **LLM and MCP** for the rate limiter; **LLM** for the budget.
 
 ## Rate Limiter
 
-**`rate_limiter`** counts requests in a sliding window at `pre_request`.
+Counts requests in a sliding window and refuses the ones over the line. You set a
+**limit**, a **window** (`30s`, `1m`, `1h`), and the **Retry-After** the refusal
+carries. Refused responses carry the standard rate-limit headers so a well-behaved
+client backs off on its own.
 
-### Settings
-
-| Setting | Backend | Notes |
-|---|---|---|
-| **Limit** | `limit` | Max requests per window. **Required.** |
-| **Window** | `window` | Duration string: `30s`, `1m`, `1h`. **Required.** |
-| **Retry-After** | `retry_after` | Seconds returned when limited (default `60`). |
-| **Group by header** | `group_by_header` | Optional sub-partition (e.g. `X-User-Id`). |
-
-```json
-{ "slug": "rate_limiter", "settings": { "limit": 100, "window": "1m" } }
-```
-
-Limited responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`,
-and `Retry-After`.
-
----
+**Group by header** splits the counter by a header value — `X-User-Id`, say — so
+one policy gives every end user of an application their own allowance. It is the
+cheap way to get fairness inside one application without a policy per person.
 
 ## LLM Budget
 
-**`token_rate_limiter`**, labeled **LLM Budget** in the catalog, caps LLM usage by
-**provider tokens or USD** over a time window. It checks the budget at `pre_request` and
-accrues usage at `post_response`.
+Caps usage over a window, in **tokens** or in **dollars**, and decides what
+happens when the cap is reached.
 
-This is the catalog quota policy for spend over time. Use **tokens** for raw usage or
-**dollars** for cost. Dollar mode uses the same rates as telemetry and Analytics:
-[registry contract pricing](/trustgate/concepts/registries#contract-pricing) first
-(override, else discount × catalog), then the models.dev catalog. A policy
-`custom_pricing` map (API-only) still wins over the registry when set.
-
-### Configure in the console
-
-1. **Policies** → **Catalog** → **LLM Budget**.
-2. Under **Budget**, set unit, max, and time window.
-3. Under **When limit is exceeded**, choose behaviour (and downgrade target if needed).
-4. Optionally add **Per model limits**.
-5. Optionally open **Advanced Settings** (group-by header, counting).
-6. Set mode and scope, then save.
-
-The console uses a dedicated form (not the generic schema renderer).
-
-### Settings (UI ↔ backend)
-
-#### Budget
-
-| UI | Backend | Default | Meaning |
-|---|---|---|---|
-| **Unit** | `unit` | Tokens | **Tokens** or **Dollars**. |
-| **Max** | `aggregate.max` | — | Ceiling for the window. Tokens must be whole numbers; dollars may be fractional. **Required** (> 0). |
-| **Time window** | `aggregate.time_window` | e.g. `1h` | Value + unit (**Seconds** / **Minutes** / **Hours** / **Days**). Backend raises windows below `60s` to `60s`. |
-
-The form shows a live summary, e.g. “Allow **1000** tokens **per hour**.”
-
-#### When limit is exceeded
-
-| UI | Backend | Meaning |
-|---|---|---|
-| **Reject request** | `behavior_on_exceeded: reject` | Block the call (default). |
-| **Downgrade model** | `behavior_on_exceeded: downgrade_model` | Rewrite `model` to a cheaper target. |
-| **Downgrade to** | `downgrade_to` | Required when downgrading. Same provider as the requested model. |
-
-#### Per model limits (optional)
-
-Tighter budgets for specific models. Match by slug or wildcard (e.g. `claude-opus-*`).
-Most specific pattern wins.
-
-| UI | Backend |
+| Setting | Meaning |
 |---|---|
-| **Model** | `rules[].model` |
-| **Max** | `rules[].max` |
-| **Time window** | `rules[].time_window` |
+| **Unit** and **Max** | Tokens (whole numbers) or dollars (fractional), per window. |
+| **Time window** | Seconds to days. Anything under a minute is raised to a minute. |
+| **When exceeded** | **Reject** the request, or **downgrade** the model to a cheaper one on the same provider. |
+| **Per-model limits** | Tighter caps for specific models or families — `claude-opus-*`. The most specific pattern wins. |
+| **Counting** | Total, input only, or output only. |
 
-#### Advanced
+The budget is checked before the request goes upstream, using an estimate, and
+the actual usage is charged after the response. In observe mode nothing is
+blocked; the decision still appears on the event, which is how you learn what a
+budget would have done before it does it.
 
-| UI | Backend | Default | Meaning |
-|---|---|---|---|
-| **Group by header** | `group_by_header` | empty | Separate counter per header value (e.g. `X-User-Id` for per-end-user budgets). |
-| **Counting** | `counting` | Total (input+output) | **Total**, **Input only**, or **Output only**. |
+### Dollars are only as true as the rates
 
-Fields present in the plugin but not edited in the console (left at defaults / API-only)
-include stream usage injection, count cache reads, and custom pricing.
+A dollar budget prices tokens the same way [Analytics](/trustgate/operate/analytics)
+does: your [contract pricing](/trustgate/registry/models#contract-pricing) on the
+registry where you set it, otherwise list price. A budget set before the contract
+is entered stops spend at list-price arithmetic, which for a discounted contract
+means it stops too early.
 
-### Runtime
+### Downgrade, not reject
 
-1. At **pre_request**, estimate whether the request would exceed the remaining budget for the
-   scope (and matching per-model rule, if any).
-2. If over limit under **Enforce**:
-   - **Reject** → stop upstream with a budget error.
-   - **Downgrade** → rewrite the request model to **Downgrade to** and continue.
-3. At **post_response**, accrue actual tokens (or estimated dollars) against the counter.
-4. Under **Observe**, over-limit traffic is not blocked; decisions still appear on policy
-   events for Activity / Analytics.
+Downgrading keeps the application working when it hits its ceiling — at
+`gpt-4o-mini` instead of `gpt-4o` — instead of returning errors. The target must
+be on the same provider. It is the better default for anything user-facing; reject
+is for spend that must not happen at all.
 
-### Example
-
-```json
-{
-  "slug": "token_rate_limiter",
-  "settings": {
-    "unit": "dollars",
-    "counting": "total",
-    "aggregate": { "max": 50, "time_window": "1d" },
-    "behavior_on_exceeded": "downgrade_model",
-    "downgrade_to": "gpt-4o-mini",
-    "rules": [
-      { "model": "gpt-4o*", "max": 20, "time_window": "1d" }
-    ],
-    "group_by_header": "X-User-Id"
-  }
-}
-```
-
-Token pool example:
-
-```json
-{
-  "slug": "token_rate_limiter",
-  "settings": {
-    "unit": "tokens",
-    "counting": "total",
-    "aggregate": { "max": 1000000, "time_window": "1h" },
-    "behavior_on_exceeded": "reject"
-  }
-}
-```
-
-### Choosing a scope
+## Choosing where it applies
 
 | Scope | Typical use |
 |---|---|
-| **Gateway-wide** | Org-level spend ceiling. |
-| **Targeted applications** | Per-tenant or per-app quotas. |
-| **Group by header** | Fairness inside one application (per end-user) without a policy per user. |
+| **Gateway-wide** | An organisation-level ceiling nobody can opt out of. |
+| **Targeted** | Per-tenant or per-application quotas. |
+| **Group by header** | Per end user inside one application, without a policy per user. |
 
----
-
-## Related
-
-- [Policies overview](/trustgate/policies/overview)
-- [Request size](/trustgate/policies/request-size) — payload size limits
-- **Analytics** — Cost and Policy tabs
-- [Registries](/trustgate/concepts/registries#contract-pricing) — contract rates for dollar budgets
-- [Smart routing](/trustgate/llm/routing#smart-routing) — route by Simple / Medium / Hard labels; pair with LLM Budget for spend ceilings
+Pair a budget with [smart routing](/trustgate/llm/routing#smart-routing) when the
+goal is cost: routing lowers the bill on every request, the budget puts a hard
+stop under it.

@@ -1,226 +1,57 @@
 ---
 title: "Tool governance"
-description: "Govern LLM function tools at the gateway — filter client tools with allow/deny patterns, inject operator-authored tools, and rate-limit tool executions. Distinct from MCP toolkit grants on applications."
+description: "Shape which tools a model sees and how often any tool may run — for LLM function calling and for MCP tool calls."
 ---
 
-For **LLM** function-calling traffic, TrustGate can shape which tools the model sees and
-how often they run. Create policies under **Policies** → **Catalog**, or attach them from a
-application **Policies** tab.
+Applies to **LLM** for allowlisting and injection; **LLM and MCP** for per-tool
+rate limits.
 
-| Policy | Slug | Catalog group | What it does |
-|---|---|---|---|
-| **[Tool Allowlist](#tool-allowlist)** | `tool_allowlist` | Not in the Catalog tab — Admin API | Keep only client tools that match allow / deny glob patterns; decide what happens when none remain. |
-| **[Tool Injection](#tool-injection)** | `tool_injection` | Tool Governance | Append operator-authored function tools to the request before the model runs. |
-| **[Per-Tool Rate Limiter](#per-tool-rate-limiter)** | `per_tool_rate_limiter` | Traffic Control | Limit how often a tool name/pattern may execute (LLM and MCP). |
-
-These policies apply to the **LLM request `tools[]` / tool-call path** (and, for the rate
-limiter, to **MCP tool executions**). They are **not** the same as MCP **toolkit** grants
-on a application, which control which MCP server tools an agent may list and call — see
-[MCP](/trustgate/mcp/overview).
-
----
+Which MCP servers and tools an application may reach at all is set on the
+[application](/trustgate/access/applications#what-it-may-use). These policies
+govern the tools on the request path.
 
 ## Tool Allowlist
 
-**`tool_allowlist`** filters the **client-supplied** tools on an LLM request against glob
-patterns before the model sees them. Deny always wins over allow. It is the counterpart of
-[Tool Injection](#tool-injection), which only adds tools.
+Filters the tools a **client** sends on an LLM request against glob patterns
+before the model sees them — `github/*`, `search_*`. Deny wins over allow. When
+filtering removes every tool you choose what happens: reject the request
+(default), send an empty tool list, or strip the tool fields entirely.
 
-The policy is not offered in the console **Catalog** tab. Create it through the
-[Admin API](/trustgate/api/credentials) with the settings below; the console shows an
-existing policy's **Allow** / **Deny** / **Behaviour** fields in its detail panel.
-
-### Settings
-
-| Setting | Meaning |
-|---|---|
-| `allow_tools` | Glob patterns (e.g. `github/*`, `search_*`). When set, only matching tools pass. |
-| `deny_tools` | Glob patterns removed after `allow_tools`. A tool matching both lists is removed. |
-| `on_empty_after_filter` | What to do when filtering removes every tool: `reject` (default, **403** `no_tools_allowed`), `pass_through_empty` (send `"tools": []`), or `strip_tools_field` (remove `tools`, `tool_choice`, `parallel_tool_calls`, and Gemini `toolConfig`). |
-| `scope` | Informational (`application` or `global`); the effective scope comes from the policy coverage. |
-
-At least one of `allow_tools` or `deny_tools` is required. Patterns must not be blank.
-Tool names containing non-printable characters are never kept.
-
-Stage: `pre_request`. Protocol: **LLM** only. Modes: **Enforce** and **Observe**.
-
-### Body handling in Enforce mode
-
-| Request body | Result |
-|---|---|
-| `tools` / `tool_choice` / `parallel_tool_calls` / `toolConfig` present once, exact case | Filtered as configured. |
-| Any of those keys duplicated or in a different case (e.g. `Tools`) | **400** `invalid_tools_field` — the request is rejected rather than filtered ambiguously. |
-| Body carries one of those keys but cannot be decoded for its wire format | **400** `invalid_tools_field` (fails closed). |
-| No tool keys | Passes untouched. |
-
-**Observe** mode never rewrites or rejects; it records what Enforce would have done.
-
-```json
-{
-  "slug": "tool_allowlist",
-  "settings": {
-    "allow_tools": ["github/*", "search_*"],
-    "deny_tools": ["github/delete_*"],
-    "on_empty_after_filter": "reject"
-  }
-}
-```
-
----
+The gateway refuses to filter ambiguously. A body that carries the tool fields
+twice, or in a different case, is rejected rather than guessed at; a body it
+cannot decode for its wire format is rejected too. Observe mode records what
+enforce would have done and rewrites nothing.
 
 ## Tool Injection
 
-**`tool_injection`** injects operator-authored **function** tools into the outbound request
-so the model can call them. It does **not** filter or deny client-supplied tools — use
-[Tool Allowlist](#tool-allowlist) for that — it only adds gateway tools (and resolves name
-collisions).
+Adds gateway-defined function tools to the outbound request so the model can
+call them. It only adds; it never removes a client's tools. When an injected
+name collides with one the client sent, **On conflict** decides: the gateway's
+wins (default), the client's wins, or the request is rejected.
 
-### Configure in the console
-
-1. **Policies** → **Catalog** → **Tool Injection** (Tool Governance group).
-2. Under **Inject tools**, add one or more functions:
-   - **Name** (required)
-   - **Description** (optional — helps the model choose when to call it)
-   - **Parameters** (optional JSON Schema object for arguments)
-3. Set **On conflict** when an injected name collides with a client tool.
-4. Set mode and scope (**gateway-wide** or **targeted** applications), then save.
-
-### Settings
-
-| Setting | Meaning |
-|---|---|
-| **Inject tools** | At least one function tool. Each entry is a `function` with `name`, optional `description`, optional `parameters` schema. |
-| **On conflict** | When an injected name already exists on the request: **Gateway tool wins** (`gateway_wins`, default), **Client tool wins** (`client_wins`), or **Reject the request** (`reject`). |
-
-Stage: `pre_request`. Protocol: **LLM** only.
-
-```json
-{
-  "slug": "tool_injection",
-  "settings": {
-    "inject_tools": [
-      {
-        "type": "function",
-        "function": {
-          "name": "get_internal_status",
-          "description": "Return internal service health",
-          "parameters": {
-            "type": "object",
-            "properties": { "service": { "type": "string" } }
-          }
-        }
-      }
-    ],
-    "on_conflict": "gateway_wins"
-  }
-}
-```
-
----
+Each injected tool is a name, an optional description — which is what the model
+reads when deciding whether to call it — and an optional parameter schema.
 
 ## Per-Tool Rate Limiter
 
-**`per_tool_rate_limiter`** counts **real tool executions** (not generic HTTP requests) and
-enforces one or more time windows per tool pattern. It works for **LLM** tool calls and
-**native MCP** tool traffic.
+Counts **actual tool executions**, not HTTP requests, and caps them per tool
+pattern over one or more windows — `execute_code*` at 60 a minute and 500 an
+hour. The first rule whose pattern matches wins.
 
-In the catalog it lives under **Traffic Control** (not Tool Governance), next to the
-request rate limiter.
+When a window is exceeded: **reject** the call (the only option on MCP, where the
+gateway itself is the caller), **inject an error result** into the LLM response,
+or **strip the tool** from the next request.
 
-### Configure in the console
+### One execution, counted twice
 
-1. **Policies** → **Catalog** → **Per-Tool Rate Limiter**.
-2. Add **rules**. The **first rule whose tool pattern matches** a tool call wins.
-3. For each rule set:
-   - **Tool** — glob against the tool name (e.g. `execute_code*`, `search_*`)
-   - **Windows** — one or more `{ duration, max }` pairs (e.g. `1m` / 60, `1h` / 500)
-   - Optional per-rule **behavior** (otherwise the policy default applies)
-4. Set the **default behavior** when a window is exceeded.
-5. Save.
+A tool an agent runs through MCP shows up twice at the gateway: once as the
+`tools/call` that executes it, and again as the tool-result message in the next
+LLM request. On a policy attached to one application the two are separate
+budgets, which is correct — a per-application limit is a promise about that
+application. On a **gateway-wide** policy they share one counter and the
+execution is charged twice unless the agent correlates them by sending the LLM
+`tool_call_id` in the `tools/call` metadata.
 
-### On exceed (behavior)
-
-| Behavior | Effect |
-|---|---|
-| **Reject response** (`reject_response`) | Fail the call (default). On **MCP**, this is the only behavior that can be attached — the gateway is the tool caller, so the request cannot be rewritten. |
-| **Inject error result** (`inject_error_result`) | Rewrite the response with an error tool result (**LLM**, response path). |
-| **Strip tool from request** (`strip_tool_from_request`) | Remove the tool from the next request (**LLM**, request path). |
-
-Counters follow policy scope: **gateway-wide** for global policies, otherwise **per
-application**.
-
-### Counting when both protocols are in play
-
-One tool execution can reach the gateway twice: once as the MCP `tools/call` that runs
-it, and again as the `role: tool` message carrying its result in the next LLM request.
-What that costs depends on the policy's scope.
-
-| Scope | What the counters do |
-|---|---|
-| **Per application** (policy attached to a application) | The LLM application and the MCP application have **separate budgets**, and each charges what it observes. This is by design: a per-application limit is a promise about that application. |
-| **Global** (policy attached gateway-wide) | Both paths share one counter, so the execution would be charged **twice** unless the agent correlates the two observations. |
-
-To make a global policy count the execution once, the agent sends the LLM
-`tool_call_id` it is executing in the `_meta` of the `tools/call`:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "tools/call",
-  "params": {
-    "name": "execute_code",
-    "arguments": { "source": "print(1)" },
-    "_meta": { "ai.neuraltrust/toolCallId": "call_abc123" }
-  }
-}
-```
-
-The gateway charges the execution when it sees the `tools/call` and remembers that
-`tool_call_id`, so the `role: tool` message for the same id in a later LLM request adds
-nothing. The id is used for accounting only — it is never forwarded to the upstream
-tool.
-
-Two limits are worth knowing:
-
-- **The `tools/call` is always charged.** The id can only cancel the *second*
-  observation, never the first, so repeating one does not buy uncounted executions.
-- **Correlation lasts as long as the rule's longest window.** An execution whose
-  `role: tool` message arrives after that window has passed is charged again, in the
-  window it arrives in.
-
-Without the `_meta` field a global policy charges both observations. Attaching the
-policy per application instead of globally also avoids the double charge.
-
-```json
-{
-  "slug": "per_tool_rate_limiter",
-  "settings": {
-    "behavior_default": "reject_response",
-    "rules": [
-      {
-        "tool": "execute_code*",
-        "windows": [{ "duration": "1m", "max": 10 }]
-      }
-    ]
-  }
-}
-```
-
----
-
-## What is not a catalog policy
-
-| Control | Where it lives |
-|---|---|
-| **MCP toolkit** (which MCP tools/prompts/resources an agent may use) | Application **Routing** / MCP binding — see [MCP](/trustgate/mcp/overview). |
-| **Which LLM models** a application may call | **Filter by available models** / **default model** on the application **Routing** tab — see [Model resolution](/trustgate/llm/routing#what-the-client-sends). |
-
----
-
-## Related
-
-- [Policies overview](/trustgate/policies/overview)
-- [Rate limiting & budgets](/trustgate/policies/rate-limiting) — request-volume and token/dollar budgets
-- [MCP](/trustgate/mcp/overview) — toolkit scoping for MCP servers
-- **Playground** — exercise LLM tool-using applications
+The `tools/call` is always charged; the id only cancels the second observation,
+so repeating it buys nothing. Attaching the policy per application avoids the
+question entirely.

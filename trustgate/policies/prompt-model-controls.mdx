@@ -1,353 +1,62 @@
 ---
-title: "Prompt management"
-description: "Prompt Template and Prompt Compression policies — inject system prompts or named versioned templates, and shrink request content before the model runs."
+title: "Prompt and model controls"
+description: "Reshape the request before the model sees it: inject a system prompt every caller gets, serve a prompt library clients invoke by name, or compress what is sent."
 ---
 
-**Prompt Management** catalog policies reshape the LLM request body on `pre_request`.
-Create them under **Policies** → **Catalog**, or attach them from a application **Policies**
-tab. Scope each policy **gateway-wide** or **targeted**.
+Applies to **LLM**.
 
-| Policy in the catalog | Slug | What it does |
-|---|---|---|
-| **[Prompt Template](#prompt-template)** | `prompt_template` | Auto-inject system prompts and/or render client-referenced named, versioned templates. |
-| **[Prompt Compression](#prompt-compression)** | `prompt_compression` | Minify JSON, strip ANSI, collapse whitespace — deterministic, fail-open. |
-
-Protocol: **LLM** only.
-
-To **restrict which models** a application may call, use the application **Routing** tab
-(**Filter by available models** / **default model**) — not a catalog policy. See
-[Model resolution](/trustgate/llm/routing#what-the-client-sends).
-
----
+Which models an application may call is not a policy — it is set on the
+[application](/trustgate/llm/routing#restricting-models). These policies change
+what goes *in* the request.
 
 ## Prompt Template
 
-**`prompt_template`** rewrites the chat body on `pre_request`, substituting
-[Mustache](https://mustache.github.io/)-style `{{placeholders}}` (v1 engine: **mustache**
-only).
+One policy type doing two unrelated jobs; the console asks which before showing
+fields.
 
-It does two unrelated jobs, and the console asks which one you want before showing you
-any fields:
+### Inject a system prompt into every request
 
-| What you want | Who it serves | Backend |
-|---|---|---|
-| **Add a system prompt to every request** | Your platform team. The gateway injects it; callers send their request unchanged and never see it. | `inject_templates` |
-| **Publish a prompt library clients can invoke** | Your API's callers. They ask for a template by name and version. | `named_templates` |
+Your platform team writes the prompt; the gateway injects it; callers send their
+requests unchanged and never see it. The parts that vary per request are
+`{{placeholders}}`, each mapped to a **header** or a **JWT claim** to read at
+request time — a tenant id from `X-Tenant-Id`, a plan tier from a claim.
 
-A policy may carry both at once, and the gateway runs each. The console edits one at a
-time and saves both, so config the panel is not showing is never dropped; it tells you
-when the other side has templates.
+A placeholder with no source cannot be saved. Before that rule existed it saved
+happily and rejected every request at runtime.
 
----
-
-### Recipe: inject a different system prompt per tenant
-
-Give every caller the same instructions, with one value that changes per request — the
-tenant, the end user's id, a plan tier — read from a header or a JWT claim.
-
-<Steps>
-  <Step title="Create the policy">
-    **TrustGate → Policies → Catalog → Prompt Template**, then pick **Add a system prompt
-    to every request**.
-  </Step>
-  <Step title="Write the prompt">
-    Write the **Content**, marking the parts that vary with `{{double_braces}}`:
-
-    ```text
-    You serve tenant {{tenant}}. Follow company safety policy.
-    ```
-
-    Placeholder names accept letters, digits, `.`, `-` and `_`.
-  </Step>
-  <Step title="Map each variable to a source">
-    Every placeholder you type appears as a row directly under the text that produced
-    it. For each one, choose **Header** or **JWT claim** and give the name to read:
-
-    | Placeholder | Source | Name |
-    |---|---|---|
-    | `tenant` | Header | `X-Tenant-Id` |
-
-    A placeholder with no source blocks the save — before this existed, it was saved
-    happily and then rejected every request at runtime.
-
-    <Warning>
-      **JWT claim** reads the claim without verifying the token's signature. It is only
-      trustworthy when the caller authenticates with that same bearer token. A application
-      that authenticates with an API key or mTLS can send any `Authorization` header it
-      likes, and the claim you read will be whatever it put there — so do not use a JWT
-      claim for an authorization decision unless bearer auth is the only way in.
-    </Warning>
-  </Step>
-  <Step title="Decide what happens when the value is missing (optional)">
-    Under **Advanced settings**, **If a variable is missing** covers the case where the
-    header or claim is absent at request time:
-
-    | Option | Effect |
-    |---|---|
-    | **Skip this template** (default) | The template is not injected; the request continues. |
-    | **Use empty string** | The placeholder becomes `""`. |
-    | **Reject request** | The request fails with `400`. |
-
-    The default is deliberate: the caller cannot fix a header it was never asked to send.
-  </Step>
-  <Step title="Save">
-    Set mode (**Enforce** / **Observe**) and scope, then save. That is the whole form:
-    the prompt is the only thing you have to decide.
-  </Step>
-</Steps>
-
-#### What the model receives
-
-The caller sends this:
-
-```json
-{
-  "model": "auto",
-  "messages": [{ "role": "user", "content": "Reset my password" }]
-}
-```
-
-With header `X-Tenant-Id: acme`, the model receives this:
-
-```json
-{
-  "model": "auto",
-  "messages": [
-    { "role": "system", "content": "You serve tenant acme. Follow company safety policy." },
-    { "role": "user", "content": "Reset my password" }
-  ]
-}
-```
-
-#### Equivalent API payload
-
-```json
-{
-  "slug": "prompt_template",
-  "settings": {
-    "template_engine": "mustache",
-    "context_variables": {
-      "tenant": { "source": "header", "name": "X-Tenant-Id" }
-    },
-    "inject_templates": [
-      {
-        "id": "safety-policy",
-        "position": "system",
-        "role": "system",
-        "content": "You serve tenant {{tenant}}. Follow company safety policy.",
-        "on_existing_system": "merge"
-      }
-    ],
-    "on_missing_context_variable": "skip_injection",
-    "escape_json_control_chars": true
-  }
-}
-```
-
-`position` is fixed to `system` in v1. `context_variables` also accepts
-`source: "jwt_claim"`, which reads a claim from the bearer token.
-
----
-
-### Recipe: serve a versioned prompt library
-
-Keep prompts on the gateway instead of in every client, and change them without shipping
-a client release.
-
-Clients reference a template by name, in a plain string user message:
-`{template://support-greeting}`, or `{template://support-greeting@stable}` to pin a
-specific label.
+**If a variable is missing** at request time: skip the template (default — the
+caller cannot fix a header it was never asked to send), substitute an empty
+string, or reject.
 
 <Warning>
-  **Limitation.** Rendering a named template **replaces the entire `messages` array**.
-  Any conversation history the client sent is discarded before the request reaches the
-  model, so this fits single-turn calls. The trace reports how many turns were dropped
-  as `discarded_messages`.
+A **JWT claim** is read without verifying the token's signature. It is
+trustworthy only when the caller authenticates with that same bearer token. An
+application that authenticates with an API key can put anything in an
+`Authorization` header, and the claim you read is whatever it put there. Never
+make an authorisation decision on a claim unless bearer auth is the only way in.
 </Warning>
 
-<Steps>
-  <Step title="Create the policy">
-    **TrustGate → Policies → Catalog → Prompt Template**, then pick **Publish a prompt
-    library clients can invoke**.
-  </Step>
-  <Step title="Name the template">
-    **Template name** is what clients put in the reference, so it is a public contract —
-    `support-greeting` below.
-  </Step>
-  <Step title="Write the prompt">
-    Write the **Content** as a plain string, or as a JSON array of message objects when
-    you need more than one turn.
+### Publish a prompt library clients invoke
 
-    The console saves it as a single version labelled `latest` and points the policy's
-    **Default label** at it, so `{template://support-greeting}` resolves with no label.
-    Versioning is an API-only capability: a template that already carries several
-    versions keeps every one of them, and the panel says so rather than editing them.
-  </Step>
-  <Step title="Say where each placeholder comes from">
-    Placeholders in a named template have two possible sources, and every one you write
-    appears as a row under the text that produced it:
-
-    | Source | Who supplies it |
-    |---|---|
-    | **Sent by the client** (default) | The caller, under `properties` in the request. |
-    | **Header** / **JWT claim** | The gateway, the same way auto-inject resolves them. |
-
-    Leave a row as **Sent by the client** and the caller fills it; pick a header or a
-    claim and the gateway does, so the caller cannot influence that value. Unlike
-    auto-inject, an unmapped placeholder here is a valid template rather than an
-    unfinished one.
-  </Step>
-  <Step title="Save">
-    **Require template reference** and **Default label** both live under **Advanced
-    settings** if you need them.
-  </Step>
-</Steps>
-
-#### How a client calls it
-
-In a **plain string** user message — not a multimodal content part:
-
-```json
-{
-  "model": "auto",
-  "properties": { "persona": "friendly" },
-  "messages": [
-    { "role": "user", "content": "{template://support-greeting@stable}" }
-  ]
-}
-```
-
-Drop the `@stable` to fall back to the policy's default label. Values under `properties`
-fill the template's `{{placeholders}}`, alongside any context variables.
-
-Resolution order: find the reference, resolve name → template, label (or default label) →
-version, render placeholders, replace `messages`. Exactly one distinct reference per
-request — repeating the same one is fine, since a multi-turn client resends it.
-
-Per-version `required_variables` (type / enum / max_length) validate what clients send.
-They have no editor yet; set them via the API and the console preserves them.
-
----
-
-### Preview a configuration before you save it
-
-**Preview** at the bottom of the panel runs the configuration currently on screen against
-a request you paste, and shows the body the model would receive. Nothing is stored and no
-traffic is sent.
-
-Paste a sample body, add any headers the template reads — one `Name: value` per line —
-and select **Run preview**. The result is one of three things: the rewritten request, a
-note that the policy left it unchanged, or the rejection the caller would have received,
-with the gateway's own status and message.
+Prompts live on the gateway and change without a client release. A client
+references one by name in a plain user message — `{template://support-greeting}`,
+or `@stable` to pin a label — and the gateway renders it. Placeholders are filled
+by the client, or by a header or claim the gateway reads so the client cannot
+influence that value.
 
 <Warning>
-  Headers you paste are sent to the gateway as written. If a template reads a JWT claim,
-  use a sample or expired token rather than a live one.
+Rendering a named template **replaces the entire message list**. Conversation
+history the client sent is discarded before the model sees anything. This fits
+single-turn calls; the trace reports how many turns were dropped.
 </Warning>
 
-Preview is available for policies whose plugin opts into it. Prompt Template does; most
-others do not, because running them for real would touch a rate-limit counter, a
-provider or a collector.
-
----
-
-### Troubleshooting
-
-| The gateway answers | Usually means |
-|---|---|
-| `context variable "x" could not be resolved` | The header or claim is absent and **If a variable is missing** is set to **Reject request**. |
-| `versions[0] must have at least one label` | A version was written via the API with no label. Add one. |
-| `request does not reference a template` | **Require template reference** is on and the caller sent a plain message. |
-| `template "x" not found` | The reference names a template this policy does not define. |
-| `template "x" label could not be resolved` | The label does not exist and no default label is set. |
-| `request references both a and b` | Two different references in one request. Only one template can be rendered. |
-| `required variable "x" is missing` | The version declares `required_variables` and the caller omitted it from `properties`. |
-| `mode not supported` on a preview | The preview was asked for a mode this policy cannot use. Prompt Template supports **Enforce** and **Observe**. |
-
-### Field reference
-
-**Add a system prompt to every request** (`inject_templates`)
-
-| UI field | Backend | Meaning |
-|---|---|---|
-| **Content** | `content` | Template body with `{{var}}` placeholders. The only field the form asks for. |
-| **Variables** | `context_variables` | Maps each placeholder to a `header` or `jwt_claim` and its name. A `jwt_claim` is read unverified — see the warning above. |
-| *(card header)* | `inject_templates[].id` | Generated as `template-1`, `template-2`…, shown as the card title and in traces. Set your own through the API. |
-| *Advanced* | `on_missing_context_variable` | `skip_injection` (default), `empty_string` or `error`. |
-| *API only* | `on_existing_system` | `merge` (default) appends to the caller's system prompt, `replace` overwrites it. Not in the form; an existing value is preserved. |
-
-**Publish a prompt library** (`named_templates`)
-
-| UI field | Backend | Meaning |
-|---|---|---|
-| **Template name** | `named_templates[].name` | Name in `{template://name…}` (unique, required). |
-| **Content** | `versions[].content` | Bare string or a JSON array of message objects (required). |
-| **Variables** | `context_variables` | Optional. Maps a placeholder to a `header` or `jwt_claim`; anything left unmapped comes from the caller's `properties`. |
-| *Advanced* | inverted `allow_untemplated_requests` | **Require template reference** — reject requests that name no template. |
-| *Advanced* | `default_label` | Used when a reference omits `@label`. Set to `latest` for a template written here. |
-| *Advanced* | `on_missing_client_variable` | `error` (default) or `empty_string`. |
-| *API only* | `versions[].labels` | The form saves one version labelled `latest`. Labels must be unique **within a template**; the same label on two different templates is fine, because a reference resolves the name first. |
-
-**API only**
-
-| Backend | Default | Meaning |
-|---|---|---|
-| `escape_json_control_chars` | on | Strip C0 control bytes from substituted values before insertion. Not in the form; an existing value is preserved. |
-
----
+The console saves one version labelled `latest`. Versioning beyond that is
+API-only; a template that already carries several versions keeps them, and the
+panel says so rather than editing them.
 
 ## Prompt Compression
 
-**`prompt_compression`** shrinks the request prompt on `pre_request` before the model runs.
-Transforms are **deterministic** (same input → same bytes) so provider prompt-cache
-prefixes stay stable, and the plugin **fails open**: any decode/transform error leaves the
-original body unchanged.
-
-The console uses the catalog **settings schema** form (booleans, integers, role multi-select).
-
-### Configure in the console
-
-1. **Policies** → **Catalog** → **Prompt Compression**.
-2. Enable at least one transform (defaults are all on).
-3. Tune thresholds and optional **target roles**.
-4. Set mode and scope, then save.
-
-### Settings
-
-| Setting | Default | Meaning |
-|---|---|---|
-| **Compress JSON** (`compress_json`) | on | Minify standalone JSON message content, fenced JSON code blocks, and tool-call arguments (whitespace-only, lossless). |
-| **Normalize Whitespace** (`normalize_whitespace`) | on | Trim trailing spaces per line (keeps Markdown two-space hard breaks) and collapse runs of blank lines. |
-| **Strip ANSI Escapes** (`strip_ansi`) | on | Remove ANSI colour/cursor sequences (common in terminal/CI logs). |
-| **Max Consecutive Blank Lines** | `1` | Longest blank-line run kept when whitespace is normalized (`1`–`1000`). |
-| **Minimum Content Length** (`min_length`) | `256` | Skip message content shorter than this many bytes (protects tiny cache-stable prefixes). `0` = compress everything. |
-| **Max Body Bytes** (`max_body_bytes`) | `1048576` (1 MiB) | Skip the whole pipeline for larger bodies (CPU bound). `0` = no cap. |
-| **Target Roles** (`target_roles`) | empty = all | Restrict to `system` / `user` / `assistant` / `tool`. Empty compresses every role. |
-
-At least one of compress JSON / normalize whitespace / strip ANSI must stay enabled.
-
-### Example
-
-```json
-{
-  "slug": "prompt_compression",
-  "settings": {
-    "compress_json": true,
-    "normalize_whitespace": true,
-    "strip_ansi": true,
-    "max_consecutive_blank_lines": 1,
-    "min_length": 256,
-    "max_body_bytes": 1048576,
-    "target_roles": ["user", "tool"]
-  }
-}
-```
-
----
-
-## Related
-
-- [Policies overview](/trustgate/policies/overview)
-- [Model resolution](/trustgate/llm/routing#what-the-client-sends) — filter models and defaults on the application
-- [Applications](/trustgate/access/applications) — Routing tab model filters
-- **Playground** — exercise template behaviour
+Minifies JSON, strips ANSI sequences, collapses whitespace. Deterministic, and it
+fails open — a compression error passes the request through untouched. It
+reduces tokens on requests that carry structured data; it does nothing useful for
+prose.
