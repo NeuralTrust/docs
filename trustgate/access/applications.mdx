@@ -1,0 +1,102 @@
+---
+title: "Applications"
+description: "An application is what your team built: the endpoints the gateway serves it on, one key that opens them, the registry entries it may use, and whose upstream accounts it acts as."
+---
+
+An **application** is something your team built that calls the gateway — a
+service, an agent, a batch job. It authenticates with a key, not as a person,
+which is what separates it from [Access](/trustgate/access/overview).
+
+## Type: LLM, MCP, or both
+
+An application's type is not something you pick up front — it follows from what
+you give it. Add a model provider and it serves **LLM** traffic; add an MCP
+server and it serves **MCP**; add both and it is both, on two endpoints.
+
+| It has | It serves | Labelled |
+|---|---|---|
+| A model provider | LLM traffic | **Models** |
+| An MCP server | Tool traffic | **Tools** |
+| Both | Both, on separate endpoints | Models and Tools |
+
+An application with neither is not yet an application: it has nowhere to serve,
+and you cannot finish creating one until you add a provider or a server.
+
+This replaces what used to be called a *consumer*. There is one object now, and
+its type is a consequence of its contents.
+
+## One key, every plane
+
+An application has one key, and that key opens every plane it has. A client holds
+one secret no matter how many planes it talks to.
+
+The key is shown once. The gateway keeps only its head and tail — enough to
+recognise it in a list, not enough to reconstruct it — so a key not captured at
+issue time is gone and has to be replaced.
+
+Revoking is total and immediate: the key stops working on every plane at once,
+and anything still using it starts failing to authenticate. There is no partial
+revoke, which is the argument for one key per deployed thing rather than one key
+shared across three.
+
+## What it may use
+
+An application names the registry entries it may reach, and can narrow further
+within them: specific models on a provider, specific tools on a server.
+
+That narrowing is the difference between *"this service can reach our OpenAI
+account"* and *"this service can call `gpt-4o-mini` and nothing else"*. It is the
+cheapest control in the product, because it fails closed at the gateway and needs
+no policy evaluation to do it.
+
+## How models are picked
+
+When an application can reach more than one model destination, a **strategy**
+decides which one a request goes to:
+
+| Strategy | Behaviour |
+|---|---|
+| **Direct** | One named destination. |
+| **Smart routing** | Picks per request. The recommended path when several models are available. |
+| **Round robin** / **Weighted round robin** | Rotates, evenly or by the weights you set. |
+| **Least connections** | Whichever destination is least busy. |
+| **Random** | Uniformly at random. |
+
+Tool traffic routes to a single server, so these apply to models only.
+
+## Whose accounts it acts as
+
+This is the decision that matters most, and the one that is expensive to change
+later, because it decides where upstream accounts live:
+
+| Acts as | Meaning | Fits |
+|---|---|---|
+| **The application's own** | One set of accounts, connected once. | A batch job, a service with no human behind any given call. |
+| **Each end user, named by the application** | The application names its user on every call and the gateway keeps their accounts apart. | A product whose users connect their own accounts through your UI. |
+| **Each end user, signed in through the platform** | People sign in for themselves. An API key cannot act for one of them. | Anything where the person is present and should authenticate as themselves. |
+
+Changing this moves where upstream accounts live. Nothing is deleted, but what
+the application has already connected stops being what it uses — so treat it as
+a migration, not a setting.
+
+The middle option is also the boundary with Access: an application naming its own
+users is outside Access levels and grants, since those identities belong to your
+product and not to the identity provider.
+
+## Status
+
+An application is **active** or **paused**; pausing stops it serving without
+taking it apart.
+
+**Endpoint missing** means the application names something the gateway no longer
+serves. It is a dangling reference, not a fault in the application, and the fix
+is to forget the missing entry or to restore what it named.
+
+Removing an application stops its endpoints answering. Anything still calling
+them fails immediately, so it asks you to type the name.
+
+## Policies
+
+Everything above decides *whether* a call is allowed and *where* it goes. Budgets,
+rate limits, guardrails and the rest are [policies](/trustgate/policies/overview),
+attached to the application — that attachment is what puts a policy in the path.

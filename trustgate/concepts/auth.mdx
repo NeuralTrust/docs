@@ -1,107 +1,96 @@
 ---
-title: "Overview"
-description: "API keys, OAuth2 identity providers, and mTLS — how clients authenticate as a consumer, how TrustGate validates a bearer JWT, and how it brokers MCP login."
+title: "Authentication"
+description: "How a caller proves it is a given application: a key the application holds, a token your identity provider issued, or a client certificate. Trust anchors belong to the gateway; who gets in belongs to the application."
 ---
 
-An **auth** is how a client proves it may act as a [consumer](/trustgate/concepts/consumers).
-Distinct from a registry's **upstream** credential (how TrustGate calls the model provider or
-MCP server).
+Authentication answers one question: *which application is this request?*
+Everything after — routing, restrictions, policies — hangs off the answer.
 
-Two kinds of auth entities exist:
+It is unrelated to how the gateway reaches upstream. A registry entry's
+credential is the gateway's identity to the provider; this page is the caller's
+identity to the gateway.
 
-- **API keys** belong to one consumer. Issue, rotate, and revoke them on the consumer's
-  **General** tab under **Authentication**.
-- **Trust anchors** — external identity providers and mTLS certificate authorities — are
-  gateway-level and shared by many consumers. Manage them at **Settings → Agent Gateway →
-  Machine identity**, then select one on the consumer under **Authentication → Identity
-  provider**. Which callers of a shared anchor may enter a given consumer is the consumer's
-  [auth binding](/trustgate/concepts/consumers#auth-binding).
+## Three ways to prove it
 
-## Types
-
-| Type | How the client authenticates | Typical use |
+| Method | The caller presents | Fits |
 |---|---|---|
-| **API Key** (`api_key`) | `X-AG-API-Key: ag_…`, `x-api-key: ag_…`, or `Authorization: Bearer ag_…` | Applications, backend agents, scheduled jobs |
-| **OAuth2** (`oauth2`) | Bearer token issued by your IdP. TrustGate **validates** a token the client already holds (JWT or, with an introspection URL, opaque), or **brokers** the login (authorization code + PKCE) for MCP clients | LLM apps with an IdP token; M2M; MCP agents |
-| **mTLS** (`mtls`) | Client certificate (or a trusted `X-Forwarded-Client-Cert` header) — [mTLS](/trustgate/concepts/mtls) | Machine callers on both planes |
+| **API key** | The application's own key, as `X-AG-API-Key`, `x-api-key`, or `Authorization: Bearer`. | Services, backend agents, scheduled jobs — anything that can hold a secret. |
+| **Identity provider** | A token your IdP issued — Okta, Entra ID, GitHub. The gateway verifies it. | Callers that already have an identity, and MCP agents where a person signs in. |
+| **Client certificate** | A certificate from a CA you trust. | Machine callers on a network where mTLS is already the norm. See [mTLS](/trustgate/concepts/mtls). |
 
-`oidc` is a deprecated alias of `oauth2`: `type: oidc` and `config.oidc` are still accepted
-on create and update, but responses always carry the `oauth2` shape.
+MCP applications have a fourth: **NeuralTrust login**, the built-in identity, for
+people who sign in with the platform account they already have.
 
-| Protocol | Methods in the console |
+An application can accept more than one. When a request carries a bearer token,
+the gateway picks the identity provider by the token's issuer and audience among
+those the application accepts, so one application can trust several IdPs.
+
+## Trust anchors are the gateway's; admission is the application's
+
+Identity providers and certificate authorities are **trust anchors**, configured
+once at the gateway under **Machine identity** and shared by any application that
+selects them. Trusting an IdP is not the same as admitting everyone it can
+vouch for, so each application narrows further with a **binding**:
+
+| Binding | Admits only |
 |---|---|
-| **LLM** | **API key**, **Identity provider** (bearer JWT validated against the IdP). |
-| **MCP** | **API key**, **Identity provider**, or **NeuralTrust login** (the built-in IdP — no auth attached). A consumer whose users sign in needs a provider that can broker the login; a validation-only provider is refused. |
+| **Allowed client IDs** | Tokens issued to these client ids. Empty admits any client the provider verifies. |
+| **Allowed certificate subjects** | Certificates with one of these common names or SAN DNS names. Empty admits any certificate the CA verified. |
 
-**mTLS** anchors are created with the Admin API (the console form offers **IdP (JWT)**) and
-attach to consumers on both planes. See [mTLS](/trustgate/concepts/mtls).
+The pattern this enables: one Okta tenant trusted at the gateway, and per
+application, the two or three client ids that may enter. The alternative — one
+anchor per application — multiplies configuration without adding security.
 
-## API keys
+Token claims decide **whether** a caller gets in. They never decide **where** it
+goes: registries and models come from the application's routing, not from
+anything in the token.
 
-1. Open the consumer → **General** → **Authentication** → **API key** → **Add API key**
-   (or pick **API key** when creating the consumer; one key is issued on create).
-2. Copy the secret once. Use it in requests or in the consumer **Connect** snippets.
-3. **Regenerate** or **Revoke** from the same list.
+## Validate, or broker
 
-Keys are prefixed `ag_`. TrustGate stores a hash; the secret cannot be recovered. Rotate by
-creating a new key, updating clients, then revoking the old one.
+The same IdP can be used two ways, and which one you want decides what you
+register on the IdP side.
 
-Both planes accept the key as `X-AG-API-Key`, as `x-api-key` (Anthropic-style clients), or
-as `Authorization: Bearer ag_…`. A bearer that starts with `ag_` is treated as an API key;
-any other bearer goes to the OAuth2 validators. An MCP consumer called with an API key runs
-as principal `app:<consumer_id>`, so rotating or renaming a key never strands the upstream
-accounts linked to the application.
+**Validate a token the caller already holds.** The service obtained a token from
+your IdP on its own — client credentials, or a user token your app acquired — and
+sends it. The gateway checks signature, issuer, expiry, audience and required
+scopes, then the application's allowed client ids. No browser, no redirect. On
+the IdP this needs an issuer and an audience, nothing more.
 
-## OAuth2 setup modes
+**Broker the login.** An MCP agent — Cursor, Claude Desktop — has no token and a
+person behind it. The gateway runs the sign-in itself, with authorization code
+and PKCE, validates what the IdP issues, and keeps that person's upstream
+connections. On the IdP this needs a confidential client with the gateway's
+callback registered as a redirect. A provider configured for validation only is
+refused for this; a person cannot sign in through something that only checks
+tokens.
 
-One `oauth2` entity covers every IdP pattern; the **Setup** choice decides which fields you
-fill.
+## Rules that bite
 
-| Mode | When | Fields |
-|---|---|---|
-| **Validate tokens only (machine-to-machine)** | The caller already holds a JWT from your IdP (client credentials, certificate credentials, a user token your app obtained). No browser login. Console kind **IdP (JWT)**. | `issuer`, `audiences`; optionally `jwks_url` or inline `public_keys`, `allowed_algorithms`, `required_scopes`, `subject_claim`. |
-| **Interactive login · IdP with discovery (Okta, Entra ID)** | MCP clients sign in through TrustGate's authorization-code + PKCE broker; endpoints come from `/.well-known/openid-configuration`. | Validation fields plus `client_id`, `client_secret`. |
-| **Interactive login · IdP without discovery (GitHub)** | The IdP publishes no discovery metadata. | Plus `authorize_url` + `token_url` (set together); `session_mode` + `userinfo_url` for opaque, non-JWT tokens. |
+- **Audience is required** and must match the token's `aud`. An `api://` resource
+  URI and its bare identifier count as the same.
+- **Required scopes** may not include `openid`, `profile`, `email` or
+  `offline_access`. Matching reads `scp` and `scope`, and also Entra-style
+  `roles` and `permissions` arrays.
+- **Only asymmetric signatures.** HMAC-signed tokens are rejected.
+- **A bearer that starts with `ag_` is an API key.** Anything else goes to the
+  identity providers. That rule is what lets a stock SDK's single `Authorization`
+  header carry either.
 
-`introspection_url` validates opaque tokens without session mode. HMAC algorithms (`HS*`) are
-rejected: only asymmetric signatures are accepted. When `public_keys` are set, discovery is
-skipped.
+## What gets recorded
 
-## Two ways to use an IdP
-
-The same Okta or Entra tenant can back both. What differs is whether TrustGate only checks a
-token or also runs the login.
-
-| Pattern | Consumer | What TrustGate does | IdP app |
-|---|---|---|---|
-| **Validate a bearer JWT** | LLM or MCP, machine or user token | Verifies signature, `iss`, `exp`/`nbf`, `aud`, `required_scopes`; then the consumer's **Allowed client IDs** (`azp`, else `client_id`). Claims never select a registry or model. | Issuer + audience (no client secret). |
-| **Interactive MCP login** | MCP whose users sign in | Brokers authorization code + PKCE, validates the tokens the IdP issues, keeps per-user upstream connections. **Required scopes** gate access. | Confidential client with redirect `{mcp_base_url}/oauth/callback`. |
-
-When a request carries a bearer JWT, TrustGate picks the provider by the token's `iss` and
-`aud` among the auths attached to the consumer's path, so one consumer may attach several
-IdPs. Client-credentials tokens are for curl checks or M2M apps, never for interactive
-agents.
-
-## Rules for every provider
-
-- **Audiences** is required and must match the token's `aud` claim. An `api://` resource URI
-  and its bare identifier count as the same audience.
-- **Required scopes** must not include `openid`, `profile`, `email`, or `offline_access`.
-- Scope matching uses `scp`/`scope` **and** Auth0/Entra-style `permissions` and `roles` arrays.
-- Interactive MCP: **Setup → Interactive login · IdP with discovery**, Session mode off,
-  Okta app type **Web Application** (not API Services).
-- **JWKS URL** can stay under **Token validation · advanced**; TrustGate resolves keys from
-  the issuer when needed.
-- Telemetry records `trustgate.principal.method` as `external_jwt` (your IdP's token),
-  `oauth` (a gateway-brokered login), `api_key`, `mtls`, or `introspection`.
+Every request records how it authenticated — `api_key`, `external_jwt` for your
+IdP's token, `oauth` for a gateway-brokered login, `mtls`, `introspection` — and
+**Activity** shows it as **Auth method**. When the same
+application can be entered two ways, that field is how you tell which one a given
+request used.
 
 ## Provider manuals
 
 <CardGroup cols={2}>
   <Card title="Okta" icon="key" href="/trustgate/concepts/authorization/okta">
-    Custom authorization server, scopes, bearer-token validation, and interactive MCP login.
+    Authorization server, scopes, and both patterns end to end.
   </Card>
   <Card title="Entra ID" icon="microsoft" href="/trustgate/concepts/authorization/entra-id">
-    App registration, exposed API scopes, bearer-token validation, and interactive MCP login.
+    App registration, exposed scope, and both patterns end to end.
   </Card>
 </CardGroup>

@@ -1,16 +1,16 @@
 ---
 title: "Entra ID"
-description: "End-to-end manual for wiring Microsoft Entra ID (Azure AD) to TrustGate: an app registration with an exposed API scope, validating Entra bearer tokens on a consumer, and OAuth2 login for MCP."
+description: "End-to-end manual for wiring Microsoft Entra ID (Azure AD) to TrustGate: an app registration with an exposed API scope, validating Entra bearer tokens on a application, and OAuth2 login for MCP."
 ---
 
 This manual sets up **Microsoft Entra ID** (formerly Azure AD) as the identity provider for
-two TrustGate patterns in the NeuralTrust app (**Settings → Agent Gateway → Machine
-identity** / **Consumers**):
+two TrustGate patterns in TrustGate (the trust anchor under **Settings → Machine identity**, then the
+application's **Authentication**):
 
-1. **Validate bearer tokens** — an LLM or MCP consumer whose callers already hold an Entra
+1. **Validate bearer tokens** — an LLM or MCP application whose callers already hold an Entra
    access token (a service using client credentials, or an app forwarding a user token).
-   TrustGate verifies the token and admits the caller; routing is the consumer's own.
-2. **OAuth2 · MCP login** — an MCP consumer gated by an exposed API scope. Interactive
+   TrustGate verifies the token and admits the caller; routing is the application's own.
+2. **OAuth2 · MCP login** — an MCP application gated by an exposed API scope. Interactive
    agents (Cursor, etc.) use TrustGate's authorization-code broker; optional
    client-credentials tokens are only for curl checks.
 
@@ -26,7 +26,7 @@ the Entra `oid` claim as the stable subject. Use the values below exactly.
 - For Cursor / agent MCP login: the public MCP base URL of your gateway (e.g.
   `https://{gateway_slug}.mcp.neuraltrust.ai`), so you can register the OAuth redirect URI.
 
-**SaaS vs Private `mcp_base_url`:** SaaS uses `{slug}.mcp.neuraltrust.ai`. Private/Hybrid uses the Dataplane MCP URL from **Settings → Agent Gateway → General**. Register `{mcp_base_url}/oauth/callback` on the IdP **before** testing agent login.
+**SaaS vs Private `mcp_base_url`:** SaaS uses `{slug}.mcp.neuraltrust.ai`. Private/Hybrid uses the Dataplane MCP URL from **Settings → General**. Register `{mcp_base_url}/oauth/callback` on the IdP **before** testing agent login.
 
 ## The values you will collect
 
@@ -117,7 +117,7 @@ left-hand navigation.
 
 Use this when the application already obtains its own Entra access token — client
 credentials for a service, or a user token the application forwards — and sends it as
-`Authorization: Bearer <token>`. TrustGate verifies the token; the consumer's own
+`Authorization: Bearer <token>`. TrustGate verifies the token; the application's own
 **Routing** decides registries and models. Everything below is done in the NeuralTrust app —
 no API payloads.
 
@@ -136,17 +136,17 @@ no API payloads.
 
     Save. No client secret is stored: the gateway only verifies tokens.
   </Step>
-  <Step title="Attach it to the consumer">
-    Go to **Agent Gateway → Consumers**, open (or create) the consumer, and on **General →
+  <Step title="Attach it to the application">
+    Go to **Agent Gateway → Applications**, open (or create) the application, and on **General →
     Authentication** choose **Identity provider** and select `entra-idp`.
 
     - **Allowed client IDs**: the **Application (client) ID** of every calling
       application. Entra v2.0 tokens carry it in `azp`. Leave empty only when the audience
-      is dedicated to this one consumer.
+      is dedicated to this one application.
 
-    **Save changes**. Registries and models stay under **Routing**, as for any consumer.
+    **Save changes**. Registries and models stay under **Routing**, as for any application.
   </Step>
-  <Step title="Call the consumer">
+  <Step title="Call the application">
     Mint a token (see [§5](#5-get-a-test-token-optional-m2m)) and send it:
 
     ```bash
@@ -215,20 +215,20 @@ TrustGate accepts either:
     use the short scope name in `required_scopes` (not `openid` / `profile` / `email`),
     and pin `jwks_url` only if you do not want discovery.
   </Step>
-  <Step title="Create an MCP consumer and attach the auth">
-    Go to **Agent Gateway → Consumers → New Application**.
+  <Step title="Create an MCP application and attach the auth">
+    Go to **Agent Gateway → Applications → New Application**.
 
     - **Name**: e.g. `entra-mcp`
     - **Protocol**: `MCP`
     - **Authentication → Identity provider**: select `entra-mcp`
     - **Allowed client IDs** (optional): the app registration's client ID
 
-    Click **Create Application**. On the consumer's **General** tab, **Identity → Acts on
+    Click **Create Application**. On the application's **General** tab, **Identity → Acts on
     behalf of end users** with **Users sign in** makes each person hold their own upstream
-    connections; the consumer's servers stay the registries bound under **Routing**.
+    connections; the application's servers stay the registries bound under **Routing**.
   </Step>
   <Step title="Connect from Cursor">
-    Open the consumer → **Connect** tab and copy the Cursor URL:
+    Open the application → **Connect** tab and copy the Cursor URL:
 
     ```text
     https://{mcpHost}/{consumer_slug}/mcp
@@ -268,7 +268,7 @@ Decode the `access_token` and confirm:
 |---|---|
 | Audience mismatch | Token `aud` is the bare `client_id` but the auth lists only `api://…` (or vice versa). TrustGate normalizes the `api://` prefix, so either form works; check for a different app's ID. |
 | `roles`/`scp` empty | For client credentials you must **grant an app role** and admin-consent it; delegated tokens need the user assigned and consent granted. |
-| `403 forbidden` on a bearer call | Token verified but its `azp` is not in the consumer's **Allowed client IDs**. |
+| `403 forbidden` on a bearer call | Token verified but its `azp` is not in the application's **Allowed client IDs**. |
 | Redirect URI mismatch on login | Add `{mcp_base_url}/oauth/callback` under **Authentication → Web** on the app registration. |
 | Wrong issuer | App is emitting v1.0 tokens (`sts.windows.net`) — switch to v2 or set the v1 issuer/JWKS. |
 | Config rejected | **Required scopes** contains `openid`/`profile`/`email`/`offline_access` — remove them. |

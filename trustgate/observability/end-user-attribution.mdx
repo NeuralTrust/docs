@@ -1,0 +1,160 @@
+---
+title: "End-user attribution"
+description: "Attribute traffic behind a shared API key to the person a client application was serving — automatically for Open WebUI, or with TrustGate's own headers from any client."
+---
+
+A chat front-end authenticates to TrustGate with **one** API key and serves **many**
+people. Without help, every request from it carries the same application and the same
+principal, so Activity, Analytics and your cost reports can only say *"this application"* —
+never *"this person"*.
+
+End-user attribution closes that gap. A client tells TrustGate who it was serving, and
+that person lands on the trace, in Activity, and in the event stream alongside the
+credential that actually authenticated.
+
+<Warning>
+**Attribution, not authentication.** These values are asserted by whoever holds the API
+key and are never verified by the gateway. They never become the request's principal,
+never reach policy decisions, and never grant access. They are for telemetry, analytics
+and cost attribution only. The authenticated principal is recorded separately and stays
+unchanged — see [Not an identity](#not-an-identity).
+</Warning>
+
+## Nothing to configure on TrustGate
+
+There is no per-tenant setup, no flag on the application and no gateway setting. TrustGate
+reads the headers below on every request; a request that declares nobody behaves exactly
+as it did before.
+
+## Ways to declare the end user
+
+TrustGate takes the **first** source that names somebody:
+
+| Order | Source | Where | Recorded `source` |
+|---|---|---|---|
+| 1 | `X-TG-User-Id`, `X-TG-User-Email`, `X-TG-User-Name`, `X-TG-User-Role` | Request headers | `trustgate` |
+| 2 | `X-OpenWebUI-User-Id`, `X-OpenWebUI-User-Email`, `X-OpenWebUI-User-Name`, `X-OpenWebUI-User-Role` | Request headers | `open_webui` |
+| 3 | `user` | OpenAI-style JSON request body | `openai_user` |
+
+TrustGate's own namespace comes first on purpose: if you set `X-TG-*`, you did so
+deliberately, so a request carrying both yours and a vendor's is attributed the way you
+asked. The body `user` field is a last resort — it is one opaque id, not a person — and is
+read only when no header named anyone.
+
+You do not have to send all four fields. Any one of id, email or name is enough; a header
+set where every value is blank is skipped, and the next source is tried.
+
+### Open WebUI
+
+Open WebUI forwards its user headers when you turn on one environment variable. Set it
+where Open WebUI runs, not on TrustGate:
+
+```yaml
+# docker-compose.yml — Open WebUI
+services:
+  open-webui:
+    environment:
+      - ENABLE_FORWARD_USER_INFO_HEADERS=true
+      - OPENAI_API_BASE_URL=https://<your-gateway>/v1
+      - OPENAI_API_KEY=<your TrustGate API key>
+```
+
+It is **off by default**. With it on, Open WebUI adds `X-OpenWebUI-User-Id`,
+`-Email`, `-Name`, `-Role` and `X-OpenWebUI-Chat-Id` to every request it sends to
+TrustGate, and attribution starts working with no further configuration on either side.
+
+If a proxy of your own sits between Open WebUI and TrustGate, check that it does not strip
+unknown request headers.
+
+### Your own client
+
+Any client — a backend, a custom UI, a proxy — can attribute with TrustGate's namespace:
+
+```bash
+curl https://<your-gateway>/v1/chat/completions \
+  -H "Authorization: Bearer <your TrustGate API key>" \
+  -H "X-TG-User-Id: u-42" \
+  -H "X-TG-User-Email: ana@acme.com" \
+  -H "X-TG-User-Name: Ana Ruiz" \
+  -H "X-TG-User-Role: analyst" \
+  -H "X-TG-Session-Id: conversation-8f21" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+### The OpenAI `user` field
+
+A client that already sets the OpenAI API's `user` field needs no headers at all:
+
+```json
+{
+  "model": "gpt-4o",
+  "messages": [{ "role": "user", "content": "Hello" }],
+  "user": "u-42"
+}
+```
+
+This is read only when no header declared anyone, and it can only carry an id — no email,
+name or role.
+
+## Grouping a conversation
+
+A chat client sends each message as its own request. Without a conversation id every
+message looks like a fresh session, which makes session-scoped alerts and any
+"conversation" view useless.
+
+TrustGate takes the first of:
+
+1. The session header configured on the gateway (`X-Session-Id` by default)
+2. `X-TG-Session-Id`
+3. `X-OpenWebUI-Chat-Id`
+4. The body field named by the gateway's session configuration, if set
+5. A generated id — one per request, which is the old behaviour
+
+The value is recorded as `session_id` and echoed back on the response as `X-Session-Id`.
+Sessions are enabled by default; if a gateway sets `session.enabled: false`, none of these
+headers are read.
+
+## Where it shows up
+
+**Activity.** The *User* column shows the declared person instead of the API key's
+principal. Because the name is unverified it is marked as such, and opening a request
+shows who declared it and, beside it, the credential that authenticated — both facts at
+once.
+
+**Event stream.** Two fields on the TrustGate event, both documented in the
+[Event schema](/platform/event-schema):
+
+| Field | Contents |
+|---|---|
+| `end_user` | A single identifier: the id, or the email, or the name — the first one given. |
+| `end_user_detail` | The whole declaration as JSON: `id`, `email`, `name`, `role`, `source`. |
+
+**OpenTelemetry.** Exported as `trustgate.end_user` plus
+`trustgate.end_user.id`, `.email`, `.name`, `.role` and `.source`.
+
+Values are trimmed and capped at 256 characters. A declaration that names nobody — only a
+role, say — records no identifier, so nothing groups under an empty user.
+
+## Not an identity
+
+TrustGate distinguishes two different things, and so should any query you write over this
+data:
+
+| | The principal | The declared end user |
+|---|---|---|
+| Comes from | The credential that authenticated (API key, JWT, mTLS) | A header or body field the caller controls |
+| Verified | Yes | **No** |
+| Stored as | `principal_subject`, `principal_email`, `principal_method` | `end_user`, `end_user_detail` |
+| Affects policy | Yes — guardrail rules can match on it | **Never** |
+
+Anyone who can reach your gateway with a valid API key can put any name in these headers.
+Use them to understand and bill traffic; do not use them to decide who may do what. If you
+need an end user whose identity TrustGate acts on, that is a different mechanism — see
+[End users of your application](/trustgate/mcp/end-users) for the MCP case, where each
+person connects their own upstream accounts.
+
+## Related
+
+- [Event schema](/platform/event-schema): the field contract alerts and analytics match on
+- [Applications](/trustgate/access/applications): API keys, bindings, and the principal behind a request
