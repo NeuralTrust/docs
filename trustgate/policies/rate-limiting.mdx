@@ -9,8 +9,14 @@ Applies to **LLM and MCP** for the rate limiter; **LLM** for the budget.
 
 Counts requests in a sliding window and refuses the ones over the line. You set a
 **limit**, a **window** (`30s`, `1m`, `1h`), and the **Retry-After** the refusal
-carries. Refused responses carry the standard rate-limit headers so a well-behaved
-client backs off on its own.
+carries — by default the window, which is when the allowance actually returns.
+Refused responses carry the standard rate-limit headers so a well-behaved client
+backs off on its own.
+
+What the counter counts depends on the scope. Gateway-wide, one counter covers all
+traffic. Targeted, each application gets its own. This is the only type that
+offers **Throttle** mode: a request over the line waits its share of the window
+and then goes through, which turns a burst into a queue instead of a wall of 429s.
 
 **Group by header** splits the counter by a header value — `X-User-Id`, say — so
 one policy gives every end user of an application their own allowance. It is the
@@ -26,8 +32,12 @@ happens when the cap is reached.
 | **Unit** and **Max** | Tokens (whole numbers) or dollars (fractional), per window. |
 | **Time window** | Seconds to days. Anything under a minute is raised to a minute. |
 | **When exceeded** | **Reject** the request, or **downgrade** the model to a cheaper one on the same provider. |
-| **Per-model limits** | Tighter caps for specific models or families — `claude-opus-*`. The most specific pattern wins. |
+| **Per-model limits** | Tighter caps for specific models or families — `claude-opus-*`. A request is checked against the main budget and against the most specific rule matching its model; exceeding either triggers the behaviour. |
 | **Counting** | Total, input only, or output only. |
+| **Group by header** | A separate budget per value of a header — `X-User-Id` — inside the policy scope. |
+
+As with the rate limiter, the budget is one counter gateway-wide and one per
+application when targeted.
 
 The budget is checked before the request goes upstream, using an estimate, and
 the actual usage is charged after the response. In observe mode nothing is
