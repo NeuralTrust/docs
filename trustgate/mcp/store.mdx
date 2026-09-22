@@ -1,111 +1,78 @@
 ---
-title: "MCP Store"
-description: "The self-service MCP catalog every gateway serves at /store/mcp: people sign in, search the NeuralTrust catalog, and install servers for themselves"
+title: "Portal"
+description: "The self-service side of MCP: people browse the catalogue, install servers for themselves, connect their own accounts, and ask for what they cannot have — while admins keep the shelf."
 ---
 
-The **MCP Store** is a fixed MCP endpoint every gateway serves at
-`https://<mcp-host>/store/mcp`. A person points their MCP client at it, signs in with
-their NeuralTrust login, and gets three gateway tools to search the whole NeuralTrust MCP
-catalog, install a server for themselves, and remove it. The tools of everything they
-installed appear on that same URL.
+Applications are for things your team built. The **Portal** is for people.
 
-The Store is for **people**; [consumers](/trustgate/concepts/consumers) are for
-**applications**. A consumer's surface is exactly the registries an admin bound to it and
-is the same for every caller it admits. The Store's surface is per person: what they
-installed, bounded by their [Access](/trustgate/mcp/access) level and grants. Neither
-governs the other.
+Every gateway has one. A person opens it, signs in with their NeuralTrust login,
+and sees the catalogue: what they can install, what they already have, and the
+state of their own account on each server. Everything they install becomes
+available to their agents through one fixed MCP URL — the same catalogue, reached
+by a client instead of a browser, with three tools to search, install and
+uninstall.
 
-The console shows the URL under the gateway's settings as **MCP Store** (**Copy MCP Store
-URL**). Employees without console permissions reach the same catalog through the
-**Portal**.
+Neither governs applications and applications do not govern it. An application's
+surface is what an admin bound; a person's Portal is what they installed, bounded
+by their [Access](/trustgate/access/overview) level.
 
-## Connect from a client
+## Installing
 
-```bash
-claude mcp add --transport http TrustGate-Store https://<mcp-host>/store/mcp
-```
+Installing a catalogue server creates or reuses **one registry entry per
+catalogue code** on the gateway. What is per person lives elsewhere: their
+account on a forwarded-auth server, vaulted under their identity, and any
+per-user setup values a server's URL is built from.
 
-Any client that supports streamable HTTP with OAuth works the same way; see
-[Connect an agent](/trustgate/mcp/overview#connect-an-agent). The sign-in is the built-in
-NeuralTrust login for the gateway's organization; on NeuralTrust-hosted gateways a session
-from another organization is rejected.
+An install answer is a state, not a success flag:
 
-## Store tools
-
-| Tool | Arguments | Returns |
+| State | What it means | What happens next |
 |---|---|---|
-| `trustgate_store_search` | `query?`, `category?`, `limit?` (default 20, max 50) | `results[]{code, name, requires_auth, description, …}`, `total`, `returned`, `truncated`, `mode`. The text body lists each result with its exact install `code`. |
-| `trustgate_store_install` | `code` (required), `config?` (per-user setup values), `instance?` | See below. |
-| `trustgate_store_uninstall` | `code` (required), `instance?` | `{code, uninstalled: true}`, or `ambiguous: true` with `instances[]{instance, label}` when several instances are installed. |
+| **Installed** | Tools are on the Portal's MCP URL now. | Nothing. |
+| **Connect** | The server needs the person's own account. | They open the connect link and sign in once. |
+| **Needs setup** | The server's address is built from values only they know — a subdomain, a workspace. | They supply them on a hosted form. Secrets are entered only there, never through the tool. |
+| **Choose an instance** | An admin connected several instances. | They pick one. |
+| **Request access** | The server is outside their selection. | They write why, and it goes to [Approvals](/trustgate/access/overview#requests-instead-of-refusals). |
+| **Needs admin setup** | The server wants a shared credential only an admin can add. | An admin finishes the registry entry. |
 
-An install result always carries `code`, `name`, `status`, `pending`, `already_installed`,
-`requires_auth`, `requires_config`, `requires_admin_setup`, and `config_variables` (`null`
-when the server needs no setup values). The
-flags tell the agent what happens next:
+The person's Portal shows the same states — **Installed**, **Connect**,
+**Reconnect needed**, **Pending**, **Needs admin setup** — and under **My Access**
+what they hold, with the state of their own account on each.
 
-| Result | Meaning | Next step |
-|---|---|---|
-| `status: installed` | The server's tools are on the Store now. | Refresh the tool list. |
-| `connect_url` + `connect_label` | The server needs the user's own account. Also returned when the server was `already_installed` but not connected. | The agent shows the link; the user signs in on the connect card once. |
-| `requires_config` + `config_variables[]{name, description, required, secret}` | The server's URL is built from per-user values (`url_variables`). | Ask for the plain values and call install again with them in `config`, or hand the user `configure_url` (+ `configure_label`). Secret values are only ever entered on that hosted form, never through the tool. |
-| `requires_instance_choice` + `instances[]{instance, name}` | An admin connected several instances of the server. | Ask which one and call install again with its id in `instance`. |
-| `requires_reason` + `request_url` | The server is outside the user's access; installing it files a request for approval. | The user opens `request_url`, writes why they need it, and files the request. The agent cannot supply the reason. |
-| `pending: true` | The request is waiting in [Access → Approvals](/trustgate/mcp/access#approvals). | Once approved, install again (or the approval grants it and the next install is instant). |
-| `requires_admin_setup` | The server needs a credential only an admin can add (a shared API key, a pre-registered OAuth client). | Ask an admin to connect it on the **Registry** page. |
+## Open or curated
 
-Tools from a per-instance install, and from any Store with more than one server, are
-published under the federated naming scheme described in
-[Tool name composition](/trustgate/mcp/overview#tool-name-composition).
+A gateway's **default access** decides what the Portal offers everyone who has no
+level of their own:
 
-## Store mode
+| Default | Effect |
+|---|---|
+| **All** | The whole catalogue is browsable and installs instantly. A server with no registry entry yet gets one on first install. |
+| **Selected** | Only the shelf and what is granted are browsable; anything else becomes a request. |
+| **None** | The Portal is closed: nothing to browse, installs are refused. |
 
-The gateway's `store_mode` is the default level for everyone on that gateway. Set it with
-`PUT /v1/gateways/{id}` or on the **Access** page as **Default access**:
+A level set on a person or a group overrides the default. The effective level is
+evaluated on every request, so a change lands immediately.
 
-| API value | Console | Effect |
-|---|---|---|
-| `open` (default) | **All** | The whole catalog is browsable and every self-service server installs instantly. Installing a server that has no registry yet creates it (origin `store`). |
-| `curated` | **Selected** | Only servers on the shelf or granted to the person are browsable; granted servers install instantly, anything else becomes an install request. |
-| `none` | **None** | The Store is closed for this person: search answers nothing and installs are refused. |
+Curated is the setting most organisations end at. It is not a refusal of
+everything else — it turns "I need this" into a request with a reason attached,
+decided by an admin, and approving a group instead of a person is how the same
+request stops arriving.
 
-A per-user or per-group level set on the [Access](/trustgate/mcp/access) page overrides
-the gateway default; the effective level is re-evaluated on every request, not only at
-install time.
+## Reconnecting
 
-## Per-user accounts and setup values
-
-Installing a server creates or reuses **one shared registry per catalog code** on the
-gateway. What is per person lives elsewhere:
-
-- **Accounts.** A `forwarded`-auth server stores each person's OAuth credential in the
-  vault under their principal, keyed by provider and instance. Two people installing
-  the same server never share a credential. Until they connect, the server shows as
-  `needs_connect` in `trustgate_list_tools` and contributes no tools.
-- **URL variables.** Servers such as Snowflake or ServiceNow build their URL from values
-  only the user knows. Plain values ride on the installation; secret values are stored in
-  the vault, entered only on the hosted configure form.
-
-The Store's `tools/list` answers an empty list plus the gateway tools while a registry is
-unconnected or nothing is installed yet; it never fails the handshake.
+A connection is reported as **connected** only while its credential can still be
+redeemed. When a provider stops honouring the refresh, the person sees
+**Reconnect needed** and the server contributes no tools until they sign in
+again. The gateway never replays a refresh token a provider already rejected.
 
 ## Instances
 
-A `multi_instance` catalog server can be connected more than once with different
-configuration (two Snowflake schemas, two API keys); admins add them from the registry side
-panel (**Instances** → **Add instance**). When several exist, the Store asks the user which
-one to install or uninstall. See
-[Instances and the Store](/trustgate/concepts/registries#instances-and-the-store).
+A server that can be connected more than once — two Snowflake schemas, two API
+keys — holds instances, added by admins from the registry. When several exist the
+Portal asks which one to install or uninstall, and each holds its own set of
+per-user accounts.
 
-## Requests and approvals
+## Where it is
 
-When a person's level is **Selected** and the server is not granted to them, the install
-becomes a request carrying the reason they wrote (up to 500 characters) and the groups they
-belonged to when they filed it. Admins decide it in
-[Access → Approvals](/trustgate/mcp/access#approvals); approving grants the server to the
-person or to one of their groups, so the next install is instant.
-
-## Related
-
-- [Access](/trustgate/mcp/access): levels, grants, approvals, and admin preview
-- [MCP Gateway](/trustgate/mcp/overview): meta-tools, forwarded auth, and tool naming
-- [Registries](/trustgate/concepts/registries): instances, `origin: "store"`, and `from-catalog`
+The Portal's MCP URL is under the gateway's settings, next to the LLM and MCP
+gateway URLs. Employees without console access reach the Portal from the platform; admins
+can preview it as any user from [Access](/trustgate/access/overview#seeing-what-someone-else-sees).

@@ -1,121 +1,107 @@
 ---
 title: "Policies"
-description: "Configure rate limits, budgets, caching, tool governance, and guardrails globally or per consumer"
+description: "A policy is a type, a scope and a configuration. The scope has two sides — who the traffic comes from and what it touches — and getting that pair right is most of the work."
 ---
 
-<p className="nt-lead">
-  A policy attaches one built-in plugin to a gateway. It runs at one or more
-  lifecycle stages and can cover the whole gateway or selected consumers.
-</p>
+Registry decides what a gateway can reach. Applications and access decide who may
+call it. A **policy** decides what happens to the calls that are already allowed:
+budgets, rate limits, what may be said, which tools may run.
+
+Every policy is the same three things.
+
+## Type
+
+The **type** is what the policy does — a rate limit, a token budget, a tool
+allowlist, a guardrail, CORS. Types come from the **Library**, which is the
+authoritative list of what this gateway can enforce; it grows without the console
+changing, so browse it rather than trusting any list written down elsewhere.
+
+You configure a type into a named policy, and you can configure the same type
+more than once. Two rate limits with different numbers for different applications
+are two policies of one type, not a conflict.
+
+Name them so the list stays readable a year from now: the type is already shown
+in its own column, so the useful name is the part the type does not say —
+`Token budget · prod`, not `Token budget`.
+
+## Scope
+
+Scope has two sides, and they answer different questions:
+
+| Side | Question |
+|---|---|
+| **Requests from** | All traffic, specific **groups**, or specific **applications**. |
+| **Resources** | All resources, or selected MCP servers — and, within a server, selected tools. |
+
+A policy with both sides open is **gateway-wide**; narrowing either side makes it
+**targeted**. The two sides intersect: a policy scoped to one group *and* one
+server applies only where both are true, which is how you write "the contractors
+group may not call the deployment tools" without touching anything else.
+
+A tool only exists inside the server that serves it, so a tool-level scope always
+follows from choosing a server first.
+
+**Coverage** in the list is the consequence of all this — all applications, or the
+number it actually reaches. Read it as the sanity check on a scope you thought
+was narrower or wider than it turned out to be.
+
+## Configuration
+
+The type's own settings, with defaults tuned for the common case. Durations are
+written the short way — `1h`, `30m`, `60s`, `500ms`.
+
+Where a type needs credentials of its own — a provider's moderation API, an AWS
+guardrail — they are stored encrypted on the policy and never shown again, the
+same as anywhere else in the product.
+
+Some types depend on something outside the gateway. A policy that hands traffic
+to Agent Runtime needs a runtime collector connected to this gateway; without one
+it has nothing to analyse with, and the policy will say so rather than failing
+quietly at request time.
+
+## Saving is enforcement
+
+There is no draft state and no staged rollout. Saving a policy changes behaviour
+for everything in its scope immediately, and deleting one removes that
+enforcement just as immediately — which is why deleting asks you to type the
+word.
+
+Two habits follow from that:
+
+- Check **coverage** before saving a change to a gateway-wide policy. A number
+  larger than you expected means the scope is not what you think.
+- Use **pause** rather than delete when you are testing whether a policy is the
+  cause of something. Pausing stops enforcement and keeps the configuration and
+  its attachments; deleting loses both.
+
+A policy in **error** is not enforcing. It is not failing open silently — the
+status says so — but nothing about the traffic it was meant to cover is being
+checked until it is fixed.
+
+## Where to attach
+
+A policy can be attached from itself, by naming applications in its scope, or
+from an application, by adding policies to it. Both edit the same relationship.
+
+Gateway-wide policies need no attaching and cannot be opted out of by an
+application — that is the point of them.
+
+## The types
 
 <CardGroup cols={2}>
   <Card title="Rate limits and budgets" icon="gauge" href="/trustgate/policies/rate-limiting">
-    Request rate, per-tool rate, and LLM token budgets.
+    Request rate, per-tool rate, and token budgets.
   </Card>
   <Card title="Request size" icon="ruler" href="/trustgate/policies/request-size">
     Cap payload size before the request is forwarded.
   </Card>
-  <Card title="Prompt and model controls" icon="file-text" href="/trustgate/policies/prompt-model-controls">
+  <Card title="Prompt Management" icon="file-text" href="/trustgate/policies/prompt-management">
     Prompt templates and compression.
   </Card>
   <Card title="Tool governance" icon="wrench" href="/trustgate/policies/tool-governance">
-    Allow-lists, injection, and per-tool limits for MCP and function calling.
+    Allowlists, injection defence, and per-tool limits.
   </Card>
   <Card title="Guardrails" icon="shield-check" href="/trustgate/policies/guardrails">
-    TrustGuard, provider moderation, and regex replace.
-  </Card>
-  <Card title="TrustGuard integration" icon="zap" href="/integrations/trustgate">
-    Native collector — no `tgk_` key on the TrustGate path.
+    TrustGuard, provider moderation, and regex replacement.
   </Card>
 </CardGroup>
-
-## Policies screen
-
-Open **Agent Gateway** → **Policies**.
-
-| Tab | Purpose |
-|---|---|
-| **Policies** | Search configured policies, filter by protocol (**LLM** / **MCP**), pause or resume them, and open their details. |
-| **Catalog** | Browse plugins by category (guardrails first). **Add policy** starts create. |
-
-### Create or edit
-
-1. **Catalog** → pick a plugin, or **New policy**.
-2. Set **Name** (catalog types use a fixed prefix where required).
-3. **Scope**
-   - **Mode:** **Enforce** · **Observe** · **Throttle** (when the plugin supports it).
-   - **Coverage:** **Gateway-wide** or **Targeted** (pick consumers).
-4. Fill **Configuration** (dedicated form or schema-driven fields).
-5. Save. Use **Pause** / **Resume** / **Delete** from the detail panel without losing history of attachments.
-
-### Attach from a consumer
-
-Open a [consumer](/trustgate/concepts/consumers) → **Policies** → **Add Policy**, or
-**Clone policies** from another consumer. Global policies still apply automatically.
-
-## Catalog (UI plugins)
-
-### Traffic control
-
-| Policy | UI / slug | Docs |
-|---|---|---|
-| Rate Limiter | `rate_limiter` | [Rate limiting & budgets](/trustgate/policies/rate-limiting#rate-limiter) |
-| Request size | `request_size_limiter` | [Request size](/trustgate/policies/request-size) |
-| Per-Tool Rate Limiter | `per_tool_rate_limiter` | [Tool governance](/trustgate/policies/tool-governance#per-tool-rate-limiter) |
-
-### Quota
-
-| Policy | UI / slug | Docs |
-|---|---|---|
-| LLM Budget | `token_rate_limiter` | [Rate limiting & budgets](/trustgate/policies/rate-limiting#llm-budget) |
-
-### Prompt management
-
-| Policy | UI / slug | Docs |
-|---|---|---|
-| Prompt Template | `prompt_template` | [Prompt management](/trustgate/policies/prompt-model-controls#prompt-template) |
-| Prompt Compression | `prompt_compression` | [Prompt management](/trustgate/policies/prompt-model-controls#prompt-compression) |
-
-### Tool governance
-
-| Policy | UI / slug | Docs |
-|---|---|---|
-| Tool Injection | `tool_injection` | [Tool governance](/trustgate/policies/tool-governance#tool-injection) |
-| Tool Allowlist (Admin API only, not in the **Catalog** tab) | `tool_allowlist` | [Tool governance](/trustgate/policies/tool-governance#tool-allowlist) |
-
-### Guardrails
-
-| Policy | UI / slug | Docs |
-|---|---|---|
-| TrustGuard | `trustguard` | [Guardrails](/trustgate/policies/guardrails) · [TrustGuard gateway integration](/integrations/trustgate) |
-| OpenAI Moderation | `openai_moderation` | [Guardrails](/trustgate/policies/guardrails) |
-| Azure Content Safety | `azure_content_safety` | [Guardrails](/trustgate/policies/guardrails) |
-| Bedrock Guardrail | `bedrock_guardrail` | [Guardrails](/trustgate/policies/guardrails) |
-| Regex Replace | `regex_replace` | [Guardrails](/trustgate/policies/guardrails#regex-replace) |
-
-> **TrustGuard in the UI.** Adding the TrustGuard policy walks you through selecting or
-> creating an Agent Runtime **collector**. Connection details are injected by the platform;
-> you do not paste base URLs by hand in normal SaaS use.
-
-The live **Catalog** tab is authoritative for what you can add in your tenant.
-
-## Stages
-
-| Stage | When |
-|---|---|
-| Pre-request | Before the request is forwarded upstream. |
-| Pre-response | After the upstream responds, before returning to the client. |
-| Post-response | After the response is returned (cache populate, budget accrual). |
-
-## Mode
-
-| Mode | Behavior |
-|---|---|
-| **Enforce** | Reject, transform, or block violations (default). |
-| **Throttle** | Delay rather than reject (rate/budget plugins). |
-| **Observe** | Record violations without enforcing them. |
-
-## Ordering
-
-Lower **priority** runs earlier. Same-priority policies may run in parallel when enabled.
-Global policies are the baseline; targeted policies refine per consumer.

@@ -1,0 +1,75 @@
+---
+title: "Prompt Management"
+description: "Change what goes into the request before the model sees it: inject a system prompt every caller gets, serve a prompt library clients invoke by name, or compress what is sent."
+---
+
+Applies to **LLM**.
+
+## Prompt Template
+
+One policy type doing two unrelated jobs; the console asks which before showing
+fields.
+
+### Inject a system prompt into every request
+
+Your platform team writes the prompt; the gateway injects it; callers send their
+requests unchanged and never see it. The parts that vary per request are
+`{{placeholders}}`, each mapped to a **header** or a **JWT claim** to read at
+request time — a tenant id from `X-Tenant-Id`, a plan tier from a claim.
+
+A placeholder with no source cannot be saved. Before that rule existed it saved
+happily and rejected every request at runtime.
+
+**If a variable is missing** at request time: skip the template (default — the
+caller cannot fix a header it was never asked to send), substitute an empty
+string, or reject.
+
+<Warning>
+A **JWT claim** is read without verifying the token's signature. It is
+trustworthy only when the caller authenticates with that same bearer token. An
+application that authenticates with an API key can put anything in an
+`Authorization` header, and the claim you read is whatever it put there. Never
+make an authorisation decision on a claim unless bearer auth is the only way in.
+</Warning>
+
+### Publish a prompt library clients invoke
+
+Prompts live on the gateway and change without a client release. A client
+references one by name in a plain user message — `{template://support-greeting}`,
+or `@stable` to pin a label — and the gateway renders it. Placeholders are filled
+by the client, or by a header or claim the gateway reads so the client cannot
+influence that value.
+
+<Warning>
+Rendering a named template **replaces the entire message list**. Conversation
+history the client sent is discarded before the model sees anything. This fits
+single-turn calls; the trace reports how many turns were dropped.
+</Warning>
+
+The console saves one version labelled `latest`. Versioning beyond that is
+API-only; a template that already carries several versions keeps them, and the
+panel says so rather than editing them.
+
+## Prompt Compression
+
+Shrinks what is sent to the model without changing what it means: minifies
+JSON — standalone content, fenced blocks, tool-call arguments — strips ANSI
+escape sequences from pasted terminal output, trims trailing spaces and
+collapses runs of blank lines.
+
+There is **nothing to configure**. A policy of this type is a name and a scope.
+
+The reason is the thing it protects. Provider prompt caches key on exact
+bytes, so a compression that varied by setting — or touched a short, stable
+system prompt — would cost more in cache misses than it saved in tokens. The
+defaults are chosen against that: content under 256 bytes is left byte-identical,
+bodies over 1 MiB are passed through untouched to bound CPU on the request path,
+and the result is deterministic, so the same input always compresses to the
+same bytes across turns.
+
+It fails open. A compression error passes the request through unchanged rather
+than refusing it.
+
+It pays off on requests carrying structured data — tool results, logs, pasted
+JSON. On prose it does nothing worth measuring, which is fine: it also costs
+nothing worth measuring.

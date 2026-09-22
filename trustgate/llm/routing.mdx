@@ -1,0 +1,149 @@
+---
+title: "Routing"
+description: "How an application picks a registry and a model for each request: one target, an ordered fallback chain, or a load-balanced pool — and what the client has to send for each."
+---
+
+Routing is decided per **application**. It answers one question for every request:
+given the registries this application may use, which one gets this call, and with
+which model.
+
+There are four answers, and the console offers them as one **Strategy** choice.
+
+| Strategy | Picks | Reach for it when |
+|---|---|---|
+| **Simple routing** | The registry the model name points at. | One provider, or the client always names the model. |
+| **Fallback** | The first registry in an ordered chain that succeeds. | You want resilience across providers, or a cheaper degrade path under load. |
+| **Load balancing** | A member of a pool, by algorithm. | Traffic should spread — evenly, by weight, or by load. |
+| **Smart routing** | A tier, by how hard the prompt is. | Two or more model strengths serve the same application and cost should follow difficulty. |
+
+Start with one registry. Fallback and load balancing are things you add once the
+application works, not things you design up front.
+
+## Simple routing
+
+One or more registries, no distribution. With one registry every request goes
+there. With several, the client's `model` decides: TrustGate walks the
+application's registries in order and uses the first that serves the named
+model. A name no registry serves is rejected before it reaches any provider.
+
+This is the strategy where the client carries the decision. That is fine for a
+service that knows exactly what it wants, and wrong for anything you would like
+to re-route later without touching the client.
+
+## Fallback
+
+An ordered **chain** of registries. TrustGate forwards to the first; on a failure
+that matches a **trigger**, it moves to the next, and never re-tries a registry
+that already failed within the same request.
+
+| Trigger | Fires on |
+|---|---|
+| **HTTP 5xx** | The upstream failed. |
+| **HTTP 429** | The upstream rate-limited you. |
+| **Timeout** | The upstream did not answer in time. |
+| **Provider error** | The provider reported an error in its own terms. |
+| **Policy rejection** | A policy refused the request. |
+
+A **budget** caps how hard it tries — a maximum number of attempts including the
+first, and a maximum total latency across all of them. When either runs out the
+client gets the last error, not a synthesised one.
+
+Two things about the chain worth knowing before you build one. The same model
+name has to exist on each registry you want it to reach, or the fallback stops
+there. And a chain that spans providers — OpenAI, then Azure OpenAI, then
+Bedrock — is resilience; a chain that goes from a flagship to a cheaper model is
+a degrade path, and those two intentions want different triggers. Rate-limit
+triggers suit the first; policy-rejection triggers usually do not.
+
+## Load balancing
+
+A **pool** of members, each a registry and optionally a pinned model. An algorithm
+picks a member per request:
+
+| Algorithm | How it picks |
+|---|---|
+| **Round robin** | Cycles evenly through the pool. |
+| **Weighted** | Each member carries a weight from 1 to 100; a member at 70 gets roughly 70% of what one at 30 gets. |
+| **Least connections** | The member with the fewest requests in flight. |
+| **Random** | Uniformly at random. |
+
+Registries with a health check are skipped while unhealthy and rejoin when they
+recover. Pair load balancing with fallback if a failed pick should retry another
+path instead of surfacing the error.
+
+Load balancing is for **models only**. Tool traffic routes to a single server, so
+an application serving MCP never sees these options.
+
+## Smart routing
+
+The console lists it beside the load-balancing algorithms, but it is a different
+kind of decision: not *which member takes the next request* but *which model
+this request deserves*.
+
+Smart routing classifies each prompt into a complexity band and sends it to the
+tier configured for that band. The bands are fixed labels — you never set a
+threshold:
+
+| Band | Traffic |
+|---|---|
+| **Simple** | Short, low-stakes, straightforward. Put the cheapest capable model here. |
+| **Medium** | Everyday production traffic. |
+| **Hard** | Long, multi-step, technical. The model that justifies its cost. |
+
+Each tier is a **registry and a model**. Tiers may share a registry — one OpenAI
+connection serving `gpt-4o-mini` on Simple and `gpt-4o` on Medium is the common
+shape. You need at least two tiers, and each band can be used once.
+
+A prompt whose complexity falls below every configured tier goes to the
+**cheapest** tier, not to a random pick. That makes the cheapest tier
+load-bearing in a way the others are not: if its registry is deleted, smart
+routing is dropped and the pool reverts to round robin. Losing a middle or top
+tier just removes that rung.
+
+The point of smart routing is cost without a product decision per request. Check
+**Analytics** after turning it on: if the tier mix is not what you expected, the
+model on **Simple** is usually too weak for what you thought was simple.
+
+## What the client sends
+
+The `model` field in the request is where routing meets the client, and its form
+has to match the strategy:
+
+| Client sends | Meaning |
+|---|---|
+| `"auto"` | *You pick.* Required for load balancing, including smart routing. |
+| `gpt-4o-mini` | A short name. Resolved to the first registry in order that serves it. |
+| `@openai/gpt-4o` | Provider-qualified. Prefers registries of that provider. |
+| nothing | The application's default model, when one is set. |
+
+With several registries and no load balancing, the client **must** name a model —
+there is nothing else to break the tie. The application's **Connect** tab and the
+Playground already emit the right form for the strategy configured, so copy from
+there rather than remembering the rule.
+
+## Restricting models
+
+Which models an application may reach is set on the application, per registry:
+either every model the registry serves, or a filtered subset, plus a default for
+requests that name none. The filter only offers models the registry's
+credentials can actually list, so an Azure entry shows its deployments and an
+OpenAI-compatible endpoint shows what it advertises.
+
+A request for a model outside the filter is rejected during resolution, before
+any provider is contacted. In a load-balanced pool a member's own model list
+overrides the registry's, and a pinned model on a member decides outright.
+
+This restriction is not a policy. It costs no policy evaluation and fails closed
+at resolution, which is why it is the right place for "this service may only call
+these two models".
+
+## Order of resolution
+
+1. Read `model`: `auto`, a short name, a qualified name, or nothing.
+2. Narrow to the registries this application may use — or the pool, for load
+   balancing.
+3. Apply each registry's model filter; fill in the default where nothing was named.
+4. Hand what survives to the strategy, with fallback on failure where configured.
+
+Every step is recorded on the trace, so a request that landed somewhere
+unexpected can be read back rather than guessed at.

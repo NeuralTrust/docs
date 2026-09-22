@@ -3,43 +3,41 @@ title: TrustGate
 sidebarTitle: Overview
 og:title: "TrustGate: AI Gateway for LLM and Agent Traffic"
 twitter:title: "TrustGate: AI Gateway for LLM and Agent Traffic"
-description: "TrustGate is an AI agent gateway that routes, governs, and observes traffic from agents to models, tools, and MCP servers."
+description: "TrustGate sits between your applications and the models and tools they call. It decides who may call what, applies the rules, routes the call, and records everything — from one console."
 ---
 
-<p className="nt-lead">
-  TrustGate is an AI agent gateway: a control plane between agents and the
-  models, tools, and MCP servers they call. Point an OpenAI, Anthropic, or
-  Responses client at it. Then route, authenticate, apply policy, and record
-  every call — from the NeuralTrust console or the control-plane API.
-</p>
+Every application that calls a model or a tool needs the same things: a
+credential it should not hold, a limit on what it may spend, a rule about what it
+may say and do, and a record of what happened. TrustGate provides those once, in
+front of every provider and every MCP server, so no application carries them
+itself.
 
-## How it works
+Point a client at the gateway instead of at the provider. It keeps speaking the
+API it already speaks. The gateway authenticates it as an **application**, applies
+the **policies** attached to it, **routes** to a registry entry using that entry's
+credential, and records the hop.
 
-<Steps>
-<Step title="Authenticate the caller">
-A [consumer](/trustgate/concepts/consumers) presents an API key, a JWT that
-TrustGate validates against your IdP, or a client certificate. The application
-never holds the provider credential.
-</Step>
-<Step title="Apply policy and route">
-TrustGate evaluates [rate limits, budgets, tool allow-lists, and
-guardrails](/trustgate/policies/overview), then the consumer's
-[registries](/trustgate/concepts/registries) handle the upstream, with
-[fallback](/trustgate/routing/fallback) and
-[smart routing](/trustgate/routing/smart-routing) when you configure them.
-</Step>
-<Step title="Record the hop">
-Tokens, cost, latency, and routing attempts go to traces and
-[OpenTelemetry](/trustgate/observability/metrics).
-</Step>
-</Steps>
+## What you operate
+
+Five objects, each answering one question. Most confusion about the product
+comes from expecting one of them to answer another's.
+
+| | |
+|---|---|
+| **[Gateway](/trustgate/concepts/gateways)** | Where traffic physically goes. Everything else belongs to one. |
+| **[Registry](/trustgate/registry/overview)** | What the gateway may reach — model providers, MCP servers — and with whose credential. |
+| **[Application](/trustgate/access/applications)** | What your team built, and what it is allowed to use. |
+| **[Access](/trustgate/access/overview)** | Which people reach which servers. |
+| **[Policy](/trustgate/policies/overview)** | The rules for traffic that is already allowed. |
+
+## Two planes
 
 <CardGroup cols={2}>
-  <Card title="Create a gateway" icon="rocket" href="/trustgate/getting-started/quickstart">
-    Register a provider, create a consumer, and send the first request.
+  <Card title="LLM Gateway" icon="brain" href="/trustgate/llm/connect">
+    Fourteen providers behind one API. Route by cost, by load, or by how hard the prompt is. Chat, embeddings, images, audio, files, rerank.
   </Card>
-  <Card title="Install a data plane" icon="server" href="/trustgate/getting-started/install">
-    Run TrustGate in your environment when prompts cannot leave your network.
+  <Card title="MCP Gateway" icon="bot" href="/trustgate/mcp/overview">
+    One endpoint in front of every MCP server. Each person as themselves upstream, a Portal people install from, and any OpenAPI document as tools.
   </Card>
 </CardGroup>
 
@@ -48,85 +46,19 @@ Tokens, cost, latency, and routing attempts go to traces and
   alt="Before-and-after diagram showing separate controls in each application consolidated into TrustGate, which applies shared controls and routes several applications to multiple LLMs."
 />
 
-## What you can do
+## Where it runs
+
+SaaS hosts everything. **Hybrid** keeps the data plane — and every prompt — inside
+your network while the console still manages it. Compare in
+[Deployment](/neuraltrust/deployment/overview).
+
+## Start
 
 <CardGroup cols={2}>
-  <Card title="Route across providers" icon="route" href="/trustgate/routing/smart-routing">
-    Fallback chains, load balancing, and smart routing by request complexity.
+  <Card title="Quickstart" icon="rocket" href="/trustgate/getting-started/quickstart">
+    A gateway, a provider, a request and its trace, in a few minutes.
   </Card>
-  <Card title="Govern traffic" icon="shield-check" href="/trustgate/policies/overview">
-    Rate limits, LLM budgets, tool allow-lists, prompt controls, and guardrails.
-  </Card>
-  <Card title="Speak one API" icon="plug" href="/trustgate/endpoints/chat">
-    Chat, embeddings, images, files, audio, rerank, and model discovery.
-  </Card>
-  <Card title="See supported providers" icon="boxes" href="/trustgate/concepts/providers">
-    Every adapter TrustGate can route to, and which modalities it supports.
-  </Card>
-  <Card title="Expose MCP tools" icon="bot" href="/trustgate/mcp/overview">
-    One MCP gateway for Claude Code, Cursor, Codex, Copilot, and Copilot Studio.
-  </Card>
-  <Card title="Authenticate consumers" icon="key-round" href="/trustgate/concepts/auth">
-    API keys, or JWTs validated against your IdP.
+  <Card title="Integrations" icon="plug" href="/integrations/overview">
+    Claude Code, Cursor, Codex, Copilot, LangChain, and the rest.
   </Card>
 </CardGroup>
-
-Attach [TrustGuard](/trustguard/overview) when you want inline inspection of
-prompts, responses, and tool activity. See the
-[integrations catalog](/integrations/overview) for coding agents and other gateways.
-
-## Core objects
-
-Everything in the console under **TrustGate** is one of these:
-
-| Object | What it is |
-|---|---|
-| **[Gateway](/trustgate/concepts/gateways)** | The top-level tenant. Owns everything below. |
-| **[Registry](/trustgate/concepts/registries)** | An upstream backend: an LLM provider or an MCP server. |
-| **[Consumer](/trustgate/concepts/consumers)** | The calling application's identity. Owns routing and credentials. |
-| **[Auth](/trustgate/concepts/auth)** | An API key, a JWT TrustGate validates against your IdP, or a client certificate. |
-| **[Policy](/trustgate/policies/overview)** | Rate limits, budgets, tool governance, guardrails, and other controls. |
-
-## Request path
-
-```text
-client ──▶ /{consumer_slug}/v1/chat/completions
-              │  X-AG-API-Key
-              │  X-AG-Gateway-Slug (Private only)
-              ├─ resolve gateway + consumer + policies
-              ├─ apply policies (rate limit, budgets, guardrails, …)
-              ├─ route across the consumer's registries (+ fallback)
-              ├─ forward to the provider adapter
-              └─ export telemetry → OpenTelemetry
-```
-
-The client names a **model** or uses `auto`. It does not send a provider URL or
-key. [Architecture](/trustgate/architecture) covers the full lifecycle.
-
-## FAQ
-
-<AccordionGroup>
-<Accordion title="Can I move an existing OpenAI or Anthropic client?">
-Yes. Change the base URL and replace the provider credential with a TrustGate
-consumer credential. TrustGate accepts OpenAI Chat Completions, Responses,
-Anthropic Messages, and Google Gemini formats, then adapts the request for the
-selected upstream. Start from the connection snippet on the consumer **Connect**
-tab.
-</Accordion>
-<Accordion title="API key or JWT?">
-Use an API key when the application holds a secret of its own. Or send a JWT
-your IdP issued — TrustGate validates it against the IdP and, through the
-consumer's auth binding, admits only the client ids you list. Either way the
-consumer's routing decides registries and models; token claims never do. See
-[Authentication](/trustgate/concepts/auth).
-</Accordion>
-<Accordion title="Can TrustGate run in my environment?">
-Yes. Hybrid keeps the data plane in your network. External runs the full
-platform yourself. SaaS hosts both planes. Compare models in
-[Deployment](/neuraltrust/deployment/overview).
-</Accordion>
-<Accordion title="Do applications need the provider's credentials?">
-No. Provider credentials stay on the registry. Applications authenticate as a
-consumer. Rotate consumer keys separately from provider keys.
-</Accordion>
-</AccordionGroup>

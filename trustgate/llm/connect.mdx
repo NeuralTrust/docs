@@ -1,0 +1,97 @@
+---
+title: "Connect your application"
+description: "A base URL and one key. Your client keeps the SDK it already uses; what changes is where it points and what goes in the model field."
+---
+
+An application's **Connect** tab shows a working snippet for the dialect and
+strategy you configured. Everything below is what that snippet is made of, so
+you can reason about it when it is not the exact shape you need.
+
+## Two values
+
+| Value | Where |
+|---|---|
+| **LLM Gateway URL** plus the application slug | Settings → General, or the Connect tab. On a Private deployment it is your data plane's public URL. |
+| **The application's key** | Issued once, from the application. It is the only secret your client holds. |
+
+The provider's credential is not one of them. It stays on the registry entry,
+and rotating either never touches the other.
+
+## Point a stock SDK at it
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="https://<llm-host>/<application-slug>/v1", api_key="ag_…")
+client.chat.completions.create(model="auto", messages=[{"role": "user", "content": "Hello"}])
+```
+
+```ts
+import OpenAI from "openai"
+const client = new OpenAI({ baseURL: "https://<llm-host>/<application-slug>/v1", apiKey: "ag_…" })
+await client.chat.completions.create({ model: "auto", messages: [{ role: "user", content: "Hello" }] })
+```
+
+```bash
+curl -X POST "https://<llm-host>/<application-slug>/v1/chat/completions" \
+  -H "X-AG-API-Key: ag_…" -H "Content-Type: application/json" \
+  -d '{"model": "auto", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+The key travels as `X-AG-API-Key`, `x-api-key` or `Authorization: Bearer` — a
+bearer that starts with `ag_` is recognised as an application key — so the
+OpenAI and Anthropic SDKs work unchanged with their own `api_key` parameter.
+
+## Which dialect
+
+The path after the slug is the dialect your client speaks, not the provider that
+answers. Anthropic's SDK talks to `/v1/messages`, OpenAI's to
+`/v1/chat/completions` or `/v1/responses`, Cohere's to `/v2/chat`, Gemini's to
+`/v1beta/models/…`. Any of them can be routed to any provider; the gateway
+translates. [Chat](/trustgate/endpoints/chat) has the full list and the honest
+limits of translation.
+
+## What goes in `model`
+
+This is the one thing that depends on how the application is configured:
+
+| Application uses | Send |
+|---|---|
+| Load balancing or smart routing | `"auto"` — the gateway picks. |
+| One registry | The model name, or nothing if a default is set. |
+| Several registries, no load balancing | A model name, always. Nothing else breaks the tie. |
+
+`@provider/model` pins a provider when the application reaches several. The
+Connect tab already shows the right form; [Routing](/trustgate/llm/routing#what-the-client-sends)
+explains why.
+
+## Private deployments
+
+Add `X-AG-Gateway-Slug: <gateway-slug>` when several gateways share one data
+plane host. SaaS never needs it, and the Connect tab includes it only when it
+applies.
+
+## Reading the answer
+
+Every response carries `X-Selected-Provider` and `X-Selected-Model`. When a
+request landed somewhere you did not expect, read those before anything else.
+
+Refusals come back in your client's dialect. A model outside the application's
+allowed set is refused before any provider is called; a policy refusal names the
+policy; a rate limit carries `Retry-After`.
+
+## Same key, from the TrustGate SDK
+
+If your code also uses the [MCP Gateway](/trustgate/mcp/connect) through the
+TrustGate SDK, the same key configures the model client, base URL included —
+which is the one value no client can work out on its own, because the LLM plane
+lives on a different host from the MCP one.
+
+```ts
+const tg = new TrustGate({ baseUrl: "https://gw.acme.ai", apiKey: "ag_…" })
+const llm = await tg.llm()
+const openai = new OpenAI({ baseURL: llm.baseUrl, apiKey: llm.apiKey })
+```
+
+Nothing is wrapped. The SDK hands you the two values and steps aside, so
+streaming and every provider option keep working exactly as the provider's own
+client implements them.
