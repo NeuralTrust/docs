@@ -7,8 +7,8 @@ description: "Author custom detection rules over TrustGuard and TrustGate teleme
 
 The **Use Cases** view in Telemetry holds the rule catalog that drives [Alerts](/platform/alerts). Each **use case** is a detection rule evaluated on a schedule by the AlertEngine over metadata events in the NeuralTrust telemetry store.
 
-- **Predefined** templates (`nt-uc-NNN`) ship with the platform. They are read-only — enable or disable them per team, or **copy to custom** to change thresholds or scope.
-- **Custom** use cases are team-owned. Create them from scratch or by copying a predefined template, then edit logic in the create/edit side panel.
+- **Predefined** templates (`nt-uc-NNN`) ship with the platform. They are read-only — enable or disable them per team from the row action menu. To change a threshold or scope, author an equivalent custom rule and disable the predefined one.
+- **Custom** use cases are team-owned. Create them from scratch in the rule builder; **Edit** is offered in the detail panel for custom rules only.
 
 Open **Telemetry → Use Cases → Create use case** (or edit an existing custom rule) to use the rule builder described below.
 
@@ -20,7 +20,7 @@ The create/edit side panel has three tabs. Changes in **Scope** and **Conditions
 
 <Steps>
   <Step title="General (Scope)">
-    Set the rule **name** and **description**, choose which **products** are in scope (TrustGate and/or TrustGuard), and pick the **gateways** or **collectors** the rule applies to. Use **Select all** to apply the rule to every gateway/collector for a product, or pick individual targets.
+    Set the rule **name** (required — the YAML `title`) and **description** (free text, shown as the human-readable logic in the use case detail), choose which **products** are in scope (TrustGate and/or TrustGuard), and narrow the **scope** with the two-level cascade described below. Leave a level empty to apply the rule to every target.
   </Step>
   <Step title="Conditions">
     Build **match** predicates (event attributes) and optional **detection** predicates (TrustGuard detector chain). Combine rows with **And** / **Or** connectors, optionally enable a **time window**, and set **severity** plus a default **assignee**.
@@ -34,14 +34,22 @@ The create/edit side panel has three tabs. Changes in **Scope** and **Conditions
 
 ## Products and condition fields
 
-Each custom rule compiles to a single `source` in the rule YAML: `trustgate` or `trustguard`. The condition field picker shows **only fields valid for that product**.
+The **Products involved** selection on the **General** tab drives both the compiled `source` and the condition field picker, which shows **only fields valid for that product**:
 
-On the **General** tab, select which products participate in scope (gateways, collectors). The **active product** for conditions is determined by your product selection:
+- **TrustGate** only → `source: trustgate`.
+- **TrustGuard** only → `source: trustguard`.
+- **Both** → `source: cross`. The Conditions tab switches to the cross builder: a **TrustGate conditions** list, a **TrustGuard conditions** list, and a **Correlate on** key. See [Cross rules](#cross-rules).
 
-- If only **TrustGate** or only **TrustGuard** is selected, conditions use that product's fields.
-- If **both** are selected, click the product row you want to author conditions for. Clicking an already-selected (inactive) product switches the condition field set without removing it from scope; click again to deselect it.
+### Scope
 
-**Cross-product** rules (`source: cross`) are not exposed in the custom builder yet. Use predefined template `nt-uc-401` (Coverage Gap) or author cross rules directly in YAML outside the UI.
+Scope is a two-level cascade per product. Pick the parent, then its children; an empty level means "no filter".
+
+| Product | Parent | Child | Compiles to |
+|---|---|---|---|
+| TrustGate | **Gateways** | **Consumers** (loaded from the selected gateways) | `gateway_id` and `consumer` predicates |
+| TrustGuard | **Instances** | **Collectors** (loaded from the selected instances) | `collector_id` predicate only |
+
+TrustGuard **instances** are a UI-only cascade that narrows which collectors are offered — there is no `guard_id` predicate field, so the instance selection is not persisted in the rule.
 
 ---
 
@@ -84,53 +92,57 @@ See [Event schema](/platform/event-schema) for how each logical field maps to st
 
 ### TrustGate condition fields (24)
 
-| Field | Description |
-|---|---|
-| `status.code` | HTTP status code (e.g. 200, 403, 500) |
-| `status.outcome` | Policy outcome: `block`, `transform`, `report`, `allow` |
-| `model` | LLM model name |
-| `is_flagged` | True when any detector fired or outcome ≠ allow |
-| `security` | Security tag labels (`contains`) |
-| `session` | Session identifier |
-| `consumer` | Consumer (entity) ID |
-| `consumer.name` | Consumer display name |
-| `trace_id` | Trace correlation ID |
-| `http_method` | HTTP verb (GET, POST, …) |
-| `total_ms` | Total request latency (ms) |
-| `provider` | Upstream LLM provider |
-| `route` | HTTP URL path |
-| `gateway_id` | TrustGate gateway ID |
-| `kind` | Request kind: `llm`, `mcp`, `a2a` |
-| `latency.provider_ms` | Provider latency (ms) |
-| `latency.gateway_ms` | Gateway latency (ms) |
-| `usage.total_tokens` | Total tokens |
-| `usage.input_tokens` | Input tokens |
-| `usage.output_tokens` | Output tokens |
-| `cost.total_usd` | Estimated cost (USD) |
-| `mcp.method` | MCP JSON-RPC method |
-| `mcp.tool` | MCP tool name |
-| `mcp.server_name` | MCP server name |
+| Field | Value type · operators | Description |
+|---|---|---|
+| `status.code` | number · `is` `in` `>` `≥` `<` `≤` | HTTP status code returned for the request (e.g. 200, 403, 500) |
+| `status.outcome` | enum · `is` `in` | Final policy outcome after evaluation: `block`, `transform`, `report`, `allow` |
+| `model` | string · `is` `in` `contains` | LLM model name from the request metadata |
+| `is_flagged` | boolean · `is` | True when any detector fired or the outcome is not `allow` |
+| `security` | string · `contains` | Security tag labels attached to the event; matches a label substring |
+| `session` | string · `is` `in` | Session identifier grouping related requests from the same user or agent |
+| `consumer` | string · `is` `in` | Consumer (entity) ID — the principal making the request |
+| `consumer.name` | string · `is` `in` `contains` | Consumer display name |
+| `trace_id` | string · `is` `in` | Trace ID linking the event to its raw payload and to cross-product correlation |
+| `http_method` | string · `is` `in` | HTTP verb (GET, POST, …) |
+| `total_ms` | number · `is` `in` `>` `≥` `<` `≤` | Total end-to-end request latency (ms) |
+| `provider` | string · `is` `in` `contains` | Upstream LLM provider (e.g. `openai`, `anthropic`) |
+| `route` | string · `is` `in` `contains` | HTTP URL path |
+| `gateway_id` | string · `is` `in` | TrustGate gateway that handled the request |
+| `kind` | enum · `is` `in` | Request kind: `llm`, `mcp`, `a2a` |
+| `latency.provider_ms` | number · `is` `in` `>` `≥` `<` `≤` | Time spent waiting on the upstream provider (ms) |
+| `latency.gateway_ms` | number · `is` `in` `>` `≥` `<` `≤` | Time spent inside the TrustGate gateway (ms) |
+| `usage.total_tokens` | number · `is` `in` `>` `≥` `<` `≤` | Input plus output tokens consumed |
+| `usage.input_tokens` | number · `is` `in` `>` `≥` `<` `≤` | Prompt/input tokens consumed |
+| `usage.output_tokens` | number · `is` `in` `>` `≥` `<` `≤` | Completion/output tokens returned |
+| `cost.total_usd` | number · `is` `in` `>` `≥` `<` `≤` | Estimated total request cost (USD) |
+| `mcp.method` | string · `is` `in` `contains` | MCP JSON-RPC method name |
+| `mcp.tool` | string · `is` `in` `contains` | MCP tool name when the call invokes a tool |
+| `mcp.server_name` | string · `is` `in` `contains` | Registered MCP server name |
 
-### TrustGuard condition fields (22)
+### TrustGuard condition fields (23)
 
 Includes all **Outcome**, **Identity**, and shared fields above, plus:
 
-| Field | Description |
-|---|---|
-| `collector_id` | TrustGuard collector instance ID |
-| `collector_name` | Collector display name |
-| `direction` | `input` (prompt) or `output` (response) |
-| `protocol` | `llm`, `mcp`, or `a2a` |
-| `policy_id` | Runtime policy ID |
-| `policy_name` | Runtime policy name |
-| `latency.detectors_ms` | Detector execution time (ms) |
-| `latency.overhead_ms` | Processing overhead (ms) |
-| `detection.type` | Normalized detection category (e.g. `prompt_injection`, `pii`, `secrets`) |
-| `detection.action` | Detector action: `block`, `transform`, `allow` |
-| `detection.confidence` | Confidence score 0–1 |
-| `detection.enforced` | True when action is `block` or `transform` |
+| Field | Value type · operators | Description |
+|---|---|---|
+| `collector_id` | string · `is` `in` | TrustGuard collector instance that evaluated the request |
+| `collector_name` | string · `is` `in` `contains` | Collector display name |
+| `direction` | enum · `is` `in` | Whether the event is an `input` (prompt) or `output` (response) evaluation |
+| `protocol` | enum · `is` `in` | Request protocol: `llm`, `mcp`, `a2a` |
+| `policy_id` | string · `is` `in` | Runtime policy that evaluated the request |
+| `policy_name` | string · `is` `in` `contains` | Runtime policy display name |
+| `latency.detectors_ms` | number · `is` `in` `>` `≥` `<` `≤` | Time spent running TrustGuard detectors (ms) |
+| `latency.overhead_ms` | number · `is` `in` `>` `≥` `<` `≤` | Processing overhead outside detectors (ms) |
+| `detection.type` | enum · `is` `in` | Normalized detection category: `prompt_injection`, `secrets`, `pii`, `toxicity`, `behavioral_threat`, `multi_turn_escalation`, `code_injection` |
+| `detection.action` | enum · `is` `in` | Action the detector took: `block`, `transform`, `allow` |
+| `detection.confidence` | number · `is` `in` `>` `≥` `<` `≤` | Detector confidence score between 0 and 1 |
+| `detection.enforced` | boolean · `is` | True when the action is `block` or `transform` (policy was enforced) |
 
 TrustGuard **detection.*** fields compile into a separate `detection:` block in the rule YAML (matched over the normalized detector chain). All other fields compile into `match:`.
+
+<Warning>
+**There is no `jailbreak` detection type.** The engine normalizes jailbreak signals — and anything raised by the `prompt_guard` / `tool_guard` plugins — into `detection.type = prompt_injection`. To match jailbreaks specifically rather than all injection attempts, filter on the `security` tag with `contains` instead.
+</Warning>
 
 <Warning>
 **IP address is not a supported field.** There is no `ip` column in the metadata store. Group by **session** or **consumer** instead of IP for surge and anomaly rules.
@@ -147,9 +159,13 @@ When enabled, configure:
 | Control | Description |
 |---|---|
 | **Amount + unit** | Window length (minutes or hours) |
-| **Per** (group by) | Entity bucket: **Consumer** (default), **Session**, **App** (gateway or collector), or **Route** (TrustGate only) |
+| **Per** (group by) | Entity bucket the count is kept per: **Consumer** (default, `entity`), **Session**, **App** (gateway or collector), or **Route** (TrustGate only) |
 
-The UI focuses on window duration and group-by. The compiled rule uses sensible defaults for measure (`count`) and threshold; inspect **Rule preview** for the exact `window`, `group_by`, and `threshold` values.
+<Warning>
+**The threshold is not editable in the builder today.** Single-product rules compile with a fixed `threshold: 5` — five matching events per bucket within the window. Only the window duration and group-by are exposed; cross rules do render a threshold input. Always check **Rule preview** for the `threshold` that will actually be stored.
+</Warning>
+
+Group-by `entity` and `consumer` both resolve to the consumer ID, and `entity` is the engine default — so it is omitted from the compiled YAML.
 
 ---
 
@@ -160,7 +176,23 @@ The UI focuses on window duration and group-by. The compiled rule uses sensible 
 | **Severity** | Default severity for alerts from this rule: Low, Medium, High, Critical |
 | **Default assignee** | Optional team member pre-assigned when the alert is raised |
 
-Gateway/collector scope from the General tab is compiled as an additional `gateway_id` or `collector_id` predicate when specific targets are selected (not when **Select all** is on).
+Scope selections from the General tab are compiled as additional predicates (`gateway_id`, `consumer`, `collector_id`) when specific targets are selected — a level left empty adds no predicate.
+
+---
+
+## Cross rules
+
+Selecting **both** products turns the Conditions tab into the cross builder, which compiles to `source: cross`:
+
+| Control | Description |
+|---|---|
+| **TrustGate conditions** | Predicates on gateway traffic. `match` only — the engine rejects detection predicates on the gate side |
+| **TrustGuard conditions** | Predicates on guard events, including `detection.*` |
+| **Correlate on** | Shared key joining a gateway event to a guard event: **Consumer** (`entity`, default) or **Session** |
+| **Time window** | Required for cross rules |
+| **Threshold** | Optional here: minimum correlated events within the window before alerting |
+
+Each side needs at least one predicate — a condition row or a scope selection.
 
 ---
 
@@ -221,7 +253,7 @@ any:
 | `aggregate` | Metric (ratio, p95, avg, sum, count_distinct) crosses threshold | `metric:` block |
 | `cross` | TrustGate ⋈ TrustGuard on `correlate_on` | `gate:`, `guard:` selections |
 
-The custom builder today covers **per_event** and **windowed** rules. **Aggregate** and **cross** rules are available in predefined templates or by editing YAML directly.
+The builder emits **per_event** (time window off), **windowed** (time window on) and **cross** (both products selected). It also compiles an **aggregate** `count_distinct` rule when the measure is set to distinct, but that control is not yet exposed in the UI — the remaining aggregate metrics (ratio, p95, avg, sum) are available in predefined templates or by editing YAML directly.
 
 ---
 
