@@ -8,7 +8,7 @@ run shell commands, and call external tools from a developer's terminal.
 
 The TrustGuard plugin evaluates these actions through lifecycle hooks on the
 machine where Claude Code runs. TrustGate provides access to the MCP tools
-assigned to a consumer. For organization-wide inference hooks or managed MCP
+assigned to an application. For organization-wide inference hooks or managed MCP
 connectors, see [Claude Enterprise](/integrations/claude-enterprise).
 
 ## NeuralTrust controls
@@ -16,7 +16,7 @@ connectors, see [Claude Enterprise](/integrations/claude-enterprise).
 | Product | Scope | Controls |
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | Evaluates prompts, commands, tool calls, and tool results against an organization [policy](/trustguard/concepts/policies). | Monitor · Block · Ask on tool calls |
-| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer, and can proxy Claude Code's model traffic through an LLM consumer. MCP (Model Context Protocol) connects Claude Code to systems such as trackers, databases, and internal APIs. | Tool availability · consumer authentication · per-tool rate limits · model routing and budgets |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to an application, and can proxy Claude Code's model traffic through an LLM application. MCP (Model Context Protocol) connects Claude Code to systems such as trackers, databases, and internal APIs. | Tool availability · application authentication · per-tool rate limits · model routing and budgets |
 
 Use the TrustGuard plugin to evaluate individual actions. Add TrustGate when
 Claude Code needs controlled access to MCP tools. Each has its own configuration
@@ -24,7 +24,7 @@ and credentials.
 
 <Warning>
 TrustGuard uses a `tgk_…` [collector](/trustguard/concepts/collectors) key in
-`claude-code.json`. TrustGate authenticates MCP consumers with OAuth2 or an
+`claude-code.json`. TrustGate authenticates MCP applications with OAuth2 or an
 `ag_…` API key. A `tgk_…` key does not authenticate MCP, and the plugin's managed
 settings do not accept an MCP URL.
 </Warning>
@@ -37,15 +37,15 @@ settings do not accept an MCP URL.
 | The **Claude Code** collector type | **Agent Runtime → Collectors → Catalog → AI assistants & coding agents → Claude Code**. Create its `tgk_…` key on **Auth** and assign the policy on **Policies**. The key is shown once. |
 | MDM | Deploys `claude-code.json`, and optionally `managed-settings.json` and a pinned binary. |
 | Egress to GitHub Releases | On first use the plugin bootstrap downloads the platform `trustguard-claude-code` binary. |
-| An [MCP consumer](/trustgate/mcp/overview), if using TrustGate | Bind the required registries, then copy the endpoint from its **Connect** tab. |
+| An [MCP application](/trustgate/mcp/overview), if using TrustGate | Bind the required registries, then copy the endpoint from its **Connect** tab. |
 
 Create the policy in **Observe** mode. Observe records decisions in **Activity**
 without enforcing them. Review the results, then switch the policy to
 **Enforce**. See [Policies](/trustguard/concepts/policies).
 
 Developers do not need NeuralTrust accounts to use the TrustGuard plugin.
-OAuth-backed MCP consumers require a login against the IdP configured for the
-consumer, which may be NeuralTrust.
+An OAuth-backed MCP application requires a login against the identity provider it
+trusts.
 
 ## TrustGuard plugin
 
@@ -131,18 +131,18 @@ connector](/integrations/claude-enterprise#organization-connectors). Claude Code
 loads that connector after the user completes the connection. Confirm in `/mcp`
 that TrustGate is the **org** connector, not *"Provided by a plugin"*.
 
-For local testing, add the MCP consumer directly to the CLI. This does not
-replace the organization connector. Copy the endpoint from the consumer's
+For local testing, add the MCP application directly to the CLI. This does not
+replace the organization connector. Copy the endpoint from the application's
 **Connect** tab:
 
 ```bash
-claude mcp add --transport http TrustGate https://<mcp-host>/<consumer-slug>/mcp
+claude mcp add --transport http TrustGate https://<mcp-host>/<application-slug>/mcp
 ```
 
-An API-key consumer sends the key as a header:
+An API-key application sends the key as a header:
 
 ```bash
-claude mcp add --transport http TrustGate https://<mcp-host>/<consumer-slug>/mcp \
+claude mcp add --transport http TrustGate https://<mcp-host>/<application-slug>/mcp \
   --header "X-AG-API-Key: ag_…"
 ```
 
@@ -152,19 +152,19 @@ clients that can only set one of those headers. On a private (Hybrid) data plane
 
 ## Route model traffic through TrustGate
 
-Claude Code can send its own model requests through an **LLM consumer** instead of
+Claude Code can send its own model requests through an **LLM application** instead of
 straight to Anthropic, so the same rate limits, budgets, guardrails, and traces apply to
 the coding agent as to any other application. Claude Code speaks the Anthropic Messages
-API; TrustGate serves it at `/{consumer_slug}/v1/messages` and routes it to whichever
-registry the consumer binds — an Anthropic registry, or a cross-format route to an OpenAI
+API; TrustGate serves it at `/{application-slug}/v1/messages` and routes it to whichever
+registry the application binds — an Anthropic registry, or a cross-format route to an OpenAI
 or Gemini registry.
 
-1. Create an LLM consumer, bind the registries and models it may use, and issue an
+1. Create an LLM application, bind the registries and models it may use, and issue an
    `ag_…` API key. Copy the LLM host from the **Connect** tab.
-2. Point Claude Code at the consumer:
+2. Point Claude Code at the application:
 
    ```bash
-   export ANTHROPIC_BASE_URL="https://<llm-host>/<consumer-slug>"
+   export ANTHROPIC_BASE_URL="https://<llm-host>/<application-slug>"
    export ANTHROPIC_AUTH_TOKEN="ag_…"      # sent as Authorization: Bearer
    # or: export ANTHROPIC_API_KEY="ag_…"   # sent as x-api-key
    ```
@@ -177,11 +177,11 @@ or Gemini registry.
    ```
 
 3. Start a new session and send a prompt. The request appears in TrustGate traces under
-   the consumer.
+   the application.
 
 Claude Code names Anthropic models. On a route to an Anthropic registry they pass through.
 On a cross-format route a bound registry must serve the model name Claude Code sends —
-TrustGate walks the consumer's registries in order and answers `404 model_not_supported`
+TrustGate walks the application's registries in order and answers `404 model_not_supported`
 when none does — so point Claude Code at a model the registry offers (`ANTHROPIC_MODEL`
 for one session, or `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` /
 `ANTHROPIC_DEFAULT_HAIKU_MODEL` for the aliases), and expect TrustGate to adapt the
@@ -226,9 +226,9 @@ reload.
 ### TrustGate inference
 
 With `ANTHROPIC_BASE_URL` set, run `/status` inside `claude` and confirm the API base URL
-is the consumer URL, then send a prompt and open the trace in the console. A `401` means
+is the application URL, then send a prompt and open the trace in the console. A `401` means
 the key is wrong or revoked; a `404` means the slug or the path is wrong (the base URL must
-end with the consumer slug, no `/v1`).
+end with the application slug, no `/v1`).
 
 ## Reference
 
@@ -296,11 +296,11 @@ download fails, the bootstrap fails open.
 MDM-deployed binary on the Mac does not cover that session. The config and
 binary must exist where the agent runs.
 
-**MCP auth.** The CLI accepts OAuth2 or an `ag_…` consumer key as
+**MCP auth.** The CLI accepts OAuth2 or an `ag_…` application key as
 `X-AG-API-Key` (the plane also takes it as `Authorization: Bearer ag_…` or
 `x-api-key`). A private data plane needs `X-AG-Gateway-Slug` unless the MCP
 host already scopes the [gateway](/trustgate/concepts/gateways). Which IdP backs
-the OAuth login is configured on the consumer. See
+the OAuth login is configured on the application. See
 [Auth](/trustgate/concepts/auth). Authenticating to TrustGate is separate from
 authenticating to the upstream servers; a registry using OAuth (forwarded)
 returns a connect link on the first call for a user without a stored credential.
@@ -310,8 +310,8 @@ returns a connect link on the first call for a user without a stored credential.
 collector key in `claude-code.json` through MDM. An Anthropic organization owner
 manages [organization connectors](/integrations/claude-enterprise#organization-connectors).
 
-Configure the consumer's available tools under **Routing** in the NeuralTrust
-console; every caller the consumer admits sees the same tool set.
+Configure the application's available tools on **General** in the NeuralTrust
+console; every caller the application admits sees the same tool set.
 To limit MCP tool calls, attach the [Per-Tool Rate
 Limiter](/trustgate/policies/per-tool-rate-limiter) policy.
 
@@ -346,7 +346,7 @@ parameter **Source application** set to `claude-code-plugin`.
 | Bootstrap returns `{}` without running the binary | An unauthenticated GitHub Releases request can return `404` for a private fork. Set `TRUSTGUARD_GITHUB_TOKEN`; otherwise the bootstrap allows the action |
 | The plugin evaluates nothing in claude.ai or Desktop | Those surfaces have no lifecycle hooks. Use [Claude Enterprise](/integrations/claude-enterprise) |
 | Claude Code shows TrustGate as *"Provided by a plugin"* | This is a local `claude mcp add` entry, not the organization connector. Confirm in `/mcp` |
-| MCP connects, no tools | Consumer has no bound registries, tool restrictions exclude everything, or the upstream connect link was never authorized |
+| MCP connects, no tools | Application has no bound registries, tool restrictions exclude everything, or the upstream connect link was never authorized |
 | `401` / repeated login on MCP | Wrong plane URL, revoked `ag_…` key, or `X-AG-Gateway-Slug` missing on Hybrid |
 
 ## Related
@@ -355,7 +355,7 @@ parameter **Source application** set to `claude-code-plugin`.
 - [Policies: Gates](/trustguard/concepts/policies#gates): Ask and Block configuration, including `source.application` values
 - [Evaluate API](/trustguard/api/evaluate): requests sent by the plugin hooks
 - [Collectors](/trustguard/concepts/collectors): collector types and keys
-- [MCP overview](/trustgate/mcp/overview): consumers, catalog merging, and upstream authentication
-- [TrustGate authentication](/trustgate/concepts/auth): API key and OAuth2 authentication for MCP consumers
+- [MCP overview](/trustgate/mcp/overview): applications, catalog merging, and upstream authentication
+- [TrustGate authentication](/trustgate/concepts/auth): API key and OAuth2 authentication for MCP applications
 - [How TrustGuard works](/trustguard/how-it-works): evaluation and enforcement across integrations
 - [Plugin repository](https://github.com/NeuralTrust/trustguard-claude-code-plugin): source, releases, and the hook contract

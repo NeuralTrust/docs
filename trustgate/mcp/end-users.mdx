@@ -1,6 +1,6 @@
 ---
 title: "Acting for end users"
-description: "An application whose own users connect their own upstream accounts, without your backend ever seeing their tokens. The application names the person; the gateway keeps their accounts apart."
+description: "An application whose own users connect their own upstream accounts, without your backend ever seeing their tokens. The call names the person; the gateway keeps their accounts apart."
 ---
 
 A product that embeds tools for its customers has one API key and many users. If
@@ -8,38 +8,37 @@ those users are to reach a ticket tracker or a repo host **as themselves**, some
 has to keep their accounts apart — and it should not be your backend, because
 then your backend holds their tokens.
 
-That is what an application set to act **for each end user, named by the
-application** does. Your backend identifies the person on every call with an
-opaque id of yours; the gateway holds one set of upstream credentials per person
-and hands your product a connect link whenever someone still has to sign in.
+Name the person on each call and the gateway does it for you. Your backend sends
+an opaque id of its own; the gateway holds one set of upstream credentials per
+person, and hands your product a connect link whenever someone still has to sign
+in.
 
-## The three ways an application can act
+## How it works
 
-| Acts as | Who signs in upstream | Fits |
-|---|---|---|
-| **The application's own** | One set of accounts, connected once by an admin. | A batch job, a service with no human behind any given call. |
-| **Each end user, named by the application** | Each of your users, once, through a link your product shows them. | A product whose users bring their own accounts. |
-| **Each end user, signed in through the platform** | Each person, with the NeuralTrust login. An API key cannot act for one of them. | Anything where the person is present and should authenticate as themselves. |
-
-Changing this later moves where accounts live. Nothing is deleted, but what the
-application already connected stops being what it uses. Treat it as a migration.
-
-## How the middle option works
-
-Your backend calls the MCP endpoint with the application key **and the person's
-id**. The request runs as that person within that application: their vaulted
-credentials, their consent flow, their tool-list notifications. Two applications
-never share a user's accounts even when they use the same ids.
+Call the MCP endpoint with the application key **and** the person's id in
+`X-NeuralTrust-End-User`. Nothing is configured up front: the same key runs as
+the application when that header is absent and as that person when it is present,
+call by call. A request that names someone uses their vaulted credentials, their
+consent flow, their tool-list notifications. Two applications never share a
+user's accounts even when they use the same ids.
 
 When a tool needs a server the person has not connected, the call fails with
 **consent required**, carrying a ready-made connect link for that person. Show it;
-they authorise the upstream once; the credential is vaulted under them. You can
-also mint the link ahead of time to offer *Connect GitHub* before the first call,
-and read each person's connection state — connected, needs reconnect, not
-connected — to render it in your UI.
+they authorise the upstream once; the credential is vaulted under them. The
+[SDK](/trustgate/mcp/connect) also mints the link ahead of time, so you can offer
+*Connect GitHub* before the first call, and reads each person's connection state
+— connected, needs reconnect, not connected — to render it in your UI.
 
 Show a connect link only to the person it was minted for. The link carries their
 identity: whoever opens it links an account under that id.
+
+## Servers your users do not connect
+
+Some servers hold **one shared account** that an administrator connected once, set
+on the server's entry in the [registry](/trustgate/registry/mcp). Those serve every
+caller from that one account, so naming a person changes nothing about which
+credential is used — there is no link to show and nothing for your users to sign
+into. The same application can call both kinds in the same session.
 
 ## What it is not
 
