@@ -1,6 +1,6 @@
 ---
 title: "Applications"
-description: "An application is what your team built: the endpoints the gateway serves it on, one key that opens them, the registry entries it may use, and whose upstream accounts it acts as."
+description: "An application is what your team built: the endpoints the gateway serves it on, one key that opens them, and the registry entries it may use."
 ---
 
 An **application** is something your team built that calls the gateway — a
@@ -39,6 +39,15 @@ and anything still using it starts failing to authenticate. There is no partial
 revoke, which is the argument for one key per deployed thing rather than one key
 shared across three.
 
+**Rotating** mints a new secret and keeps everything else — the name, and every
+plane the key opened. The old secret stops working the moment the new one is
+shown, so deploy the new one first and rotate when it is in place.
+
+A key can also be given an **expiry**, or none. An expired key is refused exactly
+like an unknown one, so a job that outlives its key fails to authenticate rather
+than degrading. The SDK reads the date from the key itself, which is how a long
+run can refuse to start instead of stopping halfway.
+
 ## What it may use
 
 An application names the registry entries it may reach, and can narrow further
@@ -64,24 +73,37 @@ decides which one a request goes to:
 
 Tool traffic routes to a single server, so these apply to models only.
 
-## Whose accounts it acts as
+## Who a call runs as
 
-This is the decision that matters most, and the one that is expensive to change
-later, because it decides where upstream accounts live:
+There is nothing to configure here. The key proves the application; each **call**
+says who it is for:
 
-| Acts as | Meaning | Fits |
+| The call carries | It runs as | Fits |
 |---|---|---|
-| **The application's own** | One set of accounts, connected once. | A batch job, a service with no human behind any given call. |
-| **Each end user, named by the application** | The application names its user on every call and the gateway keeps their accounts apart. | A product whose users connect their own accounts through your UI. |
-| **Each end user, signed in through the platform** | People sign in for themselves. An API key cannot act for one of them. | Anything where the person is present and should authenticate as themselves. |
+| The key, nothing else | The application itself | A batch job, a service with no person behind the call. |
+| The key **and** `X-NeuralTrust-End-User` | That person, within this application | A product whose users bring their own upstream accounts. |
+| A person's own sign-in (NeuralTrust login or your identity provider) | That person | Someone present, authenticating as themselves. |
 
-Changing this moves where upstream accounts live. Nothing is deleted, but what
-the application has already connected stops being what it uses — so treat it as
-a migration, not a setting.
+One application does all three, one call at a time — a nightly job and a
+customer-facing assistant can be the same application without a setting deciding
+which it is allowed to be. See [acting for end users](/trustgate/mcp/end-users)
+for the middle row.
 
-The middle option is also the boundary with Access: an application naming its own
-users is outside Access levels and grants, since those identities belong to your
-product and not to the identity provider.
+The id in the header is yours to choose and the gateway namespaces it by
+application, so two applications naming `user_123` never reach the same account.
+Only the application's own credential may assert one: a person signed in with
+their own account is already that person, and cannot name someone else.
+
+That middle row is also the boundary with Access. People your application names
+are your product's users, not your identity provider's, so Access levels and
+grants do not apply to them.
+
+## Where upstream accounts live
+
+Not on the application. Whose account an MCP server uses is a property of
+**that server's entry in the registry** — one account shared by every caller, or
+one per caller — so moving an application between the rows above never strands
+an account. See [MCP servers](/trustgate/registry/mcp).
 
 ## Status
 
