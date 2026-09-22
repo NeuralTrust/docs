@@ -1,52 +1,83 @@
 ---
 title: "Registry"
-description: "A registry entry is a destination plus the credential to reach it. What that credential is decides what the destination sees — and it is the only decision here that you cannot quietly change later."
+description: "What a gateway may reach: model providers on the LLM plane, MCP servers on the MCP plane. An entry is a destination plus the credential to reach it, and who holds that credential is the decision that shapes everything else."
 ---
 
-The **registry** is what a gateway is allowed to reach: model providers, and MCP
-servers. Nothing routes anywhere until it exists here.
+The **registry** is what a gateway is allowed to reach. Nothing routes anywhere
+until it exists here. It has two parts, one per plane.
 
-An entry is two things — a **destination** and a **credential**. Everything else
-about it follows from the second.
+## Two registries
 
-## The credential decides what upstream sees
-
-| Credential | What the destination sees | Use it when |
+| | Models | MCP |
 |---|---|---|
-| **API key** | One identity for every caller. | The destination has no per-person concept, or you want one bill and one rate limit. |
-| **Shared account** (client credentials) | One identity, obtained by OAuth. | Same, where the provider wants OAuth rather than a key. |
-| **User account** | Each person as themselves. | The destination has per-user permissions worth keeping — a ticket tracker, a repo host, a CRM. |
-| **Caller's own token** | Whatever the caller already had. | The caller is already authenticated upstream and TrustGate should stay out of it. |
-| **None** | An unauthenticated caller. | Internal services on a trusted network. |
+| **Serves** | The LLM Gateway: chat, embeddings, images, audio, files, rerank. | The MCP Gateway: tools and resources for agents. |
+| **An entry is** | A model provider — OpenAI, Anthropic, Azure OpenAI, Bedrock, Vertex AI and the rest of the [catalog](/trustgate/registry/models#every-provider), or any OpenAI-compatible endpoint. | An MCP server — one from the [catalog](/trustgate/registry/mcp#every-server), a server you register by URL, or an HTTP API described by an OpenAPI document that TrustGate turns into tools. |
+| **Who uses it** | Applications, through routing. | Applications, and people through the Portal. |
+| **Credential** | Always yours: one identity per instance. | Yours, each user's own, the caller's own token, or none. |
 
-The practical consequence: with a shared key, the destination's audit log says
-*TrustGate* and every user inherits the same permissions. With per-user accounts
-it says who it actually was, and each person reaches exactly what their own
-account reaches — which is also why someone who has not connected an account yet
-gets nothing until they do.
+The last row is the one that matters. A model provider has no notion of your
+users, so the gateway always speaks to it as one account. An MCP server usually
+does — a ticket tracker, a repository host, a CRM — and the registry lets each
+person reach it as themselves.
 
 ## Instances
 
-One entry can hold several **instances**: the same provider configured more than
-once, each with its own credential and name. Two Azure OpenAI deployments,
-production and staging keys, one MCP server registered against two accounts.
+One entry can hold several **instances**: the same provider or server configured
+more than once, each with its own name and its own credential. Two Azure OpenAI
+deployments; production and staging keys for OpenAI; GitHub registered once with a
+shared token and once per user.
 
 Instances are how you separate environments without separating gateways. Routing
-picks between them, and applications and policies refer to them individually.
+picks between them, applications bind to them, and policies can target them
+individually. Each instance shows how it authenticates upstream and whether its
+last connection test passed.
 
-A server that is a single URL with a single sign-in holds exactly one instance,
-and a server people install themselves gets its instance created on first
-install.
+Two cases need nothing from you. A server that is one URL with one sign-in holds
+exactly one instance. A built-in server people install themselves from the Portal
+gets its instance created the first time someone installs it.
 
-## Built-in and custom
+## Authentication, in both directions
 
-**Built-in** entries come from the NeuralTrust catalog: the connection details are
-already known, so you supply a credential — or, for many MCP servers, nobody
-does, and each person connects their own account the first time they use it.
+Two different questions hide under one word. Keep them apart and the registry is
+simple.
 
-**Custom** entries are the ones you register yourself: an OpenAI-compatible
-endpoint, a self-hosted model, an MCP server by URL, or an HTTP API described by
-an OpenAPI document that TrustGate turns into tools.
+### Callers to the plane
+
+Who is calling the gateway. An **application** proves itself with its API key or a
+token from an identity provider you trust — the same on both planes, covered in
+[Authentication](/trustgate/concepts/auth). On the MCP plane a **person** can also
+sign in directly, with the platform account or an identity provider, and that
+identity decides which servers they see through [Access](/trustgate/access/overview)
+and, below, whose account reaches upstream.
+
+The registry takes no part in this. An entry never authenticates a caller.
+
+### The plane to upstream
+
+How the gateway authenticates to the destination. This is the registry's
+credential, set per instance.
+
+**Models.** Always a credential you hold: an API key, or the provider's equivalent
+— an Azure key or service principal, AWS access keys, a GCP service account. The
+provider sees one identity per instance, whoever the caller was.
+[Model providers](/trustgate/registry/models) lists what each one needs.
+
+**MCP.** The instance's mode decides what the server sees:
+
+| Mode | What the server sees | Use it when |
+|---|---|---|
+| **User account** | Each person as themselves. They connect their own account once, the first time they use the instance. | The server has per-user permissions worth keeping. |
+| **Shared account** | One identity, obtained by OAuth client credentials you supply. | The server has no per-person concept, or you want one account and one audit line, and the vendor wants OAuth rather than a key. |
+| **API key** | One identity, the key you supply. For a custom server, a static header of your choosing. | Same as above, where a key is what the vendor takes. |
+| **Caller's own token** | Whatever the caller already had, forwarded. | The caller is already authenticated upstream and TrustGate should stay out of it. Set through the API; an instance in this mode cannot be switched to another later. |
+| **No authentication** | An unauthenticated caller. | Internal servers on a trusted network. |
+
+The consequence to remember: with a shared credential, the server's audit log says
+*TrustGate* and every caller inherits the same permissions. With user accounts it
+says who it actually was, each person reaches exactly what their own account
+reaches, and someone who has not connected yet gets nothing until they do. An
+application on a user-account instance acts as the account an admin linked for
+it — see [Acting for end users](/trustgate/mcp/end-users).
 
 ## What the registry does not decide
 
