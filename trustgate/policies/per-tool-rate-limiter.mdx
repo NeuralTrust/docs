@@ -1,0 +1,28 @@
+---
+title: "Per-Tool Rate Limiter"
+description: "Cap how many times a given tool may actually run in a window, for LLM function calls and MCP tool calls alike."
+---
+
+Applies to **LLM and MCP**.
+
+An agent that fails to parse a tool result tends to call the same tool again, and
+again. Some tools are cheap to repeat; a code executor, a search billed per call
+or a tool that sends messages is not. This caps how many times a given tool may
+actually run in a window, however many requests it took.
+
+Counts **actual tool executions**, not HTTP requests, and caps them per tool
+pattern over one or more windows — `execute_code*` at 60 a minute and 500 an
+hour. The first rule whose pattern matches wins.
+
+When a window is exceeded: **reject** the call (the only option on MCP, where the
+gateway itself is the caller), **inject an error result** into the LLM response,
+or **strip the tool** from the next request.
+
+### One execution, counted twice
+
+A tool an agent runs through MCP shows up twice at the gateway: once as the
+`tools/call` that executes it, and again as the tool-result message in the next
+LLM request. On a **gateway-wide** policy both hit the same counter, so one
+execution is charged twice unless the agent sends the LLM `tool_call_id` in the
+`tools/call` metadata. Attaching the policy per application avoids the problem:
+there the two are separate counters.

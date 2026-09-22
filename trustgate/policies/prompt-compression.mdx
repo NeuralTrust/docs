@@ -1,0 +1,52 @@
+---
+title: "Prompt Compression"
+description: "Remove the bytes a model does not need from a request before it is billed: JSON whitespace, terminal escape codes, trailing spaces and blank lines. Nothing to configure."
+---
+
+Applies to **LLM**.
+
+Tool results, logs and pasted JSON carry indentation, escape sequences and blank
+lines the model does not need and you pay for on every turn. Compression removes
+them before the request is billed.
+
+There is **nothing to configure**. A policy of this type is a name and a scope.
+
+## What it removes
+
+Every message in the request, the system prompt included, goes through three
+transforms, in this order:
+
+| Transform | What changes | What is kept |
+|---|---|---|
+| **JSON** | Whitespace between tokens is removed from content that is a JSON document, from ```` ```json ```` fenced blocks inside prose, and from the arguments of tool calls. | The decoded value, byte for byte. Invalid JSON is left alone. The prose around a fenced block is untouched. |
+| **ANSI escapes** | Colour and cursor codes that captured terminal output and CI logs carry. | The text they surrounded. |
+| **Whitespace** | Trailing spaces and tabs on every line; runs of blank lines are capped at one. | Leading indentation, because it means something in code, YAML and Markdown; the two trailing spaces of a Markdown hard line break. |
+
+The result is deterministic: the same input compresses to the same bytes on
+every turn, so a provider's prompt cache keeps matching the conversation's
+prefix instead of missing on every request.
+
+## What it leaves alone
+
+The policy never trades tokens for silent data loss, so it steps aside whenever
+it cannot be sure of a lossless rewrite. The whole request passes through
+untouched when:
+
+- Any content is under **256 bytes**. Short, stable text such as a system prompt
+  is worth more as a cache hit than as a few saved bytes.
+- The body is over **1 MiB**.
+- The request carries something the rewrite cannot reproduce exactly: image,
+  audio or document parts, an Anthropic `cache_control` marker, Anthropic
+  `tool_result` blocks, or fields the gateway does not model.
+- The request is not OpenAI-style Chat Completions (OpenAI, Azure OpenAI, Groq,
+  DeepSeek, xAI, OpenRouter) or Anthropic Messages.
+
+Any error on the way passes the request through unchanged rather than refusing
+it. In **Observe** mode nothing is rewritten; the trace records that the request
+would have been compressed.
+
+## What to expect
+
+It pays off on requests carrying structured data — tool results, logs, pasted
+JSON. On prose it changes almost nothing. The trace on each request records
+whether it was compressed.
