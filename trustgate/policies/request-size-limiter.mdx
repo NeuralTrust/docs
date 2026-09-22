@@ -1,0 +1,53 @@
+---
+title: "Request Size Limiter"
+description: "Refuse oversized requests before anything reads them. Two ceilings, bytes and characters, and an optional demand that the client declare its size."
+---
+
+Applies to **LLM and MCP**.
+
+An oversized body reaches the gateway before anything can judge it: it has to be
+read, buffered and parsed. Whether it came from a client that attached a PDF to a
+prompt by mistake or from someone probing for a way to exhaust memory, the
+cheapest defence is to refuse it by size before reading it.
+
+## What it checks
+
+The body as received, against two ceilings, in this order:
+
+| Setting | Default | What is measured |
+|---|---|---|
+| **Allowed payload size** | 10 megabytes | The body in bytes, kilobytes or megabytes. |
+| **Max characters per request** | 100,000 | UTF-8 characters in the body — the prompt, the message history, tool results, everything the client sent. |
+| **Reject undeclared content length** | off | Refuse a request that carries no `Content-Length` header. |
+
+Bytes are checked first. A body that passes the byte ceiling is then counted in
+characters, so a request can be small in bytes and still refused for length, and
+a multi-byte script can hit the byte ceiling before the character one.
+
+## What the client gets
+
+A refused request is answered before any provider is contacted:
+
+| Refused because | Status | Message names |
+|---|---|---|
+| Too many bytes | 413 | The size received, in bytes. |
+| Too many characters | 413 | The count received. |
+| No `Content-Length` header | 411 | The missing header. |
+
+Requiring `Content-Length` refuses chunked uploads and clients that stream a
+body of unknown size. That is the point — a declared size can be judged before
+the body is read — but it also refuses well-behaved clients that stream, so turn
+it on only where every caller is yours.
+
+In **Observe** mode the request is measured, recorded on the event as over the
+limit, and passed through.
+
+## Where to apply it
+
+Run it gateway-wide as a ceiling, and target a tighter one at applications whose
+traffic should be small. On a targeted policy the limit covers all of the
+application's traffic, on both planes.
+
+It is not a substitute for model limits: prompts that do not fit the resolved
+model are already rejected on the chat path. This policy is about not reading
+the body at all.
