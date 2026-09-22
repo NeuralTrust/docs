@@ -17,14 +17,14 @@ machine, use the [Claude Code integration](/integrations/claude-code).
 | Product | Scope | Controls |
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | Evaluates model requests from Anthropic's inference hook against an organization [policy](/trustguard/concepts/policies). | Monitor · Block |
-| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer. MCP (Model Context Protocol) connects Claude to systems such as trackers, databases, and internal APIs. | Tool availability · consumer authentication · per-tool rate limits |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to an application. MCP (Model Context Protocol) connects Claude to systems such as trackers, databases, and internal APIs. | Tool availability · application authentication · per-tool rate limits |
 
 ## Deployment options
 
 | Goal | Configuration | Location |
 | --- | --- | --- |
 | Evaluate Claude model requests across the organization | [Inference hook](#inference-hook) | Anthropic's servers; configured by an organization admin |
-| Centrally manage the MCP tools available to Claude | [Organization connector](#organization-connectors) using a TrustGate [MCP consumer](/trustgate/mcp/overview) | Anthropic's cloud calls the MCP endpoint |
+| Centrally manage the MCP tools available to Claude | [Organization connector](#organization-connectors) using a TrustGate [MCP application](/trustgate/mcp/overview) | Anthropic's cloud calls the MCP endpoint |
 
 You can use either integration independently. Configuring the inference hook
 does not register an MCP connector or install Claude Code lifecycle hooks.
@@ -32,7 +32,7 @@ does not register an MCP connector or install Claude Code lifecycle hooks.
 <Warning>
 Use separate credentials for TrustGuard and TrustGate. TrustGuard uses a
 `tgk_…` [collector](/trustguard/concepts/collectors) key in the inference-hook
-`Authorization` header. Organization connectors authenticate MCP consumers with
+`Authorization` header. Organization connectors authenticate MCP applications with
 OAuth2. A `tgk_…` key does not authenticate MCP.
 </Warning>
 
@@ -43,7 +43,7 @@ OAuth2. A `tgk_…` key does not authenticate MCP.
 | Egress to `{TRUSTGUARD_BASE_URL}` | The console shows the [base URL](/trustguard/api/evaluate#base-url) for your workspace. Anthropic's servers must be able to reach it. |
 | The **Claude Enterprise** collector type | **Agent Runtime → Collectors → Catalog → AI assistants & coding agents → Inference Hooks**. Create the `tgk_…` key on **Auth**, then assign a policy with the required Input rules on **Policies**. The key is shown once. |
 | An Anthropic organization admin | The hook lives in the Anthropic admin console under **Data and Privacy → Inference hooks**. |
-| An [MCP consumer](/trustgate/mcp/overview), if using TrustGate | Bind the required registries, then copy the endpoint from its **Connect** tab. |
+| An [MCP application](/trustgate/mcp/overview), if using TrustGate | Bind the required registries, then copy the endpoint from its **Connect** tab. |
 | Owner role in the Anthropic organization, for connectors | Custom connectors are added from **Organization settings**. |
 | A publicly reachable MCP host, for connectors | The connector is called from Anthropic's cloud, not from the user's machine. |
 
@@ -52,8 +52,8 @@ without enforcing them. Review the results, then switch the policy to
 **Enforce**. See [Policies](/trustguard/concepts/policies).
 
 Users do not need NeuralTrust accounts for the inference hook. With an
-organization connector, each member completes an OAuth login against the IdP
-configured for the consumer, which may be NeuralTrust.
+organization connector, each member completes an OAuth login against the identity
+provider the application trusts.
 
 ## Inference hook
 
@@ -89,11 +89,11 @@ plugin](/integrations/claude-code#trustguard-plugin) as well.
 
 Add TrustGate to Claude as an organization connector. The connector is
 available in claude.ai, Desktop, Cowork, and Claude Code. Claude receives the
-merged toolkit assigned to the MCP consumer. Copy the URL from the consumer's
+merged toolkit assigned to the MCP application. Copy the URL from the application's
 **Connect** tab:
 
 ```text
-https://<mcp-host>/<consumer-slug>/mcp
+https://<mcp-host>/<application-slug>/mcp
 ```
 
 1. As **Owner**, open **Organization settings → Connectors → Add → Custom → Web**.
@@ -112,7 +112,7 @@ TrustGate's private-network options before the connector can connect.
 </Warning>
 
 Prefer OAuth2 (or **Use NeuralTrust**): organization connectors expect OAuth.
-API-key consumers work through the [Claude Code
+API-key applications work through the [Claude Code
 CLI](/integrations/claude-code#connect-to-trustgate) instead.
 
 Claude Code loads the organization connector after the user completes the
@@ -187,19 +187,19 @@ path. The inference-hook endpoint returns only allow or deny.
 the hook URL and `Bearer tgk_…` header, then copies the `whsec_…` signing secret
 to the collector's **Connection** tab in TrustGuard.
 
-**Connector ownership.** An Anthropic organization owner adds the MCP consumer's
+**Connector ownership.** An Anthropic organization owner adds the MCP application's
 **Connect** URL to the organization. Each member then completes OAuth.
 
 **MCP auth.** Organization connectors use OAuth2 (or **Use NeuralTrust**).
-Which IdP backs the login is configured on the consumer. See
+Which IdP backs the login is configured on the application. See
 [Auth](/trustgate/concepts/auth). Authenticating to TrustGate is separate from
 authenticating to the upstream servers; a registry using OAuth (forwarded)
 returns a connect link on the first call for a user without a stored credential.
 For API-key authentication and private-data-plane headers through the CLI, see
 [Claude Code](/integrations/claude-code#connect-to-trustgate).
 
-Configure the consumer's available tools under **Routing** in the NeuralTrust
-console; every caller the consumer admits sees the same tool set.
+Configure the application's available tools on **General** in the NeuralTrust
+console; every caller the application admits sees the same tool set.
 To limit MCP tool calls, attach the [Per-Tool Rate
 Limiter](/trustgate/policies/per-tool-rate-limiter) policy.
 
@@ -250,15 +250,15 @@ not enforced. Test the condition on the policy **Test** tab with Extra parameter
 | A gate on `claude-code` never fires for the local plugin | The plugin stamps `claude-code-plugin`. `claude-code` is Claude Code seen server-side |
 | The connector saves but never connects | The MCP URL is not reachable from Anthropic's cloud |
 | Claude Code shows TrustGate as *"Provided by a plugin"* | This is a local `claude mcp add` entry, not the organization connector. Confirm in `/mcp` |
-| Connector connects, no tools | Consumer has no bound registries, tool restrictions exclude everything, or the upstream connect link was never authorized |
-| `401` / repeated login on MCP | Check the consumer's plane URL and authentication configuration. For a CLI connection, also check for a revoked `ag_…` key or missing `X-AG-Gateway-Slug` on Hybrid |
+| Connector connects, no tools | Application has no bound registries, tool restrictions exclude everything, or the upstream connect link was never authorized |
+| `401` / repeated login on MCP | Check the application's plane URL and authentication configuration. For a CLI connection, also check for a revoked `ag_…` key or missing `X-AG-Gateway-Slug` on Hybrid |
 
 ## Related
 
 - [Claude Code](/integrations/claude-code): lifecycle hooks and direct CLI MCP setup
 - [Policies: Gates](/trustguard/concepts/policies#gates): Ask and Block configuration, including `source.application` values
 - [Collectors](/trustguard/concepts/collectors): collector types and keys
-- [MCP overview](/trustgate/mcp/overview): consumers, catalog merging, and upstream authentication
-- [TrustGate authentication](/trustgate/concepts/auth): API key and OAuth2 authentication for MCP consumers
+- [MCP overview](/trustgate/mcp/overview): applications, catalog merging, and upstream authentication
+- [TrustGate authentication](/trustgate/concepts/auth): API key and OAuth2 authentication for MCP applications
 - [How TrustGuard works](/trustguard/how-it-works): evaluation and enforcement across integrations
 - [Custom connectors (Anthropic)](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp): Anthropic's reference
