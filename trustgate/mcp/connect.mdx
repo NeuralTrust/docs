@@ -1,6 +1,6 @@
 ---
 title: "Connect an agent"
-description: "Two ways in. An agent with its own MCP client needs a URL and a way to sign in. Your own code gets the TrustGate SDK, which answers the three questions MCP does not: which actor, which credential, and what to do when an account is not connected."
+description: "Two ways in. An agent with its own MCP client needs a URL and a way to sign in. Your own code gets the TrustGate SDK, which answers the questions MCP does not: who a call runs as, which credential it travels with, and what to do when an upstream account is not connected."
 ---
 
 Every application on the MCP plane has one URL. What connects to it decides
@@ -35,9 +35,9 @@ and Windsurf have their own pages under [Integrations](/integrations/overview).
 ## Your own code: the TrustGate SDK
 
 When you are writing the agent yourself, the URL is the easy part. MCP does not
-carry **which actor** a call speaks as, **which credential** it travels with, or
-**what to do when an upstream account is not connected** — and the SDK exists to
-answer those three.
+carry **who a call runs as**, **which credential** it travels with, or **what to
+do when an upstream account is not connected** — and the SDK exists to answer
+those three.
 
 ```bash
 npm install @neuraltrust/trustgate     # TypeScript, Node 18+, no runtime dependencies
@@ -55,7 +55,7 @@ travelled with it, so the SDK asks the gateway what the key reaches. You name a
 slug only when one key reaches two applications on the same plane, and the SDK
 refuses to guess rather than pick.
 
-### `connect()` proves three things before anything runs
+### `connect()` checks the run before it starts
 
 ```python
 try:
@@ -63,18 +63,20 @@ try:
 except MissingToolsError as e:
     sys.exit(f"the application is missing {e.missing}; ask your admin")
 except UpstreamNotConnectedError as e:
-    sys.exit(f"nobody has signed in to {e.providers}; open {e.connect_url}")
+    sys.exit(str(e))
 ```
 
-1. **Which actor the application is** — acting as itself, or for its own end
-   users. The application decides this, not your code; the SDK reads it and
-   hands back the matching handle.
-2. **That the tools you need are there.** The tool set belongs to an admin and
+`connect()` is the application acting as itself — the key and nothing else — and
+it proves two things before returning:
+
+1. **That the tools you need are there.** The tool set belongs to an admin and
    can be narrowed without warning. `requires` turns that into a refusal at
    startup instead of a failure mid-conversation.
-3. **That the accounts are signed in** — for an application acting as itself.
-   A batch has nobody to open a connect link once it is running, so the check
-   belongs before the first row.
+2. **That the servers behind it have an account.** A batch has nobody to open a
+   connect link once it is running, so the check belongs before the first row.
+   The message names who has to act: an administrator, for a server whose one
+   account every caller rides on, or you, by naming the person a call is for —
+   see [acting for your users](#acting-for-your-users).
 
 Tools are named as their own server names them — `search`, not the prefixed
 name the gateway publishes when several servers are bound. The SDK adds the
@@ -120,12 +122,11 @@ strict rather than dropping them.
 
 ### Acting for your users
 
-When the application is set to act for its own end users, `connect()` returns a
-factory instead of a surface: every call belongs to one named person.
+Name the person and you get a handle on the same key and the same application,
+whose calls run as them:
 
 ```ts
-const handle = await tg.connect()
-const alice = await handle.forEndUser("user_123")
+const alice = await tg.forEndUser("user_123")
 
 try {
   await alice.toolkit(ToolFormat.OpenAIResponses).execute(response.output)
@@ -136,17 +137,20 @@ try {
 }
 ```
 
-The connect link arrives inside the error because that is where the gateway
+There is no startup account check here, because this one has a remedy at
+runtime: the connect link arrives inside the error, which is where the gateway
 mints it. `alice.connections()` and `alice.connectLink()` do the same ahead of
-time, when you would rather ask than fail. This is the code side of
-[acting for end users](/trustgate/mcp/end-users).
+time, when you would rather ask than fail. An agent you already opened gives you
+the same handle with `agent.forEndUser("user_123")`, without a second round trip.
+
+This is the code side of [acting for end users](/trustgate/mcp/end-users).
 
 ### What can go wrong, by name
 
 | Error | When |
 |---|---|
 | `MissingToolsError` | `requires` names a tool the application does not serve. |
-| `UpstreamNotConnectedError` | The application's own accounts are not signed in. |
+| `UpstreamNotConnectedError` | At startup: servers the application cannot call yet. `servers` names them; the message names who connects each. |
 | `ConsentRequiredError` | An end user has not connected; carries the link. |
 | `PolicyBlockedError` | A gateway policy refused the call. |
 | `ToolNotFoundError` | The tool left the tool set under a running agent. |
@@ -154,5 +158,6 @@ time, when you would rather ask than fail. This is the code side of
 
 The [SDK repository](https://github.com/NeuralTrust/trustgate-sdk) has four
 runnable examples, two per language: a batch job acting as itself, and an
-assistant acting for its users — plus `whoami`, which prints what a key reaches
-and is the first thing to run when something is off.
+assistant acting for its users — plus `whoami`, which prints what a key reaches,
+when it expires, and for each server whether an account is connected and who
+connects it. It is the first thing to run when something is off.
