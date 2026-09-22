@@ -1,6 +1,6 @@
 ---
 title: "Routing"
-description: "How an application picks a registry and a model for each request: one target, an ordered fallback chain, or a load-balanced pool — and what the client has to send for each."
+description: "How an application picks a registry and a model for each request: one target, a tier chosen by how hard the prompt is, an ordered fallback chain, or a load-balanced pool — and what the client has to send for each."
 ---
 
 Routing is decided per **application**. It answers one question for every request:
@@ -12,9 +12,9 @@ There are four answers, and the console offers them as one **Strategy** choice.
 | Strategy | Picks | Reach for it when |
 |---|---|---|
 | **Simple routing** | The registry the model name points at. | One provider, or the client always names the model. |
+| **Smart routing** | A tier, by how hard the prompt is. | Two or more model strengths serve the same application and cost should follow difficulty. |
 | **Fallback** | The first registry in an ordered chain that succeeds. | You want resilience across providers, or a cheaper degrade path under load. |
 | **Load balancing** | A member of a pool, by algorithm. | Traffic should spread — evenly, by weight, or by load. |
-| **Smart routing** | A tier, by how hard the prompt is. | Two or more model strengths serve the same application and cost should follow difficulty. |
 
 Start with one registry. Fallback and load balancing are things you add once the
 application works, not things you design up front.
@@ -29,6 +29,36 @@ model. A name no registry serves is rejected before it reaches any provider.
 This is the strategy where the client carries the decision. That is fine for a
 service that knows exactly what it wants, and wrong for anything you would like
 to re-route later without touching the client.
+
+## Smart routing
+
+The console lists it beside the load-balancing algorithms, but it is a different
+kind of decision: not *which member takes the next request* but *which model
+this request deserves*.
+
+Smart routing classifies each prompt into a complexity band and sends it to the
+tier configured for that band. The bands are fixed labels — you never set a
+threshold:
+
+| Band | Traffic |
+|---|---|
+| **Simple** | Short, low-stakes, straightforward. Put the cheapest capable model here. |
+| **Medium** | Everyday production traffic. |
+| **Hard** | Long, multi-step, technical. The model that justifies its cost. |
+
+Each tier is a **registry and a model**. Tiers may share a registry — one OpenAI
+connection serving `gpt-4o-mini` on Simple and `gpt-4o` on Medium is the common
+shape. You need at least two tiers, and each band can be used once.
+
+A prompt whose complexity falls below every configured tier goes to the
+**cheapest** tier, not to a random pick. That makes the cheapest tier
+load-bearing in a way the others are not: if its registry is deleted, smart
+routing is dropped and the pool reverts to round robin. Losing a middle or top
+tier just removes that rung.
+
+The point of smart routing is cost without a product decision per request. Check
+**Analytics** after turning it on: if the tier mix is not what you expected, the
+model on **Simple** is usually too weak for what you thought was simple.
 
 ## Fallback
 
@@ -73,36 +103,6 @@ path instead of surfacing the error.
 
 Load balancing is for **models only**. Tool traffic routes to a single server, so
 an application serving MCP never sees these options.
-
-## Smart routing
-
-The console lists it beside the load-balancing algorithms, but it is a different
-kind of decision: not *which member takes the next request* but *which model
-this request deserves*.
-
-Smart routing classifies each prompt into a complexity band and sends it to the
-tier configured for that band. The bands are fixed labels — you never set a
-threshold:
-
-| Band | Traffic |
-|---|---|
-| **Simple** | Short, low-stakes, straightforward. Put the cheapest capable model here. |
-| **Medium** | Everyday production traffic. |
-| **Hard** | Long, multi-step, technical. The model that justifies its cost. |
-
-Each tier is a **registry and a model**. Tiers may share a registry — one OpenAI
-connection serving `gpt-4o-mini` on Simple and `gpt-4o` on Medium is the common
-shape. You need at least two tiers, and each band can be used once.
-
-A prompt whose complexity falls below every configured tier goes to the
-**cheapest** tier, not to a random pick. That makes the cheapest tier
-load-bearing in a way the others are not: if its registry is deleted, smart
-routing is dropped and the pool reverts to round robin. Losing a middle or top
-tier just removes that rung.
-
-The point of smart routing is cost without a product decision per request. Check
-**Analytics** after turning it on: if the tier mix is not what you expected, the
-model on **Simple** is usually too weak for what you thought was simple.
 
 ## What the client sends
 
