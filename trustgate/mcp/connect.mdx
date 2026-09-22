@@ -12,13 +12,15 @@ Claude Code, Claude, Cursor, Codex, Gemini, VS Code — anything with an MCP cli
 — is pointed at the application's URL and nothing else. The Connect tab has the
 exact snippet for each; they all reduce to one of these shapes:
 
-```bash
-claude mcp add --transport http TrustGate https://<mcp-host>/<application-slug>/mcp
-```
+<CodeGroup>
+  ```bash Claude Code
+  claude mcp add --transport http TrustGate https://<mcp-host>/<application-slug>/mcp
+  ```
 
-```json
-{ "mcpServers": { "TrustGate": { "type": "http", "url": "https://<mcp-host>/<application-slug>/mcp" } } }
-```
+  ```json JSON config
+  { "mcpServers": { "TrustGate": { "type": "http", "url": "https://<mcp-host>/<application-slug>/mcp" } } }
+  ```
+</CodeGroup>
 
 How the agent authenticates follows from the application:
 
@@ -42,16 +44,31 @@ carry **who a call runs as**, **which credential** it travels with, or **what to
 do when an upstream account is not connected** — and the SDK exists to answer
 those three.
 
-```bash
-npm install @neuraltrust/trustgate     # TypeScript, Node 18+, no runtime dependencies
-pip install trustgate-sdk              # Python 3.10+, standard library only
-```
+<CodeGroup>
+  ```bash Python
+  pip install trustgate-sdk      # Python 3.10+, standard library only; the import is still trustgate
+  ```
+
+  ```bash TypeScript
+  npm install @neuraltrust/trustgate      # Node 18+, no runtime dependencies
+  ```
+</CodeGroup>
 
 One secret, nothing else:
 
-```ts
-const tg = new TrustGate({ baseUrl: "https://gw.acme.ai", apiKey: "ag_…" })
-```
+<CodeGroup>
+  ```python Python
+  from trustgate import TrustGate
+
+  tg = TrustGate(base_url="https://gw.acme.ai", api_key="ag_…")
+  ```
+
+  ```ts TypeScript
+  import { TrustGate } from "@neuraltrust/trustgate"
+
+  const tg = new TrustGate({ baseUrl: "https://gw.acme.ai", apiKey: "ag_…" })
+  ```
+</CodeGroup>
 
 The applications behind a key were created in the console and their slugs never
 travelled with it, so the SDK asks the gateway what the key reaches. You name a
@@ -60,14 +77,24 @@ refuses to guess rather than pick.
 
 ### `connect()` checks the run before it starts
 
-```python
-try:
-    agent = tg.connect(requires=["search", "create_issue"])
-except MissingToolsError as e:
-    sys.exit(f"the application is missing {e.missing}; ask your admin")
-except UpstreamNotConnectedError as e:
-    sys.exit(str(e))
-```
+<CodeGroup>
+  ```python Python
+  try:
+      agent = tg.connect(requires=["search", "create_issue"])
+  except MissingToolsError as e:
+      sys.exit(f"the application is missing {e.missing}; ask your admin")
+  except UpstreamNotConnectedError as e:
+      sys.exit(str(e))
+  ```
+
+  ```ts TypeScript
+  const agent = await tg.connect({ requires: ["search", "create_issue"] }).catch((error) => {
+    if (error instanceof MissingToolsError) fail(`the application is missing ${error.missing}; ask your admin`)
+    if (error instanceof UpstreamNotConnectedError) fail(error.message)
+    throw error
+  })
+  ```
+</CodeGroup>
 
 `connect()` is the application acting as itself — the key and nothing else — and
 it proves two things before returning:
@@ -91,10 +118,17 @@ If your framework brings its own MCP client — the OpenAI Agents SDK, the Claud
 Agent SDK, LangChain, Mastra — all the SDK contributes is a checked URL and its
 headers:
 
-```ts
-const agent = await tg.connect({ requires: ["search"] })
-new MCPServerStreamableHttp({ url: agent.mcp.url, headers: agent.mcp.headers })
-```
+<CodeGroup>
+  ```python Python
+  agent = tg.connect(requires=["search"])
+  MCPServerStreamableHttp(params={"url": agent.mcp.url, "headers": agent.mcp.headers})
+  ```
+
+  ```ts TypeScript
+  const agent = await tg.connect({ requires: ["search"] })
+  new MCPServerStreamableHttp({ url: agent.mcp.url, requestInit: { headers: agent.mcp.headers } })
+  ```
+</CodeGroup>
 
 No adapter per framework, because the framework already is one.
 
@@ -104,47 +138,75 @@ When you call a provider's API directly there is no MCP client in the picture.
 The SDK lists the tools, translates them into that provider's function-calling
 dialect, and runs the calls — every one of them back through the gateway:
 
-```ts
-const { tools, execute } = agent.toolkit(ToolFormat.OpenAIResponses)
+<CodeGroup>
+  ```python Python
+  toolkit = agent.toolkit(ToolFormat.OPENAI_RESPONSES)
 
-let res = await openai.responses.create({ model: "gpt-5.2", tools, input })
-while (res.output.some((o) => o.type === "function_call")) {
-  res = await openai.responses.create({
-    model: "gpt-5.2", tools, previous_response_id: res.id,
-    input: await execute(res.output),
-  })
-}
-```
+  res = openai.responses.create(model="gpt-5.2", tools=toolkit.tools, input=input)
+  while any(o.type == "function_call" for o in res.output):
+      res = openai.responses.create(
+          model="gpt-5.2", tools=toolkit.tools, previous_response_id=res.id,
+          input=toolkit.execute(res.output),
+      )
+  ```
+
+  ```ts TypeScript
+  const { tools, execute } = agent.toolkit(ToolFormat.OpenAIResponses)
+
+  let res = await openai.responses.create({ model: "gpt-5.2", tools, input })
+  while (res.output.some((o) => o.type === "function_call")) {
+    res = await openai.responses.create({
+      model: "gpt-5.2", tools, previous_response_id: res.id,
+      input: await execute(res.output),
+    })
+  }
+  ```
+</CodeGroup>
 
 `ToolFormat` names providers — `OpenAIResponses`, `OpenAIChat`,
-`AnthropicMessages`, `Gemini` — because translation is only needed on that path.
+`AnthropicMessages`, `Gemini`; `OPENAI_RESPONSES` and so on in Python — because
+translation is only needed on that path.
 The SDK depends on no provider package; `tools` and what `execute()` returns are
-whatever types you name at the call. `strict: true` closes every schema so the
+whatever types you name at the call. `strict` closes every schema so the
 model cannot invent an argument, and lists the tools that could not be made
 strict rather than dropping them.
 
 ### Acting for your users
 
-Name the person and you get a handle on the same key and the same application,
-whose calls run as them:
+When the application is configured to act for its own users, `connect()`
+returns a factory instead of an agent: every call must name the person, and the
+handle it gives runs as them on the same key and the same application:
 
-```ts
-const alice = await tg.forEndUser("user_123")
+<CodeGroup>
+  ```python Python
+  factory = tg.connect()
+  alice = factory.for_end_user("user_123")
 
-try {
-  await alice.toolkit(ToolFormat.OpenAIResponses).execute(response.output)
-} catch (error) {
-  if (error instanceof ConsentRequiredError) {
-    reply(`I need access to ${error.provider}: ${error.connectUrl}`)
+  try:
+      alice.toolkit(ToolFormat.OPENAI_RESPONSES).execute(response.output)
+  except ConsentRequiredError as e:
+      reply(f"I need access to {e.provider}: {e.connect_url}")
+  ```
+
+  ```ts TypeScript
+  const factory = await tg.connect()
+  const alice = await factory.forEndUser("user_123")
+
+  try {
+    await alice.toolkit(ToolFormat.OpenAIResponses).execute(response.output)
+  } catch (error) {
+    if (error instanceof ConsentRequiredError) {
+      reply(`I need access to ${error.provider}: ${error.connectUrl}`)
+    }
   }
-}
-```
+  ```
+</CodeGroup>
 
 There is no startup account check here, because this one has a remedy at
 runtime: the connect link arrives inside the error, which is where the gateway
-mints it. `alice.connections()` and `alice.connectLink()` do the same ahead of
-time, when you would rather ask than fail. An agent you already opened gives you
-the same handle with `agent.forEndUser("user_123")`, without a second round trip.
+mints it. `alice.connections()` and `alice.connectLink()` (`connect_link()` in
+Python) do the same ahead of time, when you would rather ask than fail. The tool
+set is read once, by the first user named, and shared by every handle after it.
 
 This is the code side of [acting for end users](/trustgate/mcp/end-users).
 
@@ -153,7 +215,7 @@ This is the code side of [acting for end users](/trustgate/mcp/end-users).
 | Error | When |
 |---|---|
 | `MissingToolsError` | `requires` names a tool the application does not serve. |
-| `UpstreamNotConnectedError` | At startup: servers the application cannot call yet. `servers` names them; the message names who connects each. |
+| `UpstreamNotConnectedError` | At startup: servers the application cannot call yet. `providers` names them; the message names who connects each. |
 | `ConsentRequiredError` | An end user has not connected; carries the link. |
 | `AuthenticationError` | The key is unknown, revoked or past its expiry — all three are refused alike. |
 | `PolicyBlockedError` | A gateway policy refused the call. |
