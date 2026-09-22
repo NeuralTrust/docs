@@ -1,0 +1,52 @@
+---
+title: "Tool Injection"
+description: "Add gateway-defined tools to every model call an application makes, so a platform tool does not depend on each client remembering to send it."
+---
+
+Applies to **LLM**.
+
+Some tools should be available on every model call an application makes, whether
+or not the developer remembered to send them — a lookup against your own knowledge
+base, an escalation tool, a tool that records a decision. Injecting them at the
+gateway makes them a platform guarantee instead of a per-client convention.
+
+## What it does
+
+The policy appends its tools to the request's tool list before the request
+reaches the model. It only adds; a client's own tools are never removed. The
+tool is written once and encoded for whichever provider the request is going to,
+so the same policy serves OpenAI-style and Anthropic requests.
+
+Each injected tool is a **function** with:
+
+| Field | Role |
+|---|---|
+| **Name** | What the model calls, and what the client will see in the tool call. |
+| **Description** | What the model reads when deciding whether to call it. Write it for the model, not for a person. |
+| **Parameters** | A JSON Schema for the arguments. Optional; without one the model calls the tool with no arguments. |
+
+## When a name collides
+
+A client may already send a tool with the same name. **On conflict** decides:
+
+| Setting | Outcome |
+|---|---|
+| **Gateway tool wins** (default) | The client's definition is replaced by the gateway's. |
+| **Client tool wins** | The gateway's tool is dropped for that request. |
+| **Reject the request** | The request is refused, naming the tool. |
+
+The trace records what happened to each injected tool on each request: appended,
+replaced, dropped or rejected.
+
+## What it does not do
+
+The gateway adds the definition; it does not run the tool. When the model calls
+an injected tool, the call comes back to the application like any other tool
+call, and the application has to execute it — itself, or through an MCP server
+that serves it. Inject only tools your applications know how to handle.
+
+It is not an access control. Which tools an application may call is set on the
+[application](/trustgate/access/applications#what-it-may-use); this policy adds
+to that set for the model's benefit, it does not narrow it.
+
+The policy always enforces; there is no observe mode for adding a tool.

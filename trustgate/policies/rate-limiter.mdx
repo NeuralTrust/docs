@@ -1,0 +1,38 @@
+---
+title: "Rate Limiter"
+description: "Cap how many requests an application, or each end user behind it, may make in a sliding window. Refuse or delay the rest."
+---
+
+Applies to **LLM and MCP**.
+
+A client stuck in a retry loop, a script someone pointed at production, a tenant
+that decides to backfill a year of data — to the provider they are all one flood
+of requests billed to you, and a rate-limit error for everyone else sharing the
+key. The rate limiter stops the flood at the gateway, per application, so one
+caller's bug stays that caller's problem.
+
+Counts requests in a sliding window and refuses the ones over the line. You set a
+**limit**, a **window** (`30s`, `1m`, `1h`), and the **Retry-After** the refusal
+carries — by default the window, which is when the allowance actually returns.
+Refused responses carry the standard rate-limit headers so a well-behaved client
+backs off on its own.
+
+What the counter counts depends on the scope. Gateway-wide, one counter covers all
+traffic. Targeted, each application gets its own. This is the only type that
+offers **Throttle** mode: a request over the line waits its share of the window
+and then goes through, which turns a burst into a queue instead of a wall of 429s.
+
+**Group by header** splits the counter by a header value — `X-User-Id`, say — so
+one policy gives every end user of an application their own allowance.
+
+## Where to apply it
+
+| Scope | Typical use |
+|---|---|
+| **Gateway-wide** | An organisation-level ceiling nobody can opt out of. |
+| **Targeted** | Per-tenant or per-application quotas. |
+| **Group by header** | Per end user inside one application, without a policy per user. |
+
+A refused request gets HTTP 429 with the standard rate-limit headers and the
+Retry-After you set. Pair it with an [LLM Budget](/trustgate/policies/llm-budget)
+when the concern is spend rather than volume.
