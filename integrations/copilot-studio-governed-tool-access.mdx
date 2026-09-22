@@ -1,11 +1,11 @@
 ---
 title: "Copilot Studio: governed tool access"
 sidebarTitle: "Set up governed tool access"
-description: "Decide which MCP tools a Copilot Studio agent can reach through a TrustGate consumer, and optionally inspect their payloads"
+description: "Decide which MCP tools a Copilot Studio agent can reach through a TrustGate application, and optionally inspect their payloads"
 ---
 
 TrustGate publishes a merged MCP catalog to the agent and decides which tools it
-can reach at all. A TrustGuard policy on the consumer additionally inspects the
+can reach at all. A TrustGuard policy on the application additionally inspects the
 content of that traffic.
 
 Read [Microsoft Copilot Studio](/integrations/copilot-studio) first if you have
@@ -18,10 +18,10 @@ catalog and decides which of those tools the agent can reach.
 
 | Surface | Access only | With a TrustGuard policy |
 |---|---|---|
-| **MCP catalog** | Limited to the consumer's registries and toolkit | Same registry and toolkit restrictions |
-| **Tool call** (`tools/call`) | Routed only when the consumer may use the tool | Evaluated before the upstream tool runs. **Block** or **Transform** |
+| **MCP catalog** | Limited to the application's registries and toolkit | Same registry and toolkit restrictions |
+| **Tool call** (`tools/call`) | Routed only when the application may use the tool | Evaluated before the upstream tool runs. **Block** or **Transform** |
 | **Tool result** (`CallToolResult`) | Delivered as returned | Evaluated before Copilot Studio receives it. **Block** or **Transform** |
-| **Rate limits** | [Per-tool limiter](/trustgate/policies/tool-governance) on the consumer | Same |
+| **Rate limits** | [Per-tool limiter](/trustgate/policies/tool-governance) on the application | Same |
 
 You can use this path on its own, or together with
 [threat detection](/integrations/copilot-studio-threat-detection). Threat
@@ -37,9 +37,9 @@ and does not affect MCP.
 
 | Requirement | Notes |
 |---|---|
-| An [MCP consumer](/trustgate/mcp/overview) with **OAuth2** authentication | Create it under **Agent Gateway** → **Consumers**. Copilot Studio uses OAuth2. |
-| [Registries](/trustgate/concepts/registries) and a toolkit assigned to the consumer | The consumer's routing determines what the agent can call. An empty toolkit on a bound registry grants the entire server. |
-| The endpoint from the consumer's **Connect** tab | Always ends `/{consumer_slug}/mcp`. |
+| An [MCP application](/trustgate/mcp/overview) with **OAuth2** authentication | Create it under **Agent Gateway → Access → Applications**. Copilot Studio uses OAuth2. |
+| [Registries](/trustgate/concepts/registries) and a toolkit assigned to the application | What the application binds on **General** is what the agent can call. An empty toolkit on a bound registry grants the entire server. |
+| The endpoint from the application's **Connect** tab | Always ends `/{application-slug}/mcp`. |
 | Egress from the TrustGate data plane to each registry `url` | SaaS cannot call private VPC endpoints. Use [Hybrid](/neuraltrust/deployment/hybrid) for internal MCP servers. |
 | An IdP app *(only if you use your own IdP)* | Follow the [Okta](/trustgate/concepts/authorization/okta) or [Entra ID](/trustgate/concepts/authorization/entra-id) setup for the app registration and redirect URI. |
 | Browser pop-ups allowed for the maker | Consent runs in a pop-up window. A blocked pop-up leaves the connection unfinished. |
@@ -55,26 +55,27 @@ the endpoint copied from **Connect**.
 
 
 
-## 1. Create the MCP consumer
+## 1. Create the MCP application
 
-In **Agent Gateway** → **Consumers**, create a consumer with protocol **MCP** and
-auth **OAuth2**, bind the [registries](/trustgate/concepts/registries) and
-toolkit you want the agent to have, then copy the URL from the **Connect** tab:
+In **Agent Gateway → Access → Applications**, create an application and add the
+[servers](/trustgate/registry/mcp) and toolkit you want the agent to have on
+**General** — its type follows from that. Set **Auth** to the identity provider
+Copilot Studio signs in through, then copy the URL from the **Connect** tab:
 
 ```text
-https://{mcpHost}/{consumer_slug}/mcp
+https://{mcpHost}/{application-slug}/mcp
 ```
 
 **Authentication options.** The Copilot Studio configuration is the same for
-both options; only the consumer configuration changes.
+both options; only the application configuration changes.
 
-| Option | Consumer setup |
+| Option | Application setup |
 |---|---|
 | **NeuralTrust** (no external IdP) | Leave the OAuth **Client** blank, or select **Use NeuralTrust**. |
 | **Your IdP** (Okta, Entra ID, etc.) | Attach an OAuth2 auth from [Identity](/trustgate/concepts/auth). Follow [Okta](/trustgate/concepts/authorization/okta) or [Entra ID](/trustgate/concepts/authorization/entra-id) for the IdP app and redirect URI. |
 
-Every caller a consumer admits sees the same registries and toolkit. When different
-people should see different tools, create one consumer per tool set, or let people
+Every caller an application admits sees the same registries and toolkit. When different
+people should see different tools, create one application per tool set, or let people
 self-serve from the [MCP Store](/trustgate/mcp/store) governed by
 [Access](/trustgate/mcp/access).
 
@@ -82,7 +83,7 @@ self-serve from the [MCP Store](/trustgate/mcp/store) governed by
 
 1. Create a tool → **MCP**.
 2. Set Authentication → **OAuth** → **Dynamic discovery**.
-3. Paste the consumer URL from [step 1](#1-create-the-mcp-consumer) as the server
+3. Paste the application URL from [step 1](#1-create-the-mcp-application) as the server
    URL. Leave the defaults. If Power Automate opens, no changes are needed there.
 
 ## 3. Build the agent and activate the connection
@@ -98,7 +99,7 @@ self-serve from the [MCP Store](/trustgate/mcp/store) governed by
 ## 4. Verify
 
 1. Submit a request that invokes a tool from a bound registry.
-2. Confirm the agent lists only the tools granted by the consumer's toolkit.
+2. Confirm the agent lists only the tools granted by the application's toolkit.
 3. Confirm the call in TrustGate **Activity**.
 
 ## Optional: inspect tool calls and results
@@ -111,7 +112,7 @@ of MCP traffic with TrustGuard:
    tool calls and Output rules for tool results. Start in **Observe** mode.
 2. In **Agent Gateway** → **Policies** → **Catalog**, add **TrustGuard**. Select
    the collector, set direction to `request_response`, and target the Copilot
-   Studio consumer. Keep the guardrail in **Observe** while testing.
+   Studio application. Keep the guardrail in **Observe** while testing.
 3. Invoke a tool and confirm the input and output decisions in TrustGuard
    **Activity**.
 4. After reviewing the decisions, switch the runtime policy and guardrail to
@@ -130,14 +131,14 @@ instead of forwarding unmasked content. Redaction applies to DLP outcomes only.
 
 ### Configuration
 
-**MCP endpoint.** Each MCP consumer has a `streamable-http` endpoint. The agent
-receives the merged catalog from the registries assigned to that consumer:
+**MCP endpoint.** Each MCP application has a `streamable-http` endpoint. The agent
+receives the merged catalog from the registries assigned to that application:
 
 ```text
-https://{mcpHost}/{consumer_slug}/mcp
+https://{mcpHost}/{application-slug}/mcp
 ```
 
-The slug is the first path segment on the consumer's proxy URL, and the path must
+The slug is the first path segment on the application's proxy URL, and the path must
 end in `/mcp`. Copy the URL from the **Connect** tab instead of assembling it
 manually.
 
@@ -152,7 +153,7 @@ connecting agents and supports **Dynamic discovery**:
 | `/authorize` · `/callback` · `/token` | Authorization-code flow with **PKCE**. |
 | `/connect` · `/disconnect` | The consent flow used by `forwarded` upstream auth. |
 
-The consumer configuration determines which IdP handles the login. See
+The application configuration determines which IdP handles the login. See
 [Auth](/trustgate/concepts/auth).
 
 **Upstream authentication is separate.** Authenticating Copilot Studio to
@@ -165,9 +166,9 @@ it. Configure the latter with `mcp_target.auth.mode` on the registry: `none`,
 the registry name (`asana_create_task`). Use the name shown to the agent when
 configuring tool restrictions.
 
-**Fail mode.** `fail_mode` on the consumer decides what happens when an upstream
+**Fail mode.** `fail_mode` on the application decides what happens when an upstream
 server is unavailable. `open` skips the failed server; `closed` fails the call.
-For role-based consumers the effective mode is open **only** when every
+For role-based applications the effective mode is open **only** when every
 contributing role declares it open.
 
 ## Troubleshooting
@@ -175,21 +176,21 @@ contributing role declares it open.
 
 | Symptom | Cause |
 |---|---|
-| Copilot asks for a Client ID or Client secret | Confirm authentication is set to **Dynamic discovery** and the URL ends in `/{consumer_slug}/mcp`. Manual client credentials are not required |
+| Copilot asks for a Client ID or Client secret | Confirm authentication is set to **Dynamic discovery** and the URL ends in `/{application-slug}/mcp`. Manual client credentials are not required |
 | Consent does not finish | Allow pop-ups in the maker's browser, then retry connection activation |
-| Tools are missing, or an upstream call fails | The consumer has no bound registries, the toolkit excludes the tool, or the user has not completed the IdP or upstream OAuth flow |
+| Tools are missing, or an upstream call fails | The application has no bound registries, the toolkit excludes the tool, or the user has not completed the IdP or upstream OAuth flow |
 | The agent sees no tools at all on first run | Not all connections, including the MCP Server itself, were activated on the first run |
 | A tool the maker expected is silently absent | A bound registry is down and `fail_mode` is `open`, so it was skipped rather than erroring |
-| Tool calls or results do not appear in TrustGuard **Activity** | The default setup is access-only, or the TrustGuard policy is not targeted to this consumer or direction |
+| Tool calls or results do not appear in TrustGuard **Activity** | The default setup is access-only, or the TrustGuard policy is not targeted to this application or direction |
 | A tool-result block did not undo an external action | Output inspection runs after the tool executes. The result can be blocked or rewritten, but the tool action cannot be reversed |
 
 ## Related
 
 - [Microsoft Copilot Studio](/integrations/copilot-studio): the choice between both paths
 - [Threat detection](/integrations/copilot-studio-threat-detection): coverage and setup for the other path
-- [MCP Gateway](/trustgate/mcp/overview): consumers, catalog merging, toolkits, and upstream authentication
+- [MCP Gateway](/trustgate/mcp/overview): applications, catalog merging, toolkits, and upstream authentication
 - [TrustGate guardrails](/trustgate/policies/guardrails#trustguard): configure the optional policy
-- [Consumers](/trustgate/concepts/consumers): slugs, routing, and the Connect tab
-- [TrustGate authentication](/trustgate/concepts/auth): OAuth2 authentication for MCP consumers
+- [Applications](/trustgate/concepts/applications): slugs, routing, and the Connect tab
+- [TrustGate authentication](/trustgate/concepts/auth): OAuth2 authentication for MCP applications
 - [Okta](/trustgate/concepts/authorization/okta) and [Entra ID](/trustgate/concepts/authorization/entra-id): IdP applications and redirect URIs
 - [Access](/trustgate/mcp/access): who may install which MCP servers from the Store

@@ -26,7 +26,7 @@ Microsoft Copilot Studio is a separate product. See
 | Product | Scope | Controls |
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | Evaluates prompt submissions, tool calls, and tool results against an organization [policy](/trustguard/concepts/policies), using a [collector](/trustguard/concepts/collectors) on the developer's machine or a repository hook for cloud jobs. | Prompt submissions: audit only · tool calls: Block or Ask · tool results: Block after execution |
-| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer. MCP (Model Context Protocol) connects Copilot Chat to systems such as trackers, databases, and internal APIs. | Tool availability · consumer authentication · per-tool rate limits |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to an application. MCP (Model Context Protocol) connects Copilot Chat to systems such as trackers, databases, and internal APIs. | Tool availability · application authentication · per-tool rate limits |
 
 Install TrustGuard from the
 [trustguard-copilot-plugin](https://github.com/NeuralTrust/trustguard-copilot-plugin).
@@ -47,7 +47,7 @@ Configure TrustGate separately as a remote MCP server in Copilot's MCP config.
 <Warning>
 **Use separate credentials for TrustGuard and TrustGate.** The hooks use a
 `tgk_…` [collector](/trustguard/concepts/collectors) key in `copilot.json`. MCP
-authenticates as a consumer with OAuth or an `ag_…` API key. A `tgk_…` key does
+authenticates as an application with OAuth or an `ag_…` API key. A `tgk_…` key does
 not authenticate MCP.
 </Warning>
 
@@ -59,8 +59,8 @@ not authenticate MCP.
 | The **GitHub Copilot** collector type *(hooks path)* | **Agent Runtime → Collectors → Catalog → AI assistants & coding agents → GitHub Copilot**. Create the `tgk_…` key on its **Auth** tab, where it is shown once, and assign a policy on the **Policies** tab. One org key covers every developer machine. |
 | MDM *(enterprise path)* | Kandji scripts ship in the repo under [`mdm/kandji/`](https://github.com/NeuralTrust/trustguard-copilot-plugin/tree/main/mdm/kandji). |
 | VS Code enterprise policy *(Agent mode path)* | Agent hooks are a VS Code **preview** feature. Confirm your policy permits hooks and controls marketplace sources. |
-| An [MCP consumer](/trustgate/mcp/overview) *(MCP path)* | Bind the required registries, then copy the endpoint or JSON configuration from **Connect**. |
-| Consumer credentials *(MCP path)* | OAuth2 where Copilot can complete the browser login, or an `ag_…` API key. |
+| An [MCP application](/trustgate/mcp/overview) *(MCP path)* | Bind the required registries, then copy the endpoint or JSON configuration from **Connect**. |
+| Application credentials *(MCP path)* | OAuth2 where Copilot can complete the browser login, or an `ag_…` API key. |
 
 Create the policy in **Observe** mode. Observe records decisions in **Activity**
 without enforcing them. Review the results, then switch the policy to
@@ -144,17 +144,17 @@ for cloud jobs that must stop the tool call.
 ## Set up governed tool access (TrustGate)
 
 Copilot treats TrustGate as a **remote HTTP MCP server**: one `url` per MCP
-consumer, and Copilot Chat sees the merged toolkit that consumer is routed to.
-Copy the endpoint from the consumer's **Connect** tab:
+application, and Copilot Chat sees the merged toolkit that application is routed to.
+Copy the endpoint from the application's **Connect** tab:
 
 ```text
-https://<mcp-host>/<consumer-slug>/mcp
+https://<mcp-host>/<application-slug>/mcp
 ```
 
 Create `.vscode/mcp.json` in the workspace, or use the user MCP config your VS
 Code version provides.
 
-**OAuth2 consumers (recommended).** Use OAuth2 where Copilot can complete the
+**OAuth2 applications (recommended).** Use OAuth2 where Copilot can complete the
 browser login. Omit `headers`:
 
 ```json
@@ -162,13 +162,13 @@ browser login. Omit `headers`:
   "servers": {
     "TrustGate": {
       "type": "http",
-      "url": "https://<mcp-host>/<consumer-slug>/mcp"
+      "url": "https://<mcp-host>/<application-slug>/mcp"
     }
   }
 }
 ```
 
-**API-key consumers.** Send the `ag_…` consumer key as a header. Do not use a
+**API-key applications.** Send the `ag_…` application key as a header. Do not use a
 TrustGuard `tgk_…` key:
 
 ```json
@@ -176,7 +176,7 @@ TrustGuard `tgk_…` key:
   "servers": {
     "TrustGate": {
       "type": "http",
-      "url": "https://<mcp-host>/<consumer-slug>/mcp",
+      "url": "https://<mcp-host>/<application-slug>/mcp",
       "headers": {
         "X-AG-API-Key": "ag_…"
       }
@@ -200,7 +200,7 @@ listed but disabled; the first OAuth connect may open a browser.
 
 The top-level key is `servers` or `mcpServers`, depending on your VS Code and
 Copilot version. If the file is ignored, paste the **JSON** tab from the
-consumer's **Connect** page into the MCP configuration UI instead.
+application's **Connect** page into the MCP configuration UI instead.
 
 ## Verify
 
@@ -220,7 +220,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 **MCP.**
 
-1. In Copilot Chat, list tools or invoke one bound on the consumer.
+1. In Copilot Chat, list tools or invoke one bound on the application.
 2. Confirm the call in TrustGate **Activity**.
 
 ## Reference
@@ -309,8 +309,8 @@ exits. This prevents an incomplete plugin installation from blocking Copilot.
 
 **`mcp.json` (TrustGate only).** Workspace file `.vscode/mcp.json`, or the user
 MCP config your VS Code version uses. TrustGate is always `"type": "http"` with a
-`url`. Auth is `X-AG-API-Key` with an `ag_…` consumer key, plus
-`X-AG-Gateway-Slug` on a private (Hybrid) data plane; OAuth2 consumers send no
+`url`. Auth is `X-AG-API-Key` with an `ag_…` application key, plus
+`X-AG-Gateway-Slug` on a private (Hybrid) data plane; OAuth2 applications send no
 headers. The top-level key is `servers` or `mcpServers` depending on version.
 
 **Deployment ownership.**
@@ -320,7 +320,7 @@ headers. The top-level key is `servers` or `mcpServers` depending on version.
 | **Plugin** | Each developer (CLI marketplace) or the organization marketplace (VS Code) | `copilot plugin install trustguard@neuraltrust` |
 | **Policy hooks, collector, config, and wrapper** | IT / MDM | Four pieces at the per-OS paths, with the org `tgk_…` key |
 | **Cloud hook** | Repository maintainer | A hook file under `.github/hooks/`, the binary in the job image, firewall allowlist, credentials |
-| **MCP config** | Developer or IT | `.vscode/mcp.json` pointing at the consumer endpoint |
+| **MCP config** | Developer or IT | `.vscode/mcp.json` pointing at the application endpoint |
 
 ### Attributes
 
@@ -347,13 +347,13 @@ infer one.
 | A developer turned hooks off and enforcement stopped | The plugin was installed per user, not as a policy hook. Policy hooks are unaffected by `disableAllHooks` |
 | Every tool call is denied on one machine | The collector is installed but failing, and the policy-hook wrapper denies `preToolUse` in that state. Check the binary and `TRUSTGUARD_COPILOT_BIN` |
 | The TrustGate server is not listed in Copilot Chat | Wrong top-level key for your version (`servers` vs `mcpServers`), or the window was not reloaded. Paste the **Connect** JSON into the MCP config UI instead |
-| `401` on MCP | A `tgk_…` key was used instead of an `ag_…` consumer key, or `X-AG-Gateway-Slug` is missing on Hybrid |
+| `401` on MCP | A `tgk_…` key was used instead of an `ag_…` application key, or `X-AG-Gateway-Slug` is missing on Hybrid |
 
 ## Related
 
 - [Policies: Gates](/trustguard/concepts/policies#gates): Ask and Block configuration
 - [Evaluate API](/trustguard/api/evaluate): requests sent by the hooks
-- [MCP overview](/trustgate/mcp/overview): consumers, catalog merging, and upstream authentication
+- [MCP overview](/trustgate/mcp/overview): applications, catalog merging, and upstream authentication
 - [Microsoft Copilot Studio](/integrations/copilot-studio): Microsoft's agent builder and its TrustGate MCP integration
 - [How it works](/trustguard/how-it-works): comparison of Copilot with other collectors
 - [Plugin repository](https://github.com/NeuralTrust/trustguard-copilot-plugin): source, releases, and the hook contract

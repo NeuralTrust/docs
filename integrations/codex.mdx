@@ -18,7 +18,7 @@ TrustGuard lifecycle hooks evaluate local prompts and actions.
 | Product | Scope | Controls |
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | Evaluates prompts, tool calls, and tool results against an organization [policy](/trustguard/concepts/policies) through lifecycle hooks on the developer's machine. | Monitor · Block |
-| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to a consumer. MCP (Model Context Protocol) connects Codex to systems such as trackers, databases, and internal APIs. | Tool availability · consumer authentication · per-tool rate limits |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to an application. MCP (Model Context Protocol) connects Codex to systems such as trackers, databases, and internal APIs. | Tool availability · application authentication · per-tool rate limits |
 
 Install TrustGuard from the
 [trustguard-codex-plugin](https://github.com/NeuralTrust/trustguard-codex-plugin)
@@ -38,7 +38,7 @@ through a marketplace.
 <Warning>
 **Use separate credentials for TrustGuard and TrustGate.** The hooks use a
 `tgk_…` [collector](/trustguard/concepts/collectors) key in `codex.json`. MCP
-authenticates as a consumer with OAuth or an `ag_…` API key. A `tgk_…` key does
+authenticates as an application with OAuth or an `ag_…` API key. A `tgk_…` key does
 not authenticate MCP, and `codex.json` does not accept MCP settings.
 </Warning>
 
@@ -53,8 +53,8 @@ guardrails are a separate extension point and are not configured here.
 | The **Codex** collector type *(hooks path)* | **Agent Runtime → Collectors → Catalog → AI assistants & coding agents → Codex**. Create the `tgk_…` key on its **Auth** tab, where it is shown once, and assign the policy on the **Policies** tab. |
 | MDM *(hooks path, for enforcement)* | MDM ships the hook bootstraps, `codex.json`, and `requirements.toml`. |
 | Egress to GitHub Releases | If `trustguard-codex` is not already on the machine, the bootstrap downloads the pinned release on first use, checksum-verified. |
-| An [MCP consumer](/trustgate/mcp/overview) *(MCP path)* | Bind the required registries, then copy the endpoint from its **Connect** tab. |
-| Consumer credentials *(MCP path)* | Use OAuth, which requires no pasted credential, or an `ag_…` API key. |
+| An [MCP application](/trustgate/mcp/overview) *(MCP path)* | Bind the required registries, then copy the endpoint from its **Connect** tab. |
+| Application credentials *(MCP path)* | Use OAuth, which requires no pasted credential, or an `ag_…` API key. |
 
 Create the policy in **Observe** mode. Observe records decisions in **Activity**
 without enforcing them. Review the results, then switch the policy to
@@ -151,11 +151,11 @@ in the plugin repo; exact keys vary by Codex version, so confirm against
 ## Set up governed tool access (TrustGate)
 
 Codex treats TrustGate as a **streamable HTTP** MCP server: one `url` per MCP
-consumer, and the agent sees the merged toolkit that consumer is routed to. Copy
-the endpoint from the consumer's **Connect** tab:
+application, and the agent sees the merged toolkit that application is routed to. Copy
+the endpoint from the application's **Connect** tab:
 
 ```text
-https://<mcp-host>/<consumer-slug>/mcp
+https://<mcp-host>/<application-slug>/mcp
 ```
 
 The Codex CLI, ChatGPT desktop app, and IDE extension share the same
@@ -163,13 +163,13 @@ The Codex CLI, ChatGPT desktop app, and IDE extension share the same
 `[mcp_servers.<name>]` table; see [Configuration](#configuration) for the two
 scopes and the transport rules.
 
-### OAuth consumers (recommended)
+### OAuth applications (recommended)
 
 For OAuth, only `url` is required:
 
 ```toml
 [mcp_servers.TrustGate]
-url = "https://<mcp-host>/<consumer-slug>/mcp"
+url = "https://<mcp-host>/<application-slug>/mcp"
 ```
 
 Then log in once:
@@ -193,14 +193,14 @@ mcp_oauth_callback_url = "https://devbox.example.internal/callback"
 
 Codex appends a server-specific callback id to that base.
 
-### API-key consumers
+### API-key applications
 
 Keep the key out of the file with `env_http_headers`, which reads the value from
 the environment at connect time:
 
 ```toml
 [mcp_servers.TrustGate]
-url = "https://<mcp-host>/<consumer-slug>/mcp"
+url = "https://<mcp-host>/<application-slug>/mcp"
 env_http_headers = { "X-AG-API-Key" = "TRUSTGATE_MCP_API_KEY" }
 ```
 
@@ -209,7 +209,7 @@ static value:
 
 ```toml
 [mcp_servers.TrustGate]
-url = "https://<mcp-host>/<consumer-slug>/mcp"
+url = "https://<mcp-host>/<application-slug>/mcp"
 http_headers = { "X-AG-API-Key" = "ag_…" }
 ```
 
@@ -217,7 +217,7 @@ http_headers = { "X-AG-API-Key" = "ag_…" }
 
 ```toml
 [mcp_servers.TrustGate]
-url = "https://<mcp-host>/<consumer-slug>/mcp"
+url = "https://<mcp-host>/<application-slug>/mcp"
 bearer_token_env_var = "TRUSTGATE_MCP_API_KEY"
 ```
 
@@ -227,11 +227,11 @@ the gateway:
 
 ```toml
 [mcp_servers.TrustGate]
-url = "https://<mcp-host>/<consumer-slug>/mcp"
+url = "https://<mcp-host>/<application-slug>/mcp"
 http_headers = { "X-AG-Gateway-Slug" = "<gateway-slug>" }
 ```
 
-Combine it with `env_http_headers` for the API key when the consumer is not
+Combine it with `env_http_headers` for the API key when the application is not
 OAuth.
 
 ### Add it from the GUI
@@ -265,7 +265,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 1. Run `codex mcp list`, or `/mcp` in the CLI TUI, and confirm **TrustGate** is
    active.
-2. Ask the agent to use a tool from a toolkit bound to that consumer.
+2. Ask the agent to use a tool from a toolkit bound to that application.
 3. Confirm the call in TrustGate **Activity**.
 
 ## Reference
@@ -346,8 +346,8 @@ Without a managed file, all configuration is loaded from
 
 | Scope | Path | Use it for |
 |---|---|---|
-| **User** | `~/.codex/config.toml` | A consumer every session should reach |
-| **Project** | `.codex/config.toml` | A consumer tied to one codebase; loaded only for **trusted** projects |
+| **User** | `~/.codex/config.toml` | An application every session should reach |
+| **Project** | `.codex/config.toml` | An application tied to one codebase; loaded only for **trusted** projects |
 
 The table key is snake_case: `mcp_servers`, not `mcpServers`. Codex infers the
 transport from the keys: `url` selects HTTP and `command` selects stdio. It
@@ -359,12 +359,12 @@ rejects a table that mixes keys from both. TrustGate always uses `url`.
 `/.well-known/oauth-protected-resource` and exposes a registration endpoint.
 The Codex configuration does not require a client ID or secret. TrustGate
 accepts `https` callbacks, `http` loopback callbacks, and private-use schemes,
-and rejects anything else with `invalid_redirect_uri`. The consumer configuration
+and rejects anything else with `invalid_redirect_uri`. The application configuration
 determines which IdP handles the login. See
 [Okta](/trustgate/concepts/authorization/okta) or
 [Entra ID](/trustgate/concepts/authorization/entra-id).
 
-Use OAuth for consumers whose users sign in individually. Every caller a consumer
+Use OAuth for applications whose users sign in individually. Every caller an application
 admits sees the same registries and toolkit; per-person self-service lives in the
 [MCP Store](/trustgate/mcp/store) and is governed from [Access](/trustgate/mcp/access).
 
@@ -383,26 +383,26 @@ TrustGate stores and refreshes the credential.
 
 ### Tools and approvals
 
-TrustGate defines the consumer's tool set. Codex applies additional settings on
+TrustGate defines the application's tool set. Codex applies additional settings on
 the local machine:
 
 | Decision | Where it lives | Notes |
 |---|---|---|
-| Which tools the consumer exposes | **NeuralTrust console**, under consumer **Routing** | Bind MCP registries. **Restrict tools** narrows a registry to named tools; leave it empty to grant the whole server |
+| Which tools the application exposes | **NeuralTrust console**, on the application's **General** tab | Add MCP servers. **Restrict tools** narrows a registry to named tools; leave it empty to grant the whole server |
 | Which of those tools this machine may use | **Codex**, through `enabled_tools` (allow list) and `disabled_tools` (deny list, applied after `enabled_tools`) | Per machine only |
 | Whether a call needs confirmation | **Codex**, through `default_tools_approval_mode` (`auto`, `prompt`, `writes`, `approve`) and `tools.<name>.approval_mode` | Per machine only |
 | Whether the server loads at all | **Codex**. `enabled` turns it off without deleting the entry; `required` fails session startup when it cannot initialize | `startup_timeout_sec` defaults to `10`, `tool_timeout_sec` to `60` |
 
 ```toml
 [mcp_servers.TrustGate]
-url = "https://<mcp-host>/<consumer-slug>/mcp"
+url = "https://<mcp-host>/<application-slug>/mcp"
 default_tools_approval_mode = "prompt"
 required = true
 tool_timeout_sec = 90
 ```
 
 Codex tool filters, approval modes, and server settings apply only to the local
-client. Configure restrictions that must apply to every client on the consumer
+client. Configure restrictions that must apply to every client on the application
 or role. To limit MCP tool calls, attach the [Per-Tool Rate
 Limiter](/trustgate/policies/tool-governance) policy.
 
@@ -429,7 +429,7 @@ Gate on `source.application` and/or `tool.name` / `tool.command`.
 | Hooks listed but never fire | `~/.codex/hooks.json` points to relative paths. Codex runs hooks from the session cwd, so the paths must be absolute |
 | A developer turned the hooks off | `allow_managed_hooks_only = true` is missing from `requirements.toml` |
 | Config parse error | `command` and `url` in the same table, or `mcpServers` instead of `mcp_servers` |
-| Server initializes, no tools | Consumer has no bound registries, tool restrictions exclude everything, or the upstream connect link was never authorized |
+| Server initializes, no tools | Application has no bound registries, tool restrictions exclude everything, or the upstream connect link was never authorized |
 | `401` after login | Revoked `ag_…` key, wrong plane URL, or `X-AG-Gateway-Slug` missing on Hybrid |
 | OAuth never completes (`invalid_redirect_uri`) | The overridden callback base is not `https`, an `http` loopback, or a private-use scheme |
 | Project entry ignored | The project is not trusted, so `.codex/config.toml` is not loaded |
@@ -439,8 +439,8 @@ Gate on `source.application` and/or `tool.name` / `tool.command`.
 
 - [Policies: Gates](/trustguard/concepts/policies#gates): Ask and Block configuration
 - [Evaluate API](/trustguard/api/evaluate): requests sent by the hooks
-- [MCP overview](/trustgate/mcp/overview): consumers, catalog merging, and upstream authentication
-- [TrustGate authentication](/trustgate/concepts/auth): API key and OAuth2 authentication for MCP consumers
+- [MCP overview](/trustgate/mcp/overview): applications, catalog merging, and upstream authentication
+- [TrustGate authentication](/trustgate/concepts/auth): API key and OAuth2 authentication for MCP applications
 - [How it works](/trustguard/how-it-works): comparison of Codex with other collectors
 - [Plugin repository](https://github.com/NeuralTrust/trustguard-codex-plugin): source, releases, and the hook contract
 - [Codex hooks docs](https://developers.openai.com/codex/hooks) · [Codex MCP docs](https://developers.openai.com/codex/mcp)
