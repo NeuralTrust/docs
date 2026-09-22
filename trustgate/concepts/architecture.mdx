@@ -1,0 +1,108 @@
+---
+title: "Control plane and data plane"
+sidebarTitle: "Architecture"
+description: "TrustGate is two planes: the control plane you configure and the data plane your traffic crosses. How configuration gets from one to the other, what happens when they lose each other, and what never crosses between them."
+---
+
+TrustGate splits into two planes that can run in different places.
+
+| | Control plane | Data plane |
+|---|---|---|
+| **What it is** | The console, the Admin API, the configuration store, analytics and the catalogs. | The gateway processes your clients call: the LLM endpoint and the MCP endpoint. |
+| **Holds** | Every object you configure: gateways, registry entries and their credentials, applications, access, policies, identity providers. Every trace's metadata. | A compiled copy of that configuration, in memory. Rate-limit counters and the semantic cache, in Redis. |
+| **Talks to** | You, and the data planes. | Your clients, your model providers and MCP servers, your Redis, and the control plane. |
+| **SaaS** | NeuralTrust runs it. | NeuralTrust runs it. |
+| **Private** | NeuralTrust runs it. | You run it, in your network. |
+
+On SaaS the split is invisible. On a **Private** gateway it is the whole design:
+prompts and responses cross a data plane you host, while the console you
+configure it from stays at NeuralTrust. The rest of this page is about how those
+two stay in step.
+
+## Configuration flows one way
+
+The data plane never receives a connection. It dials the control plane, over
+gRPC with TLS, with a token the console issued when the gateway was created, and
+keeps that connection open. Everything below rides on it.
+
+### On the control plane
+
+Every write you make — a policy saved, a key rotated, an application bound to a
+server — leaves a durable marker. A dispatcher folds the markers into one
+**snapshot**: the gateways, applications, registry entries with their
+credentials, policies, identity providers, providers and catalog models, Employee
+portal grants, and the keys that verify Playground tokens. The snapshot's version
+is the SHA-256 of its bytes, so two control-plane replicas compiling the same
+state produce the same version.
+
+A single write is dispatched at once. A burst of writes is folded into one
+dispatch after a short debounce. A backstop recompiles on a timer whether or not
+anything changed, and a control plane that restarts mid-burst finishes the
+dispatch from the markers it left behind.
+
+### On the data plane
+
+The data plane announces itself on the stream, then waits for **version
+notices**. On each notice it pulls the new snapshot in chunks, checks that the
+version matches the hash of what arrived, swaps it into memory in one step,
+drops any caches derived from the old one so the change takes effect without a
+restart, and acknowledges the version it now runs. If the stream is quiet it
+polls on a timer, so a notice lost while the stream was down is caught up
+within the interval.
+
+Each applied snapshot is also written to disk, encrypted, as the **last known
+good** copy.
+
+### The timings
+
+| | |
+|---|---|
+| Debounce that folds a write burst | 250 ms |
+| Backstop recompile on the control plane | 5 min, jittered |
+| Poll on the data plane when no notice arrives | 5 min |
+| Stale warning on a snapshot served from cache | after 24 h |
+| Markers kept for catch-up after a control-plane restart | 24 h |
+
+In practice a change you save in the console is live on a connected data plane
+in well under a second, and never later than the poll interval.
+
+## What "online" means
+
+The control plane records every data-plane connection: its state, the snapshot
+version it has acknowledged, and when it was last seen. That record is what the
+**Online** badge on a gateway reads. A data plane whose acknowledged version lags
+the control plane's has not yet applied your latest change.
+
+## When the planes lose each other
+
+| Situation | What happens |
+|---|---|
+| Control plane unreachable, data plane running | Traffic continues on the last snapshot. Changes you save wait; they apply when the stream returns. After 24 hours the data plane warns that its configuration is stale, and keeps serving it. |
+| Data plane restarts while the control plane is unreachable | It restores the encrypted last-known-good copy if the file survived the restart. If it did not, the process is up but **not Ready**, and stays out of the load balancer until a snapshot arrives. A gateway with no configuration serves nothing rather than the wrong thing. |
+| Wrong or rotated token | The control plane rejects the connection; the data plane keeps retrying with backoff and serves what it has. |
+| A data plane older than the control plane | It may reject the snapshot. Upgrade both together. |
+
+## What never crosses
+
+- **Inbound connections to the data plane from NeuralTrust.** Configuration is
+  pulled, never pushed. The one exception is the URL you register for a Private
+  gateway, which the console calls for its own checks; that is also why the
+  Playground and connection tests cannot reach a data plane the console cannot
+  see.
+- **Prompts and responses.** They stay in the data plane and in the PostgreSQL
+  you give it. What leaves for Analytics is metadata: who called, which model,
+  tokens, cost, latency, the policy decision.
+- **Provider credentials at rest, unencrypted.** They reach the data plane inside
+  the snapshot over TLS and live there in memory and in the encrypted cache. The
+  data plane has no database of its own to keep them in.
+
+## What a private data plane needs
+
+Redis, for rate-limit counters and the semantic cache — it refuses to start
+without one. PostgreSQL, for the raw payloads it keeps on your side. Outbound
+HTTPS to your model providers and MCP servers, and to NeuralTrust for
+configuration and telemetry. Nothing inbound except your own clients.
+
+Running one is covered under Deployment: [Hybrid](/neuraltrust/deployment/hybrid)
+for the install, [Config sync](/neuraltrust/deployment/config-sync) for the
+tokens, the cache key and diagnosing a plane that will not become Ready.
