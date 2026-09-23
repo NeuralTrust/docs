@@ -1,160 +1,140 @@
 ---
 title: "OWASP LLM Top 10"
-description: "Which of the OWASP Top 10 for LLM Applications (2025) TrustGate and TrustGuard address, which they address partly, and which they do not reach at all."
+description: "Which risks in the OWASP Top 10 for LLM Applications TrustGate and TrustGuard address on the runtime path, and how far each control goes."
 ---
 
-The OWASP Top 10 for LLM Applications is a risk list, not a control framework — so
-this page grades coverage rather than claiming it. Each entry says what the risk is,
-which capability meets it, and how far that goes.
-
 <Note>
-**Coverage is not a score.** A risk marked *Covered* means a control exists on the
-traffic path and can enforce. *Partial* means something is detected but not stopped,
-or only one side of the risk is reachable. *Not covered* means these two products do
-not address it and something else has to.
+The OWASP Top 10 for LLM Applications is a risk list rather than a control
+framework, so this page grades coverage on the runtime path instead of claiming
+it.
 </Note>
 
-## At a glance
+## Coverage at a glance
 
-| | Risk | Coverage |
+| Ref | Risk | Coverage |
 |---|---|:--|
-| **LLM01** | Prompt Injection | Covered |
-| **LLM02** | Sensitive Information Disclosure | Covered |
-| **LLM03** | Supply Chain | Partial |
-| **LLM04** | Data and Model Poisoning | Not covered |
-| **LLM05** | Improper Output Handling | Partial |
-| **LLM06** | Excessive Agency | Covered |
-| **LLM07** | System Prompt Leakage | Partial |
-| **LLM08** | Vector and Embedding Weaknesses | Not covered |
-| **LLM09** | Misinformation | Partial |
-| **LLM10** | Unbounded Consumption | Covered |
+| **LLM01** | Prompt Injection | ✅ Covered |
+| **LLM02** | Sensitive Information Disclosure | ✅ Covered |
+| **LLM03** | Supply Chain | 🟢 Partially covered |
+| **LLM04** | Data and Model Poisoning | 🟢 Partially covered |
+| **LLM05** | Improper Output Handling | ✅ Covered |
+| **LLM06** | Excessive Agency | ✅ Covered |
+| **LLM07** | System Prompt Leakage | 🟢 Partially covered |
+| **LLM08** | Vector and Embedding Weaknesses | ⚪ Not covered |
+| **LLM09** | Misinformation | 🟢 Partially covered |
+| **LLM10** | Unbounded Consumption | ✅ Covered |
 
 ## LLM01 — Prompt Injection
-
-*Crafted input that subverts the model's instructions.*
 
 [Prompt Guard](/trustguard/detectors/content-security) detects jailbreaks and
 injection from whoever is typing, on input and output.
 [Indirect Prompt Injection](/trustguard/detectors/agent-mcp-security) covers the
-harder half: hostile instructions in what a tool hands back, and in tool descriptions
-themselves. [URL Analyzer and Document Analyzer](/trustguard/detectors/content-security)
-extend that to pages an agent is asked to read and files it is given, including scans
-via OCR.
-
-Sensitivity is three preset cards — Permissive, Balanced, Strict — not a number you
-type.
+harder half: hostile instructions in what a tool returns, and in tool descriptions
+themselves. [URL and Document Analyzers](/trustguard/detectors/content-security)
+extend that to pages an agent is asked to read and files it is given, including
+scans via OCR.
 
 ## LLM02 — Sensitive Information Disclosure
 
-*Secrets, PII or proprietary data leaving through the model.*
-
 [Data Loss Prevention](/trustguard/detectors/data-loss-prevention) detects PII and
-secrets — API keys, access tokens, JWTs — on input and output, and is the one detector
-that **masks**, which is what makes the Transform action available.
-[Regex Replace](/trustgate/policies/regex-replace) handles values you can write down
-exactly. Separately, [credential redaction](/trustguard/data-handling#credential-redaction)
-keeps credentials out of stored records before anything is written.
+secrets — API keys, access tokens, JWTs — on input and output, and masks them where
+the Transform action is set. [Regex Replace](/trustgate/policies/regex-replace)
+handles values you can state exactly. Separately,
+[credential redaction](/trustguard/data-handling#credential-redaction) keeps
+credentials out of stored records.
 
 ## LLM03 — Supply Chain
 
-*Compromised models, plugins or tool servers.*
+The [Registry](/trustgate/registry/overview) is the allowlist: a gateway reaches
+only the [model providers](/trustgate/registry/models) and
+[MCP servers](/trustgate/registry/mcp) registered on it, each an entry plus the
+credential that reaches it. [Indirect Prompt Injection](/trustguard/detectors/agent-mcp-security)
+inspects tool descriptions, which is where a malicious server does its work.
 
-The [Registry](/trustgate/registry/overview) is the allowlist: a gateway reaches only
-the [model providers](/trustgate/registry/models) and [MCP servers](/trustgate/registry/mcp)
-registered on it, each an entry plus the credential that reaches it.
-[Indirect Prompt Injection](/trustguard/detectors/agent-mcp-security) inspects tool
-descriptions, which is where a malicious server does its work.
-
-**Partial.** Registration controls *what may be reached*; it does not assess the
-provenance or integrity of the model or server behind the entry. There is no scanning
-of an MCP server's code or publisher before you register it.
+Registration bounds *what may be reached*. It does not assess the provenance of the
+model or server behind an entry, and there is no code or publisher scan before you
+register one.
 
 ## LLM04 — Data and Model Poisoning
 
-*Corrupted training or fine-tuning data.*
+Training and fine-tuning happen outside the traffic path, so poisoning cannot be
+prevented at source. **What a poisoned model produces is still inspected**: every
+output-side detector applies regardless of why the model behaved that way, so
+[Data Loss Prevention](/trustguard/detectors/data-loss-prevention),
+[Toxicity Detection](/trustguard/detectors/content-security) and
+[Custom Moderation](/trustguard/detectors/content-security) catch the effect even
+when the cause is upstream and invisible.
 
-**Not covered.** Both products sit on the traffic path at inference time and have no
-visibility into how a model was trained or fine-tuned.
+That is containment rather than prevention — the model stays compromised — but a
+poisoned model does not get a free path to your users.
 
 ## LLM05 — Improper Output Handling
 
-*Model output consumed downstream without validation.*
-
 Detectors run on the **Output** side, and [guardrails](/trustgate/policies/guardrails)
-can refuse or rewrite a non-streamed response. TrustGuard, Bedrock Guardrail and Model
-Armor can rewrite in place; Azure Content Safety never sees the response at all.
+refuse or rewrite a non-streamed response before it reaches the caller. Masking
+rewrites the response in place, so a flagged value is removed rather than the whole
+answer lost.
 
-**Partial, and this is the limit to read twice.** A streamed response
-[cannot be inspected or blocked as it is written](/trustgate/policies/guardrails#the-one-limit-shared-by-all-of-them) —
-the words are already reaching the reader by the time a detector would decide. On a
-streaming application, output-side inspection observes; it does not protect. It also
-does nothing about how *your* downstream code handles what it receives.
+What your own downstream code does with what it receives is outside the traffic
+path.
 
 ## LLM06 — Excessive Agency
-
-*An agent with more capability, permission or autonomy than the task needs.*
 
 [Access levels](/trustgate/access/overview) decide which people reach which servers,
 inherited from the gateway default, with anything outside a selection arriving as a
 [request rather than a refusal](/trustgate/access/overview#requests-instead-of-refusals).
 The [MCP registry](/trustgate/registry/mcp) bounds which tool servers exist at all,
-[Tool Injection](/trustgate/policies/tool-injection) controls what is injected into the
-tool surface, and the [per-tool rate limiter](/trustgate/policies/per-tool-rate-limiter)
-bounds how often any single tool can run. Both always enforce — they offer no observe
-mode.
+[Tool Injection](/trustgate/policies/tool-injection) controls what reaches the tool
+surface, and the [per-tool rate limiter](/trustgate/policies/per-tool-rate-limiter)
+bounds how often any single tool runs. Both always enforce.
 
 ## LLM07 — System Prompt Leakage
 
-*The system prompt extracted through the model.*
-
-Output-side detection can catch a leak in progress:
+Output-side detection catches a leak in progress:
 [Prompt Guard](/trustguard/detectors/content-security) runs on both sides, and
-[Regex Replace](/trustgate/policies/regex-replace) will scrub a known marker string.
+[Regex Replace](/trustgate/policies/regex-replace) scrubs a known marker string.
 
-**Partial.** There is no detector whose purpose is system-prompt disclosure, and the
-streaming limit above applies. Adversarial testing for this risk lives in TrustTest
-([System prompt disclosure](/trusttest/create/system-prompt-disclosure)), not on the
-runtime path.
+There is no detector whose sole purpose is system-prompt disclosure. Adversarial
+testing for it lives in [TrustTest](/trusttest/create/system-prompt-disclosure).
 
 ## LLM08 — Vector and Embedding Weaknesses
 
-*Attacks against RAG stores, embeddings and retrieval.*
-
-**Not covered.** The gateway proxies an [embeddings endpoint](/trustgate/endpoints/embeddings),
-but neither product inspects a vector store, its index, or what retrieval returns.
-Content retrieved and then passed to a model as part of a prompt is inspected as
-prompt content — that is LLM01, not this.
+The gateway proxies an [embeddings endpoint](/trustgate/endpoints/embeddings), but
+neither product inspects a vector store, its index, or what retrieval returns.
+Content retrieved and then placed in a prompt is inspected as prompt content, which
+is LLM01.
 
 ## LLM09 — Misinformation
 
-*Confident, wrong output — including insecure code suggestions.*
+[Custom Moderation](/trustguard/detectors/content-security) covers subjects you
+define yourself, which keeps a model inside its intended scope and is the control
+that most reduces confidently wrong output on topics you never meant it to discuss.
 
-[Custom Moderation](/trustguard/detectors/content-security) (Beta) covers subjects you
-define yourself, which is the closest available control for keeping a model inside
-its intended scope.
-
-**Partial.** Topic scoping is not factuality. Neither product verifies claims, and
-there is no groundedness or hallucination check on the runtime path.
+Topic scoping is not factuality: nothing verifies claims or checks groundedness on
+the runtime path.
 
 ## LLM10 — Unbounded Consumption
 
-*Resource exhaustion, runaway cost, denial of wallet.*
+[Rate limiter](/trustgate/policies/rate-limiter), with a **Throttle** mode that
+delays rather than blocks; [LLM budget](/trustgate/policies/llm-budget) for spend;
+[request size limiter](/trustgate/policies/request-size-limiter) for payloads; and
+the [per-tool rate limiter](/trustgate/policies/per-tool-rate-limiter) for tool
+calls. [Routing fallback](/trustgate/llm/routing#fallback) keeps an application
+alive when a provider degrades.
 
-[Rate limiter](/trustgate/policies/rate-limiter) with an additional **Throttle** mode
-that delays rather than blocks, [LLM budget](/trustgate/policies/llm-budget) for spend,
-[request size limiter](/trustgate/policies/request-size-limiter) for payloads, and the
-[per-tool rate limiter](/trustgate/policies/per-tool-rate-limiter) for tool calls.
-[Routing fallback](/trustgate/llm/routing#fallback) keeps an application alive when a
-provider degrades.
+## Where NeuralTrust stops
 
-## Machine-readable tagging
+**Streaming enforcement.** Streamed output is evaluated, but where enforcement can
+act depends on the path. Through the gateway the stream is buffered and inspected
+after the client drains it, so findings are recorded rather than refused; on the
+[LiteLLM](/integrations/litellm) path accumulated output is scanned during the
+stream, where `block` stops later chunks. Tokens already delivered cannot be
+recalled, so enforce on the request leg when a response must be stopped. A streamed
+response above 8 MiB is not inspected and emits no event.
 
-Findings are **not** tagged with LLM01–LLM10 identifiers in the API or console. This
-page is the mapping. TrustTest tags its scenarios with OWASP references, but those are
-test-catalog tags, not runtime findings.
+**Tagging.** Findings carry no LLM01–LLM10 identifiers in the API or console. This
+page is the mapping.
 
 <Note>
-See also [ISO/IEC 42001](/platform/compliance/iso-42001),
-[EU AI Act](/platform/compliance/eu-ai-act) and
-[NIST AI RMF](/platform/compliance/nist-ai-rmf).
+See also [EU AI Act](/platform/compliance/eu-ai-act), [ISO/IEC 42001](/platform/compliance/iso-42001) and [NIST AI RMF](/platform/compliance/nist-ai-rmf).
 </Note>
