@@ -1,0 +1,210 @@
+---
+title: "Langfuse"
+description: "Trace the model calls your application sends through TrustGate in Langfuse, with the TrustGate SDK configuring the client from the application key"
+---
+
+[Langfuse](https://langfuse.com) is an open-source observability platform for
+LLM applications. It records each model call as a trace, with its prompt,
+completion, token usage, and latency, and groups traces by user and session.
+
+TrustGate's LLM plane speaks the OpenAI API, so Langfuse's OpenAI integration
+traces calls sent through TrustGate with no change on either side. The
+[TrustGate SDK](/trustgate/llm/connect#same-key-from-the-trustgate-sdk) resolves
+the LLM plane's base URL from the application key, so your code needs only the
+TrustGate key and the Langfuse project keys.
+
+Langfuse runs inside your application's process. It records what your client
+sent and what TrustGate returned. TrustGate does not send anything to Langfuse,
+and a call that bypasses TrustGate is still traced but not governed.
+
+## Integration capabilities
+
+| Product | What it does | What it controls |
+| --- | --- | --- |
+| **[TrustGate](/trustgate/overview)** | Routes each call and applies the application's governance: allowed models, rate limits, budgets, and [TrustGuard](/trustguard/overview) policies | Which models · spend ceilings · content policy |
+| **Langfuse** | Traces each call the OpenAI client makes, attributed to a user and a session | Nothing: it observes |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| A TrustGate application with an LLM plane | Create it in the console and issue its API key. The key is shown once. See [Applications](/trustgate/access/applications). |
+| A Langfuse project | Copy its public and secret keys from the project settings, and note its base URL: `https://cloud.langfuse.com` (EU), `https://us.cloud.langfuse.com` (US), or your self-hosted address. |
+| Python 3.10+ or Node.js 22+ | For the TrustGate SDK: `trustgate-sdk` on PyPI, `@neuraltrust/trustgate` on npm. |
+
+## 1. Install the packages
+
+<CodeGroup>
+  ```bash Python
+  pip install trustgate-sdk langfuse openai
+  ```
+
+  ```bash TypeScript
+  npm install @neuraltrust/trustgate openai @langfuse/openai @langfuse/otel @opentelemetry/sdk-node
+  ```
+</CodeGroup>
+
+## 2. Set the credentials
+
+```bash
+export TRUSTGATE_API_KEY="ag_…"
+
+export LANGFUSE_PUBLIC_KEY="pk-lf-…"
+export LANGFUSE_SECRET_KEY="sk-lf-…"
+export LANGFUSE_BASE_URL="https://cloud.langfuse.com"
+```
+
+The TrustGate SDK finds the gateway from the key. On a Hybrid data plane, also
+set `TRUSTGATE_URL` to the MCP host that data plane is published on: the
+NeuralTrust cloud does not serve that gateway.
+
+In Python, you can check the Langfuse credentials before sending anything:
+
+```python
+from langfuse import get_client
+
+get_client().auth_check()
+```
+
+## 3. Create the traced client
+
+Build the OpenAI client from the values the TrustGate SDK resolves, and let
+Langfuse wrap it.
+
+<CodeGroup>
+  ```python Python
+  from langfuse.openai import OpenAI
+  from trustgate import TrustGate
+
+  llm = TrustGate().llm()  # reads TRUSTGATE_API_KEY
+  client = OpenAI(base_url=llm.base_url, api_key=llm.api_key)
+  ```
+
+  ```ts TypeScript
+  // instrumentation.ts: import it before any other module
+  import { NodeSDK } from "@opentelemetry/sdk-node"
+  import { LangfuseSpanProcessor } from "@langfuse/otel"
+
+  export const langfuseSpanProcessor = new LangfuseSpanProcessor()
+  new NodeSDK({ spanProcessors: [langfuseSpanProcessor] }).start()
+  ```
+
+  ```ts TypeScript (client)
+  import { langfuseSpanProcessor } from "./instrumentation"
+  import OpenAI from "openai"
+  import { observeOpenAI } from "@langfuse/openai"
+  import { TrustGate } from "@neuraltrust/trustgate"
+
+  const llm = await new TrustGate().llm() // reads TRUSTGATE_API_KEY
+  const client = observeOpenAI(new OpenAI({ baseURL: llm.baseUrl, apiKey: llm.apiKey }))
+  ```
+</CodeGroup>
+
+The SDK wraps nothing: it hands the base URL and key to OpenAI's own client, so
+Langfuse's integration sees a standard OpenAI client.
+
+## 4. Send a call
+
+<CodeGroup>
+  ```python Python
+  from langfuse import get_client
+
+  response = client.chat.completions.create(
+      model="auto",
+      messages=[
+          {"role": "system", "content": "You are a helpful assistant."},
+          {"role": "user", "content": "What does an AI gateway do?"},
+      ],
+  )
+  print(response.choices[0].message.content)
+
+  get_client().flush()
+  ```
+
+  ```ts TypeScript
+  const response = await client.chat.completions.create({
+    model: "auto",
+    messages: [
+      { role: "system", content: "You are a helpful assistant." },
+      { role: "user", content: "What does an AI gateway do?" },
+    ],
+  })
+  console.log(response.choices[0].message.content)
+
+  await langfuseSpanProcessor.forceFlush()
+  ```
+</CodeGroup>
+
+What goes in `model` depends on how the application routes: `"auto"` when it
+load-balances, otherwise a model name. See
+[What goes in `model`](/trustgate/llm/connect#what-goes-in-model).
+
+Langfuse sends traces in the background. Flush before a short-lived process
+exits, or its last traces are lost.
+
+## 5. Attribute calls to a user and a session
+
+The application key identifies the application, not the person using it, so
+neither tool knows the user until your code names one. Send the same id to
+both, so a person has the same identity in each: Langfuse reads it from the
+call's metadata, and TrustGate from the `X-NeuralTrust-End-User` header. For
+TrustGate the header is attribution only: it lands on the trace and in
+**Activity**, and grants nothing.
+
+<CodeGroup>
+  ```python Python
+  response = client.chat.completions.create(
+      model="auto",
+      messages=[{"role": "user", "content": "Summarize my open tickets."}],
+      extra_headers={"X-NeuralTrust-End-User": "user_123"},
+      metadata={
+          "langfuse_user_id": "user_123",
+          "langfuse_session_id": "session_456",
+          "langfuse_tags": ["support"],
+      },
+  )
+  ```
+
+  ```ts TypeScript
+  const traced = observeOpenAI(new OpenAI({ baseURL: llm.baseUrl, apiKey: llm.apiKey }), {
+    userId: "user_123",
+    sessionId: "session_456",
+    tags: ["support"],
+  })
+
+  const response = await traced.chat.completions.create(
+    { model: "auto", messages: [{ role: "user", content: "Summarize my open tickets." }] },
+    { headers: { "X-NeuralTrust-End-User": "user_123" } },
+  )
+  ```
+</CodeGroup>
+
+## What each tool sees
+
+Langfuse traces in the client, TrustGate in the request path, so each sees the
+call from its own side.
+
+| Case | Langfuse | TrustGate |
+| --- | --- | --- |
+| A call TrustGate refuses (a model outside the allowed set, a policy block, a rate limit) | The error your client received | The refusal and its reason, in **Activity** |
+| Content TrustGuard redacts in the prompt | The prompt as your code wrote it, before redaction | The redacted request it forwarded |
+| Content TrustGuard redacts in the completion | The completion as TrustGate returned it, redacted | The redaction, in **Activity** |
+| A streamed completion | The assembled stream | Output evaluated after delivery, so monitoring only. See [TrustGate](/integrations/trustgate) |
+
+Because Langfuse records the prompt before TrustGate sees it, sensitive data
+that TrustGuard redacts still reaches Langfuse. If that data must not leave your
+process, mask it in Langfuse's client as well.
+
+For a streamed call, pass `stream_options={"include_usage": True}` to get token
+usage. The usage arrives in a final chunk with an empty `choices` list, so check
+`chunk.choices` before indexing it.
+
+## Troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| No traces in Langfuse | The process flushed before exiting, and the Langfuse keys and base URL match the project. Set `LANGFUSE_DEBUG=True` to log what the client sends. |
+| The TrustGate SDK says the key's gateway runs on its own (Hybrid) data plane | Set `TRUSTGATE_URL` to the MCP host of that data plane. |
+| The TrustGate SDK says the key reaches several LLM consumers | Name one: `TrustGate(llm_consumer="…")` or `new TrustGate({ llmConsumer: "…" })`. |
+| `401` from TrustGate | The key is wrong, revoked, or expired. `TrustGate().identity()` reports its expiry. |
+| The user is missing in TrustGate but present in Langfuse | The call carried Langfuse metadata but not the `X-NeuralTrust-End-User` header. |
