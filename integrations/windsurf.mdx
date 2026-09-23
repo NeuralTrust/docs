@@ -1,16 +1,162 @@
 ---
 title: "Windsurf"
-description: "Connect Windsurf Cascade to TrustGate over MCP"
+description: "Evaluate Windsurf (Devin Desktop) Cascade prompts, commands, file access and MCP tool calls with TrustGuard, and connect Cascade to TrustGate over MCP"
 ---
 
-Windsurf is a code editor whose Cascade agent can read repositories, edit files,
-run shell commands, and call MCP tools on a developer's machine.
+Windsurf is a code editor whose Cascade agent reads repositories, edits files,
+runs shell commands and calls MCP tools on the developer's machine. On
+2 June 2026 Windsurf was renamed **Devin Desktop**; the agent, the hooks and the
+MCP configuration are the same, and this page says Windsurf for both.
 
-There is no TrustGuard hook for Windsurf yet. Point Cascade at a TrustGate
-[MCP application](/trustgate/mcp/overview) so tool access, identity, and rate limits
-stay on the gateway.
+The TrustGuard hooks evaluate Cascade's actions on the machine where it runs.
+TrustGate provides the MCP tools assigned to an application.
 
-## Connect to TrustGate
+## NeuralTrust controls
+
+| Product | Scope | Controls |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates prompts, shell commands, file reads and writes, MCP tool calls and their results against an organization [policy](/trustguard/concepts/policies) through Cascade hooks on the developer's machine. | Monitor · Block |
+| **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to an application. MCP (Model Context Protocol) connects Cascade to systems such as trackers, databases and internal APIs. | Tool availability · application authentication · per-tool rate limits |
+
+Cascade's own model calls cannot go through TrustGate: Windsurf has no setting
+for a custom model endpoint, and its bring-your-own-key option takes an
+Anthropic key only.
+
+<Warning>
+**Use separate credentials for TrustGuard and TrustGate.** The hooks use a
+`tgk_…` [collector](/trustguard/concepts/collectors) key in `windsurf.json`. MCP
+authenticates as an application with OAuth or an `ag_…` API key. A `tgk_…` key
+does not authenticate MCP, and `windsurf.json` does not accept MCP settings.
+</Warning>
+
+## Deployment options
+
+| Goal | Configuration | Location |
+| --- | --- | --- |
+| Evaluate prompts, commands, file access and tool calls against organization policy | **TrustGuard hooks** from the [plugin repository](https://github.com/NeuralTrust/trustguard-windsurf-plugin), plus a managed `windsurf.json` | Each developer machine; IT deploys the system-level `hooks.json`, bootstraps and config by MDM |
+| Centrally manage the MCP tools available to Cascade | **TrustGate MCP** as an entry in `mcp_config.json` | Cascade connects to the remote TrustGate endpoint |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| Egress from developer machines to `{TRUSTGUARD_BASE_URL}` *(hooks path)* | The console shows the [base URL](/trustguard/api/evaluate#base-url) for your workspace. |
+| The **Windsurf** collector type *(hooks path)* | **Agent Runtime → Collectors → Catalog → AI assistants & coding agents → Windsurf**. Create the `tgk_…` key on its **Auth** tab, where it is shown once, and assign the policy on the **Policies** tab. |
+| Egress to GitHub Releases *(hooks path)* | If `trustguard-windsurf` is not already on the machine, the bootstrap downloads the pinned release on first use, checksum-verified. |
+| An [MCP application](/trustgate/mcp/overview) *(MCP path)* | Bind the required registries, then copy the endpoint from its **Connect** tab. |
+| Application credentials *(MCP path)* | OAuth, which requires no pasted credential, or an `ag_…` API key. |
+
+Create the policy in **Observe** mode. Observe records decisions in **Activity**
+without enforcing them. Review the results, then switch the policy to
+**Enforce**. See [Policies](/trustguard/concepts/policies).
+
+Developers do **not** need NeuralTrust accounts for the hooks path.
+
+## Set up prompt and tool screening (TrustGuard)
+
+Cascade runs a hook command before and after its actions, writes the event as
+JSON on stdin, and reads the verdict from the exit code. Exit code `2` blocks a
+pre-hook and shows the reason from stderr to the agent; `0` lets the action
+through. The TrustGuard bootstrap calls `trustguard-windsurf`, which evaluates
+each event with [`POST /v1/evaluate`](/trustguard/api/evaluate) and answers with
+that exit code.
+
+### Install from a checkout (pilot)
+
+```bash
+git clone https://github.com/NeuralTrust/trustguard-windsurf-plugin.git
+cd trustguard-windsurf-plugin
+make install-hooks
+```
+
+`make install-hooks`:
+
+- Copies the bootstraps to `~/.trustguard/windsurf-hooks/`
+- Merges entries with **absolute** paths into `~/.codeium/windsurf/hooks.json`.
+  Cascade runs hooks from the workspace root, so relative paths would break.
+  Hooks already in the file are kept
+- Leaves the binary to the bootstrap, which downloads it on the first event.
+  `make install-local` builds it from source instead
+
+Then write the key config to `~/.trustguard/windsurf.json` and `chmod 600` it:
+
+```json
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "closed"
+}
+```
+
+Reload the Windsurf window and send a test prompt.
+
+### Deploy under MDM (enterprise)
+
+An MDM deployment consists of three components:
+
+| Piece | What to deploy |
+| --- | --- |
+| **Hook bootstraps** | `trustguard-hook.sh` and `trustguard-hook.ps1` from the repo's `hooks/` directory, under a fixed directory such as `/Library/Application Support/TrustGuard/windsurf-hooks` |
+| **API key config** | MDM-managed `windsurf.json` (paths below) |
+| **System-level hooks** | `hooks.json` in Windsurf's system location, pointing at those scripts |
+
+The binary is optional: put `trustguard-windsurf` on `PATH` or in
+`~/.trustguard/bin`, or let the bootstrap download the pinned release.
+
+**Managed key config.**
+
+```json
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "closed",
+  "consumer_id": "<device or user id>"
+}
+```
+
+Cascade does not put the user in the hook payload, so set `consumer_id` per
+device or per user if you want findings attributed to a person.
+
+| OS | Managed config | System-level `hooks.json` |
+| --- | --- | --- |
+| macOS | `/Library/Application Support/TrustGuard/windsurf.json` | `/Library/Application Support/Devin/hooks.json` |
+| Linux | `/etc/trustguard/windsurf.json` | `/etc/devin/hooks.json` |
+| Windows | `%ProgramData%\TrustGuard\windsurf.json` | `C:\ProgramData\Devin\hooks.json` |
+
+Installs from before the rename read the same file under `Windsurf` instead of
+`Devin`: `/Library/Application Support/Windsurf/`, `/etc/windsurf/` and
+`C:\ProgramData\Windsurf\`. Devin Desktop reads both during the transition.
+
+**System-level hooks.** Each event gets one entry with a bash command and a
+PowerShell command:
+
+```json
+{
+  "hooks": {
+    "pre_run_command": [
+      {
+        "command": "bash \"/Library/Application Support/TrustGuard/windsurf-hooks/trustguard-hook.sh\"",
+        "powershell": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\ProgramData\\TrustGuard\\windsurf-hooks\\trustguard-hook.ps1\"",
+        "show_output": true
+      }
+    ]
+  }
+}
+```
+
+Declare the same entry for `pre_user_prompt`, `pre_mcp_tool_use`,
+`post_mcp_tool_use`, `pre_write_code`, `pre_read_code` and
+`post_cascade_response`, the last one without `show_output`. The full file is
+[`docs/enterprise-hooks.json`](https://github.com/NeuralTrust/trustguard-windsurf-plugin/blob/main/docs/enterprise-hooks.json)
+in the plugin repo. Hooks from the system, user and workspace files all run,
+system first, and system-level hooks cannot be removed without root. On the
+Enterprise plan, the same hooks can be distributed from the team dashboard
+instead of a file.
+
+## Set up governed tool access (TrustGate)
+
+Cascade treats TrustGate as a remote MCP server: one `serverUrl` per MCP
+application, and the agent sees the tool set that application is routed to.
 
 1. Create or open an [MCP application](/trustgate/mcp/overview) and bind the
    registries Cascade should reach.
@@ -18,44 +164,160 @@ stay on the gateway.
 3. In Windsurf, open **Settings → Cascade → MCP Servers**, or edit
    `~/.codeium/windsurf/mcp_config.json`.
 
-Windsurf's HTTP field is `serverUrl` (not `url`):
+Windsurf's HTTP field is `serverUrl`, not `url`:
 
 ```json
 {
   "mcpServers": {
     "TrustGate": {
-      "serverUrl": "https://<mcp-host>/<application>/mcp"
+      "serverUrl": "https://<mcp-host>/<application-slug>/mcp"
     }
   }
 }
 ```
 
-Use OAuth when the application requires it — Cascade starts the sign-in flow for
-servers that advertise it. For an `ag_…` API key, add a `headers` block:
+Cascade starts the sign-in for OAuth applications on its own. For an `ag_…` API
+key, add a `headers` block; `${env:VAR}` reads the key from the environment
+instead of the file:
 
 ```json
 {
   "mcpServers": {
     "TrustGate": {
-      "serverUrl": "https://<mcp-host>/<application>/mcp",
+      "serverUrl": "https://<mcp-host>/<application-slug>/mcp",
       "headers": {
-        "Authorization": "Bearer <ag_…>"
+        "Authorization": "Bearer ${env:TRUSTGATE_MCP_API_KEY}"
       }
     }
   }
 }
 ```
 
-Do not put a TrustGuard `tgk_…` collector key in this file.
+On a private (Hybrid) data plane add `"X-AG-Gateway-Slug": "<gateway-slug>"` to
+`headers`. Team admins can allowlist MCP servers in the Windsurf team settings;
+once one server is allowlisted, every other server is blocked, which makes
+TrustGate the only way to reach tools.
 
 ## Verify
 
+**Hooks.**
+
+1. Send a test prompt in Cascade.
+2. Confirm the event in TrustGuard **Activity** with
+   `source.application = windsurf-plugin`.
+
+Smoke-test the binary (optional):
+
+```bash
+echo '{"agent_action_name":"pre_run_command","trajectory_id":"t1","tool_info":{"command_line":"echo hi"}}' \
+  | trustguard-windsurf hook; echo "exit=$?"
+```
+
+`exit=0` means allow. `exit=2` with a reason on stderr means block.
+
+**MCP.**
+
 1. Confirm **TrustGate** is connected in the Cascade MCP panel and that its
    tools are listed.
-2. Ask Cascade to use a tool from a toolkit bound to that application.
+2. Ask Cascade to use a tool from a registry bound to that application.
 3. Confirm the call in TrustGate **Activity**.
+
+## Reference
+
+### Coverage
+
+This table describes the TrustGuard hooks, not the TrustGate connection.
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ✅ | ❌ | ❌ |
+| Tool call | ✅ | ✅ | ❌ |
+| Tool result | ✅ | ⚠️ | ❌ |
+
+**Ask.** Cascade has no approval prompt. An `ask` verdict blocks the action
+with a message saying approval was required; set `ask_action: "allow"` to let it
+through with a notice instead. A DLP `transform` verdict also blocks, because a
+hook cannot rewrite what Cascade sends; `transform_action: "allow"` lets it
+through.
+
+**Tool results.** `post_mcp_tool_use` runs after the call, so a block cannot
+undo it. The hook still exits `2`, and Cascade hands the agent the warning to
+treat the result as untrusted before the model acts on it. That is the ⚠️ in the
+table.
+
+**Limits.** `post_run_command` carries no command output, so command results
+are not evaluated. `post_cascade_response` is asynchronous: the response is
+recorded in Activity but never blocked. The hooks do not evaluate tool
+declarations; use TrustGate to control which tools are available.
+
+### What is evaluated
+
+| Cascade event | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| `pre_user_prompt` | `protocol: llm`, `direction: input` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard)); secrets and PII pasted into the agent ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** |
+| `pre_run_command` | `protocol: all`, `{ "input": "<command>" }`, `direction: input` | Dangerous or out-of-policy shell commands. `tool.name` is `run_command` and `tool.command` the command line | **Block** |
+| `pre_mcp_tool_use` | `protocol: mcp`, `tools/call`, `direction: input` | Risky MCP tool calls. `attributes.mcp.server` names the server | **Block** |
+| `pre_write_code` | `protocol: mcp`, `tools/call` named `write_code` with `file_path` and `edits` | Secrets written into files; writes to paths your policy protects | **Block** |
+| `pre_read_code` | `protocol: mcp`, `tools/call` named `read_code` with `file_path` | Reads of `.env` files, keys and other protected paths | **Block** |
+| `post_mcp_tool_use` | `protocol: mcp`, tool result, `direction: output` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) in MCP output | Warns the agent |
+| `post_cascade_response` | `protocol: llm`, `direction: output` | Sensitive data in the agent's answer | Monitor |
+
+For an MCP tool, `tool.name` in a gate is `payload.params.name`, the name the
+server itself uses; the server name travels separately. The policy's
+[detectors](/trustguard/concepts/detectors) decide the verdict.
+
+### Configuration
+
+**`windsurf.json` (TrustGuard hooks only).** Keys: `data_url`, `api_key`,
+`fail_mode`, plus the optional settings below. It never holds MCP values. When
+the managed file includes `api_key`:
+
+- **Locked:** `api_key`, `data_url`, `fail_mode`. A user file and environment
+  variables cannot replace them.
+- **User-overridable settings** may still be loaded from
+  `~/.trustguard/windsurf.json`: `timeout_ms`, `ask_action`,
+  `transform_action`, `report_notice`, `events`, `consumer_id`.
+
+`events` turns individual hooks off, for example `{"pre_read_code": false}` on
+machines where every file read would cost a round trip. `fail_mode: open`
+allows an action when TrustGuard cannot be reached; `closed` blocks it.
+
+**Binary discovery.** The bootstrap checks `PATH`, then `~/.trustguard/bin`
+under the stable name, then the versioned name it downloads to. If the download
+fails, the bootstrap allows the action and says why on stderr.
+
+**Remote sessions.** Over SSH or WSL, the hooks run on the remote host. The
+config, bootstraps and binary must exist where Cascade runs.
+
+### Attributes
+
+The hooks stamp `source.application = windsurf-plugin`, `session_id` from
+Cascade's `trajectory_id`, and `attributes.model.name` from the model Cascade
+used. `consumer_id` is sent only when set in config or through
+`TRUSTGUARD_CONSUMER_ID`.
+
+To target Windsurf, create a [gate](/trustguard/concepts/policies#gates) with
+`source.application` **eq** `windsurf-plugin`, then choose **Block** or
+**Report**. Gates run before detectors. In **Observe** mode, Block is recorded
+but not enforced.
+
+### Troubleshooting
+
+| Symptom | Cause |
+| --- | --- |
+| An `ask` gate blocked instead of asking | Cascade has no approval prompt. Use **Block** or **Report**, or set `ask_action: "allow"` |
+| Hooks never fire | The window was not reloaded after the install, or `hooks.json` points at a path that does not exist on this machine |
+| Hooks fire but nothing reaches **Activity** | `windsurf.json` has no `tgk_…` key, so the binary allows without calling evaluate, or `data_url` is incorrect |
+| A developer's own hooks disappeared | Another installer overwrote `hooks.json`. `make install-hooks` only adds or replaces TrustGuard entries |
+| The system `hooks.json` is ignored | The file sits in the pre-rename `Windsurf` directory on a machine where only the `Devin` one is read, or the reverse. Deploy to the path for the installed version |
+| Findings show no user | Cascade does not send the user. Set `consumer_id` in the managed config |
+| Every file read is slow | `pre_read_code` evaluates each read. Disable it with `events` if your policy does not gate paths |
 
 ## Related
 
+- [TrustGuard plugin repository](https://github.com/NeuralTrust/trustguard-windsurf-plugin)
+- [Collectors](/trustguard/concepts/collectors): API keys, policy routing and attribution
+- [Policies: Gates](/trustguard/concepts/policies#gates): configure Block and Report
 - [TrustGate MCP](/trustgate/mcp/overview)
-- [Integrations](/integrations/overview#ai-coding-agents)
+- [Claude Code](/integrations/claude-code) · [Codex](/integrations/codex) · [Gemini CLI](/integrations/gemini-cli): the same hooks on other coding agents
