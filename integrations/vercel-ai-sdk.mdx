@@ -32,6 +32,7 @@ keys, the model allowlist, and the tools should live outside the project.
 | A policy with Input **and** Output rules | The user turn and tool calls use the Input phase. The response and tool results use Output. |
 | Egress from your functions to `{TRUSTGUARD_BASE_URL}` | The console shows the [base URL](/trustguard/api/evaluate#base-url) for your workspace. |
 | AI SDK 7 on Node.js 22 | The AI SDK requires Node.js 22. Earlier AI SDK majors are not supported. |
+| `@neuraltrust/trustguard-sdk` 0.1.5 or later | The first release with the `/ai-sdk` entry point. |
 
 Create the policy in **Observe** mode. Observe records decisions in **Activity**
 without enforcing them. Review the results, then switch the policy to Enforce.
@@ -47,13 +48,19 @@ The integration ships inside the [Node.js SDK](/sdks/trustguard/node) as a
 second entry point, `@neuraltrust/trustguard-sdk/ai-sdk`. `ai` is an optional
 peer dependency: code that imports only the main entry point never loads it.
 
-Add the collector key and the base URL to the project's environment variables,
-for every environment that should be guarded:
+Add the collector key, the base URL, and a secret for signing tool approvals to
+the project's environment variables, for every environment that should be
+guarded:
 
 ```bash
 TRUSTGUARD_API_KEY=tgk_...
-TRUSTGUARD_URL=https://trustguard.neuraltrust.ai
+TRUSTGUARD_BASE_URL=https://trustguard.neuraltrust.ai
+TOOL_APPROVAL_SECRET=...   # openssl rand -base64 32
 ```
+
+`TRUSTGUARD_BASE_URL` is the public origin from the collector's **Connection**
+tab. On a self-hosted deployment, it is not the `TRUSTGUARD_URL` your operator
+configures, which is an internal address.
 </Step>
 
 <Step title="Guard the route" titleSize="h3" id="2-guard-the-route">
@@ -69,7 +76,7 @@ import { trustguard, TrustGuardBlockedError } from "@neuraltrust/trustguard-sdk/
 import { tools } from "./tools"
 
 const client = new TrustGuard({
-  baseUrl: process.env.TRUSTGUARD_URL!,
+  baseUrl: process.env.TRUSTGUARD_BASE_URL!,
   apiKey: process.env.TRUSTGUARD_API_KEY!,
 })
 
@@ -83,6 +90,7 @@ export async function POST(req: Request) {
     model: wrapLanguageModel({ model: openai("gpt-5.2"), middleware: tg.middleware }),
     tools: tg.tools(tools),
     toolApproval: tg.toolApproval,
+    experimental_toolApprovalSecret: process.env.TOOL_APPROVAL_SECRET!,
     stopWhen: isStepCount(5),
     messages: await convertToModelMessages(messages),
   })
@@ -156,9 +164,20 @@ export function Chat() {
 }
 ```
 
-An approved call runs without being evaluated again. If the application has no
-approval screen, set `toolAsk: "deny"` so an Ask gate denies the call instead of
-leaving the turn waiting.
+The answer comes back inside the message history the browser sends, so treat it
+like any other client input:
+
+- **Sign the requests.** `experimental_toolApprovalSecret` in [step 2](#2-guard-the-route)
+  makes the AI SDK sign each approval request and check the signature on the
+  answer. Without it, a client can approve a call the server never proposed, or
+  change its arguments, and get past an Ask gate.
+- **The policy still decides.** When the answer arrives, the AI SDK calls
+  `toolApproval` again before it runs the call. TrustGuard evaluates the call a
+  second time, so a call the policy now blocks stays denied even after the user
+  allowed it.
+
+If the application has no approval screen, set `toolAsk: "deny"` so an Ask gate
+denies the call instead of leaving the turn waiting.
 
 To keep your own approval rules, run them after TrustGuard's. `toolApproval`
 returns `undefined` when TrustGuard lets a call through:
@@ -273,7 +292,8 @@ The client's own timeout is 10 seconds and applies to every evaluation. Set
 
 Each guarded point adds one round trip. A turn with a streamed answer and no
 tools makes two evaluations. Each tool call adds two more: one for the call and
-one for its result. With `stream: "buffer"`, the response is held until its
+one for its result. A call that waits for approval is evaluated again when the
+answer arrives. With `stream: "buffer"`, the response is held until its
 evaluation returns.
 
 ### Troubleshooting
@@ -284,9 +304,10 @@ evaluation returns.
 | A blocked turn shows `An error occurred.` | The AI SDK hides error messages. Pass `onError` to `toUIMessageStreamResponse` as in [step 2](#2-guard-the-route). |
 | A streamed response with PII reached the user | The default stream mode records findings but does not enforce them. Use `stream: "buffer"`. |
 | A tool call waits forever | An Ask gate matched and the application has no approval screen. Add one, or set `toolAsk: "deny"`. |
+| Approving a call ends the turn with an error | The approval request was not signed with the same `experimental_toolApprovalSecret`, for example after the secret changed between the request and the answer. |
 | Every conversation shows one turn | No `sessionId`. Pass the chat `id`. |
 | Findings have no user | No `consumerId`. |
-| `Cannot find module '@neuraltrust/trustguard-sdk/ai-sdk'` | The installed SDK predates the entry point. Update `@neuraltrust/trustguard-sdk`. |
+| `Cannot find module '@neuraltrust/trustguard-sdk/ai-sdk'` | The installed SDK predates the entry point. Update `@neuraltrust/trustguard-sdk` to 0.1.5 or later. |
 
 ## TrustGate
 
@@ -387,6 +408,7 @@ flow, and a server-side route has no one to complete it.
 
 ## Related
 
+- [Example app](https://github.com/NeuralTrust/trustguard-sdk/tree/main/examples/ai-sdk): a Next.js chat agent with every piece on this page, approvals, and a live verdict panel
 - [Node.js SDK](/sdks/trustguard/node): evaluate calls outside the AI SDK
 - [Evaluate API](/trustguard/api/evaluate): request and response reference
 - [Policies](/trustguard/concepts/policies): gates, Ask, and Enforce mode
