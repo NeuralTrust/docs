@@ -235,15 +235,19 @@ talks to the Code Assist service and ignores the base URL.
    ```bash
    export GOOGLE_GEMINI_BASE_URL="https://<llm-host>/<application-slug>"
    export GEMINI_API_KEY="ag_…"
-   export GEMINI_CLI_CUSTOM_HEADERS="X-AG-API-Key: ag_…"
    ```
 
    With the base URL set, Gemini CLI switches to its `gateway` authentication
-   mode and sends the key as `x-goog-api-key`. TrustGate reads the key from
-   `X-AG-API-Key`, so `GEMINI_CLI_CUSTOM_HEADERS` carries it too. The variable
-   takes comma-separated `Header: value` pairs and reaches model requests only.
-   On a private (Hybrid) data plane add `X-AG-Gateway-Slug: <gateway-slug>`, and
-   to name the person behind the key add `X-NeuralTrust-End-User: ana@example.com`.
+   mode and sends the key as `x-goog-api-key`, which TrustGate accepts like
+   `X-AG-API-Key`. Extra headers go in `GEMINI_CLI_CUSTOM_HEADERS`, which takes
+   comma-separated `Header: value` pairs and reaches model requests only. On a
+   private (Hybrid) data plane add `X-AG-Gateway-Slug: <gateway-slug>`, and to
+   name the person behind the key add `X-NeuralTrust-End-User: ana@example.com`:
+
+   ```bash
+   export GEMINI_CLI_CUSTOM_HEADERS="X-NeuralTrust-End-User: ana@example.com"
+   ```
+
    The end-user value is attribution only: it lands on the trace and in Activity,
    and grants nothing.
 
@@ -290,9 +294,9 @@ disabled or the session predates the install.
 2. Confirm the call in TrustGate **Activity**.
 
 **Model traffic.** Run `/about` and confirm the auth method reads `gateway`,
-then send a prompt and open the trace in the console. A `401` means the key did
-not arrive: check `GEMINI_CLI_CUSTOM_HEADERS`. A `404` means the slug or the path
-is wrong; the base URL must end with the application slug, no `/v1beta`.
+then send a prompt and open the trace in the console. A `401` means the key is
+wrong or revoked; a `404` means the slug or the path is wrong. The base URL must
+end with the application slug, no `/v1beta`.
 
 ## Reference
 
@@ -391,7 +395,7 @@ policy **Test** tab with Extra parameter **Source application** set to
 | Hooks work locally but not over SSH / WSL | Hooks run on the remote host. The binary and config have to be there |
 | Bootstrap answers `{}` without running the binary | The pinned release could not be downloaded, or the checksum did not match. The bootstrap allows the action and says why on stderr |
 | The MCP sign-in never opens | The application uses an API key, not OAuth, or the `401` challenge was swallowed by a proxy. Check the application's **Auth** tab |
-| Model requests return `401` through the gateway | Gemini CLI sent the key only as `x-goog-api-key`. Set `GEMINI_CLI_CUSTOM_HEADERS="X-AG-API-Key: ag_…"` |
+| Model requests return `401` through the gateway | `GEMINI_API_KEY` is not the application's `ag_…` key, or the key was revoked. Gemini CLI sends it as `x-goog-api-key`, which the LLM plane accepts |
 | `Invalid auth method selected` on start | Recent Gemini CLI versions reject `GOOGLE_API_KEY` together with a base URL. Use `GEMINI_API_KEY` |
 | A prompt with an image fails through the gateway | Gemini CLI calls `:countTokens` for attachments and TrustGate does not serve it |
 
