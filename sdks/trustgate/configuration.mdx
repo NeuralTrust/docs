@@ -1,0 +1,84 @@
+---
+title: "Configuration"
+description: "Every option the TrustGate SDK takes, the environment variables it reads, and the address a Hybrid gateway needs"
+---
+
+The key is the only value the SDK requires. Everything else has a default or is
+asked of the gateway.
+
+| Option (Python / TypeScript) | Environment | Default | What it is |
+|---|---|---|---|
+| `api_key` / `apiKey` | `TRUSTGATE_API_KEY` | — | The application's key (`ag_…`). Required. |
+| `base_url` / `baseUrl` | `TRUSTGATE_URL` | `https://agentgateway-mcp.neuraltrust.ai` | Where to ask what the key reaches. Set it only for a Hybrid gateway. |
+| `mcp_consumer` / `mcpConsumer` | `TRUSTGATE_MCP_CONSUMER` | — | The MCP application's slug, when one key reaches several. |
+| `llm_consumer` / `llmConsumer` | `TRUSTGATE_LLM_CONSUMER` | — | The LLM application's slug, when one key reaches several. |
+| `timeout` / `timeoutMs` | — | 30 s / 30000 ms | Per-request timeout. |
+| `transport` / `fetch` | — | Standard library / global `fetch` | The HTTP layer, for proxies and tests. |
+
+An explicit option wins over its environment variable.
+
+<CodeGroup>
+  ```python Python
+  from trustgate import TrustGate
+
+  tg = TrustGate(
+      api_key=os.environ["MY_TRUSTGATE_KEY"],
+      mcp_consumer="support-agent",
+      timeout=10.0,
+  )
+  ```
+
+  ```ts TypeScript
+  import { TrustGate } from "@neuraltrust/trustgate"
+
+  const tg = new TrustGate({
+    apiKey: process.env.MY_TRUSTGATE_KEY,
+    mcpConsumer: "support-agent",
+    timeoutMs: 10_000,
+  })
+  ```
+</CodeGroup>
+
+## Which application
+
+A key is attached to applications, one per plane: an agent that calls tools and
+models holds an MCP one and an LLM one behind the same key. The SDK picks the
+one of each plane the key reaches. When a key reaches two on the same plane, it
+refuses to guess and names them, and you pick one with `mcp_consumer` or
+`llm_consumer`.
+
+## Hybrid gateways
+
+A Hybrid gateway is served only by its own data plane, which runs in your
+environment. The NeuralTrust cloud holds its keys but not its traffic, so a
+Hybrid key sent to the default address is refused with a message that says so.
+Point the SDK at that data plane instead: the MCP host it is published on, with
+nothing after it.
+
+```bash
+export TRUSTGATE_URL="https://<gateway>.<your-mcp-domain>"
+```
+
+The data plane answers the same question the cloud does, and from then on the
+SDK talks to the addresses it names.
+
+## Regions and environments
+
+The default address is the EU cloud. A key from another region is found only by
+that region's entry point:
+
+| Environment | `TRUSTGATE_URL` |
+|---|---|
+| NeuralTrust cloud, EU | Unset |
+| NeuralTrust cloud, US | `https://agentgateway-mcp.us.neuraltrust.ai` |
+| Hybrid | The MCP host of your data plane |
+
+## Headers the SDK sends
+
+| Header | Value |
+|---|---|
+| `X-AG-API-Key` | The key. The gateway also accepts `x-api-key` and `Authorization: Bearer ag_…`. |
+| `X-NeuralTrust-End-User` | The person a call runs as, on a handle from `for_end_user()`. |
+
+Both are exported as constants, `API_KEY_HEADER` and `END_USER_HEADER`, for code
+that builds its own requests.

@@ -1,0 +1,86 @@
+---
+title: "Models"
+description: "Point a provider's own client at the application's LLM plane with the same key, base URL included"
+---
+
+If the application also fronts your models, the same key configures the
+provider's own client, including the base URL. That is the one value no client
+can work out for itself, because the LLM plane lives on a different host from
+the MCP one.
+
+<CodeGroup>
+  ```python Python
+  from openai import OpenAI
+  from trustgate import TrustGate
+
+  llm = TrustGate().llm()
+  openai = OpenAI(base_url=llm.base_url, api_key=llm.api_key)
+  ```
+
+  ```ts TypeScript
+  import OpenAI from "openai"
+  import { TrustGate } from "@neuraltrust/trustgate"
+
+  const llm = await new TrustGate().llm()
+  const openai = new OpenAI({ baseURL: llm.baseUrl, apiKey: llm.apiKey })
+  ```
+</CodeGroup>
+
+Nothing is wrapped. The SDK hands over the values and steps aside, so streaming
+and every provider option work exactly as the provider's own client implements
+them.
+
+## What `llm()` returns
+
+| Field | Python | TypeScript | Use |
+|---|---|---|---|
+| Base URL | `base_url` | `baseUrl` | The OpenAI client. It ends in `/v1`. |
+| Anthropic base URL | `anthropic_base_url` | `anthropicBaseUrl` | Anthropic's client, which adds `/v1/messages` itself. |
+| API key | `api_key` | `apiKey` | Any provider client's own key parameter. |
+| Headers | `headers` | `headers` | `X-AG-API-Key`, for a client that takes headers instead. |
+| Consumer | `consumer` | `consumer` | The LLM application's slug, for logs and errors. |
+
+<CodeGroup>
+  ```python Python
+  from anthropic import Anthropic
+
+  claude = Anthropic(base_url=llm.anthropic_base_url, api_key=llm.api_key)
+  ```
+
+  ```ts TypeScript
+  import Anthropic from "@anthropic-ai/sdk"
+
+  const claude = new Anthropic({ baseURL: llm.anthropicBaseUrl, apiKey: llm.apiKey })
+  ```
+</CodeGroup>
+
+What goes in `model` depends on how the application routes: `"auto"` when it
+load-balances, otherwise a model name. See
+[What goes in `model`](/trustgate/llm/connect#what-goes-in-model).
+
+## Naming the user
+
+The key identifies the application, not the person using it. To attribute a
+model call to one, send `X-NeuralTrust-End-User` with it. The value lands on the
+trace and in **Activity**, and grants nothing.
+
+<CodeGroup>
+  ```python Python
+  openai.chat.completions.create(
+      model="auto",
+      messages=[{"role": "user", "content": "Hello"}],
+      extra_headers={"X-NeuralTrust-End-User": "user_123"},
+  )
+  ```
+
+  ```ts TypeScript
+  await openai.chat.completions.create(
+    { model: "auto", messages: [{ role: "user", content: "Hello" }] },
+    { headers: { "X-NeuralTrust-End-User": "user_123" } },
+  )
+  ```
+</CodeGroup>
+
+A key that reaches no LLM application raises
+[`PlaneUnavailableError`](/sdks/trustgate/errors). For the gateway side of the
+LLM plane, see [Connect your application](/trustgate/llm/connect).

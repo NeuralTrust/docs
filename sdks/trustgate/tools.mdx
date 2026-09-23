@@ -1,0 +1,122 @@
+---
+title: "Tools"
+description: "Give an agent the application's tools: hand the MCP endpoint to a framework, or translate the tools for a model call and run what the model asks for"
+---
+
+`connect()` returns the application's tool set, already checked. Spend it one of
+two ways, depending on whether something in your stack already speaks MCP.
+
+## Hand the endpoint to a framework
+
+If your framework brings its own MCP client (the OpenAI Agents SDK, the Claude
+Agent SDK, LangChain, Mastra), all the SDK contributes is a checked URL and its
+headers:
+
+<CodeGroup>
+  ```python Python
+  agent = tg.connect(requires=["search"])
+  MCPServerStreamableHttp(params={"url": agent.mcp.url, "headers": agent.mcp.headers})
+  ```
+
+  ```ts TypeScript
+  const agent = await tg.connect({ requires: ["search"] })
+  new MCPServerStreamableHttp({ url: agent.mcp.url, requestInit: { headers: agent.mcp.headers } })
+  ```
+</CodeGroup>
+
+There is no adapter per framework, because the framework already is one.
+
+## Or translate the tools for a model call
+
+When you call a provider's API directly there is no MCP client in the picture.
+`toolkit()` translates the tools into that provider's function-calling dialect,
+and `execute()` runs the calls the model asked for, every one of them back
+through the gateway:
+
+<CodeGroup>
+  ```python Python
+  from trustgate import ToolFormat
+
+  toolkit = agent.toolkit(ToolFormat.OPENAI_RESPONSES)
+
+  res = openai.responses.create(model="gpt-5.2", tools=toolkit.tools, input=input)
+  while any(o.type == "function_call" for o in res.output):
+      res = openai.responses.create(
+          model="gpt-5.2", tools=toolkit.tools, previous_response_id=res.id,
+          input=toolkit.execute(res.output),
+      )
+  ```
+
+  ```ts TypeScript
+  import { ToolFormat } from "@neuraltrust/trustgate"
+
+  const { tools, execute } = agent.toolkit(ToolFormat.OpenAIResponses)
+
+  let res = await openai.responses.create({ model: "gpt-5.2", tools, input })
+  while (res.output.some((o) => o.type === "function_call")) {
+    res = await openai.responses.create({
+      model: "gpt-5.2", tools, previous_response_id: res.id,
+      input: await execute(res.output),
+    })
+  }
+  ```
+</CodeGroup>
+
+| Provider API | Python | TypeScript |
+|---|---|---|
+| OpenAI Responses | `ToolFormat.OPENAI_RESPONSES` | `ToolFormat.OpenAIResponses` |
+| OpenAI Chat Completions | `ToolFormat.OPENAI_CHAT` | `ToolFormat.OpenAIChat` |
+| Anthropic Messages | `ToolFormat.ANTHROPIC_MESSAGES` | `ToolFormat.AnthropicMessages` |
+| Google Gemini | `ToolFormat.GEMINI` | `ToolFormat.Gemini` |
+
+The SDK depends on no provider package: `tools` and what `execute()` returns are
+plain objects in the provider's shape. In TypeScript, name the types at the call
+to get them checked: `agent.toolkit<OpenAI.Responses.Tool, OpenAI.Responses.ResponseInputItem>(…)`.
+
+A toolkit is two halves of one translation. What `tools` changed on the way out,
+`execute()` undoes on the way back, so use the pair from the same call.
+
+### Strict schemas
+
+`strict` closes every schema so the model cannot invent an argument. Tools whose
+schema cannot be made strict are listed in `warnings` rather than dropped:
+
+<CodeGroup>
+  ```python Python
+  toolkit = agent.toolkit(ToolFormat.OPENAI_RESPONSES, strict=True)
+  for warning in toolkit.warnings:
+      log.warning(warning)
+  ```
+
+  ```ts TypeScript
+  const toolkit = agent.toolkit(ToolFormat.OpenAIResponses, { strict: true })
+  for (const warning of toolkit.warnings) console.warn(warning)
+  ```
+</CodeGroup>
+
+## Call one tool directly
+
+`call_tool()` (`callTool()` in TypeScript) runs one tool without a model in the
+loop. The server prefix is optional: `list_issues` reaches `linear_list_issues`
+while Linear is the only server of the application that serves it.
+
+<CodeGroup>
+  ```python Python
+  result = agent.call_tool("list_issues", {"team": "ENG"})
+  ```
+
+  ```ts TypeScript
+  const result = await agent.callTool("list_issues", { team: "ENG" })
+  ```
+</CodeGroup>
+
+## Long-running processes
+
+An admin owns the tool set and can change it under a running agent. A process
+that stays up re-reads it with `refresh()` rather than trusting the list it took
+at startup. A tool that left in between fails with
+[`ToolNotFoundError`](/sdks/trustgate/errors).
+
+`refresh_connections()` (`refreshConnections()`) re-reads the application's
+upstream accounts the same way: what it still owes before it can call every
+server.

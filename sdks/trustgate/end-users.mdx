@@ -1,0 +1,82 @@
+---
+title: "Acting for end users"
+description: "Run calls as one of your application's users, on the same key and the same application, and send them the link to connect an account when one is missing"
+---
+
+The same key and the same application serve two actors. Without a name, a call
+runs as the application itself. With one, it runs as that person, and each
+upstream server that keeps an account per user reaches for theirs.
+
+Naming the person is a per-call decision, not a setting:
+
+<CodeGroup>
+  ```python Python
+  from trustgate import ConsentRequiredError, ToolFormat
+
+  alice = tg.for_end_user("user_123")
+
+  try:
+      alice.toolkit(ToolFormat.OPENAI_RESPONSES).execute(response.output)
+  except ConsentRequiredError as e:
+      reply(f"I need access to {e.provider}: {e.connect_url}")
+  ```
+
+  ```ts TypeScript
+  import { ConsentRequiredError, ToolFormat } from "@neuraltrust/trustgate"
+
+  const alice = await tg.forEndUser("user_123")
+
+  try {
+    await alice.toolkit(ToolFormat.OpenAIResponses).execute(response.output)
+  } catch (error) {
+    if (error instanceof ConsentRequiredError) {
+      reply(`I need access to ${error.provider}: ${error.connectUrl}`)
+    }
+  }
+  ```
+</CodeGroup>
+
+An `Agent` from `connect()` gives the same handle with `agent.for_end_user(…)`
+(`forEndUser(…)`), without another round trip: the tool set an admin bound is the
+application's, identical for everyone it acts for. What changes is one header,
+`X-NeuralTrust-End-User`.
+
+## No startup check, a link instead
+
+`connect()` refuses to start when a server has no account, because a batch has
+nobody to send a link to. A person does, so `for_end_user()` does not check at
+startup. When a call needs an account the user has not connected, the gateway
+refuses it with `ConsentRequiredError`, and the link to connect arrives inside
+the error, because that is where the gateway mints it.
+
+When you would rather ask than fail, check ahead of time:
+
+<CodeGroup>
+  ```python Python
+  for connection in alice.connections():
+      print(connection.provider, connection.status)
+
+  link = alice.connect_link("com.notion/mcp")  # omit the provider to cover every server
+  send(link.connect_url)                        # it expires: mint it when you show it
+  ```
+
+  ```ts TypeScript
+  for (const connection of await alice.connections()) {
+    console.log(connection.provider, connection.status)
+  }
+
+  const link = await alice.connectLink("com.notion/mcp") // omit the provider to cover every server
+  send(link.connectUrl)                                  // it expires: mint it when you show it
+  ```
+</CodeGroup>
+
+## Whose name it is
+
+The name is yours to choose, and the gateway does not verify it: it trusts the
+application that holds the key. It namespaces the name by application, so two
+applications naming `user_123` never reach the same account. For the same
+reason only an application's own credential may assert one: a request carrying
+a person's own token is already that person.
+
+This is the code side of [acting for end users](/trustgate/mcp/end-users) on the
+gateway.
