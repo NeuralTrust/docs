@@ -1,0 +1,68 @@
+---
+title: "Errors"
+description: "Every failure the TrustGate SDK raises, when it happens, and whose it is to fix"
+---
+
+Every error is a subclass of `TrustGateError`, which carries the HTTP `status`
+and the gateway's error `code` when there is one. They are classes rather than
+status codes because the useful question is never which number came back, but
+whether the fix is yours, your user's, or your admin's.
+
+## At startup
+
+| Error | When | Who fixes it |
+|---|---|---|
+| `MissingToolsError` | `requires` names a tool the application does not serve. `missing` and `available` list both sides. | An admin, who owns the tool set. |
+| `UpstreamNotConnectedError` | `connect()` found servers the application cannot call yet. `servers` names them; the message names who connects each. | An admin, for a shared account. Your code, for a per-user one: call it through [`for_end_user()`](/sdks/trustgate/end-users). |
+| `AuthenticationError` | The key is unknown, revoked or past its expiry. All three are refused alike. | You: issue or rotate the key. |
+| `PlaneUnavailableError` | The key reaches no application on the plane asked for: `llm()` with no LLM application, for example. | An admin, who attaches the key to one. |
+| `TrustGateError` (`status` 421) | The key belongs to a Hybrid gateway and was sent to the cloud. | You: set [`TRUSTGATE_URL`](/sdks/trustgate/configuration#hybrid-gateways) to that data plane. |
+
+## During a call
+
+| Error | When | Retry? |
+|---|---|---|
+| `ConsentRequiredError` | An end user has not connected the account this call needs. `provider` and `connect_url` (`connectUrl`) say which and where. | After the user connects. |
+| `PolicyBlockedError` | A gateway policy refused the call. | No. |
+| `ToolNotFoundError` | The tool left the tool set under a running agent. `tool` names it. | After `refresh()`, if it is back. |
+| `RateLimitedError` | A rate limit refused the call. `retry_after_ms` (`retryAfterMs`) says when to try again. | Yes, after the wait. |
+| `InvalidRequestError` | The request was malformed: a bad end-user id, an unknown provider. | No, fix the call. |
+| `ServiceUnavailableError` | The gateway could not serve the request and says so. | Yes. |
+| `TrustGateServerError` | The gateway failed on its own account. | Yes, with backoff. |
+
+<CodeGroup>
+  ```python Python
+  from trustgate import ConsentRequiredError, PolicyBlockedError, RateLimitedError
+
+  try:
+      result = alice.call_tool("create_issue", {"title": title})
+  except ConsentRequiredError as e:
+      reply(f"Connect {e.provider} first: {e.connect_url}")
+  except PolicyBlockedError:
+      reply("That action is not allowed here.")
+  except RateLimitedError as e:
+      schedule_retry(after_ms=e.retry_after_ms)
+  ```
+
+  ```ts TypeScript
+  import { ConsentRequiredError, PolicyBlockedError, RateLimitedError } from "@neuraltrust/trustgate"
+
+  try {
+    await alice.callTool("create_issue", { title })
+  } catch (error) {
+    if (error instanceof ConsentRequiredError) reply(`Connect ${error.provider} first: ${error.connectUrl}`)
+    else if (error instanceof PolicyBlockedError) reply("That action is not allowed here.")
+    else if (error instanceof RateLimitedError) scheduleRetry(error.retryAfterMs)
+    else throw error
+  }
+  ```
+</CodeGroup>
+
+## When nothing makes sense
+
+A `404` from `/whoami` almost always means the SDK was pointed at the wrong
+address: an `/<application>/mcp` endpoint, or the LLM plane, instead of the MCP
+host on its own. The error quotes the URL it tried. The `whoami` example in the
+[SDK repository](https://github.com/NeuralTrust/trustgate-sdk/tree/main/examples)
+prints what the key reaches, when it expires, and for each server whether an
+account is connected and who connects it.
