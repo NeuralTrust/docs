@@ -164,6 +164,22 @@ control over something that must never leave.
   arguments, not reasoning.
 - **A rule cannot match across messages.** Each message is rewritten on its own,
   so a pattern spanning a turn boundary never fires.
+- **A rewrite re-encodes the whole body, and fields the gateway does not model
+  are lost.** When a rule fires, the request is rebuilt from the gateway's own
+  neutral representation rather than patched in place, and that representation
+  carries only the model, the system prompt, the messages, the tools and a
+  handful of sampling settings. Everything else at the top level is dropped —
+  `seed`, `n`, `user`, the penalties, `logit_bias`, `stream_options`, `store`
+  and `metadata` on an OpenAI-shaped body, `thinking` on an Anthropic one,
+  `safetySettings` and `cachedContent` on a Gemini one; the response leg loses
+  `created`, `system_fingerprint` and `service_tier`. A body no rule matched is
+  forwarded byte for byte, so only the requests this policy actually rewrites
+  are affected.
+- **A rewritten multimodal message keeps only its text.** Content sent as an
+  array of parts — text beside an image, an audio clip or a document — is
+  flattened to the joined text of its text parts before the rules see it, and
+  written back as a plain string. If a rule fires on such a message the image
+  never reaches the model, and no event records the loss.
 - **RE2 only: no backreferences, no lookahead, no lookbehind.** RE2 gives them up
   in exchange for patterns that cannot be made to run away on hostile input. See
   below for what to write instead.
@@ -224,12 +240,6 @@ check the order.
 
 Every decision is emitted as a metadata event. See the
 [event schema](/platform/event-schema) for the fields recorded.
-
-{/* TODO(verify): the request body is re-encoded from the gateway's canonical
-    representation rather than patched in place. Whether provider-specific
-    fields the canonical form does not model survive that round trip is not
-    established from the plugin alone — confirm against the provider adapters
-    before documenting it either way. */}
 
 ---
 

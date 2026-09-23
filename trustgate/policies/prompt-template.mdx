@@ -380,7 +380,13 @@ template would fire; useless for seeing what it does.
   That is the OpenAI Chat Completions shape and the Anthropic Messages shape.
   Unlike [Prompt Compression](/trustgate/policies/prompt-compression), which
   steps aside on a wire format it does not model, this policy carries no such
-  guard.
+  guard. A client calling the gateway's Gemini route sends neither key, and the
+  policy does not notice: it adds a `messages` array to a body that has no such
+  field and records the injection as done. Bound for Google, the request goes
+  out exactly as the policy left it, stray field and all; bound for a provider
+  in another shape, the gateway rebuilds the request from the fields it does
+  model and the array is discarded. Either way the model never sees the prompt,
+  and a `{template://…}` reference in such a body is never found at all.
 - **A template reference is found only in message content.** One in the
   top-level `system` field is ignored — not an error, just not a reference — and
   is forwarded to the model as literal text.
@@ -400,13 +406,6 @@ template would fire; useless for seeing what it does.
 - **`jinja2_subset` is not implemented.** A policy naming it is refused on save.
 - **LLM traffic only.** The policy does not apply to MCP (Model Context
   Protocol) tool calls.
-
-{/* TODO(verify): the plugin decodes the inbound body as raw JSON and looks for
-    top-level "system" and "messages" keys, with no wire-format guard of its
-    own. What a provider whose request shape uses neither — a Gemini-style
-    "contents" body, say — does with the "messages" array this policy would then
-    add has not been traced through the provider adapters. Confirm before
-    documenting that case either way. */}
 
 ---
 
