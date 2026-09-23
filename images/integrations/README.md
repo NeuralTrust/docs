@@ -40,3 +40,14 @@ the image whenever the documented controls change.
 - To recapture, install the community node in a local demo instance, import the
   example workflow, and capture the canvas with all four outputs and the Ask
   approval branch visible.
+
+## Logos
+
+`logos/` holds the brand marks the home page and the integrations catalog show.
+Marks drawn in `currentColor` are used as CSS masks so they follow the theme.
+Added for the catalog on 2026-09-23:
+
+- `haystack.svg`, `go.svg`: [Simple Icons](https://simpleicons.org) (CC0).
+- `langfuse.svg`: [LobeHub icons](https://github.com/lobehub/lobe-icons) (MIT).
+- `code.svg`, `globe.svg`: [Lucide](https://lucide.dev) (ISC).
+- `portkey.png`: Portkey's docs favicon. `litellm.png`: LiteLLM's docs favicon.
