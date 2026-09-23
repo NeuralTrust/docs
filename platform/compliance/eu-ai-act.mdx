@@ -1,0 +1,131 @@
+---
+title: "EU AI Act"
+description: "How TrustGate and TrustGuard support the obligations the EU AI Act places on providers and deployers, article by article."
+---
+
+<Note>
+The EU AI Act binds **you** as the provider or deployer of an AI system.
+NeuralTrust supplies technical controls and evidence your compliance programme
+can cite against specific articles.
+</Note>
+
+## Coverage at a glance
+
+| Article | Obligation | Coverage |
+|---|---|:--|
+| **9** | Risk management system | ✅ Covered |
+| **10** | Data and data governance | ✅ Covered |
+| **12** | Record-keeping | ✅ Covered |
+| **14** | Human oversight | 🟢 Partially covered |
+| **15** | Accuracy, robustness and cybersecurity | ✅ Covered |
+| **26** | Deployer obligations | ✅ Covered |
+| **50** | Transparency | ⚪ Not covered |
+
+## Article 9 — Risk management system
+
+*An iterative, lifecycle-long process of identifying, estimating and mitigating risk.*
+
+| Capability | What it evidences |
+|---|---|
+| [Detector catalog](/trustguard/detectors/overview) | The fixed set of risks inspected for, across data loss prevention, content security, and agent and MCP security — so the scope of inspection is explicit |
+| [TrustGuard policies](/trustguard/concepts/policies) | Risk treatment: gates filter before detection, detector rules decide the action, one switch between watching and enforcing |
+| [Observe mode](/trustgate/policies/overview#mode) | A policy's decision recorded without blocking, so treatment is measured before it is imposed |
+| [Alerts](/platform/alerts) | Detections correlated and deduplicated across both products |
+
+## Article 10 — Data and data governance
+
+*Data-governance practices, in particular for personal data reaching the system.*
+
+| Capability | What it evidences |
+|---|---|
+| [Data Loss Prevention](/trustguard/detectors/data-loss-prevention) | PII and secrets — API keys, access tokens, JWTs — detected on input and output, and masked where the Transform action is set |
+| [Regex Replace](/trustgate/policies/regex-replace) | Deterministic rewriting of values you can state exactly: an internal hostname, a ticket reference, a key prefix |
+| [Credential redaction](/trustguard/data-handling#credential-redaction) | Credential headers and credential-looking body fields replaced before any record is written, at any nesting depth |
+| [Document and URL Analyzers](/trustguard/detectors/content-security) | PII and injection in uploaded files, including scans via OCR, and in pages an agent is asked to read; decoded content is discarded after evaluation |
+
+## Article 12 — Record-keeping
+
+*Automatic recording of events over the system's lifetime.*
+
+| Capability | What it evidences |
+|---|---|
+| [Audit logs](/platform/audit-logs) | Sign-ins, membership and role changes, SSO and SCIM, and product configuration — retained **365 days**, filterable, exportable as CSV or JSON for ingestion into your own SIEM |
+| Findings | Which detector fired, on which side, what it decided, and an evidence summary — the kind of thing found, never the value |
+| Request bodies | The evaluated traffic behind a finding, credential-redacted and capped at 1 MiB |
+| [Event schema](/platform/event-schema) | The exact shape of both records, for downstream consumption |
+| [SIEM forwarding](/platform/alert-integrations) | Alert findings delivered as OCSF Detection Findings |
+
+Retention is split by design. Audit events are kept 365 days. TrustGuard records
+carry a per-team entitlement — 365 days by default — with an **absolute expiry**
+stamped when written, so changing entitlements later neither extends nor shortens
+what is already stored.
+
+## Article 14 — Human oversight
+
+*Systems that natural persons can effectively oversee.*
+
+| Capability | What it evidences |
+|---|---|
+| [Observe mode](/trustgate/policies/overview#mode) | Policies log what they would have done and let traffic through, so a person reviews before enforcement is switched on |
+| [Access requests](/trustgate/access/overview#requests-instead-of-refusals) | Reaching a server outside your selection arrives as a request for a human to grant, rather than a refusal |
+| [Alerts](/platform/alerts) and [integrations](/platform/alert-integrations) | Detections pushed to the channels operators watch |
+| [Break the glass](/platform/break-glass) | The documented, auditable emergency path |
+
+Oversight here means observe, alert, grant and revoke. The approval workflow
+governs which servers a person may reach, not individual inference requests.
+
+## Article 15 — Accuracy, robustness and cybersecurity
+
+*Resilience against errors, faults, and attempts to exploit the system.*
+
+| Capability | What it evidences |
+|---|---|
+| [Prompt Guard](/trustguard/detectors/content-security) | Jailbreaks and prompt injection from whoever is typing, on input and output |
+| [Indirect Prompt Injection](/trustguard/detectors/agent-mcp-security) | Hostile instructions in what a tool returns, and in tool descriptions themselves |
+| [Rate limiter](/trustgate/policies/rate-limiter) and [per-tool rate limiter](/trustgate/policies/per-tool-rate-limiter) | Resource-exhaustion resistance, per scope and per tool |
+| [LLM budget](/trustgate/policies/llm-budget) and [request size limiter](/trustgate/policies/request-size-limiter) | Spend and payload bounds |
+| [Routing fallback](/trustgate/llm/routing#fallback) | An ordered fallback chain and load-balanced pools, so a degrading provider does not take the application with it |
+
+## Article 26 — Deployer obligations
+
+*Use high-risk systems per instructions, assign human oversight, keep the logs you control.*
+
+Deployer duties are where these products fit most directly:
+[policies](/trustgate/policies/overview) are the documented operational control,
+[roles](/platform/users) assign who oversees, and
+[audit logs](/platform/audit-logs) plus findings are the logs under your control.
+[End-user attribution](/trustgate/observability/end-user-attribution) ties traffic
+behind a shared key to the person a client was serving — as a label the calling
+application asserts, [not an authenticated identity](/trustgate/observability/end-user-attribution#not-an-identity).
+
+## Article 50 — Transparency
+
+Neither product detects nor enforces AI-identity disclosure. Article 50 is met by
+how you design and label your application.
+
+## Where NeuralTrust stops
+
+**Design-time risk.** Articles 9 and 10 also reach training choices,
+foreseeable-misuse analysis and dataset governance. Both products sit on the
+traffic path at inference time and have no visibility into how a model was
+trained. Cite them for the operational half.
+
+**Streaming enforcement.** Streamed output is evaluated, but where enforcement can
+act depends on the path. Through the gateway the stream is buffered and inspected
+once the client has drained it, so findings are recorded rather than refused; on
+the [LiteLLM](/integrations/litellm) path accumulated output is scanned during the
+stream, where `block` stops later chunks. Tokens already delivered cannot be
+recalled either way, so enforce on the request leg when a response must be
+stopped. A streamed response above 8 MiB is not inspected and emits no event.
+
+**Tagging.** Article identifiers do not ship as tags on findings. This page is the
+mapping.
+
+**Residency.** Self-hosted and hybrid keep evaluated traffic in your own
+infrastructure, with configuration-only egress. On SaaS it lives in the region your
+workspace was provisioned in, fixed at provisioning. See
+[Data handling](/trustguard/data-handling).
+
+<Note>
+See also [ISO/IEC 42001](/platform/compliance/iso-42001), [OWASP LLM Top 10](/platform/compliance/owasp-llm-top-10) and [NIST AI RMF](/platform/compliance/nist-ai-rmf).
+</Note>
