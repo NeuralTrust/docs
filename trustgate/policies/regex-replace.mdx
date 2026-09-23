@@ -1,0 +1,265 @@
+---
+title: "Regex Replace"
+sidebarTitle: "Regex Replace"
+description: "Deterministic RE2 rewrites on the request or the response — no external service, no model, no judgement, and no ability to refuse anything."
+---
+
+The **Regex Replace** policy applies ordered regular-expression rules to the
+prompt or to the model's reply and forwards the rewritten text. No external
+service is called and nothing is scored: it does exactly what the patterns say,
+which is both its virtue and its limit.
+
+Applies to **LLM** traffic only.
+
+It **can never block** — it only edits. Reach for it when you know the exact
+shape of what must not pass — an internal hostname, a ticket reference, a key
+prefix — and you want that removed without a detector's opinion in the loop.
+
+---
+
+## Configure the policy
+
+Open **Policies** → **Library** → **Regex Replace**.
+
+### Target
+
+**Target** chooses the leg, and it is required — there is no default.
+
+| Value | What is rewritten |
+|---|---|
+| **request** | The system prompt and the content of every message, before the request reaches the model. |
+| **response** | The assistant's content, before it reaches the caller. |
+
+**One policy rewrites one leg.** To rewrite both, create two policies.
+
+### Rules
+
+**Add Rule** appends a rule. Rules run in the order listed, and **each rule sees
+the previous rule's output**.
+
+| Field | What it is |
+|---|---|
+| **Pattern** | The expression to match. The gateway matches with RE2, a regular-expression engine that deliberately leaves a few features out — see [Writing patterns without lookaround](#writing-patterns-without-lookaround). Required. |
+| **Replacement** | The text that replaces each match. `$1` and `${name}` insert capture groups. Empty removes the match. |
+| **Case Insensitive** | Matches without regard to letter case. Off by default. |
+| **Multiline** | `^` and `$` match at line boundaries rather than only at the ends of the text. Off by default. |
+
+An invalid pattern is rejected when you save, not at request time, so a policy
+that saved has patterns that compile.
+
+### A worked example: two rules that chain
+
+Say your users write the same thing three ways — `email`, `e-mail`, `E Mail` —
+and you want the address after it replaced with a placeholder.
+
+**Rule 1** normalises the word:
+
+| Field | Value |
+|---|---|
+| **Pattern** | `\be[-\s]?mail\b` |
+| **Replacement** | `email` |
+| **Case Insensitive** | On |
+
+**Rule 2** matches the normalised form and redacts what follows:
+
+| Field | Value |
+|---|---|
+| **Pattern** | `email\s+is\s+[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}` |
+| **Replacement** | `email is [REDACTED]` |
+
+`My E-Mail is ana@example.com` becomes `My email is [REDACTED]`. Rule 2 matches
+only because rule 1 ran first — on its own it would miss every spelling but one.
+Reorder the two and the rewrite stops working, with nothing to say why.
+
+<Warning>
+**A later rule also sees the text an earlier rule produced, including its
+placeholders.** A rule matching `card` will happily rewrite the `[CARD]` an
+earlier rule just inserted. Choose placeholders no later pattern can match, and
+read your rule list bottom-up once before saving.
+</Warning>
+
+<Note>
+**`$` in a replacement is a capture-group reference, not a literal.** `$5` is
+group 5, not five dollars, and a group that does not exist expands to nothing.
+Write `$$` for a literal dollar sign, and `${1}` rather than `$1` when the group
+number is followed by more characters — `$1x` is read as a group named `1x`.
+</Note>
+
+### Mode and scope
+
+**Enforce** is the only mode in which this policy does anything. In **Observe** a
+rule that matches is recorded as `observed` and **the original text is forwarded
+unchanged** — which for a rewriting policy means it is a no-op with an event.
+That is still worth a first pass: it tells you how often your patterns fire
+before they start changing traffic.
+
+---
+
+## How the decision is made
+
+<Steps>
+<Step title="The leg matching Target is decoded">
+The other leg passes through without the rules being applied at all. A policy
+with **Target** `request` does nothing on the response, and vice versa.
+</Step>
+
+<Step title="Every rule is applied in order, to every field">
+On the request leg that is the system prompt and each message's content,
+separately — a rule cannot match across a message boundary. On the response leg
+it is the assistant's content.
+</Step>
+
+<Step title="If nothing changed, the body is forwarded untouched">
+The event records that nothing matched. A rule whose replacement is identical to
+what it matched counts as no change.
+</Step>
+
+<Step title="If something changed, the rewritten body is forwarded">
+In **Enforce**, the re-encoded body goes upstream on the request leg, or back to
+the caller on the response leg with the upstream's own status code. The event
+records `rewritten`.
+</Step>
+</Steps>
+
+There is no fourth step. Nothing here produces a `403`.
+
+### Modes and failures
+
+| Situation | Enforce | Observe |
+|---|---|---|
+| A rule matches | Content rewritten, event `rewritten` | Event `observed`, **original content forwarded** |
+| No rule matches | Forwarded untouched, recorded as no match | Forwarded untouched, recorded as no match |
+| The leg does not match **Target** | Forwarded untouched | Forwarded untouched |
+| Streaming response | Forwarded untouched | Forwarded untouched |
+| The body cannot be read or written back | **Forwarded unredacted** | Forwarded unredacted |
+| An invalid pattern | Rejected at save time | Rejected at save time |
+| The policy configuration cannot be parsed | `502`, refused | `502`, refused |
+
+<Warning>
+**When the rewrite cannot be applied, the content is forwarded unredacted.** If
+the request arrives in a shape the gateway does not recognise, or the body
+cannot be read or written back, this policy passes the original through. It logs
+at debug level and emits no decision — at default log levels there is nothing to
+see.
+
+This is the opposite of what the other masking guardrails do: TrustGuard, AWS
+Bedrock and Google Model Armor all refuse a request they cannot mask. Same
+catalogue group, opposite failure direction. Do not use this policy as the only
+control over something that must never leave.
+</Warning>
+
+### Limits
+
+- **It can never block.** There is no threshold, no action, no refusal. If the
+  requirement is "this must not reach the model at all", this is the wrong
+  policy.
+- **It forwards unredacted when it cannot rewrite.** See the warning above.
+- **Streaming responses pass through untouched**, silently.
+- **One leg per policy.** **Target** is a single choice; use two policies for
+  both legs.
+- **Message content only.** On the request leg, tool call arguments, tool
+  definitions and attachments are not rewritten — only the system prompt and
+  message content. On the response leg, only the assistant's text: not tool call
+  arguments, not reasoning.
+- **A rule cannot match across messages.** Each message is rewritten on its own,
+  so a pattern spanning a turn boundary never fires.
+- **A rewrite re-encodes the whole body, and anything the gateway does not model
+  is lost.** When a rule fires, the request is rebuilt from the gateway's own
+  neutral representation rather than patched in place, and that representation
+  carries only the model, the system prompt, the messages, the tools and a
+  handful of sampling settings. Everything else the client sent is dropped: the
+  provider-specific options, the sampling controls the gateway does not carry,
+  and, on the response leg, a few identifiers the provider stamps on its answer.
+  A body no rule matched is forwarded byte for byte, so only the requests this
+  policy actually rewrites are affected.
+- **A rewritten multimodal message keeps only its text.** Content sent as an
+  array of parts — text beside an image, an audio clip or a document — is
+  flattened to the joined text of its text parts before the rules see it, and
+  written back as a plain string. If a rule fires on such a message the image
+  never reaches the model, and no event records the loss.
+- **RE2 only: no backreferences, no lookahead, no lookbehind.** RE2 gives them up
+  in exchange for patterns that cannot be made to run away on hostile input. See
+  below for what to write instead.
+- **LLM traffic only.** The policy does not apply to MCP (Model Context Protocol)
+  tool calls.
+
+### Writing patterns without lookaround
+
+RE2 rejects `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)` and `\1`. The pattern will not
+compile and the policy will not save. Three substitutions cover almost every real
+case:
+
+| What you wanted | What to write instead |
+|---|---|
+| Lookbehind — replace what *follows* a prefix | Match the prefix too, capture it, and put it back: `(Bearer )\S+` → `${1}[REDACTED]` |
+| Lookahead — replace what *precedes* a suffix | Same trick on the other side: `\d{6,}( in ticket)` → `[NUMBER]${1}` |
+| Backreference — "the same word twice" | Not expressible. Split it into two rules, or match the general shape and restore the parts you keep with capture groups |
+
+The capture-and-restore trick is the whole answer: RE2 cannot assert around a
+match, so consume the context and re-emit it.
+
+---
+
+## Verify the policy
+
+Open the **Playground**, pick an application the policy applies to, and send
+these **in this order**.
+
+<Steps>
+<Step title="Control — the path works at all">
+```
+hello, write me a short greeting
+```
+
+Expect a normal reply and no rewrite — the event records that nothing matched. If
+this fails, the problem is the application or the model, not the rules. Fix it
+before going on.
+</Step>
+
+<Step title="A rule fires — the rewrite happens">
+Send text your first rule should match.
+
+Expect the decision **`rewritten`**. **Read the model's reply, not just the
+status**: with **Target** `request`, the reply must behave as though it had been
+asked the rewritten question. That is what proves the model received the rewrite
+and not the original.
+</Step>
+
+<Step title="The chain holds — later rules see earlier output">
+Send text that only your *last* rule can match once the earlier rules have run —
+the `E-Mail` spelling from the worked example above, if you built it.
+
+Still **`rewritten`**, and the reply must show the final form. If it shows the
+intermediate one, a later rule is not matching what the earlier rule produced;
+check the order.
+</Step>
+</Steps>
+
+Every decision is emitted as a metadata event. See the
+[event schema](/platform/event-schema) for the fields recorded.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The policy will not save | An invalid pattern, no rules, or no **Target** | All three are validated at save; the error names the rule index |
+| Nothing is ever rewritten | **Target** is the other leg | One policy rewrites one leg; create a second |
+| Nothing is rewritten, and the event says `observed` | The policy is in **Observe** | Observe forwards the original — switch to **Enforce** |
+| The pattern works in your editor but not here | Backreferences, lookaround, atomic groups or possessive quantifiers — none of which RE2 has | Rewrite with capture-and-restore; a pattern using them would not have saved |
+| The replacement lost a `$` | `$` starts a capture-group reference | Write `$$` |
+| The replacement inserted nothing where a group should be | The group number does not exist, or `$1x` was read as a group named `1x` | Count the groups; use `${1}` |
+| A placeholder from one rule disappeared | A later rule matched the text the earlier rule inserted | Reorder, or choose a placeholder no later pattern matches |
+| Text spanning two messages is never matched | Each message is rewritten separately | Match within a single message |
+| Sensitive text reached the model anyway, with no event | The body could not be read or written back, and was forwarded unredacted | Raise the log level to debug to see it, and do not rely on this policy alone |
+| Streamed responses are never rewritten | Streaming is not supported | Rewrite on the request leg |
+
+---
+
+## Related
+
+- [Guardrails](/trustgate/policies/guardrails) — the other guardrail policies, and how to choose between them
+- [TrustGuard](/trustgate/policies/trustguard-guardrail) — detector-driven masking that refuses rather than forwards when it cannot mask
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [Event schema](/platform/event-schema) — the fields each decision records
