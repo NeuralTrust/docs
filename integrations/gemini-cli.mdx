@@ -1,0 +1,405 @@
+---
+title: "Gemini CLI"
+description: "Evaluate Gemini CLI prompts, commands and tool results with TrustGuard, connect the CLI to TrustGate over MCP, and route its model traffic through a TrustGate LLM application"
+---
+
+Gemini CLI is Google's coding agent for the terminal. It reads repositories,
+runs shell commands, edits files and calls external tools from the developer's
+machine.
+
+The TrustGuard extension evaluates those actions through lifecycle hooks on the
+machine where Gemini CLI runs. TrustGate provides the MCP tools assigned to an
+application and, separately, can serve the model traffic itself.
+
+## NeuralTrust controls
+
+| Product | Scope | Controls |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates prompts, shell commands, tool calls and tool results against an organization [policy](/trustguard/concepts/policies) through lifecycle hooks on the developer's machine. | Monitor · Block · Ask on tool calls |
+| **[TrustGate](/trustgate/overview)** MCP | Exposes the MCP registries and tools assigned to an application. MCP (Model Context Protocol) connects Gemini CLI to systems such as trackers, databases and internal APIs. | Tool availability · application authentication · per-tool rate limits |
+| **[TrustGate](/trustgate/overview)** LLM | Serves Gemini CLI's own model requests through an LLM application. | Model routing · budgets · rate limits · guardrails · traces |
+
+The three are independent. Each has its own configuration in Gemini CLI and its
+own credential, and any one works without the other two.
+
+<Warning>
+**Use separate credentials for TrustGuard and TrustGate.** The hooks use a
+`tgk_…` [collector](/trustguard/concepts/collectors) key in `gemini-cli.json`.
+TrustGate authenticates as an application with OAuth or an `ag_…` API key. A
+`tgk_…` key does not authenticate MCP or model traffic, and `gemini-cli.json`
+does not accept TrustGate settings.
+</Warning>
+
+## Deployment options
+
+| Goal | Configuration | Location |
+| --- | --- | --- |
+| Evaluate prompts, commands and tool results against organization policy | **TrustGuard lifecycle hooks**, installed as a Gemini CLI extension or declared in the system settings file, plus a managed `gemini-cli.json` | Each developer machine; IT deploys the hooks, binary and config by MDM |
+| Centrally manage the MCP tools available to Gemini CLI | **TrustGate MCP** as an `mcpServers` entry, or `admin.mcp.requiredConfig` for every user | Gemini CLI connects to the remote TrustGate endpoint |
+| Govern the model calls Gemini CLI makes | **TrustGate LLM** through `GOOGLE_GEMINI_BASE_URL` | Environment of the developer machine or CI runner |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| Egress from developer machines to `{TRUSTGUARD_BASE_URL}` *(hooks path)* | The console shows the [base URL](/trustguard/api/evaluate#base-url) for your workspace. |
+| A collector for Gemini CLI *(hooks path)* | **Agent Runtime → Collectors → Catalog → AI assistants & coding agents**. Create the `tgk_…` key on its **Auth** tab, where it is shown once, and assign the policy on the **Policies** tab. |
+| Node.js on the developer machine *(hooks path)* | Gemini CLI itself requires it. The hook bootstrap runs on Node so that one command works under bash on macOS and Linux and under PowerShell on Windows. |
+| Egress to GitHub Releases *(hooks path)* | If `trustguard-gemini-cli` is not already on the machine, the bootstrap downloads the pinned release on first use, checksum-verified. |
+| An [MCP application](/trustgate/mcp/overview) *(MCP path)* | Bind the required registries, then copy the endpoint from its **Connect** tab. |
+| An [LLM application](/trustgate/access/applications) with a Gemini registry *(LLM path)* | Gemini CLI names Gemini models. A registry that serves them avoids translation. |
+| Application credentials *(TrustGate paths)* | OAuth, which requires no pasted credential, or an `ag_…` API key. |
+
+Create the policy in **Observe** mode. Observe records decisions in **Activity**
+without enforcing them. Review the results, then switch the policy to
+**Enforce**. See [Policies](/trustguard/concepts/policies).
+
+Developers do **not** need NeuralTrust accounts for the hooks path.
+
+## Set up prompt and tool screening (TrustGuard)
+
+The [Gemini CLI extension](https://github.com/NeuralTrust/trustguard-gemini-cli-plugin)
+registers hooks for `BeforeAgent`, `BeforeTool` and `AfterTool`. Before an action
+runs, each hook calls [`POST /v1/evaluate`](/trustguard/api/evaluate) with the
+collector `tgk_…` key and answers in Gemini CLI's hook contract: deny with a
+reason, ask, or allow.
+
+### Install the extension (pilot)
+
+```bash
+gemini extensions install https://github.com/NeuralTrust/trustguard-gemini-cli-plugin --auto-update
+```
+
+Gemini CLI asks for consent because the extension ships hooks; `--consent`
+accepts it in a script. On the first hook event the bootstrap downloads the
+pinned release binary into `~/.trustguard/bin` and evaluates from the next event
+on. Then write the key config to `~/.trustguard/gemini-cli.json` and `chmod 600`
+it:
+
+```json
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "closed"
+}
+```
+
+Start a new session, run `/hooks panel` to confirm the three TrustGuard hooks
+are listed, and send a test prompt.
+
+### Deploy under MDM (enterprise)
+
+An MDM deployment consists of four components:
+
+| Piece | What to deploy |
+| --- | --- |
+| **Hook bootstrap** | `trustguard-hook.js` from the extension's `hooks/` directory, under a fixed directory such as `/Library/Application Support/TrustGuard/gemini-cli-hooks` |
+| **Binary** | Optional: put `trustguard-gemini-cli` on `PATH` or in `~/.trustguard/bin`. If missing, the bootstrap downloads the pinned release from GitHub Releases on first use |
+| **API key config** | MDM-managed `gemini-cli.json` (paths below) |
+| **Gemini CLI system settings** | `settings.json` in the system location, declaring the hooks and keeping the hooks system on |
+
+**Managed key config.**
+
+```json
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "closed",
+  "transform_action": "deny"
+}
+```
+
+| OS | Managed config path | Gemini CLI system settings |
+| --- | --- | --- |
+| macOS | `/Library/Application Support/TrustGuard/gemini-cli.json` | `/Library/Application Support/GeminiCli/settings.json` |
+| Linux | `/etc/trustguard/gemini-cli.json` | `/etc/gemini-cli/settings.json` |
+| Windows | `%ProgramData%\TrustGuard\gemini-cli.json` | `C:\ProgramData\gemini-cli\settings.json` |
+
+**Gemini CLI system settings.** System settings override user and workspace
+settings, so hooks declared here cannot be removed by the developer, and
+`hooksConfig.enabled` set here cannot be turned off:
+
+```json
+{
+  "hooksConfig": { "enabled": true },
+  "hooks": {
+    "BeforeAgent": [
+      { "hooks": [ { "name": "trustguard-prompt", "type": "command",
+        "command": "node \"/Library/Application Support/TrustGuard/gemini-cli-hooks/trustguard-hook.js\"",
+        "timeout": 30000 } ] }
+    ]
+  }
+}
+```
+
+Declare `BeforeTool` and `AfterTool` with the same command and `"matcher": "*"`.
+The full file is
+[`docs/enterprise-settings.json`](https://github.com/NeuralTrust/trustguard-gemini-cli-plugin/blob/main/docs/enterprise-settings.json)
+in the extension repo. `admin.secureModeEnabled: true` in the same file removes
+YOLO mode and the *always allow* options, so an **Ask** verdict is always
+answered by a person. A developer can still point Gemini CLI at another system
+file with `GEMINI_CLI_SYSTEM_SETTINGS_PATH`; deploy a wrapper script that pins
+the variable if that matters in your environment.
+
+## Set up governed tool access (TrustGate MCP)
+
+Gemini CLI treats TrustGate as a **streamable HTTP** MCP server: one `httpUrl`
+per MCP application, and the agent sees the tool set that application is routed
+to. Copy the endpoint from the application's **Connect** tab:
+
+```text
+https://<mcp-host>/<application-slug>/mcp
+```
+
+### OAuth applications
+
+Add the server and nothing else:
+
+```bash
+gemini mcp add -t http TrustGate https://<mcp-host>/<application-slug>/mcp
+```
+
+On the first call TrustGate answers `401` with a `WWW-Authenticate` challenge.
+Gemini CLI follows it: it reads the protected-resource metadata, discovers the
+authorization server, registers itself as a public client and opens the sign-in
+in the browser. No client id is configured anywhere. Run `/mcp auth TrustGate`
+to sign in again; tokens live in `~/.gemini/mcp-oauth-tokens.json`.
+
+### API-key applications
+
+```bash
+gemini mcp add -t http TrustGate https://<mcp-host>/<application-slug>/mcp \
+  -H "X-AG-API-Key: ag_…"
+```
+
+Or in `settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "TrustGate": {
+      "httpUrl": "https://<mcp-host>/<application-slug>/mcp",
+      "headers": { "X-AG-API-Key": "ag_…" }
+    }
+  }
+}
+```
+
+The MCP plane also accepts the key as `Authorization: Bearer ag_…` or
+`x-api-key`. On a private (Hybrid) data plane add
+`"X-AG-Gateway-Slug": "<gateway-slug>"` to `headers`.
+
+### Enterprise
+
+Two settings in the system settings file give the organization the same control
+a Claude organization connector gives Claude Code:
+
+| Setting | Effect |
+| --- | --- |
+| `admin.mcp.requiredConfig` | Servers injected into every user's session, whatever their own settings say. Put TrustGate here. |
+| `admin.mcp.config` | The only servers a user may configure. Without it, users add their own. |
+
+```json
+{
+  "admin": {
+    "mcp": {
+      "requiredConfig": {
+        "TrustGate": { "httpUrl": "https://<mcp-host>/<application-slug>/mcp", "type": "http" }
+      }
+    }
+  }
+}
+```
+
+Which tools the application exposes is decided in the NeuralTrust console, on the
+application's **General** tab. To limit MCP tool calls, attach the
+[Per-Tool Rate Limiter](/trustgate/policies/per-tool-rate-limiter) policy.
+
+## Route model traffic through TrustGate
+
+Gemini CLI can send its own model requests through an **LLM application**
+instead of straight to Google, so the same rate limits, budgets, guardrails and
+traces apply to the coding agent as to any other application. Gemini CLI speaks
+the Gemini API; TrustGate serves it at
+`/{application-slug}/v1beta/models/{model}:generateContent` and
+`:streamGenerateContent`, and routes it to whichever registry the application
+binds.
+
+This applies to the API-key authentication modes only. **Login with Google**
+talks to the Code Assist service and ignores the base URL.
+
+1. Create an LLM application, bind a Gemini registry and the models it may use,
+   and issue an `ag_…` API key. Copy the LLM host from the **Connect** tab.
+2. Point Gemini CLI at the application:
+
+   ```bash
+   export GOOGLE_GEMINI_BASE_URL="https://<llm-host>/<application-slug>"
+   export GEMINI_API_KEY="ag_…"
+   export GEMINI_CLI_CUSTOM_HEADERS="X-AG-API-Key: ag_…"
+   ```
+
+   With the base URL set, Gemini CLI switches to its `gateway` authentication
+   mode and sends the key as `x-goog-api-key`. TrustGate reads the key from
+   `X-AG-API-Key`, so `GEMINI_CLI_CUSTOM_HEADERS` carries it too. The variable
+   takes comma-separated `Header: value` pairs and reaches model requests only.
+   On a private (Hybrid) data plane add `X-AG-Gateway-Slug: <gateway-slug>`, and
+   to name the person behind the key add `X-NeuralTrust-End-User: ana@example.com`.
+   The end-user value is attribution only: it lands on the trace and in Activity,
+   and grants nothing.
+
+3. Start a new session and send a prompt. The request appears in TrustGate
+   traces under the application.
+
+An administrator can require this mode with
+`"security": { "auth": { "enforcedType": "gateway" } }` in the system settings
+file, alongside the environment variables deployed by MDM.
+
+Gemini CLI names Gemini models. On a route to a Gemini registry they pass
+through. On a cross-format route a bound registry must serve the model name
+Gemini CLI sends, so set `GEMINI_MODEL` to a model the registry offers.
+
+**Limit.** TrustGate does not serve `:countTokens`. Gemini CLI calls it only
+when a prompt carries an image or a file attachment; text and tool calls are
+counted locally. A prompt with an attachment fails through the gateway until
+that route exists.
+
+## Verify
+
+**Hooks.**
+
+1. In Gemini CLI, run `/hooks panel` and confirm the three TrustGuard hooks are
+   listed.
+2. Send a test prompt.
+3. Confirm the event in TrustGuard **Activity** with
+   `source.application = gemini-cli-plugin`.
+
+Smoke-test the binary (optional):
+
+```bash
+echo '{"hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"echo hi"},"session_id":"sess_1"}' \
+  | trustguard-gemini-cli hook
+```
+
+`{}` means allow. If Gemini CLI still never evaluates, the extension is
+disabled or the session predates the install.
+
+**MCP.**
+
+1. Run `/mcp` and confirm **TrustGate** is connected, then call a tool from a
+   bound registry.
+2. Confirm the call in TrustGate **Activity**.
+
+**Model traffic.** Run `/about` and confirm the auth method reads `gateway`,
+then send a prompt and open the trace in the console. A `401` means the key did
+not arrive: check `GEMINI_CLI_CUSTOM_HEADERS`. A `404` means the slug or the path
+is wrong; the base URL must end with the application slug, no `/v1beta`.
+
+## Reference
+
+### Coverage
+
+This table describes the TrustGuard extension, not the TrustGate connections.
+
+| Surface | Monitor | Block | Redact |
+| --- | :--: | :--: | :--: |
+| LLM input | ✅ | ✅ | ❌ |
+| LLM output | ➖ | ➖ | ➖ |
+| Tool call | ✅ | ✅ | ❌ |
+| Tool result | ✅ | ✅ | ❌ |
+
+**Ask.** Gemini CLI honours an `ask` decision on `BeforeTool`: it opens its own
+confirmation prompt and shows the TrustGuard reason beside it. Gates with
+**Ask**, and DLP findings under the default `transform_action: "ask"`, therefore
+reach the developer as a question. An `ask` on `BeforeAgent` does not stop the
+prompt: Gemini CLI has no confirmation dialog for that event, so the prompt is
+submitted with the message shown in the terminal and appended as context. Use a
+**Block** gate to stop a prompt.
+
+**Limits.** The extension does not support redaction and does not evaluate
+tool declarations. The `AfterModel` hook exists but fires per streamed chunk,
+so model responses are not evaluated. Route model traffic through TrustGate for
+controls on that side.
+
+### What is evaluated
+
+| Gemini CLI event | TrustGuard | What you can stop | Enforcement |
+| --- | --- | --- | --- |
+| `BeforeAgent` | `protocol: llm`, `direction: input` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard)); secrets and PII pasted into the agent ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** with `decision: "deny"` |
+| `BeforeTool` (`run_shell_command`) | `protocol: all`, `{ "input": "<command>" }`, `direction: input` | Dangerous or out-of-policy shell commands. `tool.name` is `run_shell_command` | **Block** or **Ask** |
+| `BeforeTool` (MCP and other built-in tools) | `protocol: mcp`, `tools/call`, `direction: input` | Risky MCP tool calls, and built-in tools such as `write_file` or `web_fetch` | **Block** or **Ask** |
+| `AfterTool` | `protocol: mcp`, tool result, `direction: output` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) in tool output, and sensitive data in results, before the model consumes it | **Block**. The reason replaces the result the model sees. Ask gates do not match on output |
+
+For an MCP tool, `tool.name` is the name the server itself uses, taken from
+Gemini CLI's `mcp_context`; the server name travels separately as
+`attributes.mcp.server`. Gate on the short tool name. The policy's
+[detectors](/trustguard/concepts/detectors) decide the verdict.
+
+### Configuration
+
+**`gemini-cli.json` (TrustGuard hooks only).** Keys: `data_url`, `api_key`,
+`fail_mode`, plus the optional settings below. It never holds TrustGate values.
+When the managed file includes `api_key`:
+
+- **Locked:** `api_key`, `data_url`, `fail_mode`. A user file and environment
+  variables cannot replace them.
+- **User-overridable settings** may still be loaded from
+  `~/.trustguard/gemini-cli.json`: `timeout_ms`, `transform_action`,
+  `report_notice`, `events`, `consumer_id`.
+
+Without a managed file, all configuration is loaded from
+`~/.trustguard/gemini-cli.json` (`chmod 600`). `fail_mode: open` plus an empty
+hook body `{}` means allow; that is also the response when evaluate returns
+`allow`.
+
+**Binary discovery.** The bootstrap checks `PATH`, then `~/.trustguard/bin`
+under the stable name, then the versioned name it downloads to. If the download
+fails, the bootstrap fails open and warns on stderr.
+
+**Remote sessions.** Over SSH or WSL, the hooks run on the remote host. An
+MDM-deployed binary on the Mac does not cover that session. The config and
+binary must exist where the agent runs.
+
+**MCP auth.** The CLI accepts OAuth2 or an `ag_…` application key in `headers`
+(the plane also takes it as `Authorization: Bearer ag_…` or `x-api-key`). Which
+IdP backs the OAuth login is configured on the application. See
+[Authentication](/trustgate/concepts/auth). Authenticating to TrustGate is
+separate from authenticating to the upstream servers; a registry using OAuth
+(forwarded) returns a connect link on the first call for a user without a stored
+credential.
+
+### Attributes
+
+The extension stamps `source.application = gemini-cli-plugin` and, when Gemini
+CLI is signed in with Google, `user.email` from its account cache. `consumer_id`
+is sent only when set in config or through `TRUSTGUARD_CONSUMER_ID`.
+
+To target the extension, create a [gate](/trustguard/concepts/policies#gates)
+with `source.application` **eq** `gemini-cli-plugin`, then choose **Ask** or
+**Block** as appropriate for the event. Gates run before detectors. In
+**Observe** mode, Block is recorded but not enforced. Test the condition on the
+policy **Test** tab with Extra parameter **Source application** set to
+`gemini-cli-plugin`.
+
+### Troubleshooting
+
+| Symptom | Cause |
+| --- | --- |
+| An `ask` gate on a prompt did not stop it | There is no confirmation dialog at `BeforeAgent`. Use a **Block** gate |
+| Hooks fire but nothing reaches **Activity** | `gemini-cli.json` has no `tgk_…` key, so the binary allows without calling evaluate, or `data_url` is incorrect |
+| `/hooks panel` lists nothing | The extension was installed in a running session, or `hooksConfig.enabled` is false in a settings file the system file does not override. Start a new session |
+| Every tool call is denied with a Node error | `node` is not on the `PATH` Gemini CLI inherited. Gemini CLI treats a hook exit code above 1 as a denial. Install Node where the agent runs |
+| Hooks work locally but not over SSH / WSL | Hooks run on the remote host. The binary and config have to be there |
+| Bootstrap answers `{}` without running the binary | The pinned release could not be downloaded, or the checksum did not match. The bootstrap allows the action and says why on stderr |
+| The MCP sign-in never opens | The application uses an API key, not OAuth, or the `401` challenge was swallowed by a proxy. Check the application's **Auth** tab |
+| Model requests return `401` through the gateway | Gemini CLI sent the key only as `x-goog-api-key`. Set `GEMINI_CLI_CUSTOM_HEADERS="X-AG-API-Key: ag_…"` |
+| `Invalid auth method selected` on start | Recent Gemini CLI versions reject `GOOGLE_API_KEY` together with a base URL. Use `GEMINI_API_KEY` |
+| A prompt with an image fails through the gateway | Gemini CLI calls `:countTokens` for attachments and TrustGate does not serve it |
+
+## Related
+
+- [TrustGuard extension repository](https://github.com/NeuralTrust/trustguard-gemini-cli-plugin)
+- [Collectors](/trustguard/concepts/collectors): API keys, policy routing and attribution
+- [Policies: Gates](/trustguard/concepts/policies#gates): configure Block and Ask
+- [Connect an agent](/trustgate/mcp/connect): what any MCP client needs from TrustGate
+- [Connect your application](/trustgate/llm/connect): base URL, key and the `model` field on the LLM plane
+- [Claude Code](/integrations/claude-code) · [Codex](/integrations/codex): the same three surfaces on other coding agents
