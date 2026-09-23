@@ -1,0 +1,157 @@
+---
+title: "TrustGate SDK"
+description: "Connect your own code to a TrustGate application with its key alone: the gateway is found for you, and the run is checked before it starts"
+sidebarTitle: "Quickstart"
+---
+
+When you write the agent yourself, the URL is the easy part. MCP does not carry
+**who a call runs as**, **which credential** it travels with, or **what to do
+when an upstream account is not connected**. The TrustGate SDK exists to answer
+those three, in Python and TypeScript, with the same behaviour in both.
+
+An agent that already speaks MCP, such as Claude Code or Cursor, does not need
+the SDK. It needs a URL and a way to sign in: see
+[Connect an agent](/trustgate/mcp/connect).
+
+## Install
+
+Both packages have no runtime dependencies: the Python one uses the standard
+library, the TypeScript one the global `fetch`.
+
+<CodeGroup>
+  ```bash Python
+  pip install trustgate-sdk      # Python 3.10+, imported as trustgate
+  ```
+
+  ```bash TypeScript
+  npm install @neuraltrust/trustgate      # Node.js 22+
+  ```
+</CodeGroup>
+
+## One key, nothing else
+
+<CodeGroup>
+  ```python Python
+  from trustgate import TrustGate
+
+  tg = TrustGate()  # reads TRUSTGATE_API_KEY
+  ```
+
+  ```ts TypeScript
+  import { TrustGate } from "@neuraltrust/trustgate"
+
+  const tg = new TrustGate() // reads TRUSTGATE_API_KEY
+  ```
+</CodeGroup>
+
+The key is the application's own, issued from its **Auth** tab in the console.
+The gateway it belongs to and the addresses the application is served on never
+travel with it, so the SDK asks: it sends the key to
+`https://agentgateway-mcp.neuraltrust.ai`, which finds the gateway from the key
+and answers with that gateway's own addresses. From then on the SDK talks only
+to those.
+
+You name nothing else unless one key reaches two applications on the same
+plane, which the SDK refuses to guess at. A Hybrid gateway is the one case that
+needs an address. See [Configuration](/sdks/trustgate/configuration).
+
+## Check the run before it starts
+
+<CodeGroup>
+  ```python Python
+  import sys
+  from trustgate import MissingToolsError, UpstreamNotConnectedError
+
+  try:
+      agent = tg.connect(requires=["search", "create_issue"])
+  except MissingToolsError as e:
+      sys.exit(f"the application is missing {e.missing}; ask your admin")
+  except UpstreamNotConnectedError as e:
+      sys.exit(str(e))  # names each server and who connects it
+  ```
+
+  ```ts TypeScript
+  import { MissingToolsError, UpstreamNotConnectedError } from "@neuraltrust/trustgate"
+
+  const agent = await tg.connect({ requires: ["search", "create_issue"] }).catch((error) => {
+    if (error instanceof MissingToolsError) fail(`the application is missing ${error.missing}; ask your admin`)
+    if (error instanceof UpstreamNotConnectedError) fail(error.message)
+    throw error
+  })
+  ```
+</CodeGroup>
+
+`connect()` is the application acting as itself, with the key and nothing else.
+It proves two things before returning:
+
+1. **The servers behind it have an account.** A batch has nobody to open a
+   connect link once it is running, so the check comes before the first row.
+   The message names who has to act: an administrator, for a server whose one
+   account every caller shares, or your code, with the line to write, for a
+   server that keeps an account per user.
+2. **The tools you need are there.** The tool set belongs to an admin and can be
+   narrowed without warning. `requires` turns that into a refusal at startup
+   instead of a failure mid-conversation.
+
+Name tools as their own server names them: `search`, not the prefixed name the
+gateway publishes when several servers are bound. The SDK adds the prefix, and
+asks only when two of your servers serve the same tool.
+
+## What the key reaches
+
+`identity()` answers what `connect()` reads, without connecting: the gateway,
+when the key expires, and for each application its plane, its address and which
+servers are still waiting for an account. It is asked once and remembered.
+
+<CodeGroup>
+  ```python Python
+  identity = tg.identity()
+  identity.key.expires_at      # None when the key never expires
+  for consumer in identity.consumers:
+      print(consumer.type, consumer.slug, consumer.url)
+  ```
+
+  ```ts TypeScript
+  const identity = await tg.identity()
+  identity.key.expiresAt       // undefined when the key never expires
+  for (const consumer of identity.consumers) {
+    console.log(consumer.type, consumer.slug, consumer.url)
+  }
+  ```
+</CodeGroup>
+
+The `whoami` example in the [SDK repository](https://github.com/NeuralTrust/trustgate-sdk/tree/main/examples)
+prints all of it. Run it first when something is off.
+
+## Next
+
+<div className="nt-cat-grid">
+  <a className="nt-cat-card" href="/sdks/trustgate/tools">
+    <span className="nt-cat-logo nt-harness-logo nt-logo-code nt-cat-icon" aria-hidden="true"></span>
+    <span className="nt-cat-text">
+      <span className="nt-cat-name">Tools</span>
+      <span className="nt-cat-meta"><span className="nt-cat-note">Hand the endpoint to a framework, or translate the tools</span></span>
+    </span>
+  </a>
+  <a className="nt-cat-card" href="/sdks/trustgate/end-users">
+    <span className="nt-cat-logo nt-harness-logo nt-logo-globe nt-cat-icon" aria-hidden="true"></span>
+    <span className="nt-cat-text">
+      <span className="nt-cat-name">Acting for end users</span>
+      <span className="nt-cat-meta"><span className="nt-cat-note">Per-user accounts and connect links</span></span>
+    </span>
+  </a>
+  <a className="nt-cat-card" href="/sdks/trustgate/models">
+    <span className="nt-cat-logo nt-brand-mark nt-mark-openai" aria-hidden="true"></span>
+    <span className="nt-cat-text">
+      <span className="nt-cat-name">Models</span>
+      <span className="nt-cat-meta"><span className="nt-cat-note">The same key, for the LLM plane</span></span>
+    </span>
+  </a>
+  <a className="nt-cat-card" href="/sdks/trustgate/errors">
+    <span className="nt-cat-logo nt-harness-logo nt-logo-code nt-cat-icon" aria-hidden="true"></span>
+    <span className="nt-cat-text">
+      <span className="nt-cat-name">Errors</span>
+      <span className="nt-cat-meta"><span className="nt-cat-note">Every failure, by name</span></span>
+    </span>
+  </a>
+</div>
