@@ -64,12 +64,12 @@ and one of them will start seeing `429`s caused by the other nine.
 
 It is also a **raw header read**. It is not the end-user attribution pipeline,
 which [never reaches policy decisions](/trustgate/observability/end-user-attribution).
-If your clients declare their user only in the OpenAI `user` body field, this
-field cannot see it.
+A client that identifies its end user inside the request body rather than in a
+header is invisible to this setting.
 </Warning>
 
 <Note>
-**Group by header never partitions MCP traffic.** An MCP `tools/call` reaches the
+**Group by header never partitions MCP traffic.** An MCP tool call reaches the
 policy without any HTTP headers attached, so the value is always empty and every
 MCP request lands on the shared counter. Configure it if you like; on MCP it does
 nothing.
@@ -147,25 +147,14 @@ A refusal on **LLM** traffic is `429` with these headers, where `<scope>` is
 | `X-RateLimit-<scope>-Reset` | Every response, refused or not — a Unix timestamp one window from now |
 | `Retry-After` | Refusals only, in seconds |
 
-and this body:
+and a refusal that says the rate limit was exceeded, whose limit it was, what
+the limit and the window are, and how long to wait before trying again.
 
-```json
-{
-  "error": "rate limit exceeded",
-  "message": "Request blocked: consumer rate limit exceeded. Retry after 60s.",
-  "reason": "consumer",
-  "scope": "consumer",
-  "limit": 60,
-  "window": "1m",
-  "retry_after_seconds": 60
-}
-```
-
-On **MCP** traffic the same refusal is a JSON-RPC error with code **`-32004`**
-on HTTP **`200`** — a non-2xx would drop the client's MCP session — carrying the
-same headers and the same payload in its `data`. The code is deliberately not the
-generic policy-denied one: `-32004` tells a client this is a matter of timing and
-retrying later will work.
+On **MCP** traffic the same refusal comes back as an error carried inside a
+`200` response — a non-2xx would drop the client's MCP session — under the code
+**`-32004`**, with the same headers and the same detail. That code is
+deliberately not the generic policy-denied one: it tells a client this is a
+matter of timing, and that retrying later will work.
 
 ### Modes and failures
 
@@ -173,7 +162,7 @@ retrying later will work.
 |---|---|---|---|
 | Under the limit | Counted, forwarded | Counted, forwarded | Counted, forwarded |
 | At or above the limit | `429`, refused, **not counted** | Delayed up to 2s, then **counted and forwarded** | Recorded, counted, forwarded |
-| MCP `tools/call` over the limit | JSON-RPC `-32004` on HTTP `200` | Delayed, then forwarded | Recorded, forwarded |
+| An MCP tool call over the limit | `-32004` inside a `200` response | Delayed, then forwarded | Recorded, forwarded |
 | Counter store unreachable, LLM leg | **`502`, refused** | **`502`, refused** | **`502`, refused** |
 | Counter store unreachable, MCP leg | Logged, **request allowed** | Logged, allowed | Logged, allowed |
 
@@ -190,9 +179,10 @@ whichever kind you actually run.
 
 ### Limits
 
-- **On MCP it counts `tools/call` and nothing else.** `tools/list`,
-  `initialize`, and every other JSON-RPC method pass without touching the
-  counter. A client that only lists tools is invisible to this policy.
+- **On MCP it counts tool calls and nothing else.** Listing the available
+  tools, opening the session, and every other kind of MCP message pass without
+  touching the counter. A client that only lists tools is invisible to this
+  policy.
 - **Group by header does not work on MCP at all.** See the note above.
 - **Reading the counter and incrementing it are two steps, not one.** A burst of
   genuinely simultaneous requests can all read the same under-limit value and all
@@ -235,17 +225,17 @@ if the traffic you are sending is not one of them, nothing is being counted and
 the next step will never refuse.
 
 The running count itself is not something the Playground shows you. The gateway
-puts it in the response headers listed above, so a client of your own sees
-`X-RateLimit-<scope>-Remaining` fall by one per request; the Playground does not
-display response headers.
+puts it in the response headers listed above, so a client of your own watches the
+remaining allowance fall by one per request; the Playground does not display
+response headers.
 </Step>
 
 <Step title="The limit refuses">
 Keep sending until you have made one more request than **Max requests**.
 
-Expect `429`, a `Retry-After` matching what you configured, and
-**`Provider 0 ms`** in the timing breakdown. That zero is the evidence that
-matters: the refused request never reached the model.
+Expect `429`, a retry-after matching what you configured, and **no time at the
+provider** in the timing breakdown. That the provider leg is empty is the
+evidence that matters: the refused request never reached the model.
 
 In **Observe** you will see no `429` — look for the violation on the event
 instead. In **Throttle** you will see no `429` either; you will see the request

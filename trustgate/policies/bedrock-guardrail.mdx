@@ -58,15 +58,14 @@ for, and the AWS-side decisions that change what it does:
 **TrustGate's PII action does not set AWS's per-entity action.** They are two
 different decisions, and both have to agree before anything is ever masked.
 
-AWS decides, per entity, whether a match is reported as `BLOCKED` or
-`ANONYMIZED`. TrustGate's **PII action** decides only what the gateway does when
-AWS reports `ANONYMIZED` — and its default, *Block request*, **overrides AWS's
-anonymise verdict into a hard block**. A guardrail configured to mask email
-addresses, dropped into a policy left at its defaults, refuses the request
-instead.
+AWS decides, per entity, whether a match comes back as blocked or as anonymised.
+TrustGate's **PII action** decides only what the gateway does with an anonymised
+verdict — and its default, *Block request*, **turns AWS's anonymise verdict into
+a hard block**. A guardrail configured to mask email addresses, dropped into a
+policy left at its defaults, refuses the request instead.
 
 Real masking needs both: the entity set to *Anonymize* in the AWS console **and**
-**PII action** set to *Anonymize* here. An entity AWS reports as `BLOCKED` is
+**PII action** set to *Anonymize* here. An entity AWS comes back as blocked is
 always a block, whatever this setting says.
 </Warning>
 
@@ -150,15 +149,15 @@ request.
 
 **PII action** — *Block request* (the default) or *Anonymize*. Read the warning
 in **Part 1** before changing it: this decides what the gateway does with an
-`ANONYMIZED` verdict from AWS, and it does nothing at all unless the entity is
-set to anonymise on the AWS side.
+anonymised verdict from AWS, and it does nothing at all unless the entity is set
+to anonymise on the AWS side.
 
 **Block message** — leave your expectations low here.
 
 <Warning>
 **The block message is stored and never used.** The field is saved with the
-policy, and the `403` body carries the matched policy and the matched name —
-never this text. Do not rely on it to tell your callers anything.
+policy, and the `403` names the matched policy and the matched name — never this
+text. Do not rely on it to tell your callers anything.
 </Warning>
 
 ### Advanced Settings
@@ -198,26 +197,15 @@ is the one named in the response — regardless of how many others also matched,
 and regardless of which you would consider the more serious.
 </Step>
 <Step title="A blocking finding refuses the request">
-The request never reaches the model. The caller gets `403` and a body naming the
-policy that fired and, where AWS provides one, the name it matched:
-
-```json
-{
-  "error": {
-    "type": "guardrail_blocked",
-    "policy": "topic_policy",
-    "name": "DangerousTopics"
-  }
-}
-```
-
-`policy` is one of `topic_policy`, `content_policy`, `word_policy`,
-`sensitive_information` or `contextual_grounding`.
+The request never reaches the model. The caller gets `403`, and the response
+names which of the guardrail's policies fired — denied topics, content filters,
+word lists, sensitive information or contextual grounding — and, where AWS
+provides one, the name it matched.
 </Step>
 <Step title="Masking applies only if nothing blocked">
-With **PII action** set to *Anonymize*, and AWS reporting `ANONYMIZED`, the
-masked text AWS returned replaces the original message and the request continues
-to the model. The model never sees the original.
+With **PII action** set to *Anonymize*, and AWS coming back with an anonymised
+verdict, the masked text AWS returned replaces the original message and the
+request continues to the model. The model never sees the original.
 </Step>
 <Step title="Otherwise the request passes through untouched">
 </Step>
@@ -235,10 +223,10 @@ forward the original. Masking that fails is never a silent pass-through.
 
 | Situation | Enforce | Observe |
 |---|---|---|
-| A topic, content, word or grounding policy reports `BLOCKED` | `403`, refused | Recorded, request continues |
-| Sensitive information reports `BLOCKED` | `403`, refused | Recorded, request continues |
-| Sensitive information reports `ANONYMIZED`, **PII action** *Block request* | **`403`, refused** | Recorded, original text sent |
-| Sensitive information reports `ANONYMIZED`, **PII action** *Anonymize* | Rewritten in place | Recorded, **original text sent** |
+| A topic, content, word or grounding policy comes back blocked | `403`, refused | Recorded, request continues |
+| Sensitive information comes back blocked | `403`, refused | Recorded, request continues |
+| Sensitive information comes back anonymised, **PII action** *Block request* | **`403`, refused** | Recorded, original text sent |
+| Sensitive information comes back anonymised, **PII action** *Anonymize* | Rewritten in place | Recorded, **original text sent** |
 | *Anonymize*, but the masked text cannot be applied | **`403`, refused** | Recorded, original text sent |
 | AWS unreachable, throttled, denied, or the credentials cannot be resolved | **`502`, refused** | Recorded, request continues |
 
@@ -309,9 +297,9 @@ plain **`allowed`**, the entity is not in your guardrail at all.
 <Step title="A denied topic — blocking works">
 Send something your guardrail's denied topics or content filters should refuse.
 
-Expect the decision **`block`**, a `403` whose body names the policy that fired,
-and **`Provider 0 ms`** in the timing breakdown. That zero is the evidence that
-matters: the request never reached the model.
+Expect the decision **`block`**, a `403` naming the policy that fired, and **no
+time at the provider** in the timing breakdown. That the provider leg is empty is
+the evidence that matters: the request never reached the model.
 </Step>
 </Steps>
 
@@ -329,11 +317,11 @@ fields recorded.
 | `502` that starts on its own, with nothing changed | A **session token** or other temporary credential expired | Replace the credential; nothing refreshes a pasted session token |
 | Every assume-role call is denied | The role's trust policy requires an `sts:ExternalId` | Remove that condition — the policy cannot send one |
 | `403` where you expected masking | The entity is set to *Block* in AWS, or **PII action** is *Block request* | Both have to say anonymise; see the warning in **Part 1** |
-| `403` with `"policy": "sensitive_information"` although **PII action** is *Anonymize* | AWS returned no masked text, or the request body could not be re-encoded | Expected, and deliberate: the original is never forwarded when masking fails |
+| `403` naming the sensitive-information policy although **PII action** is *Anonymize* | AWS returned no masked text, or the request body could not be re-encoded | Expected, and deliberate: the original is never forwarded when masking fails |
 | Nothing is ever blocked, and the guardrail looks correct in AWS | The guardrail's only active policy is contextual grounding | It cannot fire here. Add a topic, content or word policy |
 | Behaviour changed with no change to the policy | The policy points at `DRAFT` and someone edited the guardrail | Pin **Guardrail version** to a published version |
 | A jailbreak in the system prompt or a tool result is never caught | Only the last user message is sent | Expected. Use a guardrail that inspects the whole conversation |
-| Your **Block message** never reaches the caller | It is stored and never read | Expected; the body carries the matched policy and name |
+| Your **Block message** never reaches the caller | It is stored and never read | Expected; the refusal names the matched policy and name instead |
 
 ---
 

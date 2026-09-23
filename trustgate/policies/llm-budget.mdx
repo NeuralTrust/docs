@@ -199,24 +199,12 @@ Every response, refused or not, carries the state of the reported window:
 
 | Unit | Headers |
 |---|---|
-| Tokens | `X-Ratelimit-Limit-Tokens`, `X-Ratelimit-Remaining-Tokens`, `X-Ratelimit-Reset-Tokens` (seconds, e.g. `2400s`) |
+| Tokens | `X-Ratelimit-Limit-Tokens`, `X-Ratelimit-Remaining-Tokens`, `X-Ratelimit-Reset-Tokens` (in seconds) |
 | Dollars | `X-Budget-Unit`, `X-Budget-Scope`, `X-Budget-Window`, `X-Budget-Limit-Usd`, `X-Budget-Remaining-Usd`, `X-Budget-Reset` |
 
-A refusal is `429` with this body:
-
-```json
-{
-  "error": {
-    "type": "token_budget_exceeded",
-    "scope": "consumer",
-    "window": "1h"
-  }
-}
-```
-
-`type` is `token_budget_exceeded` or `dollar_budget_exceeded`. `scope` is `global`
-for a gateway-wide policy and `consumer` for a targeted one. `window` is the
-window of the ceiling that was breached.
+A refusal is `429`, and the response says which budget was exhausted — the token
+one or the dollar one — whether the ceiling was the gateway-wide one or the one
+targeted at this application, and which window was breached.
 
 ### Modes and failures
 
@@ -302,9 +290,8 @@ Send the same prompt a few more times, then look at the events for those
 requests. Each one should carry the usage it was charged for.
 
 The remaining allowance is not something the Playground shows you. The gateway
-puts it in the response headers listed above, so a client of your own sees
-`X-Ratelimit-Remaining-Tokens` — or `X-Budget-Remaining-Usd` for a dollar
-budget — fall as it goes; the Playground does not display response headers.
+puts it in the response headers listed above, so a client of your own watches it
+fall as it goes; the Playground does not display response headers.
 
 If nothing is being charged, either the traffic is not in this policy's scope —
 check **Coverage** on the policy — or the responses carry no usage at all. For a
@@ -317,14 +304,15 @@ Keep sending. **Expect to cross the ceiling without being refused** — that
 request is served in full — and to be refused on a later one. That is the
 policy working as designed, not a fault.
 
-With *Reject request*, expect `429`, a body naming the budget type, and
-**`Provider 0 ms`** in the timing breakdown. That zero is the evidence that
-matters: the refused request never reached the model.
+With *Reject request*, expect `429`, a refusal naming the budget that was
+exhausted, and **no time at the provider** in the timing breakdown. That the
+provider leg is empty is the evidence that matters: the refused request never
+reached the model.
 
-With *Downgrade model*, expect `200` and
-`X-NeuralTrust-Model-Downgraded: <original>→<target>` on the response. **Read
-which model answered**, not just the status. If you get a `429` instead, the
-downgrade target is not valid for this request.
+With *Downgrade model*, expect `200` and the downgrade header on the response,
+naming the model asked for and the one that answered. **Read which model
+answered**, not just the status. If you get a `429` instead, the downgrade target
+is not valid for this request.
 </Step>
 
 <Step title="The partition holds (only if you set Group by header)">

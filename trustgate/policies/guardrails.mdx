@@ -1,89 +1,73 @@
 ---
 title: "Guardrails"
-description: "Inspect what goes in and what comes out. TrustGuard, a provider's moderation service, an AWS or Google guardrail, or deterministic regex — and the one thing none of them can do."
+description: "Six policies inspect what goes in and what comes out. This page is for choosing between them; each has a page of its own for setting it up."
 ---
 
-Applies to **LLM and MCP** — the Model Context Protocol your agents call tools
-over. Each guardrail inspects the request, the response, or both, and blocks or
-transforms what matches.
+A guardrail inspects the traffic passing through the gateway and either lets it
+through, refuses it, or rewrites it. Six of them are available, and they differ
+in ways that matter before you pick one.
 
 ## The one limit shared by all of them
 
-**Streaming responses cannot be inspected or blocked in real time.** Tokens are
-already leaving when a detector would decide. Put guardrails on the request leg,
-or on non-streaming responses, for enforcement. A response guardrail on a
-streaming application observes; it does not protect.
+**A streamed response cannot be inspected or blocked as it is being written.**
+The words are already reaching the reader by the time a detector would decide.
+Put a guardrail on the request leg, or on non-streamed responses, when you need
+it to actually stop something. On a streaming application, a response-side
+guardrail observes; it does not protect.
 
-## TrustGuard
+## Choosing one
 
-Runs [TrustGuard](/trustguard/overview) detectors — jailbreak, PII, secrets,
-toxicity, tool abuse, multi-turn attacks — against the request, the response, or
-both, and applies the action TrustGuard returns. It needs an Agent Runtime
-collector connected to this gateway, and **it does not create one for you** — the
-policy will not save until one exists.
+| Guardrail | Covers | Can rewrite as well as refuse | What you need first |
+|---|---|---|---|
+| [TrustGuard](/trustgate/policies/trustguard-guardrail) | LLM and MCP | Yes | A runtime collector on this gateway |
+| [OpenAI Moderation](/trustgate/policies/openai-moderation) | LLM | No | An OpenAI key |
+| [Azure Content Safety](/trustgate/policies/azure-content-safety) | LLM, requests only | No | An Azure resource, its endpoint and key |
+| [AWS Bedrock Guardrail](/trustgate/policies/bedrock-guardrail) | LLM | Yes | A guardrail you have already built in Bedrock |
+| [Google Model Armor](/trustgate/policies/google-model-armor) | LLM | Yes | A template in Google Cloud, and an IAM grant |
+| [Regex Replace](/trustgate/policies/regex-replace) | LLM | Rewrites only — it never refuses | Nothing |
 
-**On error**: fail open for transport and service failures. Authentication,
-rate-limit and entitlement responses from TrustGuard refuse the request
-regardless, **and in Observe too** — a gateway that cannot prove it is allowed to
-call the detector does not get to guess. The
-[TrustGuard page](/trustgate/policies/trustguard-guardrail#modes-and-failures)
-has the full table.
+Four questions usually settle it.
 
-Findings correlate with [Telemetry alerts](/platform/alerts), which is the
-argument for this one over a provider's moderation API when you already run
-TrustGuard.
+**Do you already run TrustGuard?** Then reach for its guardrail. Its findings
+line up with [Telemetry alerts](/platform/alerts), so a detection here becomes
+part of the same picture as everything else you watch. No provider's moderation
+API can do that.
 
-## OpenAI Moderation
+**Do you need the content cleaned rather than the request refused?** TrustGuard,
+Bedrock and Model Armor can rewrite the content in place and let the call
+continue. Azure and OpenAI Moderation return a score, so all they can do is
+allow or refuse.
 
-Screens text with OpenAI's moderation model against per-category thresholds; a
-score at or above a threshold blocks, and **block on flagged** blocks anything
-OpenAI flags even without a threshold. Needs an OpenAI key of its own. Text only.
+**Is the rule something you can write down exactly?** An internal hostname, a
+ticket reference, a key prefix — that is Regex Replace. It calls nothing, scores
+nothing, and does exactly what the pattern says. For anything needing judgement,
+you want one of the others.
 
-In enforce mode it **fails closed** on any moderator error. Note before you pick
-it: neither the thresholds nor **block on flagged** has a field on its form, so
-a policy you create in the console scores everything and refuses nothing until
-someone sets one of them for you.
+**Do you already own the policy somewhere else?** Bedrock and Model Armor reuse
+a guardrail or template you built in your own cloud account, so the definition
+lives in one place rather than two. That is their real argument, and the cost is
+a setup that happens in the provider's console before this one is any use.
 
-## Azure Content Safety
+## Two things worth knowing before you commit
 
-Azure's Analyze Text against **Hate**, **Violence**, **SelfHarm** and **Sexual**,
-with a severity threshold per category; only the categories you list are
-enforced. Needs the endpoint and a subscription key. Request leg only. Fails
-closed in enforce mode.
+**An OpenAI Moderation policy created in the console scores everything and
+refuses nothing.** Blocking needs a threshold or *block on flagged*, and the
+form draws neither. Someone has to set one for you before that policy is a
+guardrail rather than an instrument.
 
-## AWS Bedrock guardrail
-
-Reuses a guardrail you already defined in Bedrock — its topic, content, word,
-sensitive-information and grounding policies — against prompts and responses.
-Authenticate with static keys or an IAM role. The one distinctive option is
-**PII action**: block, or **anonymise in place** — redacting rather than refusing,
-which only this and Google Model Armor can do.
-
-## Google Model Armor
-
-Reuses a template you defined in Google Cloud, covering sensitive data,
-Responsible AI categories, prompt injection and jailbreak, malicious URLs and
-CSAM in a single call against prompts and responses. Like Bedrock it can
-**mask in place** instead of refusing, reinjecting the de-identified text Google
-returns.
-
-Standing it up is more work than the others: the template depends on two
-Sensitive Data Protection templates, a region that must match everywhere, and an
-IAM grant that Editor does not include. It has a guide of its own.
-
-<Card title="Set up Google Model Armor" icon="shield-check" href="/trustgate/policies/google-model-armor">
-Google Cloud template, credentials, policy settings, and how to verify it.
-</Card>
-
-## Regex Replace
-
-Ordered RE2 rewrite rules on the request **or** the response — one leg per
-policy. Each rule sees the previous rule's output. No external service, fully
-deterministic, and it does exactly what the pattern says and nothing more, which
-is both its virtue and its limit.
+**Azure never sees the model's answer.** It runs on requests only. If what you
+need to inspect is what the model said, this is not the one.
 
 ## Combining them
 
-A chain may hold several. TrustGuard on the request and a Bedrock guardrail
-anonymising PII on the response is a common pair: the first refuses what should
-not go out, the second cleans what comes back.
+A chain may hold several, and they run in policy-priority order. TrustGuard on
+the request and a Bedrock guardrail anonymising sensitive data on the response
+is a common pair: the first refuses what should not go out, the second cleans
+what comes back.
+
+A guardrail that rewrites content changes what any guardrail after it sees.
+
+## Related
+
+- [Policies overview](/trustgate/policies/overview) — scope, composition and modes
+- [TrustGuard](/trustguard/overview) — the detectors behind the TrustGuard policy

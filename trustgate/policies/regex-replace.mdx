@@ -11,10 +11,9 @@ which is both its virtue and its limit.
 
 Applies to **LLM** traffic only.
 
-It is the only guardrail in the catalogue that **can never block**. Every other
-one decides; this one edits. Reach for it when you know the exact shape of what
-must not pass — an internal hostname, a ticket reference, a key prefix — and you
-want that removed without a detector's opinion in the loop.
+It **can never block** — it only edits. Reach for it when you know the exact
+shape of what must not pass — an internal hostname, a ticket reference, a key
+prefix — and you want that removed without a detector's opinion in the loop.
 
 ---
 
@@ -40,7 +39,7 @@ the previous rule's output**.
 
 | Field | What it is |
 |---|---|
-| **Pattern** | An RE2 regular expression. Required. |
+| **Pattern** | The expression to match. The gateway matches with RE2, a regular-expression engine that deliberately leaves a few features out — see [Writing patterns without lookaround](#writing-patterns-without-lookaround). Required. |
 | **Replacement** | The text that replaces each match. `$1` and `${name}` insert capture groups. Empty removes the match. |
 | **Case Insensitive** | Matches without regard to letter case. Off by default. |
 | **Multiline** | `^` and `$` match at line boundaries rather than only at the ends of the text. Off by default. |
@@ -111,8 +110,8 @@ it is the assistant's content.
 </Step>
 
 <Step title="If nothing changed, the body is forwarded untouched">
-The event records `no_match`. A rule whose replacement is identical to what it
-matched counts as no change.
+The event records that nothing matched. A rule whose replacement is identical to
+what it matched counts as no change.
 </Step>
 
 <Step title="If something changed, the rewritten body is forwarded">
@@ -129,7 +128,7 @@ There is no fourth step. Nothing here produces a `403`.
 | Situation | Enforce | Observe |
 |---|---|---|
 | A rule matches | Content rewritten, event `rewritten` | Event `observed`, **original content forwarded** |
-| No rule matches | Forwarded untouched, event `no_match` | Forwarded untouched, event `no_match` |
+| No rule matches | Forwarded untouched, recorded as no match | Forwarded untouched, recorded as no match |
 | The leg does not match **Target** | Forwarded untouched | Forwarded untouched |
 | Streaming response | Forwarded untouched | Forwarded untouched |
 | The body cannot be read or written back | **Forwarded unredacted** | Forwarded unredacted |
@@ -164,17 +163,15 @@ control over something that must never leave.
   arguments, not reasoning.
 - **A rule cannot match across messages.** Each message is rewritten on its own,
   so a pattern spanning a turn boundary never fires.
-- **A rewrite re-encodes the whole body, and fields the gateway does not model
-  are lost.** When a rule fires, the request is rebuilt from the gateway's own
+- **A rewrite re-encodes the whole body, and anything the gateway does not model
+  is lost.** When a rule fires, the request is rebuilt from the gateway's own
   neutral representation rather than patched in place, and that representation
   carries only the model, the system prompt, the messages, the tools and a
-  handful of sampling settings. Everything else at the top level is dropped —
-  `seed`, `n`, `user`, the penalties, `logit_bias`, `stream_options`, `store`
-  and `metadata` on an OpenAI-shaped body, `thinking` on an Anthropic one,
-  `safetySettings` and `cachedContent` on a Gemini one; the response leg loses
-  `created`, `system_fingerprint` and `service_tier`. A body no rule matched is
-  forwarded byte for byte, so only the requests this policy actually rewrites
-  are affected.
+  handful of sampling settings. Everything else the client sent is dropped: the
+  provider-specific options, the sampling controls the gateway does not carry,
+  and, on the response leg, a few identifiers the provider stamps on its answer.
+  A body no rule matched is forwarded byte for byte, so only the requests this
+  policy actually rewrites are affected.
 - **A rewritten multimodal message keeps only its text.** Content sent as an
   array of parts — text beside an image, an audio clip or a document — is
   flattened to the joined text of its text parts before the rules see it, and
@@ -214,9 +211,9 @@ these **in this order**.
 hello, write me a short greeting
 ```
 
-Expect a normal reply and no rewrite — the event records `no_match`. If this
-fails, the problem is the application or the model, not the rules. Fix it before
-going on.
+Expect a normal reply and no rewrite — the event records that nothing matched. If
+this fails, the problem is the application or the model, not the rules. Fix it
+before going on.
 </Step>
 
 <Step title="A rule fires — the rewrite happens">
