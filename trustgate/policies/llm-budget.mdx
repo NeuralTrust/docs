@@ -1,6 +1,7 @@
 ---
 title: "LLM Budget"
-description: "Cap what an application may spend on models over a window, in tokens or dollars, and choose whether the cap rejects or downgrades."
+sidebarTitle: "LLM Budget"
+description: "Cap what an application may spend on models over a window, in tokens or dollars — a brake that stops the next request, not a wall that stops this one."
 ---
 
 Applies to **LLM**.
@@ -11,23 +12,134 @@ limit alone leaves spend unbounded. The budget is the ceiling on tokens or dolla
 an application, or an end user behind it, may consume in a window — the thing
 that keeps a runaway agent from becoming an invoice.
 
-Caps usage over a window, in **tokens** or in **dollars**, and decides what
-happens when the cap is reached.
+<Warning>
+**Nothing about the incoming request is estimated or reserved.** The budget
+compares the counter of what has *already been charged* against the ceiling, and
+usage is charged only once the answer is known — after the response has been
+sent. Three consequences, and all three matter:
 
-| Setting | Meaning |
+- **The request that crosses the ceiling is served in full.** It is charged
+  afterwards. The first refusal is the request *after* it.
+- **Concurrent requests are all admitted.** Ten simultaneous requests against an
+  exhausted-but-not-yet-charged counter all read the same under-budget value.
+- **Accrual is asynchronous.** Even a sequential client can get one or two more
+  requests through between the crossing request and the first refusal.
+
+A budget of 100,000 tokens does not guarantee you spend 100,000 tokens. It
+guarantees you stop *soon after* 100,000, by whatever a request in flight costs.
+Set it where the overshoot is affordable, and do not treat it as a hard cap on an
+expensive model. It is a brake, not a wall.
+</Warning>
+
+**LLM Budget** is what the catalogue calls it. Elsewhere — on an event, for
+instance — the same type goes by its older name, `token_rate_limiter`. One
+policy type, two names; nothing behaves differently.
+
+---
+
+## Configure the policy
+
+Open **Policies** → **Library** → **LLM Budget**.
+
+### Budget
+
+| Field | What to enter |
 |---|---|
-| **Unit** and **Max** | Tokens (whole numbers) or dollars (fractional), per window. |
-| **Time window** | Seconds to days. Anything under a minute is raised to a minute. |
-| **When exceeded** | **Reject** the request, or **downgrade** the model to a cheaper one on the same provider. |
-| **Per-model limits** | Tighter caps for specific models or families — `claude-opus-*`. A request is checked against the main budget and against the most specific rule matching its model; exceeding either triggers the behaviour. |
-| **Counting** | Total, input only, or output only. |
-| **Group by header** | A separate budget per value of a header — `X-User-Id` — inside the policy scope. |
+| **Unit** | *Tokens* or *Dollars*. Tokens must be whole numbers; dollars may be fractional. |
+| **Max** | The ceiling for the window. Required, and positive. |
+| **Time window** | A number and a unit — **Seconds**, **Minutes**, **Hours** or **Days**. The console defaults to **1 hour**. |
 
-As with the rate limiter, the budget is one counter gateway-wide and one per
-application when targeted.
+The form shows the pair back as a sentence — *Allow 100000 tokens per hour*.
 
-The budget is checked before the request goes upstream, using an estimate, and
-the actual usage is charged after the response.
+<Warning>
+**The console offers Seconds, and the gateway does not honour anything under a
+minute.** Any window shorter than 60 seconds is silently raised to 60 seconds.
+The summary line will still read *per 30 seconds*. Choose a window of a minute or
+more so the form and the gateway agree.
+</Warning>
+
+<Note>
+**The window is fixed, and it opens on the first charge.** It is not a rolling
+window and not aligned to the clock: the counter is created when usage is first
+charged to it, lives exactly the window's length, then disappears and the whole
+allowance returns at once. An hour-long budget exhausted at 10:59 is empty for
+one minute and full again at 11:00 — if the counter happened to open at 10:00.
+</Note>
+
+### When limit is exceeded
+
+| Field | What to enter |
+|---|---|
+| **Behaviour** | *Reject request* (the default) or *Downgrade model*. |
+| **Downgrade to** | The model to fall back to. Required when the behaviour is *Downgrade model*. |
+
+Downgrading keeps the application working at its ceiling — `gpt-4o-mini` instead
+of `gpt-4o` — instead of returning errors. Reject is for spend that must not
+happen at all.
+
+<Warning>
+**A downgrade that cannot be applied refuses instead.** The target must be a
+plain model name, on the **same provider** as the request, and one the
+application is allowed to call where its models are restricted. A pool alias, a
+wildcard, or
+a model the application may not call is not a valid target, and a budget
+configured to downgrade to one behaves exactly like *Reject request* — with
+nothing in the policy to say so.
+
+When the downgrade does apply, the response carries
+`X-NeuralTrust-Model-Downgraded: <original>→<target>`. That header is the only
+signal the caller gets; the status is a plain `200`.
+</Warning>
+
+### Per model limits
+
+Optional. Each line is a **Model** pattern — a model name, or a wildcard such as
+`claude-opus-*` — a **Max**, and its own **Time window**.
+
+A request is checked against the overall budget **and** against the most specific
+per-model rule matching its model. Exceeding either triggers the behaviour, and
+usage is charged to both. An exact slug beats a wildcard; a longer wildcard beats
+a shorter one.
+
+<Note>
+**The form makes the overall budget mandatory, so per-model rules are always a
+tightening**, never the whole policy. A policy that came from somewhere else can
+carry per-model rules with no overall budget — and then a model matching no rule
+has no budget at all. If your policies are built that way, one of them should be
+a catch-all.
+</Note>
+
+### Advanced Settings
+
+| Field | What to enter |
+|---|---|
+| **Group by header** | Optional. A request header whose value splits the budget — `X-User-Id`, say — so each distinct value gets its own allowance inside the policy's scope. |
+| **Counting** | *Total (input+output)*, *Input only* or *Output only*. Defaults to total. |
+
+<Warning>
+**Group by header is a partition, not an exemption.** A request that does not
+carry the named header is not skipped: it falls back to the policy's own counter,
+shared with every other request that omits it. It is also a raw header read, not
+the [end-user attribution](/trustgate/observability/end-user-attribution)
+pipeline, which never reaches policy decisions.
+</Warning>
+
+### Scope
+
+| Scope | Typical use |
+|---|---|
+| **Gateway-wide** | An organisation-level ceiling nobody can opt out of. |
+| **Targeted** | Per-tenant or per-application quotas. |
+| **Group by header** | Per end user inside one application, without a policy per user. |
+
+### Mode
+
+**Enforce** and **Observe**.
+
+Observe is a real dry run here, and a better one than most policies offer: usage
+is still charged, the headers are still emitted, and a request over the ceiling
+is still recorded — it is simply never refused or downgraded. Run a window in
+Observe, read the counts, then switch.
 
 ### Dollars are only as true as the rates
 
@@ -36,19 +148,211 @@ A dollar budget prices tokens the same way **Analytics** does: your
 otherwise list price. Enter the contract before the budget, or a discounted
 contract stops too early.
 
-### Downgrade, not reject
+<Warning>
+**A model with no price accrues nothing against a dollar budget.** If neither
+your contract pricing nor the built-in catalogue knows the model, its usage is
+costed at zero and the request is free as far as the budget is concerned. A
+warning is logged and the event is marked unpriced; nothing is refused. A
+self-hosted or newly released model is the usual case. Price it in **Contract
+pricing**, or use a **token** budget for that traffic.
+</Warning>
 
-Downgrading keeps the application working at its ceiling — `gpt-4o-mini` instead
-of `gpt-4o` — instead of returning errors. The target must be on the same
-provider. Reject is for spend that must not happen at all.
+---
 
-## Where to apply it
+## How the decision is made
 
-| Scope | Typical use |
+<Steps>
+<Step title="The counters for this request are read">
+The overall budget's counter, and the counter of the most specific per-model rule
+matching the request's model. Both keyed by the policy, its scope subject, and
+the **Group by header** value if there is one.
+
+**Nothing about this request is measured.** No prompt is tokenised, no cost is
+estimated, nothing is reserved.
+</Step>
+
+<Step title="At or above either ceiling, the behaviour applies">
+In **Enforce**, *Reject request* refuses with `429`; *Downgrade model* rewrites
+the request's model and lets it continue. In **Observe**, the violation is
+recorded and the request continues unchanged.
+
+The ceiling that is reported — in the headers and on the event — is the first one
+found to be breached.
+</Step>
+
+<Step title="The request is forwarded">
+Under budget, it goes upstream untouched, and the response carries the remaining
+allowance.
+</Step>
+
+<Step title="After the response, the actual usage is charged">
+The gateway reads the usage the provider reported, applies **Counting**, converts
+to dollars if the unit is dollars, and adds it to every window in play. This
+happens **after the response has been sent to the caller**, on its own, so it
+never delays the answer — and never gates it either.
+</Step>
+</Steps>
+
+### What the caller receives
+
+Every response, refused or not, carries the state of the reported window:
+
+| Unit | Headers |
 |---|---|
-| **Gateway-wide** | An organisation-level ceiling nobody can opt out of. |
-| **Targeted** | Per-tenant or per-application quotas. |
-| **Group by header** | Per end user inside one application, without a policy per user. |
+| Tokens | `X-Ratelimit-Limit-Tokens`, `X-Ratelimit-Remaining-Tokens`, `X-Ratelimit-Reset-Tokens` (in seconds) |
+| Dollars | `X-Budget-Unit`, `X-Budget-Scope`, `X-Budget-Window`, `X-Budget-Limit-Usd`, `X-Budget-Remaining-Usd`, `X-Budget-Reset` |
 
-When the goal is cost, pair a budget with [smart routing](/trustgate/llm/routing#smart-routing):
-routing lowers the bill on every request, the budget puts a hard stop under it.
+A refusal is `429`, and the response says which budget was exhausted — the token
+one or the dollar one — whether the ceiling was the gateway-wide one or the one
+targeted at this application, and which window was breached.
+
+### Modes and failures
+
+| Situation | Enforce | Observe |
+|---|---|---|
+| Under every ceiling | Forwarded; usage charged after the response | Forwarded; usage charged after the response |
+| Over a ceiling, **Reject request** | `429`, refused | Recorded, **request served** |
+| Over a ceiling, **Downgrade model** | Model rewritten, `200`, downgrade header set | Recorded, **original model used** |
+| Over a ceiling, downgrade target invalid | **`429`, refused** | Recorded, request served |
+| Response reports no usage | Forwarded, **nothing charged** | Forwarded, nothing charged |
+| Model unpriced, dollar budget | Forwarded, **nothing charged**, logged | Same |
+| Streaming response the client abandoned | Forwarded, **nothing charged** | Same |
+| Streamed response larger than the buffer cap | Forwarded, **nothing charged**, logged | Same |
+| Counter store unreachable | **`502`, refused** | **`502`, refused** |
+| Charging fails after the response | Response already sent; the usage is lost, logged as a warning | Same |
+
+<Warning>
+**In Observe, a counter-store failure still refuses the request.** The mode is
+read *after* the counter, so a store that cannot be reached fails the request
+before anything has consulted the mode. A policy you attached only to watch can
+take an application down with `502`s.
+</Warning>
+
+<Warning>
+**A stream the client abandons costs you money the budget never sees.** Usage is
+charged only when the gateway has the whole response. A client that disconnects
+mid-stream — or a streamed answer larger than the gateway's post-response buffer
+— leaves the tokens spent at the provider and the counter untouched. An agent
+that cancels aggressively can run well past its budget without ever tripping it.
+</Warning>
+
+### Limits
+
+- **No pre-flight estimate, no reservation.** See the warning at the top of this
+  page. The ceiling is enforced against what has already been charged.
+- **Accrual is asynchronous**, so the counter lags the traffic by roughly one
+  response.
+- **The windows are fixed**, open on the first charge, and return the whole
+  allowance at once when they close.
+- **Windows shorter than a minute are raised to a minute**, without the form
+  saying so.
+- **LLM traffic only.** MCP (Model Context Protocol) tool calls are outside this
+  policy entirely; the
+  [Per-Tool Rate Limiter](/trustgate/policies/per-tool-rate-limiter) is the tool
+  equivalent.
+- **Only usage the provider reports is charged.** A response without a usage
+  block is free.
+- **Abandoned and oversized streams are not charged.**
+- **Unpriced models are free against a dollar budget.**
+- **A downgrade target must be a plain model name on the same provider**, and one
+  the application may call; anything else silently becomes a refusal.
+- **`Retry-After` is not sent.** The refusal carries the reset in the budget
+  headers instead, so a client that only reads `Retry-After` learns nothing about
+  when to come back.
+- **The refusal body is the gateway's own shape**, not your provider's error
+  shape, whichever wire format your client speaks.
+- **The counters live in the gateway's shared store.** They are operational
+  state, not accounting: if that store is cleared, every budget starts again from
+  zero. Use **Analytics** for what was actually spent.
+
+---
+
+## Verify the policy
+
+Set **Max** low — a few hundred tokens, or a fraction of a dollar — and the
+window to a minute while you test. Send these **in this order**.
+
+<Steps>
+<Step title="Control — the path works at all">
+In the **Playground**, pick the application the policy applies to, and send:
+
+```
+hello, write me a short greeting
+```
+
+Expect a normal reply. If this fails, the problem is the application, the model
+or the provider — not the policy. In **Enforce**, a `502` here means the gateway
+could not reach its counter store. Fix it before going on.
+</Step>
+
+<Step title="The budget is being charged">
+Send the same prompt a few more times, then look at the events for those
+requests. Each one should carry the usage it was charged for.
+
+The remaining allowance is not something the Playground shows you. The gateway
+puts it in the response headers listed above, so a client of your own watches it
+fall as it goes; the Playground does not display response headers.
+
+If nothing is being charged, either the traffic is not in this policy's scope —
+check **Coverage** on the policy — or the responses carry no usage at all. For a
+dollar budget, check the event for the unpriced marker before assuming the
+policy is broken.
+</Step>
+
+<Step title="The ceiling acts">
+Keep sending. **Expect to cross the ceiling without being refused** — that
+request is served in full — and to be refused on a later one. That is the
+policy working as designed, not a fault.
+
+With *Reject request*, expect `429`, a refusal naming the budget that was
+exhausted, and **no time at the provider** in the timing breakdown. That the
+provider leg is empty is the evidence that matters: the refused request never
+reached the model.
+
+With *Downgrade model*, expect `200` and the downgrade header on the response,
+naming the model asked for and the one that answered. **Read which model
+answered**, not just the status. If you get a `429` instead, the downgrade target
+is not valid for this request.
+</Step>
+
+<Step title="The partition holds (only if you set Group by header)">
+Send a request with a different value in the header you named. It must be allowed
+on its own fresh budget while the exhausted value is still refused. Then send one
+with the header omitted: it is not exempt — it joins the shared counter.
+</Step>
+</Steps>
+
+Every decision is emitted as a metadata event, in Observe mode too, where nothing
+is blocked. See the [event schema](/platform/event-schema) for the fields
+recorded.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Spend went past the ceiling | Expected: the crossing request is served, and concurrent requests are all admitted | Set the ceiling where the overshoot is affordable; for a hard stop, this is the wrong instrument |
+| Several requests got through after the ceiling was reached | Accrual happens after the response, so the counter lags | Expected. Lower the ceiling if the lag matters |
+| Nothing is ever refused | The policy is in **Observe**, or the traffic is not in scope | Switch to **Enforce**; check **Coverage** on the policy |
+| The remaining allowance never moves | The responses carry no usage, or — on a dollar budget — the model is unpriced | Check the event for the unpriced marker, then add the model to **Contract pricing** |
+| A dollar budget never stops anything | The model has no price, so everything costs zero | Price it in **Contract pricing**, or use a token budget |
+| A dollar budget stops far too early | Traffic is being priced at list rates while you pay less | Enter your contract in **Contract pricing** first |
+| `429` although the behaviour is **Downgrade model** | The target is not a plain model name on the same provider, or the application may not call it | Fix **Downgrade to**; a pool alias or a wildcard is never valid |
+| The window reset earlier than expected | The window is fixed and opened when the counter was first charged, not on the hour | Expected |
+| A 30-second window behaves like a minute | Anything under 60 seconds is raised to 60 | Use a window of a minute or more |
+| An agent that cancels streams runs past its budget | Abandoned streams are never charged | Expected. Do not rely on this policy for clients that disconnect routinely |
+| Everyone shares one budget although **Group by header** is set | The clients are not sending that header | Make the header mandatory in the client |
+| A model with no per-model rule is unlimited | The policy carries per-model rules and no overall budget, which this form would not have allowed | Add an overall budget, or a catch-all rule |
+| `502` on every request, including harmless ones | The counter store is unreachable | This policy fails closed regardless of mode. Fix the store |
+| The budget disappeared after a deployment | The counters are operational state in a shared store | Expected. Use **Analytics** for what was actually spent |
+
+---
+
+## Related
+
+- [Rate Limiter](/trustgate/policies/rate-limiter) — the same shape of control, for volume rather than spend
+- [Smart routing](/trustgate/llm/routing#smart-routing) — routing lowers the bill on every request; the budget puts a hard stop under it
+- [Contract pricing](/trustgate/registry/models#contract-pricing) — the rates a dollar budget counts with
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [Event schema](/platform/event-schema) — the fields each decision records
