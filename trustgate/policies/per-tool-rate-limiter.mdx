@@ -1,9 +1,11 @@
 ---
 title: "Per-Tool Rate Limiter"
-description: "Cap how many times a given tool may actually run in a window, for LLM function calls and MCP tool calls alike."
+sidebarTitle: "Per-Tool Rate Limiter"
+description: "Cap how many times a given tool may actually run in a window — counting executions rather than requests, across LLM function calls and MCP tool calls alike."
 ---
 
-Applies to **LLM and MCP**.
+Applies to **LLM and MCP** — the Model Context Protocol your agents call tools
+over.
 
 An agent that fails to parse a tool result tends to call the same tool again, and
 again. Some tools are cheap to repeat; a code executor, a search billed per call
@@ -14,9 +16,135 @@ Counts **actual tool executions**, not HTTP requests, and caps them per tool
 pattern over one or more windows — `execute_code*` at 60 a minute and 500 an
 hour. The first rule whose pattern matches wins.
 
-When a window is exceeded: **reject** the call (the only option on MCP, where the
-gateway itself is the caller), **inject an error result** into the LLM response,
-or **strip the tool** from the next request.
+That choice — executions rather than requests — is what makes the policy worth
+having and also what makes it partial. The gateway can only count an execution it
+sees. Read **Limits** before you rely on this for anything expensive.
+
+---
+
+## Configure the policy
+
+Open **Policies** → **Library** → **Per-Tool Rate Limiter**.
+
+### Rules
+
+**Add rule** appends a rule card. Rules are evaluated in order and **the first
+whose tool pattern matches wins** — a later rule for the same tool is dead. Put
+the specific patterns above the catch-all.
+
+| Field | What it is |
+|---|---|
+| **Tool pattern** | A glob matched against the tool's name: `*` for any run of characters, `?` for one, `[abc]` for a set. `execute_code*` matches `execute_code` and `execute_code_v2`. `*` on its own is the catch-all. Required. |
+| **Windows** | One or more lines of *max calls* **per** *number* + **Second / Minute / Hour**. Each must be a whole number of seconds, at least one second, with a positive maximum. |
+| **Behavior when exceeded** | Per rule. Leaving it on *Use default behavior* inherits **Default behaviour** below. |
+
+A rule with several windows enforces **all** of them: 60 a minute *and* 500 an
+hour means a burst is stopped by the first and a slow grind by the second.
+
+<Note>
+**The windows are fixed, not sliding**, despite what the catalogue's one-line
+description says. A window opens when the tool's counter is first charged and
+closes exactly its duration later, at which point the counter disappears and the
+whole allowance returns at once.
+
+With *10 per hour*, if the counter opened at 10:00 it closes at 11:00. Ten
+executions at 10:59 exhaust it — and ten more at 11:01 are all allowed, because
+by then the window is a new one. Twenty executions in two minutes, inside a
+policy that reads as ten an hour. Size the window for the burst you can tolerate,
+not the average you want.
+</Note>
+
+### Behavior when exceeded
+
+Three choices. On MCP only the first exists.
+
+| Behaviour | What happens |
+|---|---|
+| **Reject** | The request is refused. On LLM, `429`. On MCP, a JSON-RPC error. |
+| **Inject error** | The model's own tool call is removed from the response before the caller sees it, and an assistant message is put in its place: *The tool "X" (call Y) is rate limited and was not executed. Please slow down and retry later.* The agent reads a refusal it can act on instead of an HTTP error. |
+| **Strip tool** | The tool is removed from the `tools` array before the request reaches the model, so the model cannot propose it at all. |
+
+**Default behaviour** at the bottom of the form applies to every rule left on
+*Use default behavior*. It starts at **Reject**.
+
+<Warning>
+**Inject error silently becomes Strip tool on a streaming request.** The rewrite
+it wants to make happens on the response, and a streamed response cannot be
+rewritten — tokens are already leaving. So on a streaming request the gateway
+falls back to withdrawing the tool from the request instead. The effect is
+similar and the agent's experience is not: it gets a model that never proposes
+the tool, rather than an explanation of why its call was refused.
+</Warning>
+
+<Warning>
+**A policy attached to an MCP application is refused at save time unless every
+behaviour is Reject.** On MCP the gateway *is* the caller: the client asked for
+one tool by name and there is no conversation to edit, so *Inject error* and
+*Strip tool* have nothing to act on. Rather than accept the setting and quietly
+enforce something else, the association is rejected and the error names the rules
+to change.
+</Warning>
+
+### Scope
+
+<Warning>
+**The Scope selector on this form does nothing.** *Application* and *Global* are
+stored with the policy and never read. The counters are always partitioned by the
+policy's own scope: one counter for everything when the policy is gateway-wide,
+one per application when it is targeted. Change the policy's scope, not this
+field.
+</Warning>
+
+| Policy scope | What the counter counts |
+|---|---|
+| **Gateway-wide** | Every execution of the matched tool, from every application, against one counter. |
+| **Targeted** | One counter per application, so one agent's loop does not spend another's allowance. |
+
+### Mode
+
+**This policy has only one mode, and the console shows no mode selector for it.**
+It always enforces. There is no Observe, so **there is no way to find out what it
+would do before it does it**. Roll it out with a generous limit, watch the counts
+on the events, and tighten from there — that is the nearest thing to a dry run
+this policy offers.
+
+---
+
+## How the decision is made
+
+The counter is charged when the gateway **observes an execution**, and it is
+checked on the **next** request. The two are separate moments, and which request
+is which depends on whether the traffic is chat or MCP.
+
+<Steps>
+<Step title="On LLM, an execution is a tool result coming back">
+The gateway reads the incoming conversation, finds the most recent turn in which
+the assistant proposed tool calls, and looks at the messages after it. Each
+`role: tool` message whose `tool_call_id` matches one of those proposals is one
+execution, and charges every window of the matching rule.
+
+Each `tool_call_id` is charged **once**: a repeated one — an agent retrying, or
+re-sending history — is remembered and ignored for as long as the rule's longest
+window.
+</Step>
+
+<Step title="On MCP, an execution is the tools/call itself">
+The gateway is the caller, so it knows the call really ran. Every `tools/call`
+that reaches the upstream charges the windows, whether or not it carries a
+correlation id.
+</Step>
+
+<Step title="The tools the request declares are checked against their counters">
+On LLM, only tools present in the request's `tools` array are checked. On MCP,
+the single tool named in the `tools/call`.
+</Step>
+
+<Step title="A tool at or above any of its windows triggers its behaviour">
+**Reject** refuses the whole request. **Strip tool** removes that tool from the
+request and lets the rest through. **Inject error** lets the request reach the
+model and removes the tool call from the answer instead.
+</Step>
+</Steps>
 
 ### One execution, counted twice
 
@@ -26,3 +154,182 @@ LLM request. On a **gateway-wide** policy both hit the same counter, so one
 execution is charged twice unless the agent sends the LLM `tool_call_id` in the
 `tools/call` metadata. Attaching the policy per application avoids the problem:
 there the two are separate counters.
+
+The correlation is a single field in the call's `_meta`:
+
+```json
+{
+  "name": "mcp__files__send_email",
+  "arguments": { "to": "ana@example.com" },
+  "_meta": { "ai.neuraltrust/toolCallId": "call_abc123" }
+}
+```
+
+The value must be the same `tool_call_id` the model used. The gateway accepts
+letters, digits, `_` and `-`, up to 128 characters, and quietly ignores anything
+else — a malformed id costs you the correlation, not the call.
+
+The `tools/call` always charges, correlated or not. Only the LLM-side observation
+can be suppressed, and only by an id the MCP side already claimed. Replaying one
+`tool_call_id` across several real `tools/call`s does not buy free executions:
+each of those really ran, and each is charged.
+
+### What the caller receives
+
+**Reject** on **LLM** traffic is `429` with these headers, where `<scope>` is
+`global` for a gateway-wide policy and `consumer` for a targeted one:
+
+| Header | Value |
+|---|---|
+| `X-RateLimit-Tool` | The tool that ran out of allowance |
+| `X-RateLimit-<scope>-Limit` | The maximum of the window that was breached |
+| `X-RateLimit-<scope>-Remaining` | `0` |
+| `X-RateLimit-<scope>-Reset` | A Unix timestamp for when that window closes |
+| `Retry-After` | Seconds until it closes, from the counter's own remaining lifetime |
+
+and this body:
+
+```json
+{ "error": "plugin_rejected", "message": "tool \"send_email\" rate limit exceeded" }
+```
+
+On **MCP** traffic it is a JSON-RPC error with code **`-32004`** on HTTP `200`,
+carrying the same headers. The upstream tool is never invoked.
+
+**Strip tool** and **Inject error** both return `200`. Nothing tells the caller a
+policy acted, apart from the event — and, for *Inject error*, the assistant
+message the gateway wrote.
+
+### Modes and failures
+
+There is only **Enforce**. The column is here to be read against the other
+policies, not because there is a choice.
+
+| Situation | Enforce |
+|---|---|
+| Under every window | Forwarded untouched |
+| Over a window, **Reject**, LLM | `429`, refused |
+| Over a window, **Reject**, MCP | JSON-RPC `-32004` on HTTP `200`, upstream not called |
+| Over a window, **Strip tool** | `200`, that tool removed from the request, the others kept |
+| Over a window, **Inject error**, non-streaming | `200`, the tool call removed from the answer and replaced with an explanation; `finish_reason` becomes `stop` if it was the only one |
+| Over a window, **Inject error**, streaming | Falls back to **Strip tool** on the request |
+| Tool declared but no rule matches | Forwarded untouched, nothing counted |
+| Request body cannot be decoded | Forwarded untouched, nothing counted |
+| Counter store unreachable, LLM leg | **`502`, refused** |
+| Counter store unreachable, MCP leg | Logged, **call allowed** |
+| Counter store not configured at all | Forwarded untouched, nothing counted |
+
+<Warning>
+**A counter-store failure refuses the request on the LLM leg and allows it on the
+MCP leg.** Same policy, same failure, opposite directions — and since there is no
+Observe mode, there is no configuration that softens the LLM side. Account for it
+when sizing availability.
+</Warning>
+
+### Limits
+
+- **No Observe mode.** You cannot dry-run this policy. Start loose and tighten.
+- **On LLM, only declared tools are enforced.** The check reads the request's
+  `tools` array. A client that stops declaring a tool — or never declares one,
+  because the model is being asked to answer in prose — is not checked at all,
+  however exhausted that tool's counter is.
+- **On LLM, only reported executions are counted.** The gateway learns a tool ran
+  by seeing its result come back in a later request. A tool the agent executes
+  and never reports through the gateway is free.
+- **Only the latest turn's results are counted.** Results from earlier turns in
+  the same conversation are skipped, so a history replayed after the window
+  reopened is not re-counted — and a straggling result reported several turns
+  late is not counted at all.
+- **The windows are fixed, not sliding.** See the note above.
+- **The Scope field on the form does nothing.**
+- **Inject error cannot act on a streaming response**, and silently becomes
+  Strip tool.
+- **On MCP only Reject exists**, and a policy configured otherwise cannot be
+  attached to an MCP application.
+- **Reading a counter and charging it are separate steps**, so a burst of
+  simultaneous executions can overshoot a window slightly.
+- **The counters live in the gateway's shared store.** If it is cleared, every
+  window reopens.
+
+---
+
+## Verify the policy
+
+Set a rule to **1** per minute on a tool you can trigger on demand, then send
+these **in this order**. The counting model means you need three turns, not two,
+and the middle one is the one people forget.
+
+<Steps>
+<Step title="Control — the path works at all">
+In the **Playground**, pick the application the policy applies to, and send a
+prompt that makes the model propose your tool. Expect a normal reply carrying the
+tool call. If this fails, the problem is the application or the model, not the
+policy. Fix it before going on.
+</Step>
+
+<Step title="Report an execution — the counter is charged">
+The gateway only learns a tool ran when it sees the result come back, and a
+result is something an agent sends, not something you type into a prompt box. So
+send this turn the way your agent would — from your own client, or a one-off
+request with an application's API key: the assistant's tool call, then a
+`role: tool` message with the same `tool_call_id` and a result. Keep the `tools`
+array declared, as a real agent framework does on every turn.
+
+Expect `200`. Nothing is refused here — this turn is what *charges* the counter.
+</Step>
+
+<Step title="The limit acts">
+Back in the **Playground**, send the first prompt again.
+
+With **Reject**, expect `429`, `X-RateLimit-Tool` naming your tool, and
+**`Provider 0 ms`** in the timing breakdown — the request never reached the
+model.
+
+With **Strip tool**, expect `200` and a reply that behaves as though the tool did
+not exist; the tool is gone from what the model received.
+
+With **Inject error**, expect `200`, no tool call in the answer, and an assistant
+message naming the rate-limited tool.
+</Step>
+
+<Step title="If you run both chat and MCP — one execution, one charge">
+Set the rule to **2** per minute. Run the tool once over MCP with
+`_meta["ai.neuraltrust/toolCallId"]` set, then send the LLM turn reporting that
+same `tool_call_id`. A second MCP `tools/call` must still be allowed: the budget
+of two owes one more execution.
+
+If the second call is refused, the correlation is not arriving — check the
+`_meta` key spelling and that the id matches the model's exactly.
+</Step>
+</Steps>
+
+Every decision is emitted as a metadata event. See the
+[event schema](/platform/event-schema) for the fields recorded.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Nothing is ever limited | The tool never comes back as a reported result, so the counter is never charged | Confirm the agent sends the tool result through the gateway with its `tool_call_id` |
+| Nothing is limited although the counter shows executions | The request does not declare the tool in its `tools` array | Enforcement reads declared tools; a request without them is not checked |
+| The allowance is spent twice as fast as expected | One execution counted on both the chat side and the MCP side, on a gateway-wide policy | Send `_meta["ai.neuraltrust/toolCallId"]` on the `tools/call`, or target the policy per application |
+| The correlation is ignored | The id is empty, longer than 128 characters, or contains anything but letters, digits, `_` and `-` | Use the model's id verbatim |
+| A rule never fires although its pattern looks right | An earlier rule matches the same tool first | Rules are ordered; move the specific pattern above the general one |
+| Twice the allowance ran in a couple of minutes | The window is fixed and it rolled over between the two bursts | Expected. Shorten the window, or add a second, longer one to the same rule |
+| **Inject error** produced no message, and the tool was missing from the request instead | The request was streaming, so the behaviour fell back to **Strip tool** | Expected. Use a non-streaming request if you need the explanation |
+| The policy will not attach to an MCP application | A rule, or the default, uses a behaviour MCP cannot carry out | Set every behaviour to **Reject** for that policy |
+| Changing **Scope** on the form changed nothing | That field is stored and never read | Change the policy's own scope instead |
+| No mode selector appears | This policy only supports Enforce | Expected |
+| `502` on every LLM request | The counter store is unreachable | This policy fails closed on the LLM leg, and has no Observe mode to soften it |
+| MCP calls are all allowed while the LLM leg returns `502` | The MCP leg fails open on the same failure | Expected. Healthy MCP traffic is not evidence of a healthy policy |
+
+---
+
+## Related
+
+- [Rate Limiter](/trustgate/policies/rate-limiter) — a ceiling on requests rather than tool executions
+- [Tool Injection](/trustgate/policies/tool-injection) — putting a tool into every request rather than taking one out
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [Event schema](/platform/event-schema) — the fields each decision records

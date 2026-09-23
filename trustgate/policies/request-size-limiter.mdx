@@ -1,53 +1,284 @@
 ---
 title: "Request Size Limiter"
+sidebarTitle: "Request Size Limiter"
 description: "Refuse oversized requests before anything reads them. Two ceilings, bytes and characters, and an optional demand that the client declare its size."
 ---
 
-Applies to **LLM and MCP**.
+Applies to **LLM and MCP** — the Model Context Protocol your agents call tools
+over.
 
 An oversized body reaches the gateway before anything can judge it: it has to be
 read, buffered and parsed. Whether it came from a client that attached a PDF to a
 prompt by mistake or from someone probing for a way to exhaust memory, the
 cheapest defence is to refuse it by size before reading it.
 
-## What it checks
+This is the plainest policy in the catalogue. It calls nothing, scores nothing
+and rewrites nothing. It measures two numbers and compares them.
 
-The body as received, against two ceilings, in this order:
+---
 
-| Setting | Default | What is measured |
+## Configure the policy
+
+Open **Policies** → **Library** → **Request Size Limiter**.
+
+### Size limits
+
+| Field | Default | What it is |
 |---|---|---|
-| **Allowed payload size** | 10 megabytes | The body in bytes, kilobytes or megabytes. |
-| **Max characters per request** | 100,000 | UTF-8 characters in the body — the prompt, the message history, tool results, everything the client sent. |
-| **Reject undeclared content length** | off | Refuse a request that carries no `Content-Length` header. |
+| **Allowed Payload Size** | 10 | The byte ceiling, in the unit beside it. Required, and positive. |
+| *(unit)* | **Megabytes** | **Bytes**, **Kilobytes** or **Megabytes**. Kilobytes and megabytes are binary — 1024 and 1,048,576 bytes. |
 
-Bytes are checked first. A body that passes the byte ceiling is then counted in
-characters, so a request can be small in bytes and still refused for length, and
-a multi-byte script can hit the byte ceiling before the character one.
+The form prints the resolved figure under the field — *= 10,485,760 bytes*. Read
+it, because of this:
 
-## What the client gets
+<Warning>
+**The default of 10 megabytes can never fire.** The gateway's own HTTP layer
+refuses a body larger than **8 MiB — 8,388,608 bytes** before any policy runs, and
+that wire limit is not configurable. Any **Allowed Payload Size** at or above
+8,388,608 bytes is unreachable: the request is already gone by the time the
+policy would see it.
 
-A refused request is answered before any provider is contacted:
+So raising the setting buys you nothing — there is no headroom above 8 MiB to
+grant. The useful range is strictly *below* it, and the only reason to set this
+field at all is to refuse bodies the gateway would otherwise have accepted. Read
+the *= N bytes* line and keep it under 8,388,608.
+</Warning>
 
-| Refused because | Status | Message names |
+<Note>
+**A body over the wire limit is refused with `413` by the HTTP server, not by
+this policy.** No policy runs, so no decision is recorded and nothing appears on
+the event for it. A `413` with no matching event is the wire limit, not a
+misconfigured ceiling.
+
+{/* TODO(verify): the exact response body the HTTP layer emits for an
+    over-the-wire-limit request comes from the framework, not from TrustGate
+    code, and was not confirmed on a running gateway. The status is 413; the
+    body shape is not documented here deliberately. */}
+</Note>
+
+### Character limits
+
+| Field | Default | What it is |
 |---|---|---|
-| Too many bytes | 413 | The size received, in bytes. |
-| Too many characters | 413 | The count received. |
-| No `Content-Length` header | 411 | The missing header. |
+| **Max Characters per request** | 100,000 | The maximum number of UTF-8 characters in the request body. |
+
+<Warning>
+**It counts the whole body, not the prompt.** Every character that arrived —
+JSON braces, field names, escape sequences, the full message history, tool
+definitions, tool results, base64 attachments. A 100,000-character ceiling is not
+a 100,000-character prompt; on a conversation of any depth it is considerably
+less. Measure a real request from your client before choosing a number.
+</Warning>
+
+<Note>
+**Zero is not a valid ceiling, and the form lets you type it.** The field's
+minimum is 0 and clearing it counts as 0, which passes the console's own check
+and is then refused by the gateway when you save, with an error naming the
+setting. Leave the default, or enter a positive number.
+</Note>
+
+### Request validation
+
+**Reject undeclared content length** — off by default. Refuses a request that
+carries no `Content-Length` header.
 
 Requiring `Content-Length` refuses chunked uploads and clients that stream a
 body of unknown size. That is the point — a declared size can be judged before
 the body is read — but it also refuses well-behaved clients that stream, so turn
 it on only where every caller is yours.
 
-In **Observe** mode the request is measured, recorded on the event as over the
-limit, and passed through.
+<Warning>
+**On MCP this setting refuses every tool call.** An MCP `tools/call` reaches the
+policy with no HTTP headers attached at all, so the header is always missing and
+the check always fires. If the policy's scope touches any MCP application, leave
+this off.
+</Warning>
 
-## Where to apply it
+### Scope
 
 Run it gateway-wide as a ceiling, and target a tighter one at applications whose
 traffic should be small. On a targeted policy the limit covers all of the
-application's traffic, on both planes.
+application's traffic, chat and MCP alike.
 
-It is not a substitute for model limits: prompts that do not fit the resolved
-model are already rejected on the chat path. This policy is about not reading
-the body at all.
+<Note>
+**On MCP, "the body" is the tool call, not the HTTP request.** What the policy
+measures is the `tools/call` parameters — the tool name and its arguments — not
+the JSON-RPC envelope and not the bytes on the wire. A byte ceiling sized for an
+LLM conversation will never fire on MCP traffic; size it for the arguments you
+expect a tool to receive.
+</Note>
+
+### Mode
+
+**Enforce** and **Observe**. In Observe the request is measured, recorded on the
+event as over the limit, and passed through.
+
+---
+
+## How the decision is made
+
+The three checks run in this order, and the first to fire decides.
+
+<Steps>
+<Step title="Content-Length, if you required it">
+No header, and the request is refused with `411` before anything is measured.
+
+In **Observe** the violation is recorded and the request continues to the checks
+below — it is not waved through.
+</Step>
+
+<Step title="Bytes">
+The body as received, against **Allowed Payload Size**. Over it, `413`.
+</Step>
+
+<Step title="Characters">
+A body that passed the byte ceiling is counted in UTF-8 characters against **Max
+Characters per request**. Over it, `413`.
+
+The two ceilings disagree in both directions, which is the reason to have both: a
+compact request can be small in bytes and still refused for length, and a body in
+a multi-byte script can hit the byte ceiling long before the character one.
+</Step>
+
+<Step title="Otherwise the request passes through untouched">
+The response carries what was measured and what the ceilings were.
+</Step>
+</Steps>
+
+### What the caller receives
+
+A refused request is answered before any provider is contacted:
+
+| Refused because | Status | Body |
+|---|---|---|
+| No `Content-Length` header | `411` | `{"error":"plugin_rejected","message":"Content-Length header is required"}` |
+| Too many bytes | `413` | `{"error":"plugin_rejected","message":"request size limit exceeded: received 1300 bytes"}` |
+| Too many characters | `413` | `{"error":"plugin_rejected","message":"character limit exceeded: received 120000 characters"}` |
+
+On **MCP** traffic the same refusals are JSON-RPC errors with code **`-32001`**
+on HTTP `200` — a non-2xx would drop the client's MCP session.
+
+Every request the policy allows carries four headers describing what it measured:
+
+| Header | Value |
+|---|---|
+| `X-Request-Size-Bytes` | The body's size in bytes |
+| `X-Request-Size-Chars` | Its UTF-8 character count |
+| `X-Size-Limit-Bytes` | The configured byte ceiling, resolved to bytes |
+| `X-Size-Limit-Chars` | The configured character ceiling |
+
+They are the fastest way to size a ceiling: turn the policy on in **Observe** with
+generous numbers, read the first two off real traffic, then set the ceilings.
+
+### Modes and failures
+
+| Situation | Enforce | Observe |
+|---|---|---|
+| Within both ceilings | Forwarded, headers set | Forwarded, headers set |
+| Over the byte ceiling | `413`, refused | Recorded, **request served** |
+| Over the character ceiling | `413`, refused | Recorded, **request served** |
+| No `Content-Length`, and it is required | `411`, refused | Recorded, then measured as usual |
+| Over the gateway's 8 MiB wire limit | **`413` from the HTTP layer, no policy runs, no event** | **`413` from the HTTP layer, no policy runs, no event** |
+| MCP `tools/call` over a ceiling | JSON-RPC `-32001` on HTTP `200` | Recorded, call served |
+| Zero or negative ceiling configured | Rejected at save time | Rejected at save time |
+
+There is no external dependency to fail. This policy reads a byte slice already
+in memory: there is no store to be unreachable, no provider to time out, and
+nothing that can make it fail open or closed.
+
+### Limits
+
+- **It cannot see anything larger than 8 MiB.** The wire limit gets there first,
+  and it is not configurable.
+- **Request leg only.** The size of the model's answer is not checked, on any
+  mode.
+- **It measures the body as one blob.** There is no per-field, per-message or
+  per-attachment ceiling, and nothing distinguishes a long conversation from a
+  single enormous prompt.
+- **Character counting includes the serialisation**, not just the text.
+- **On MCP it measures the tool call's parameters**, not the HTTP request.
+- **Requiring `Content-Length` refuses every MCP tool call** and every chunked
+  client.
+- **It is not a substitute for model limits.** Prompts that do not fit the
+  resolved model are already rejected on the chat path. This policy is about not
+  reading the body at all.
+- **The refusal body is the gateway's own shape**, not your provider's error
+  shape, whichever wire format your client speaks.
+
+---
+
+## Verify the policy
+
+The **Playground** cannot easily send a body big enough to trip a realistic
+ceiling, so do steps two and three from your own client — `curl`, or whatever
+calls the gateway in anger.
+
+<Steps>
+<Step title="Control — the path works at all">
+In the **Playground**, pick the application the policy applies to, and send:
+
+```
+hello, write me a short greeting
+```
+
+Expect a normal reply. If this fails, the problem is the application, the model
+or the provider — not the policy. Fix it before going on.
+</Step>
+
+<Step title="Read what a normal request actually measures">
+Send a representative request from your own client and read
+`X-Request-Size-Bytes` and `X-Request-Size-Chars` off the response. Compare them
+with `X-Size-Limit-Bytes` and `X-Size-Limit-Chars`.
+
+This is the step that tells you whether your ceilings are set anywhere near real
+traffic. Do it before switching to **Enforce**, not after.
+</Step>
+
+<Step title="The byte ceiling refuses">
+Set **Allowed Payload Size** to something just under what step two measured, and
+send the same request again.
+
+Expect `413` and a body naming the size received. Confirm the upstream was never
+called — in the timing breakdown, **`Provider 0 ms`**.
+</Step>
+
+<Step title="The character ceiling refuses independently">
+Restore the byte ceiling, then set **Max Characters per request** just under the
+character count from step two and send the request again.
+
+Expect `413` again, and a body naming the *character* count this time. That the
+message changed is the proof the second ceiling is doing its own work rather than
+the first firing twice.
+</Step>
+</Steps>
+
+Every decision is emitted as a metadata event, in Observe mode too, where nothing
+is blocked. See the [event schema](/platform/event-schema) for the fields
+recorded.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Large requests are refused although the ceiling is well above them | The gateway's 8 MiB wire limit fired first | Expected, and not adjustable. Nothing above 8,388,608 bytes reaches a policy |
+| Raising **Allowed Payload Size** changed nothing | It was already at or above the wire limit | The useful range is below 8 MiB; the setting only *tightens* |
+| `413` with no decision on the event | The wire limit refused it before any policy ran | Expected. That `413` is not this policy |
+| The policy will not save | **Max Characters per request** is 0, or the payload size is 0 | Both must be positive; the console accepts 0 in the character field and the gateway does not |
+| Requests are refused for characters although they look short | The count includes the whole serialised body — history, tool definitions, attachments | Measure a real request with `X-Request-Size-Chars` and set the ceiling from that |
+| Every MCP tool call is refused with `-32001` | **Reject undeclared content length** is on, and MCP requests carry no headers | Turn it off, or scope the policy away from MCP applications |
+| A chunked or streaming client is refused with `411` | It sends no `Content-Length` | That is what the setting does. Turn it off, or have the client declare its size |
+| The byte ceiling never fires on MCP traffic | On MCP the policy measures the tool call's parameters, not the HTTP body | Size a separate, tighter policy for MCP applications |
+| Nothing is ever refused | The policy is in **Observe**, or the traffic is not in scope | Switch to **Enforce**; check **Coverage** on the policy |
+| A long conversation is refused while a single huge prompt is not | Both are measured as one body; the conversation simply serialises larger | Expected. There is no per-message ceiling |
+| The model rejected a prompt for length although this policy allowed it | Context-window limits are enforced separately, on the chat path | Expected. This policy is about the body, not the model |
+
+---
+
+## Related
+
+- [Prompt Compression](/trustgate/policies/prompt-compression) — shrinking a body rather than refusing it
+- [Rate Limiter](/trustgate/policies/rate-limiter) — a ceiling on how many requests arrive rather than how large they are
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [Event schema](/platform/event-schema) — the fields each decision records

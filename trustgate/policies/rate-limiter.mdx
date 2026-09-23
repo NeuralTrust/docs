@@ -1,9 +1,11 @@
 ---
 title: "Rate Limiter"
-description: "Cap how many requests an application, or each end user behind it, may make in a sliding window. Refuse or delay the rest."
+sidebarTitle: "Rate Limiter"
+description: "Cap how many requests an application, or each end user behind it, may make in a rolling window — and know exactly what the counter counts, and what it does not."
 ---
 
-Applies to **LLM and MCP**.
+Applies to **LLM and MCP** — the Model Context Protocol your agents call tools
+over.
 
 A client stuck in a retry loop, a script someone pointed at production, a tenant
 that decides to backfill a year of data — to the provider they are all one flood
@@ -11,28 +13,284 @@ of requests billed to you, and a rate-limit error for everyone else sharing the
 key. The rate limiter stops the flood at the gateway, per application, so one
 caller's bug stays that caller's problem.
 
-Counts requests in a sliding window and refuses the ones over the line. You set a
-**limit**, a **window** (`30s`, `1m`, `1h`), and the **Retry-After** the refusal
-carries — by default the window, which is when the allowance actually returns.
-Refused responses carry the standard rate-limit headers so a well-behaved client
-backs off on its own.
+It counts **requests**, not tokens, not cost, not tools. A four-token completion
+and a two-hundred-thousand-token one are the same request to this policy. If
+what you are protecting is the bill rather than the provider's concurrency,
+reach for an [LLM Budget](/trustgate/policies/llm-budget) instead — or both.
 
-What the counter counts depends on the scope. Gateway-wide, one counter covers all
-traffic. Targeted, each application gets its own. This is the only type that
-offers **Throttle** mode: a request over the line waits its share of the window
-and then goes through, which turns a burst into a queue instead of a wall of 429s.
+---
 
-**Group by header** splits the counter by a header value — `X-User-Id`, say — so
-one policy gives every end user of an application their own allowance.
+## Configure the policy
 
-## Where to apply it
+Open **Policies** → **Library** → **Rate Limiter**.
 
-| Scope | Typical use |
+### Limit
+
+| Field | What to enter |
 |---|---|
-| **Gateway-wide** | An organisation-level ceiling nobody can opt out of. |
-| **Targeted** | Per-tenant or per-application quotas. |
-| **Group by header** | Per end user inside one application, without a policy per user. |
+| **Max requests** | How many requests the window allows. Required, and must be positive. |
+| **Window** | A number and a unit — **Seconds**, **Minutes** or **Hours**. Required. The shortest window the gateway accepts is one second. |
 
-A refused request gets HTTP 429 with the standard rate-limit headers and the
-Retry-After you set. Pair it with an [LLM Budget](/trustgate/policies/llm-budget)
-when the concern is spend rather than volume.
+The window is **rolling**, not a clock-aligned bucket: the counter is the number
+of requests recorded in the last *window* at any instant, kept at one-second
+resolution. There is no reset on the hour, and no moment at which the whole
+allowance comes back at once.
+
+The form shows the pair back as a sentence — *Allow 60 requests per minute* —
+which is worth reading before you save. **Max requests** exactly: with a limit of
+60, the sixtieth request in the window passes and the sixty-first is refused.
+
+### When limit is exceeded
+
+| Field | What to enter |
+|---|---|
+| **Retry after** | The number of seconds the refusal advertises in its `Retry-After` header. The console pre-fills **60 seconds** and lets you pick a unit; whatever you choose is converted to seconds on save. |
+| **Group by header** | Optional. A request header whose value splits the counter — `X-User-Id`, say — so each distinct value gets its own allowance inside the policy's scope. |
+
+<Warning>
+**The console's default Retry-After is 60 seconds whatever your window is.** It is
+not derived from the window you just entered. Set a one-hour window and leave the
+field alone, and every refusal tells the caller to come back in a minute — fifty-nine
+minutes early, into another refusal. Set it to the window, or to however long you
+actually want a refused client to wait.
+</Warning>
+
+<Warning>
+**Group by header is a partition, not an exemption.** A request that does not
+carry the named header is not skipped and is not exempt: it falls back to the
+policy's own counter, shared with every other request that omits it. Ten clients
+that forget the header do not get ten allowances — they get one between them,
+and one of them will start seeing `429`s caused by the other nine.
+
+It is also a **raw header read**. It is not the end-user attribution pipeline,
+which [never reaches policy decisions](/trustgate/observability/end-user-attribution).
+If your clients declare their user only in the OpenAI `user` body field, this
+field cannot see it.
+</Warning>
+
+<Note>
+**Group by header never partitions MCP traffic.** An MCP `tools/call` reaches the
+policy without any HTTP headers attached, so the value is always empty and every
+MCP request lands on the shared counter. Configure it if you like; on MCP it does
+nothing.
+</Note>
+
+### Scope
+
+| Scope | What the counter counts |
+|---|---|
+| **Gateway-wide** | One counter for all the traffic in scope. An organisation-level ceiling nobody can opt out of. |
+| **Targeted** | One counter per application. Two applications sharing one policy keep independent allowances. |
+| **Group by header** | One counter per header value, inside whichever of the two above applies. |
+
+### Mode
+
+This is the only policy type that offers all three modes.
+
+| Mode | What it does |
+|---|---|
+| **Enforce** | Requests over the line are refused with `429`. |
+| **Observe** | Nothing is refused. Requests are still counted, and a request over the line is recorded as a violation. This is a genuine dry run: switch to Enforce later and the numbers you saw are the numbers that will block. |
+| **Throttle** | Requests over the line are delayed and then **let through**. |
+
+<Warning>
+**Throttle does not enforce the limit — it paces it.** A request over the line
+waits, and is then admitted and counted like any other. Nothing is ever refused,
+so the limit is a target rather than a ceiling.
+
+The wait is the window divided by the limit, and it is **capped at two seconds**.
+So 60 requests a minute pace at one second apiece, as intended; 10 requests a
+minute would need six seconds each and get two, which lets roughly three times
+the configured rate through. Throttle is a way to smooth a burst, not a way to
+hold a slow limit.
+</Warning>
+
+---
+
+## How the decision is made
+
+<Steps>
+<Step title="The counter for this request is read">
+The key is the policy, its scope subject (the gateway, or the application), and
+the **Group by header** value if there is one. The value read is how many
+requests that key has recorded in the last window.
+</Step>
+
+<Step title="At or above the limit, the mode decides">
+In **Enforce**, the request is refused before it reaches the model or the tool.
+The caller gets `429`, and the request is not counted — a refused request does
+not deepen the hole it is in.
+
+In **Throttle**, the request waits and then continues to the next step.
+
+In **Observe**, the violation is recorded and the request continues to the next
+step.
+</Step>
+
+<Step title="The request is counted and forwarded">
+The counter is incremented, the window's expired entries are trimmed, and the
+request goes upstream. The response carries the allowance headers, with
+**Remaining** already reflecting this request — a client reading `1 remaining`
+can spend it without being refused.
+</Step>
+</Steps>
+
+### What the caller receives
+
+A refusal on **LLM** traffic is `429` with these headers, where `<scope>` is
+`global` for a gateway-wide policy and `consumer` for a targeted one:
+
+| Header | On |
+|---|---|
+| `X-RateLimit-<scope>-Limit` | Every response, refused or not |
+| `X-RateLimit-<scope>-Remaining` | Every response, refused or not |
+| `X-RateLimit-<scope>-Reset` | Every response, refused or not — a Unix timestamp one window from now |
+| `Retry-After` | Refusals only, in seconds |
+
+and this body:
+
+```json
+{
+  "error": "rate limit exceeded",
+  "message": "Request blocked: consumer rate limit exceeded. Retry after 60s.",
+  "reason": "consumer",
+  "scope": "consumer",
+  "limit": 60,
+  "window": "1m",
+  "retry_after_seconds": 60
+}
+```
+
+On **MCP** traffic the same refusal is a JSON-RPC error with code **`-32004`**
+on HTTP **`200`** — a non-2xx would drop the client's MCP session — carrying the
+same headers and the same payload in its `data`. The code is deliberately not the
+generic policy-denied one: `-32004` tells a client this is a matter of timing and
+retrying later will work.
+
+### Modes and failures
+
+| Situation | Enforce | Throttle | Observe |
+|---|---|---|---|
+| Under the limit | Counted, forwarded | Counted, forwarded | Counted, forwarded |
+| At or above the limit | `429`, refused, **not counted** | Delayed up to 2s, then **counted and forwarded** | Recorded, counted, forwarded |
+| MCP `tools/call` over the limit | JSON-RPC `-32004` on HTTP `200` | Delayed, then forwarded | Recorded, forwarded |
+| Counter store unreachable, LLM leg | **`502`, refused** | **`502`, refused** | **`502`, refused** |
+| Counter store unreachable, MCP leg | Logged, **request allowed** | Logged, allowed | Logged, allowed |
+
+<Warning>
+**In Observe, a counter-store failure still refuses the request — on LLM
+traffic.** The mode is read *after* the counter, so a store that cannot be
+reached fails the request before anything has consulted the mode. A policy you attached only to
+watch can take an application down with `502`s.
+
+MCP does the opposite: the same failure is logged and the call proceeds. One
+policy, two kinds of traffic, two failure directions. Size your expectations for
+whichever kind you actually run.
+</Warning>
+
+### Limits
+
+- **On MCP it counts `tools/call` and nothing else.** `tools/list`,
+  `initialize`, and every other JSON-RPC method pass without touching the
+  counter. A client that only lists tools is invisible to this policy.
+- **Group by header does not work on MCP at all.** See the note above.
+- **Reading the counter and incrementing it are two steps, not one.** A burst of
+  genuinely simultaneous requests can all read the same under-limit value and all
+  be admitted, so a limit can be overshot slightly under concurrency. It is a
+  ceiling for sustained traffic, not a mutual exclusion lock.
+- **Throttle never refuses**, and its delay is capped at two seconds.
+- **`Retry-After` is a number you configured**, not the time until the next slot
+  actually frees. Nothing recomputes it per request.
+- **Every request costs one**, whatever it asks the model to do.
+- **The refusal body is the gateway's own shape**, not your provider's error
+  shape, whichever wire format your client speaks. A client that only knows how
+  to parse OpenAI or Anthropic errors will see an unfamiliar object.
+- **The counter lives in the gateway's shared store.** It is not durable
+  accounting: if that store is cleared, every allowance starts again from zero.
+
+---
+
+## Verify the policy
+
+Set the limit low — 2 or 3 — while you test, then raise it. Send these **in this
+order**.
+
+<Steps>
+<Step title="Control — the path works at all">
+Open the **Playground**, pick the application the policy applies to, and send:
+
+```
+hello, write me a short greeting
+```
+
+Expect a normal reply. If this fails, the problem is the application, the model
+or the provider — not the policy. In **Enforce**, a `502` here means the gateway
+could not reach its counter store at all. Fix it before going on.
+</Step>
+
+<Step title="The allowance is being counted">
+Send the same prompt a few more times, then open the policy and check
+**Coverage**. It tells you how many applications this policy actually reaches —
+if the traffic you are sending is not one of them, nothing is being counted and
+the next step will never refuse.
+
+The running count itself is not something the Playground shows you. The gateway
+puts it in the response headers listed above, so a client of your own sees
+`X-RateLimit-<scope>-Remaining` fall by one per request; the Playground does not
+display response headers.
+</Step>
+
+<Step title="The limit refuses">
+Keep sending until you have made one more request than **Max requests**.
+
+Expect `429`, a `Retry-After` matching what you configured, and
+**`Provider 0 ms`** in the timing breakdown. That zero is the evidence that
+matters: the refused request never reached the model.
+
+In **Observe** you will see no `429` — look for the violation on the event
+instead. In **Throttle** you will see no `429` either; you will see the request
+take visibly longer and then succeed.
+</Step>
+
+<Step title="The partition holds (only if you set Group by header)">
+Send a request with a different value in the header you named. It must be
+allowed, on its own fresh allowance, while the exhausted value is still being
+refused.
+
+Then send one with the header **omitted**. It is *not* exempt — it joins the
+shared counter, which is the point of the warning above.
+</Step>
+</Steps>
+
+Every decision is emitted as a metadata event, in Observe mode too, where nothing
+is blocked. See the [event schema](/platform/event-schema) for the fields
+recorded.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Nothing is ever refused | The policy is in **Observe** or **Throttle** | Only **Enforce** returns `429` |
+| Nothing is ever refused, and the mode is Enforce | The traffic is not in scope | Check **Coverage** on the policy — a number smaller than you expected means the scope is not what you think |
+| One application's traffic exhausts another's allowance | The policy is gateway-wide | Target it at applications, which gives each its own counter |
+| Everyone shares one allowance although **Group by header** is set | The clients are not sending that header, so they all fall back to the shared counter | Make the header mandatory in the client, or accept the shared counter |
+| **Group by header** does nothing on MCP | MCP requests carry no headers into the policy | Expected. Use a targeted policy per MCP application instead |
+| Clients retry immediately and are refused again | `Retry-After` is the console's 60-second default, not your window | Set **Retry after** to the window, or to whatever wait you want |
+| Slightly more requests get through than the limit allows | The read and the increment are not atomic under concurrency | Expected. Lower the limit if you need a hard ceiling |
+| Throttle lets far more through than the configured rate | The per-request delay is capped at two seconds | Expected for limits slower than about 30 per minute. Use **Enforce** if you need a ceiling |
+| `502` on every request, including harmless ones | The counter store is unreachable | This policy fails closed on the LLM leg regardless of mode. Fix the store |
+| MCP calls are all allowed while the LLM leg returns `502` | The MCP leg fails open on the same failure | Expected, and deliberate. Healthy MCP traffic is not evidence of a healthy policy |
+| The counter reset on its own | The shared store was cleared or lost | Expected. The counter is operational state, not accounting |
+| A client cannot parse the `429` body | The refusal uses the gateway's error shape, not the provider's | Handle the status code and `Retry-After` rather than the body |
+
+---
+
+## Related
+
+- [LLM Budget](/trustgate/policies/llm-budget) — the same shape of control, for spend rather than volume
+- [Per-Tool Rate Limiter](/trustgate/policies/per-tool-rate-limiter) — a ceiling on tool executions rather than requests
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [End-user attribution](/trustgate/observability/end-user-attribution) — why the header you group by is not the same thing as the user on the trace
+- [Event schema](/platform/event-schema) — the fields each decision records

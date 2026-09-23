@@ -1,0 +1,262 @@
+---
+title: "OpenAI Moderation"
+sidebarTitle: "OpenAI Moderation"
+description: "Score text with OpenAI's Moderations API — and the settings the form does not show, without which a policy created there detects everything and blocks nothing."
+---
+
+The **OpenAI Moderation** policy sends text to
+[OpenAI's Moderations API](https://platform.openai.com/docs/guides/moderation)
+and records a score for every category the model returns. It either **blocks**
+the call or lets it through; unlike the AWS and Google guardrails it cannot mask,
+because the Moderations API returns scores, not rewritten text.
+
+Applies to **LLM** traffic only. Text only.
+
+<Warning>
+**A policy created from the console today detects and never blocks.** Blocking
+needs **Block On Flagged** or at least one per-category **Threshold**, and the
+form draws neither — there is no field for either one anywhere on it. Until
+there is, a policy you create here is a scoring instrument: useful, and not a
+guardrail. See [Making it block](#making-it-block) for what has to happen
+instead, and who has to do it.
+</Warning>
+
+<Warning>
+**This policy puts a synchronous call to OpenAI in front of every inspected
+leg.** What that costs depends on your region and the size of the conversation,
+so measure it in your own environment rather than assuming.
+</Warning>
+
+---
+
+## Configure the policy
+
+Open **Policies** → **Library** → **OpenAI Moderation**. The form has two fields.
+
+| Field | What to enter |
+|---|---|
+| **Model** | The Moderations model. Defaults to `omni-moderation-latest`. |
+| **API Key** | An OpenAI credential of your own, sent as a bearer token. Required. |
+
+<Warning>
+**The key is stored as provided and is shown again whenever the policy is
+reopened.** Policy settings are not encrypted at rest and are not redacted on
+read. Use a key scoped to moderation, and rotate it on your normal schedule.
+</Warning>
+
+### Mode and scope
+
+Start in **Observe** and read the recorded scores before you choose thresholds.
+That is not ceremony here — you cannot pick a sensible threshold for your traffic
+without seeing what your traffic actually scores.
+
+A policy created from the console inspects the **request leg only**. The form
+offers no choice about it and writes that leg for you. The gateway can also
+inspect the model's answer — a second call to OpenAI on every turn — but that is
+another of the things this form cannot turn on.
+
+---
+
+## Making it block
+
+Four settings decide whether this policy ever refuses anything, and the form
+draws none of them. You will not find them under **Advanced**, behind a toggle,
+or anywhere else on the panel: there is nothing to look for.
+
+They are not out of reach altogether — they can be set on the policy outside the
+console, which is a job for whoever manages your gateway. Once one of them is
+set it stays set: the form preserves what it does not show, so your own edits
+here will not wipe it.
+
+| Setting | What it does |
+|---|---|
+| **Block On Flagged** | Blocks any category OpenAI itself marks as flagged, with no threshold of your own. Off by default. The single switch that turns this policy into a guardrail. |
+| **Thresholds** | A score per category, between 0 and 1. A score **at or above** the threshold blocks. |
+| **Categories** | An allow-list of categories to evaluate. Empty evaluates everything OpenAI returns. |
+| **Message** | The message returned to the caller on a block. |
+
+Use the category keys exactly as the Moderations API returns them. The reliable
+way to learn them is to run in **Observe** and read `category_scores` off the
+recorded events — every category OpenAI scored is there.
+
+A fifth setting the form does not draw chooses which legs are inspected — the
+request on its way to the model, the model's answer coming back, or both. It
+does not affect whether a violation blocks, only where one can be found.
+
+<Warning>
+**A threshold of `0` blocks everything in that category.** The comparison is
+*at or above*, and every score is at or above zero. A category with a `0`
+threshold refuses every request that reaches this policy, whatever the content.
+It is the most common way to take an application offline with this policy.
+</Warning>
+
+<Warning>
+**Categories is an allow-list that also switches off thresholds.** A category
+outside the list is not evaluated at all, so a threshold you set for it is never
+consulted and nothing reports that it was ignored. If you list categories, list
+every category you have a threshold for.
+</Warning>
+
+---
+
+## How the decision is made
+
+<Steps>
+<Step title="The text is flattened and sent in one call">
+On the request leg, the system prompt and the content of every message are joined
+with newlines into a single string. On the response leg, the assistant's content
+alone. One call, one string.
+</Step>
+
+<Step title="Scores are aggregated across the returned results">
+The highest score per category wins, and a category flagged in any result counts
+as flagged.
+</Step>
+
+<Step title="Each evaluated category is checked">
+A category with a threshold is a violation when its score is at or above it. A
+category without a threshold is a violation only when **Block On Flagged** is on
+and OpenAI flagged it. **With neither, there are no violations and nothing is
+ever blocked.**
+</Step>
+
+<Step title="A violation in Enforce refuses the call">
+The caller gets `403` and a body listing what crossed:
+
+```json
+{
+  "error": {
+    "type": "content_flagged",
+    "message": "request blocked by content policy",
+    "categories": [
+      { "category": "violence", "score": 0.93, "threshold": 0.8 }
+    ]
+  }
+}
+```
+
+The message is the **Message** setting, or that default. A category blocked by
+**Block On Flagged** rather than a threshold appears with no `threshold` field.
+</Step>
+</Steps>
+
+### Modes and failures
+
+| Situation | Enforce | Observe |
+|---|---|---|
+| A category crosses its threshold | `403`, refused | Recorded as `reported`, request continues |
+| OpenAI flags a category, **Block On Flagged** on | `403`, refused | Recorded as `reported`, request continues |
+| OpenAI flags a category, no threshold and **Block On Flagged** off | **Allowed**, recorded | Allowed, recorded |
+| The Moderations call fails for any reason | **`502`, refused** | Recorded as `failed_open`, request continues |
+| The policy configuration cannot be parsed | `502`, refused | `502`, refused |
+| Streaming response | Not inspected | Not inspected |
+
+On failure in Enforce the caller gets:
+
+```json
+{
+  "error": {
+    "type": "moderation_unavailable",
+    "message": "content moderation is temporarily unavailable"
+  }
+}
+```
+
+<Warning>
+**In Enforce this policy fails closed, and there is no setting to change that.**
+Every failure class collapses into that one response: a revoked key, an OpenAI
+rate limit, a malformed request and an outage are indistinguishable from the
+caller's side and from the policy's event. When it starts refusing everything,
+the gateway cannot tell you which of those it is — check the key and OpenAI's
+status page yourself.
+</Warning>
+
+### Limits
+
+- **It cannot mask.** There is no anonymise action; the call is blocked or it is
+  not. For redaction use [TrustGuard](/trustgate/policies/trustguard-guardrail)
+  or [Regex Replace](/trustgate/policies/regex-replace).
+- **Streaming responses are not inspected.** They pass through untouched, and
+  nothing is recorded. Enforce on the request leg.
+- **Text only, and structure is lost.** Roles, tool calls, tool definitions and
+  attachments are not sent — the request leg becomes one newline-joined blob. A
+  detector that would care which participant said something cannot.
+- **Your own system prompt is scored.** It is the first thing in that blob, and a
+  security-related system prompt can score high enough to matter. Check it in
+  Observe before enforcing.
+- **LLM traffic only.** The policy does not apply to MCP (Model Context Protocol)
+  tool calls.
+- **The console cannot select the response leg.** A policy created there inspects
+  requests, and inspecting the answer is set outside the console, like the
+  blocking settings.
+- **Settings are stored and returned in plain text**, including the API key.
+
+---
+
+## Verify the policy
+
+Open the **Playground**, pick an application the policy applies to, and work
+through these in order. Steps 2 and 3 are one loop: observe, then enforce.
+
+<Steps>
+<Step title="Control — the path works at all">
+```
+hello, write me a short greeting
+```
+
+Expect a normal reply and the decision **`allowed`**. If this fails, the problem
+is the application, the model or the key — not the thresholds. Fix it before
+going on.
+</Step>
+
+<Step title="Observe — learn what your traffic scores">
+Leave the policy in **Observe** and send real prompts, including ones you expect
+to be borderline. Read `category_scores` on each event.
+
+You are looking for two numbers: how high your acceptable traffic scores, and how
+high the traffic you want refused scores. A threshold between them is the only
+one worth setting. Take the category keys from these events too.
+</Step>
+
+<Step title="Enforce — confirm a violation is refused">
+This step needs a threshold, or **Block On Flagged**, already set on the policy —
+neither of which you can do from the form, so hand your numbers from step two to
+whoever manages your gateway first. Once one of them is in place, switch to
+**Enforce** and resend the prompt that scored above it.
+
+Expect the decision **`block`**, a `403` whose body names the category and the
+score, and **`Provider 0 ms`** in the timing breakdown. That zero is the evidence
+that matters: the request never reached the model.
+
+If the same prompt is allowed, the policy has no threshold and no **Block On
+Flagged** — see the warning at the top of this page.
+</Step>
+</Steps>
+
+Every decision is emitted as a metadata event, in Observe mode too. See the
+[event schema](/platform/event-schema) for the fields recorded.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Nothing is ever blocked, scores look right | No threshold and **Block On Flagged** off — where a policy created in the console starts | Neither can be set from the form; ask whoever manages your gateway for one of them |
+| A threshold is set and still nothing blocks | The category is not in **Categories**, so it is never evaluated | Add it, or clear **Categories** to evaluate everything |
+| Every request is refused with `403` | A threshold of `0`, or one far below what normal traffic scores | Raise it; read the scores in Observe first |
+| `502 moderation_unavailable` on every request | The Moderations call is failing — revoked or wrong key, rate limit, or an outage | The response cannot tell you which; check the key, then OpenAI's status |
+| The policy will not save | **API Key** is empty | It is required |
+| Responses are never inspected | The console sets the request leg only | Not something this form can change; ask whoever manages your gateway |
+| Streamed responses are never inspected | Streaming is not supported | Enforce on the request leg |
+| High scores on benign traffic | The system prompt is part of the scored text | Read it in Observe and account for it in the threshold |
+| MCP tool calls are never inspected | This policy sees chat traffic only | Use [TrustGuard](/trustgate/policies/trustguard-guardrail), which covers MCP too |
+
+---
+
+## Related
+
+- [Guardrails](/trustgate/policies/guardrails) — the other guardrail policies, and how to choose between them
+- [TrustGuard](/trustgate/policies/trustguard-guardrail) — the guardrail that also covers MCP, and can mask
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [Event schema](/platform/event-schema) — the fields each decision records

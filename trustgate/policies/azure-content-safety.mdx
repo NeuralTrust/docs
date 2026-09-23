@@ -1,0 +1,293 @@
+---
+title: "Azure Content Safety"
+sidebarTitle: "Azure Content Safety"
+description: "Score request text against Azure's four harm categories and block on a threshold per category — on the request leg, which is the only leg this policy has."
+---
+
+The **Azure Content Safety** policy sends the request text to the **Analyze
+Text** operation of
+[Azure AI Content Safety](https://learn.microsoft.com/azure/ai-services/content-safety/overview)
+and applies the verdict at the gateway. Azure scores four harm categories —
+**Hate**, **Violence**, **Self-harm** and **Sexual content** — and the policy
+refuses the request when any category you enforce reaches the severity you set
+for it.
+
+It blocks, or it allows. It cannot mask, redact or rewrite anything. And it
+never sees the model's answer: **this policy has no response leg at all**.
+Everything below is about what goes in.
+
+<Warning>
+**The endpoint is the value that will go wrong.** The gateway POSTs the URL you
+configure exactly as you typed it and appends nothing — no operation path, no
+`api-version`. The endpoint the Azure portal shows on **Keys and Endpoint** is
+the resource root, not an operation, so it is accepted when you save the policy
+and then fails on every single request.
+
+```
+# Wrong — the resource endpoint from the portal. Saves without complaint.
+https://my-content-safety.cognitiveservices.azure.com/
+
+# Right — the Analyze Text operation, with its api-version query string
+https://my-content-safety.cognitiveservices.azure.com/contentsafety/text:analyze?api-version=2024-09-01
+```
+
+You will not see Azure's 404. Any non-2xx from Azure becomes one generic
+gateway error, so the symptom is every request failing with nothing naming the
+cause.
+</Warning>
+
+{/* TODO(verify): the api-version above is illustrative. Confirm the current
+    supported value against Azure's Analyze Text reference when Part 1 is
+    written against a real resource. */}
+
+This policy puts a synchronous call in front of every request. What that costs
+depends on your region, your resource tier and the size of the conversation, so
+measure it in your own environment rather than assuming.
+
+---
+
+## Part 1 — Set up Azure AI Content Safety (TBD)
+
+<Note>
+This walkthrough is being written against a real account. Until then, follow
+Azure's own documentation to create the resource, and come back for **Part 2**.
+</Note>
+
+Everything in this part happens in **your own** Azure subscription. TrustGate
+never creates or changes anything there. These are the values the policy will
+ask you for:
+
+| What you need | Where it comes from |
+|---|---|
+| An Azure AI Content Safety resource | Created in your Azure subscription. A multi-service Azure AI Services resource also exposes Content Safety. |
+| A region | Chosen when you create the resource. It decides where the text is analysed, and every request makes that round trip. |
+| The **Analyze Text** endpoint URL, **including its `api-version` query string** | Built from the resource endpoint on the portal's **Keys and Endpoint** page — not that endpoint on its own. See the warning above. |
+| A subscription key | The same **Keys and Endpoint** page. A resource issues two so you can rotate one while the other is live; either works. |
+| A severity scale | Not a value from Azure but a choice you make: four levels (0, 2, 4, 6) or eight (0–7). It is sent with every call and decides the numbers Azure returns. |
+| A blocking threshold for each category | Also a choice: one severity per category, out of **Hate**, **Violence**, **Self-harm** and **Sexual content**. |
+
+Nothing else about the resource is configured from TrustGate. There is no
+blocklist, no custom term list and no per-category configuration on the Azure
+side that this policy reads.
+
+---
+
+## Part 2 — Give the gateway a key
+
+There is one authentication method. Not one recommended method out of several —
+one.
+
+The policy authenticates with the resource's **subscription key**, sent as the
+`Ocp-Apim-Subscription-Key` header on every call. Microsoft Entra ID and managed
+identity are not supported: this policy cannot use either, and there is no
+setting anywhere that would let it.
+
+<Warning>
+**The key is stored as provided and is shown again whenever the policy is
+reopened.** Treat it like any other credential. Because the resource issues two
+keys, you can rotate by pasting the second one into the policy and then
+regenerating the first.
+</Warning>
+
+---
+
+## Part 3 — Configure the policy in TrustGate
+
+Open **Policies** → **Library** → **Azure Content Safety**.
+
+### Azure connection
+
+| Field | What to enter |
+|---|---|
+| **API Key** | One of the resource's two subscription keys. |
+| **Endpoint** | The full **Analyze Text** URL, with its `api-version`. See the warning at the top of this page. |
+
+The console checks that the endpoint is an absolute `http(s)` URL, and nothing
+more. Whether that URL is an operation Azure will answer is between you and
+Azure.
+
+### Category thresholds
+
+**Severity scale** — *4 levels - 0,2,4,6* (the default) or *8 levels - 0-7*.
+This is sent to Azure with every call and decides the severities it returns. It
+also decides which thresholds you may pick below: **2, 4 or 6** on the
+four-level scale, **1 to 7** on the eight-level one. The console offers only the
+legal values, and a threshold that becomes illegal when you switch scale is
+snapped to the nearest one that is — so re-read the thresholds after changing
+the scale.
+
+Then one row per category: **Hate**, **Violence**, **Self-harm**, **Sexual
+content**. The toggle decides whether the category is sent to Azure at all;
+**Block at** is the severity at which it blocks. A category breaches when the
+severity Azure returns is **greater than or equal to** its **Block at** value.
+
+A new policy starts with all four categories enabled at **Block at** 4. At least
+one category must stay enabled or the policy will not save.
+
+A category you turn off is not sent to Azure and is never scored, so there is no
+"score it but do not block on it" for a single category. Recording without
+blocking is what **Observe** does, and it applies to the whole policy.
+
+### When content is blocked
+
+**Block message** — returned to the caller in the `403` body. Left empty, the
+body carries `request blocked by Azure Content Safety`.
+
+### Stage and mode
+
+**This policy runs on the request leg, and that is not a choice.** Screening the
+request on its way to the model is the only thing it can do, so the form draws
+no selector for it — there is nothing to select between.
+
+Start in **Observe**, which records every decision without refusing anything,
+read the severities Azure actually returns for your traffic, and only then set
+the thresholds and switch to **Enforce**.
+
+---
+
+## How the decision is made
+
+<Steps>
+<Step title="The whole conversation becomes one string">
+The system prompt, if present, and the text of **every** message in the request
+are joined with newlines and sent as a single value. Roles are not sent. Tool
+definitions, tool calls and tool results are not sent. Attachments are not sent.
+
+Sending the whole conversation is what lets this policy catch something
+assembled across several turns. It is also what makes it collide with Azure's
+length limit — see **Limits**.
+</Step>
+<Step title="Azure scores the enabled categories">
+One Analyze Text call per request, carrying the categories you enabled and the
+severity scale you chose. A request whose text is empty after joining is
+forwarded without calling Azure at all.
+</Step>
+<Step title="Any category at or above its threshold refuses the request">
+The request never reaches the model. The caller gets `403` and a body naming
+every category that breached, with the severity Azure returned and the threshold
+it crossed:
+
+```json
+{
+  "error": {
+    "type": "content_flagged",
+    "message": "request blocked by Azure Content Safety",
+    "categories": [
+      { "category": "Hate", "severity": 6, "threshold": 2 }
+    ]
+  }
+}
+```
+
+The `category` values are Azure's own identifiers — `Hate`, `Violence`,
+`SelfHarm` and `Sexual` — not the labels the console shows.
+</Step>
+</Steps>
+
+### Modes and failures
+
+| Situation | Enforce | Observe |
+|---|---|---|
+| A category's severity meets its threshold | `403`, refused | Recorded, request continues |
+| No category meets its threshold | Request continues | Request continues |
+| The request carries no text to analyse | Forwarded; Azure is not called | Forwarded; Azure is not called |
+| Azure returns any non-2xx, or the call fails or times out | **`502`, refused** | Recorded, request continues |
+
+<Warning>
+**In Enforce this policy fails closed, and there is no setting to change that.**
+Every failure collapses into the same `502`: a wrong key, a wrong endpoint, a
+throttled resource and a conversation past Azure's length limit are
+indistinguishable to the caller, and the response carries no detail about which
+one it was. Validate in Observe, and account for this when sizing availability.
+</Warning>
+
+### Limits
+
+- **Request leg only.** There is no response leg, so this policy cannot see,
+  score or block what the model says — not for streaming responses, not for any
+  response. This is a larger limit than anything you can configure on it. If you
+  need output screening, pair it with a guardrail that has a response leg.
+- **It blocks; it cannot mask.** No anonymisation and no rewriting. Sensitive
+  content is refused or forwarded, never redacted.
+- **Four categories, and nothing else.** No blocklists, no custom term lists, no
+  jailbreak or prompt-shield detection, no protected-material detection.
+- **Azure's length limit applies to the whole conversation.** Azure documents a
+  10,000-character limit on Analyze Text. The policy sends the joined
+  conversation and never truncates it, so a long enough conversation is rejected
+  by Azure — and because the policy fails closed, that is a `502` on that turn
+  and on every turn after it, because a conversation only grows. Treat this
+  policy as suited to short exchanges until you have measured your own.
+- **Subscription key only.** No Microsoft Entra ID, no managed identity.
+- **Text only.** Files, images and audio are not sent to Azure.
+- **LLM traffic only.** The policy does not apply to MCP (Model Context Protocol)
+  tool calls.
+
+{/* TODO(verify): the 10,000-character figure above is Azure's documented
+    Analyze Text limit and may differ by api-version. Re-check it when Part 1
+    is written against a real resource. */}
+
+---
+
+## Verify the policy
+
+Open the **Playground**, pick the application the policy applies to, and send
+these prompts **in this order**. Starting with the control means a failure tells
+you something specific.
+
+<Steps>
+<Step title="Control — the path works at all">
+```
+hello, write me a short greeting
+```
+
+Expect a normal reply and the decision **`allowed`**.
+
+In **Enforce**, this step is also the endpoint test. A harmless prompt that
+comes back `502` means the gateway could not get an answer out of Azure: wrong
+endpoint, wrong key, or the resource unreachable. Fix that before going on —
+nothing below will work until this does.
+</Step>
+<Step title="Observe — read the severities before you trust the thresholds">
+Switch the policy to **Observe** and send content you consider borderline for
+your application. Nothing is refused, and the decision recorded is
+**`reported`** when a category breached and **`allowed`** when none did.
+
+This is how you find out what severities Azure returns for **your** traffic
+rather than guessing. Set **Block at** from what you see here.
+</Step>
+<Step title="Enforce — blocking works">
+Back in **Enforce**, send something that should breach a category you enabled.
+
+Expect `403`, the decision **`block`**, and **`Provider 0 ms`** in the timing
+breakdown. That zero is the evidence that matters: the request never reached the
+model. Read the `categories` array in the body to confirm it fired on the
+category you expected.
+</Step>
+</Steps>
+
+Every decision is emitted as a metadata event, in Observe mode too, where
+nothing is blocked. See the [event schema](/platform/event-schema) for the
+fields recorded.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `502` on every request, starting with the first, including harmless prompts | The endpoint is the bare resource URL, so Azure answers 404 and the gateway fails closed | Use the full **Analyze Text** URL including `api-version` |
+| `502` on every request after a key rotation | The key in the policy was the one you regenerated | Paste the current key; the resource has two for exactly this |
+| `502` that starts partway through a long conversation and never recovers | The joined conversation passed Azure's length limit | Nothing in the policy helps: the conversation only grows. Shorten the history the application sends, or screen with a guardrail that sends one message |
+| Nothing is ever blocked | The category is toggled off, or its **Block at** is above anything the scale returns | Turn the category on; check the threshold against the severity scale |
+| A threshold changed by itself | You switched the **Severity scale** and it snapped to the nearest legal value | Re-read all four thresholds after changing the scale |
+| The policy will not save | The API key or endpoint is empty, the endpoint is not an absolute `http(s)` URL, or every category is off | The console names the field; all three are checked before the request is sent |
+| Model output is never screened | Expected — there is no response leg | Use a guardrail with a response leg for output |
+
+---
+
+## Related
+
+- [Guardrails](/trustgate/policies/guardrails) — the other guardrail policies, and how to choose between them
+- [Google Model Armor](/trustgate/policies/google-model-armor) — a provider guardrail that also screens responses and can mask in place
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [Event schema](/platform/event-schema) — the fields each decision records

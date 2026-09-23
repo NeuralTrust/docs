@@ -1,52 +1,315 @@
 ---
 title: "Tool Injection"
-description: "Add gateway-defined tools to every model call an application makes, so a platform tool does not depend on each client remembering to send it."
+sidebarTitle: "Tool Injection"
+description: "Add gateway-defined tools to every model call an application makes, so a platform tool does not depend on each client remembering to send it. The gateway offers the tool; your application still has to run it."
 ---
 
 Applies to **LLM**.
 
 Some tools should be available on every model call an application makes, whether
-or not the developer remembered to send them — a lookup against your own knowledge
-base, an escalation tool, a tool that records a decision. Injecting them at the
-gateway makes them a platform guarantee instead of a per-client convention.
-
-## What it does
+or not the developer remembered to send them — a lookup against your own
+knowledge base, an escalation tool, a tool that records a decision. Injecting
+them at the gateway makes them a platform guarantee instead of a per-client
+convention.
 
 The policy appends its tools to the request's tool list before the request
-reaches the model. It only adds; a client's own tools are never removed. The
-tool is written once and encoded for whichever provider the request is going to,
-so the same policy serves OpenAI-style and Anthropic requests.
+reaches the model. **It only adds; a client's own tools are never removed.** The
+tool is written once and re-encoded for whichever provider the request is going
+to, so the same policy serves OpenAI-style and Anthropic requests.
 
-Each injected tool is a **function** with:
+<Warning>
+**The gateway adds the definition. It does not run the tool.** This is what a
+first-time reader gets wrong, and it is worth getting right before you save
+anything. See [What it does not do](#what-it-does-not-do).
+</Warning>
 
-| Field | Role |
+---
+
+## Configure the policy
+
+Open **Policies** → **Library** → **Tool Injection**. It sits under **Tool
+Governance**.
+
+This policy has no form of its own: the panel is generated from its schema, so
+the field names below are the ones you will see, generic wording and all.
+
+### Inject Tools
+
+**Add Inject** appends a card, titled **Inject 1**, **Inject 2** and so on. At
+least one is required — a policy with an empty list is refused on save.
+
+| Field | What it is |
 |---|---|
-| **Name** | What the model calls, and what the client will see in the tool call. |
+| **Type** | The tool kind. **Function** is the only value, and it is pre-selected. A policy carrying any other type is refused on save rather than quietly reinterpreted. |
+| **Name** | What the model calls, and what the client will see in the tool call. Required, and the only field the gateway validates. |
 | **Description** | What the model reads when deciding whether to call it. Write it for the model, not for a person. |
-| **Parameters** | A JSON Schema for the arguments. Optional; without one the model calls the tool with no arguments. |
+| **Parameters** | A JSON Schema for the arguments. Without one the model calls the tool with no arguments. |
 
-## When a name collides
+<Warning>
+**Parameters cannot be filled in from the console.** The field is a free-form
+JSON object and the generated panel has no editor for one: you get the label and
+its help text, and no input underneath them. A tool created here therefore has
+no argument schema, and the model calls it with no arguments.
 
-A client may already send a tool with the same name. **On conflict** decides:
+If your tool takes arguments, the form cannot give it them — today the schema
+can only be set outside the console, so ask whoever manages your gateway.
+Nothing in the panel says any of this; it simply renders an empty space where
+the field should be.
+</Warning>
 
-| Setting | Outcome |
+### On Conflict
+
+A client may already send a tool with the same name. **On Conflict** decides what
+happens, and it applies to the tool list as it stands when this policy runs —
+the client's tools, whatever an earlier policy in the chain left behind, and the
+tools this policy has already injected on this request.
+
+| Setting | Outcome | Recorded as |
+|---|---|---|
+| **Gateway Wins** (the default) | The colliding definition is replaced by the gateway's. | `replaced` |
+| **Client Wins** | The gateway's tool is dropped for that request; the client's definition stands. | `dropped` |
+| **Reject** | The request is refused, naming the tool. | `rejected` |
+
+<Warning>
+**Reject abandons the whole injection, not just the colliding tool.** The request
+is refused the moment the first collision is found: tools earlier in your list
+that had already been placed are discarded with it, and tools later in the list
+are never reached. There is no partial injection.
+
+It also means a duplicate *inside your own list* is a collision. Two entries
+named `escalate` collide with each other — the second one meets the first — and
+with **Reject** selected that configuration refuses **every request in scope**,
+with no client involvement at all. The policy saves without complaint.
+</Warning>
+
+The caller gets `400` and a body naming the tool:
+
+```json
+{ "error": { "type": "tool_name_reserved", "name": "search_docs" } }
+```
+
+### Scope
+
+The generated panel renders a **Scope** select offering *Consumer* and *Global*.
+
+<Note>
+**This field does nothing.** The policy's effective scope comes from the scope
+set on the policy itself — **Requests from** — and not from this select. It is
+informational, it is part of the schema, and a form generated from the schema
+has no way to know it should hide it. Leave it alone.
+</Note>
+
+### Mode
+
+**There is no mode control for this policy, and that is not a rendering fault.**
+Tool Injection supports **Enforce** only, so the console draws no radio group at
+all: a one-option choice is not a choice. A policy set to Observe from anywhere
+else is refused as invalid.
+
+The consequence is the one that matters: **you cannot dry-run this policy**.
+There is no way to find out what it would do to your traffic without doing it.
+Attach it to one application first and widen the scope afterwards.
+
+Scope works as it does for every policy — **Requests from**, for applications
+and groups. See [Policies overview](/trustgate/policies/overview#scope).
+
+---
+
+## How the decision is made
+
+<Steps>
+<Step title="The request is read into the one shape the gateway works in">
+Requests arrive in whichever shape the client's provider uses, and the gateway
+converts each of them into a single internal shape before any policy looks at
+it. If the body cannot be read, or it arrives in a shape the gateway does not
+know how to convert, the policy does nothing at all and the request is forwarded
+unchanged. See the warning below — this path is silent.
+</Step>
+
+<Step title="Each tool in the list is placed, in order">
+A name not already present is **appended**. A name already present is resolved by
+**On Conflict** — replaced, dropped, or the whole request rejected with `400`.
+</Step>
+
+<Step title="If nothing was appended or replaced, the body is not touched">
+A list where every tool was dropped by **Client Wins** changes nothing, so the
+original body is forwarded byte for byte. The outcomes are still recorded.
+</Step>
+
+<Step title="Otherwise the tool list is written back">
+Only the fields the tool list actually changed are written back onto the body the
+client sent, rather than the body being rebuilt from scratch. Fields particular
+to your provider, which that internal shape does not cover, survive the round
+trip.
+</Step>
+</Steps>
+
+The event records what happened to **each** injected tool on each request:
+`appended`, `replaced`, `dropped` or `rejected`. That per-tool record is the only
+way to see a **Client Wins** drop, which is otherwise invisible — the request
+succeeds and your tool simply was not there.
+
+### Modes and failures
+
+Enforce is the only mode, so there is one column.
+
+| Situation | Outcome |
 |---|---|
-| **Gateway tool wins** (default) | The client's definition is replaced by the gateway's. |
-| **Client tool wins** | The gateway's tool is dropped for that request. |
-| **Reject the request** | The request is refused, naming the tool. |
+| The name is free | Appended, event `appended` |
+| Collision, **Gateway Wins** | The gateway's definition replaces the other, event `replaced` |
+| Collision, **Client Wins** | The gateway's tool is not injected, event `dropped` |
+| Collision, **Reject** | `400 tool_name_reserved`, the whole injection abandoned, nothing reaches the model |
+| The request body cannot be read | **Forwarded with no tools injected, and no event** |
+| The request arrives in a shape the gateway cannot convert | **Forwarded with no tools injected, and no event** |
+| The tool list cannot be written back | `502`, refused |
+| The policy configuration cannot be parsed | `502`, refused |
 
-The trace records what happened to each injected tool on each request: appended,
-replaced, dropped or rejected.
+<Warning>
+**When the policy cannot read the request, it fails open and silently.** A body
+it cannot read, or one that arrives in a shape it cannot convert, produces no
+injection, no rejection and **no event of any kind**. The request reaches the
+model exactly as the client sent it, carrying only the client's own tools, and
+there is nothing in **Activity** to count.
+
+For a governance control that is the wrong direction, and no setting changes it.
+If a tool must be present on every call, assert its presence somewhere you can
+alarm on rather than reading a quiet request as an injected one.
+</Warning>
+
+### Limits
+
+- **It cannot be dry-run.** Enforce is the only supported mode, so there is no
+  way to watch what the policy would do before it does it.
+- **It adds; it never removes or narrows.** There is no way to take a tool away
+  with this policy. See
+  [Applications](/trustgate/access/applications#what-it-may-use) for that.
+- **It does not run anything.** See below.
+- **Parameters cannot be set from the console.** A tool created here has no
+  argument schema, so the model calls it with no arguments.
+- **Function tools only.** Any other tool type is refused on save.
+- **Request only.** There is no response leg and no leg to choose: the tools are
+  added on the way to the model, and nothing is inspected on the way back.
+- **It fails open and silently on a request it cannot read.** See the warning
+  above.
+- **LLM traffic only.** The policy does not apply to MCP (Model Context
+  Protocol) tool calls. A tool served by an MCP server is governed on the MCP
+  side, not here.
+
+---
 
 ## What it does not do
 
-The gateway adds the definition; it does not run the tool. When the model calls
-an injected tool, the call comes back to the application like any other tool
-call, and the application has to execute it — itself, or through an MCP server
-that serves it. Inject only tools your applications know how to handle.
+**The gateway adds the definition; it does not run the tool.** When the model
+decides to call an injected tool, the call comes back to the application like any
+other tool call, and the application has to execute it — itself, or through an
+MCP server that serves it. Inject only tools your applications know how to
+handle.
 
-It is not an access control. Which tools an application may call is set on the
+A client that receives a tool call it has never heard of does one of two things,
+neither of them good: it fails, or it returns nothing and lets the model
+improvise. Injecting a tool into an application that does not implement it does
+not extend the application; it breaks it.
+
+**It is not an access control.** Which tools an application may call is set on the
 [application](/trustgate/access/applications#what-it-may-use); this policy adds
-to that set for the model's benefit, it does not narrow it.
+to that set for the model's benefit, it does not narrow it. Reaching for Tool
+Injection to stop a tool being used is reaching for the wrong policy: it has no
+mechanism that can refuse anything except a name collision.
 
-The policy always enforces; there is no observe mode for adding a tool.
+---
+
+## Verify the policy
+
+Open the **Playground**, pick an application the policy applies to, and send
+these **in this order**. Starting with the control means a failure tells you
+something specific.
+
+<Steps>
+<Step title="Control — the path works at all">
+```
+hello, write me a short greeting
+```
+
+Expect a normal reply. If this fails, the problem is the application, the model
+or the provider — not the policy. Fix it before going on.
+</Step>
+
+<Step title="The tool was injected — the model knows about it">
+```
+list the tools you have available and what each one does
+```
+
+Your injected tool must be in the answer, with the **Description** you wrote.
+The model's own account is not proof on its own — models invent tool lists — so
+confirm it against the event, which records the tool by name with the outcome
+`appended`.
+</Step>
+
+<Step title="The model will actually call it">
+Ask for something only the injected tool can do, phrased the way a real user
+would.
+
+Expect a tool call to come back to the client. **This is where most first
+attempts fail, and the cause is almost always the description**: a tool the model
+does not understand is a tool the model does not call. Rewrite the
+**Description** for the model rather than for a reviewer.
+</Step>
+
+<Step title="A collision behaves the way you chose">
+This is the one check the Playground cannot do. A collision only happens when
+the caller declares a tool of its own, and the Playground sends none — it sends
+your prompt and nothing else. So this step goes through whatever already calls
+this gateway, or a one-off request made with an application's API key. The
+`curl` below is only there to fix the shape of that request:
+
+```bash
+curl -sS https://YOUR_GATEWAY/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_APP_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini",
+       "messages":[{"role":"user","content":"hello"}],
+       "tools":[{"type":"function","function":{
+         "name":"YOUR_INJECTED_TOOL_NAME",
+         "description":"the client-side definition"}}]}'
+```
+
+With **Gateway Wins** expect `replaced` on the event and your description to
+survive; with **Client Wins** expect `dropped` and the client's to survive; with
+**Reject** expect `400 tool_name_reserved` and the upstream never to be reached.
+
+Run this even if you expect no collisions. It is also the check that catches a
+duplicate name inside your own list.
+</Step>
+</Steps>
+
+Every decision is emitted as a metadata event. See the
+[event schema](/platform/event-schema) for the fields recorded.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The policy will not save | The tool list is empty, or a tool has no **Name** | Both are validated at save |
+| The policy will not save, citing the type | The policy carries a tool type other than `function` | Function tools are the only kind the gateway injects |
+| There is no mode selector on the panel | Tool Injection supports **Enforce** only | Expected. A one-option choice is not drawn |
+| **Parameters** shows a label and no input | A form generated from the schema cannot render a free-form JSON object | The console cannot set it — ask whoever manages your gateway |
+| The model calls the tool with no arguments | The tool has no **Parameters**, so there is nothing to fill in | As above |
+| The model never calls the tool | It was in the request and the model did not choose it | Almost always the **Description**. Confirm the injection on the event first, then rewrite the description |
+| The client errors on an unknown tool call | The application does not implement the injected tool | The gateway does not execute tools. Inject only what the application handles |
+| The tool is missing and the request succeeded | A collision resolved as `dropped` by **Client Wins**, or the scope does not cover this application | Check the per-tool outcome on the event, then check **Requests from** |
+| The tool is missing and there is no event at all | The body could not be read, or it arrived in a shape the gateway cannot convert | This path is silent by design. Do not read silence as success |
+| `400 tool_name_reserved` on every request | **On Conflict** is **Reject** and something always collides — often a duplicate name inside your own list | Read your own list first, then the client's |
+| A tool earlier in your list was not injected on a rejected request | **Reject** abandons the whole injection | Expected; there is no partial injection |
+| A client's tool definition changed unexpectedly | **Gateway Wins** replaced it | That is what the setting does. Use **Client Wins** to defer to the client |
+| Changing **Scope** on the panel does nothing | That field is informational | Use the policy's own **Requests from** |
+
+---
+
+## Related
+
+- [Applications](/trustgate/access/applications#what-it-may-use) — where which tools an application may use is actually decided
+- [Per-Tool Rate Limiter](/trustgate/policies/per-tool-rate-limiter) — the other policy that always enforces, and the one that limits tool calls rather than adding them
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [Event schema](/platform/event-schema) — the fields each decision records

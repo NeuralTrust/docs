@@ -1,0 +1,345 @@
+---
+title: "AWS Bedrock Guardrail"
+sidebarTitle: "AWS Bedrock Guardrail"
+description: "Reuse a guardrail you already built in Amazon Bedrock — and know exactly how little of the conversation the gateway sends it."
+---
+
+The **AWS Bedrock Guardrail** policy evaluates text against a guardrail you have
+already defined in
+[Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails.html)
+and applies the verdict at the gateway. One call covers everything that
+guardrail contains: denied topics, content filters, word lists, and the
+sensitive-information policy.
+
+It either **blocks** the request, or **rewrites it in place** — replacing the
+spans AWS anonymised with the masked text AWS itself returns, before the request
+reaches the model.
+
+<Warning>
+**Only the last user message is sent.** Not the system prompt. Not the earlier
+turns. Not tool definitions, tool calls or tool results. Not attachments. The
+gateway walks back through the messages, takes the most recent one whose role is
+`user`, and sends that single string — and if there is no user message with text
+in it, the request is forwarded without calling AWS at all.
+
+This is the single biggest limit on the policy, and it is not configurable. An
+instruction planted in a system prompt, smuggled into a tool result, or built up
+across several turns is invisible to this guardrail. Size your expectations
+around one message.
+</Warning>
+
+This policy puts a synchronous call in front of every request. What that costs
+depends on your region, your guardrail and the size of the message, so measure
+it in your own environment rather than assuming.
+
+---
+
+## Part 1 — Build the guardrail in AWS (TBD)
+
+<Note>
+This walkthrough is being written against a real account. Until then, follow
+AWS's own documentation to create the guardrail, and come back for **Part 2**.
+</Note>
+
+Everything in this part happens in **your own** AWS account. TrustGate never
+creates or changes anything there. These are the values the policy will ask you
+for, and the AWS-side decisions that change what it does:
+
+| What you need | Where it comes from |
+|---|---|
+| A Bedrock guardrail | Created in your AWS account. Its policies — denied topics, content filters, word lists, sensitive information — are configured there and read from there; nothing about them is set in TrustGate. |
+| The **guardrail identifier** | Shown on the guardrail in AWS. This is what the policy sends on every call. |
+| A **region** | The region the guardrail lives in. The gateway calls the Bedrock runtime endpoint for the region you configure, so a guardrail in another region is simply not found. |
+| A **version**, or `DRAFT` | A guardrail has a working draft and published versions. `DRAFT` is what the policy uses if you leave the field empty; it moves whenever someone edits the guardrail. |
+| A **per-entity action** for each sensitive entity — *Block* or *Anonymize* | Set on the guardrail in AWS, not in TrustGate. This is the decision that matters most; read the warning below. |
+| Permission to call `bedrock:ApplyGuardrail` on that guardrail | An IAM policy in your account, attached to whatever identity the gateway uses. See **Part 2**. |
+
+<Warning>
+**TrustGate's PII action does not set AWS's per-entity action.** They are two
+different decisions, and both have to agree before anything is ever masked.
+
+AWS decides, per entity, whether a match is reported as `BLOCKED` or
+`ANONYMIZED`. TrustGate's **PII action** decides only what the gateway does when
+AWS reports `ANONYMIZED` — and its default, *Block request*, **overrides AWS's
+anonymise verdict into a hard block**. A guardrail configured to mask email
+addresses, dropped into a policy left at its defaults, refuses the request
+instead.
+
+Real masking needs both: the entity set to *Anonymize* in the AWS console **and**
+**PII action** set to *Anonymize* here. An entity AWS reports as `BLOCKED` is
+always a block, whatever this setting says.
+</Warning>
+
+<Note>
+**Contextual grounding is read but can never fire.** The gateway sends one
+unqualified block of text and never marks any part of it as the grounding source
+or the query, which is what AWS requires before it evaluates grounding or
+relevance. A guardrail whose only active policy is contextual grounding will
+allow everything, and it will look exactly like a guardrail that is working.
+</Note>
+
+---
+
+## Part 2 — Give the gateway access to AWS
+
+The gateway needs to call `bedrock:ApplyGuardrail` on your guardrail. There are
+two ways, and they are the only two.
+
+| Method | What TrustGate stores | You revoke by |
+|---|---|---|
+| **[IAM role](#method-a--iam-role-sts)** | A role ARN | Editing or deleting the role's trust policy |
+| **[Static keys](#method-b--static-keys)** | The access key ID and secret | Deactivating the access key in IAM |
+
+### Method A — IAM role (STS)
+
+You create a role in your account that may call the guardrail, and the gateway
+assumes it. Choosing **IAM role (STS)** in the policy hides the key fields
+entirely: the gateway assumes the role as **its own** identity — the instance or
+pod identity it already runs with — and stores nothing of yours but the ARN.
+
+The role needs `bedrock:ApplyGuardrail` on the guardrail, and its trust policy
+has to permit the gateway's identity to assume it. Ask your NeuralTrust contact
+for that identity.
+
+<Warning>
+**The policy cannot send an external ID.** It assumes the role with a session
+name and nothing else, so a trust policy that requires an `sts:ExternalId`
+condition will refuse every call. Write the trust policy without one.
+</Warning>
+
+### Method B — Static keys
+
+Create an IAM user with `bedrock:ApplyGuardrail` on the guardrail and paste its
+access key ID and secret into the policy. **Session token** is there for
+temporary credentials.
+
+<Warning>
+**The keys are stored as provided and are shown again whenever the policy is
+reopened.** Rotate them on your normal schedule, and prefer the role where it is
+available to you.
+
+If you use a **session token**, note that nothing refreshes it. Temporary
+credentials expire, and when they do every request fails closed until someone
+pastes new ones. Static keys without a session token, or a role, are what you
+want for anything long-lived.
+</Warning>
+
+---
+
+## Part 3 — Configure the policy in TrustGate
+
+Open **Policies** → **Library** → **AWS Bedrock Guardrail**.
+
+### AWS connection
+
+| Field | What to enter |
+|---|---|
+| **Region** | The region the guardrail lives in. Left empty, the gateway uses `us-east-1` — which is a default, not a detection. |
+| **Authentication** | *Static keys* (Method B, and what the form starts on) or *IAM role (STS)* (Method A). The fields below change with it. |
+| **Role ARN** | Method A only. Required. |
+| **Access key ID** / **Secret access key** | Method B only. Both required. |
+| **Session token** | Method B only, and only for temporary credentials. |
+
+### Guardrail
+
+**Guardrail ID** — the guardrail's identifier in AWS. Required, and the console
+checks only that it is not empty; whether it exists is discovered on the first
+request.
+
+### When triggered
+
+**PII action** — *Block request* (the default) or *Anonymize*. Read the warning
+in **Part 1** before changing it: this decides what the gateway does with an
+`ANONYMIZED` verdict from AWS, and it does nothing at all unless the entity is
+set to anonymise on the AWS side.
+
+**Block message** — leave your expectations low here.
+
+<Warning>
+**The block message is stored and never used.** The field is saved with the
+policy, and the `403` body carries the matched policy and the matched name —
+never this text. Do not rely on it to tell your callers anything.
+</Warning>
+
+### Advanced Settings
+
+**Guardrail version** — defaults to `DRAFT`. Point production at a published
+version number instead: `DRAFT` changes the moment anyone edits the guardrail in
+AWS, with no change to this policy and no event to tell you.
+
+**Session name** — the STS session name, for the IAM role method. Defaults to
+`BedrockClientSession`. It shows up in CloudTrail, which is the only reason to
+change it.
+
+### Stage and mode
+
+**The form offers no choice of leg.** A policy you create here screens the
+**request** on its way to the model, which this policy always does. The gateway
+can also screen the model's answer for this policy — evaluating it, and masking
+it in place — but the form has no control for it, so today it can only be turned
+on outside the console.
+
+Start in **Observe**, which records every decision without refusing or rewriting
+anything, and switch to **Enforce** once the decisions look right.
+
+---
+
+## How the decision is made
+
+<Steps>
+<Step title="One message is sent to the guardrail">
+The most recent `user` message, as described at the top of this page. One call
+per request.
+</Step>
+<Step title="AWS's assessments are read in a fixed order">
+Denied topics, then content filters, then word lists, then sensitive
+information, then contextual grounding. **The first blocking finding wins** and
+is the one named in the response — regardless of how many others also matched,
+and regardless of which you would consider the more serious.
+</Step>
+<Step title="A blocking finding refuses the request">
+The request never reaches the model. The caller gets `403` and a body naming the
+policy that fired and, where AWS provides one, the name it matched:
+
+```json
+{
+  "error": {
+    "type": "guardrail_blocked",
+    "policy": "topic_policy",
+    "name": "DangerousTopics"
+  }
+}
+```
+
+`policy` is one of `topic_policy`, `content_policy`, `word_policy`,
+`sensitive_information` or `contextual_grounding`.
+</Step>
+<Step title="Masking applies only if nothing blocked">
+With **PII action** set to *Anonymize*, and AWS reporting `ANONYMIZED`, the
+masked text AWS returned replaces the original message and the request continues
+to the model. The model never sees the original.
+</Step>
+<Step title="Otherwise the request passes through untouched">
+</Step>
+</Steps>
+
+<Warning>
+**A block anywhere discards the masking.** If sensitive data would be masked but
+another policy blocks the same message, the block wins and nothing is sent. And
+if masking is chosen but cannot be carried out — AWS returned no masked text, or
+the request body cannot be re-encoded — the gateway **blocks** rather than
+forward the original. Masking that fails is never a silent pass-through.
+</Warning>
+
+### Modes and failures
+
+| Situation | Enforce | Observe |
+|---|---|---|
+| A topic, content, word or grounding policy reports `BLOCKED` | `403`, refused | Recorded, request continues |
+| Sensitive information reports `BLOCKED` | `403`, refused | Recorded, request continues |
+| Sensitive information reports `ANONYMIZED`, **PII action** *Block request* | **`403`, refused** | Recorded, original text sent |
+| Sensitive information reports `ANONYMIZED`, **PII action** *Anonymize* | Rewritten in place | Recorded, **original text sent** |
+| *Anonymize*, but the masked text cannot be applied | **`403`, refused** | Recorded, original text sent |
+| AWS unreachable, throttled, denied, or the credentials cannot be resolved | **`502`, refused** | Recorded, request continues |
+
+**Observe never masks.** It records what would have happened and forwards the
+original text. Masking is only ever applied in **Enforce**.
+
+<Warning>
+**In Enforce this policy fails closed, and there is no setting to change that.**
+If AWS cannot be reached, requests are refused rather than forwarded unscreened.
+Every failure class collapses into the same `502` with no detail — an expired
+credential, a denied permission, a wrong region and a throttle are
+indistinguishable to the caller. The gateway logs the underlying error at debug
+level, so at a default log level it is invisible on the gateway too.
+</Warning>
+
+### Limits
+
+- **Only the last user message is inspected on the request leg.** No system
+  prompt, no conversation history, no tool definitions, no tool calls or
+  results.
+- **Contextual grounding can never fire.** See the note in **Part 1**. A
+  guardrail relying on it looks healthy and allows everything.
+- **The form cannot turn on screening of the model's answer.** A policy created
+  there inspects requests only.
+- **Streaming responses are not inspected**, on any leg. They pass through
+  untouched.
+- **The block message is never returned to the caller.**
+- **Text only.** Files, images and audio are not sent to AWS.
+- **LLM traffic only.** The policy does not apply to MCP (Model Context Protocol)
+  tool calls.
+
+---
+
+## Verify the policy
+
+Open the **Playground**, pick the application the policy applies to, and send
+these three prompts **in this order**. Starting with the control means a failure
+tells you something specific.
+
+<Steps>
+<Step title="Control — the path works at all">
+```
+hello, write me a short greeting
+```
+
+Expect a normal reply and the decision **`allowed`**. In **Enforce**, a `502`
+here means the gateway could not get an answer out of AWS at all: region,
+credentials, permission or guardrail ID. Nothing below will work until this
+does.
+</Step>
+<Step title="Sensitive information — masking works">
+Send a prompt containing an entity your guardrail is configured to anonymise,
+for example an email address:
+
+```
+my email is juan.perez@example.com, write me a short greeting
+```
+
+With **PII action** set to *Anonymize*, expect the decision **`anonymized`**.
+
+**Read the reply, not just the status.** It must not contain the address. That
+is what proves the model never received it.
+
+If you get a `403` instead, the two settings disagree: either the entity is set
+to *Block* in AWS, or **PII action** is still *Block request*. If you get a
+plain **`allowed`**, the entity is not in your guardrail at all.
+</Step>
+<Step title="A denied topic — blocking works">
+Send something your guardrail's denied topics or content filters should refuse.
+
+Expect the decision **`block`**, a `403` whose body names the policy that fired,
+and **`Provider 0 ms`** in the timing breakdown. That zero is the evidence that
+matters: the request never reached the model.
+</Step>
+</Steps>
+
+Every decision is emitted as a metadata event, in Observe mode too, where
+nothing is blocked. See the [event schema](/platform/event-schema) for the
+fields recorded.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `502` on every request, including harmless ones | Wrong region, wrong guardrail ID, missing `bedrock:ApplyGuardrail`, or credentials that cannot be resolved | Check the region first — it is the one that fails silently — then the permission on the guardrail |
+| `502` that starts on its own, with nothing changed | A **session token** or other temporary credential expired | Replace the credential; nothing refreshes a pasted session token |
+| Every assume-role call is denied | The role's trust policy requires an `sts:ExternalId` | Remove that condition — the policy cannot send one |
+| `403` where you expected masking | The entity is set to *Block* in AWS, or **PII action** is *Block request* | Both have to say anonymise; see the warning in **Part 1** |
+| `403` with `"policy": "sensitive_information"` although **PII action** is *Anonymize* | AWS returned no masked text, or the request body could not be re-encoded | Expected, and deliberate: the original is never forwarded when masking fails |
+| Nothing is ever blocked, and the guardrail looks correct in AWS | The guardrail's only active policy is contextual grounding | It cannot fire here. Add a topic, content or word policy |
+| Behaviour changed with no change to the policy | The policy points at `DRAFT` and someone edited the guardrail | Pin **Guardrail version** to a published version |
+| A jailbreak in the system prompt or a tool result is never caught | Only the last user message is sent | Expected. Use a guardrail that inspects the whole conversation |
+| Your **Block message** never reaches the caller | It is stored and never read | Expected; the body carries the matched policy and name |
+
+---
+
+## Related
+
+- [Guardrails](/trustgate/policies/guardrails) — the other guardrail policies, and how to choose between them
+- [Google Model Armor](/trustgate/policies/google-model-armor) — the other provider guardrail that can mask in place
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [Event schema](/platform/event-schema) — the fields each decision records
