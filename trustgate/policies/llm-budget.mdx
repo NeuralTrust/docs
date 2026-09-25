@@ -31,9 +31,9 @@ Set it where the overshoot is affordable, and do not treat it as a hard cap on a
 expensive model. It is a brake, not a wall.
 </Warning>
 
-**LLM Budget** is what the catalogue calls it. Elsewhere — on an event, for
-instance — the same type goes by its older name, `token_rate_limiter`. One
-policy type, two names; nothing behaves differently.
+**LLM Budget** is what the Library calls it. Elsewhere — in what a decision
+records, for instance — the same type goes by its older name,
+`token_rate_limiter`. One policy type, two names; nothing behaves differently.
 
 ---
 
@@ -78,13 +78,22 @@ of `gpt-4o` — instead of returning errors. Reject is for spend that must not
 happen at all.
 
 <Warning>
-**A downgrade that cannot be applied refuses instead.** The target must be a
-plain model name, on the **same provider** as the request, and one the
-application is allowed to call where its models are restricted. A pool alias, a
-wildcard, or
-a model the application may not call is not a valid target, and a budget
-configured to downgrade to one behaves exactly like *Reject request* — with
-nothing in the policy to say so.
+**A downgrade that cannot be applied refuses instead — but a wrong target is not
+always caught.** The target must be a single model name. A pool alias, a
+wildcard, a target that names a provider other than the one serving the request,
+or — where the application restricts which models it may call — a model outside
+that list is not valid, and a budget configured to downgrade to one behaves
+exactly like *Reject request*, with nothing in the policy to say so.
+
+What is **not** checked is whether the provider serving the request actually has
+the model you typed. A plain model name is taken at its word: a typo, or a model
+that belongs to another provider written without naming that provider, is
+applied as a downgrade rather than refused. The request goes out under the new
+name, the downgrade header is set, and the provider answers with its own "no
+such model" error — so what you get is a provider failure, not the clean refusal
+you might have expected. Copy the target from the model's entry in **Registry**
+rather than typing it, and exercise it once against real traffic before you rely
+on it.
 
 When the downgrade does apply, the response carries
 `X-NeuralTrust-Model-Downgraded: <original>→<target>`. That header is the only
@@ -126,11 +135,11 @@ pipeline, which never reaches policy decisions.
 
 ### Scope
 
-| Scope | Typical use |
+| Requests from | Typical use |
 |---|---|
-| **Gateway-wide** | An organisation-level ceiling nobody can opt out of. |
-| **Targeted** | Per-tenant or per-application quotas. |
-| **Group by header** | Per end user inside one application, without a policy per user. |
+| **All traffic** | An organisation-level ceiling nobody can opt out of. |
+| **Applications** or **Groups** | Per-tenant or per-application quotas. |
+| *(plus **Group by header**)* | Per end user inside one application, without a policy per user. |
 
 ### Mode
 
@@ -152,7 +161,7 @@ contract stops too early.
 **A model with no price accrues nothing against a dollar budget.** If neither
 your contract pricing nor the built-in catalogue knows the model, its usage is
 costed at zero and the request is free as far as the budget is concerned. A
-warning is logged and the event is marked unpriced; nothing is refused. A
+warning is logged and the request is marked unpriced; nothing is refused. A
 self-hosted or newly released model is the usual case. Price it in **Contract
 pricing**, or use a **token** budget for that traffic.
 </Warning>
@@ -176,8 +185,8 @@ In **Enforce**, *Reject request* refuses with `429`; *Downgrade model* rewrites
 the request's model and lets it continue. In **Observe**, the violation is
 recorded and the request continues unchanged.
 
-The ceiling that is reported — in the headers and on the event — is the first one
-found to be breached.
+The ceiling that is reported — in the headers, and on the request's **Policies**
+tab — is the first one found to be breached.
 </Step>
 
 <Step title="The request is forwarded">
@@ -197,10 +206,17 @@ never delays the answer — and never gates it either.
 
 Every response, refused or not, carries the state of the reported window:
 
-| Unit | Headers |
-|---|---|
-| Tokens | `X-Ratelimit-Limit-Tokens`, `X-Ratelimit-Remaining-Tokens`, `X-Ratelimit-Reset-Tokens` (in seconds) |
-| Dollars | `X-Budget-Unit`, `X-Budget-Scope`, `X-Budget-Window`, `X-Budget-Limit-Usd`, `X-Budget-Remaining-Usd`, `X-Budget-Reset` |
+| Unit | On every response | A refusal also adds |
+|---|---|---|
+| Tokens | `X-Ratelimit-Limit-Tokens`, `X-Ratelimit-Remaining-Tokens`, `X-Ratelimit-Reset-Tokens` | `X-Budget-Unit`, `X-Budget-Scope`, `X-Budget-Window` |
+| Dollars | `X-Budget-Unit`, `X-Budget-Scope`, `X-Budget-Window`, `X-Budget-Limit-Usd`, `X-Budget-Remaining-Usd`, `X-Budget-Reset` | *(already all present)* |
+
+So the unit, the scope and the window are on **every** refusal, whichever unit
+the budget is in — a token refusal is not a lesser one.
+
+Both reset headers — `X-Ratelimit-Reset-Tokens` and `X-Budget-Reset` — are a
+number of seconds **with a seconds suffix**: `3600s`, not `3600`. A client that
+reads them as a bare number will not parse them.
 
 A refusal is `429`, and the response says which budget was exhausted — the token
 one or the dollar one — whether the ceiling was the gateway-wide one or the one
@@ -214,6 +230,7 @@ targeted at this application, and which window was breached.
 | Over a ceiling, **Reject request** | `429`, refused | Recorded, **request served** |
 | Over a ceiling, **Downgrade model** | Model rewritten, `200`, downgrade header set | Recorded, **original model used** |
 | Over a ceiling, downgrade target invalid | **`429`, refused** | Recorded, request served |
+| Over a ceiling, downgrade target the provider does not serve | Model rewritten, then **the provider's own error** | Recorded, original model used |
 | Response reports no usage | Forwarded, **nothing charged** | Forwarded, nothing charged |
 | Model unpriced, dollar budget | Forwarded, **nothing charged**, logged | Same |
 | Streaming response the client abandoned | Forwarded, **nothing charged** | Same |
@@ -254,8 +271,18 @@ that cancels aggressively can run well past its budget without ever tripping it.
   block is free.
 - **Abandoned and oversized streams are not charged.**
 - **Unpriced models are free against a dollar budget.**
-- **A downgrade target must be a plain model name on the same provider**, and one
-  the application may call; anything else silently becomes a refusal.
+- **Prompt-cache reads are free against a token budget.** Input tokens the
+  provider served from its prompt cache are subtracted before anything is
+  counted, so a long system prompt reused across a conversation charges the
+  budget once and then stops charging for itself. There is no setting in the
+  console to count them. A **dollar** budget does count them, at the provider's
+  cheaper cache-read rate rather than the full input rate. An application that
+  caches heavily will therefore travel much further inside a token budget than
+  its raw token counts suggest.
+- **A downgrade target must be a single model name** the application may call,
+  and not a pool alias or a wildcard; anything else silently becomes a refusal.
+  A name the request's provider does not serve is *not* caught — it is applied,
+  and the provider errors.
 - **`Retry-After` is not sent.** The refusal carries the reset in the budget
   headers instead, so a client that only reads `Retry-After` learns nothing about
   when to come back.
@@ -286,17 +313,31 @@ could not reach its counter store. Fix it before going on.
 </Step>
 
 <Step title="The budget is being charged">
-Send the same prompt a few more times, then look at the events for those
-requests. Each one should carry the usage it was charged for.
+**Pick a specific model in the Playground first, not Auto.** With **Auto** the
+gateway chooses the model for you, and on that path the Playground does not ask
+the provider to report what the request used. Providers that only report it when
+asked — OpenAI among them — then report nothing, so nothing is charged and a
+budget you are watching never moves however many prompts you send. Open the
+model selector and choose one model by name.
+
+Then send the same prompt a few more times and look those requests up in
+**Activity**. Open one and read its **Policies** tab: this policy should be
+listed with the usage it charged.
 
 The remaining allowance is not something the Playground shows you. The gateway
 puts it in the response headers listed above, so a client of your own watches it
 fall as it goes; the Playground does not display response headers.
 
-If nothing is being charged, either the traffic is not in this policy's scope —
-check **Coverage** on the policy — or the responses carry no usage at all. For a
-dollar budget, check the event for the unpriced marker before assuming the
-policy is broken.
+If nothing is being charged, work down this list:
+
+- **Auto is still selected** in the Playground's model selector. Pick a model by
+  name and send again.
+- **The traffic is not in this policy's scope.** Check **Coverage** on the
+  policy, and that its Scope does not read **Matches nothing**.
+- **The responses carry no usage at all.**
+- **On a dollar budget, the model has no price.** The request's **Policies** tab
+  marks it as unpriced. Price it in **Contract pricing** before assuming the
+  policy is broken.
 </Step>
 
 <Step title="The ceiling acts">
@@ -304,15 +345,17 @@ Keep sending. **Expect to cross the ceiling without being refused** — that
 request is served in full — and to be refused on a later one. That is the
 policy working as designed, not a fault.
 
-With *Reject request*, expect `429`, a refusal naming the budget that was
-exhausted, and **no time at the provider** in the timing breakdown. That the
-provider leg is empty is the evidence that matters: the refused request never
-reached the model.
+With *Reject request*, expect `429` and a refusal naming the budget that was
+exhausted. Then confirm the refused request never reached the model: open
+**Activity**, click the request, open its **Policies** tab and read **Aggregated
+Latency** — the **Provider** row should be empty. That the provider leg is empty
+is the evidence that matters.
 
 With *Downgrade model*, expect `200` and the downgrade header on the response,
 naming the model asked for and the one that answered. **Read which model
-answered**, not just the status. If you get a `429` instead, the downgrade target
-is not valid for this request.
+answered**, not just the status. A `429` instead means the target is not valid
+for this request; an error from the provider about an unknown model means the
+target was applied but that provider does not serve it.
 </Step>
 
 <Step title="The partition holds (only if you set Group by header)">
@@ -322,9 +365,11 @@ with the header omitted: it is not exempt — it joins the shared counter.
 </Step>
 </Steps>
 
-Every decision is emitted as a metadata event, in Observe mode too, where nothing
-is blocked. See the [event schema](/platform/event-schema) for the fields
-recorded.
+Every decision this policy takes is recorded, in Observe mode too, where nothing
+is blocked. To read one, open **Activity**, click the request, and open its
+**Policies** tab: the policies chain lists this policy and the decision it made.
+The [event schema](/platform/event-schema) is the reference for everything a
+decision records.
 
 ---
 
@@ -334,11 +379,14 @@ recorded.
 |---|---|---|
 | Spend went past the ceiling | Expected: the crossing request is served, and concurrent requests are all admitted | Set the ceiling where the overshoot is affordable; for a hard stop, this is the wrong instrument |
 | Several requests got through after the ceiling was reached | Accrual happens after the response, so the counter lags | Expected. Lower the ceiling if the lag matters |
-| Nothing is ever refused | The policy is in **Observe**, or the traffic is not in scope | Switch to **Enforce**; check **Coverage** on the policy |
-| The remaining allowance never moves | The responses carry no usage, or — on a dollar budget — the model is unpriced | Check the event for the unpriced marker, then add the model to **Contract pricing** |
+| Nothing is ever refused | The policy is in **Observe**, or the traffic is not in scope | Switch to **Enforce**; check **Coverage** on the policy, and that its Scope does not read **Matches nothing** |
+| The budget never moves while you test from the Playground | **Auto** is selected, so the provider is not asked to report what the request used, and some providers then report nothing | Pick a specific model by name in the Playground's model selector |
+| The remaining allowance never moves | The responses carry no usage, or — on a dollar budget — the model is unpriced | Look for the unpriced marker on the request's **Policies** tab, then add the model to **Contract pricing** |
+| A heavily cached application never reaches its token budget | Prompt-cache reads are subtracted before anything is counted | Expected, and not configurable. Use a dollar budget if you want cached reads to count |
 | A dollar budget never stops anything | The model has no price, so everything costs zero | Price it in **Contract pricing**, or use a token budget |
 | A dollar budget stops far too early | Traffic is being priced at list rates while you pay less | Enter your contract in **Contract pricing** first |
-| `429` although the behaviour is **Downgrade model** | The target is not a plain model name on the same provider, or the application may not call it | Fix **Downgrade to**; a pool alias or a wildcard is never valid |
+| `429` although the behaviour is **Downgrade model** | The target is a pool alias, a wildcard, a model on a provider it names explicitly that is not the request's, or one the application may not call | Fix **Downgrade to** |
+| The provider says the model does not exist, right after a downgrade | The target was accepted without being checked against the provider's catalogue | Copy the exact model name from **Registry** into **Downgrade to** |
 | The window reset earlier than expected | The window is fixed and opened when the counter was first charged, not on the hour | Expected |
 | A 30-second window behaves like a minute | Anything under 60 seconds is raised to 60 | Use a window of a minute or more |
 | An agent that cancels streams runs past its budget | Abandoned streams are never charged | Expected. Do not rely on this policy for clients that disconnect routinely |

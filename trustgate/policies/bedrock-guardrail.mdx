@@ -73,8 +73,10 @@ the same region on the policy in Part 3.
 
 ### Create the guardrail
 
-**Create guardrail** opens a seven-step wizard. Steps 2 to 6 are each marked
-*optional*, and that is worth pausing on.
+**Create guardrail** opens a seven-step wizard, and only the first and the last
+are mandatory: **Provide guardrail details** and **Review and create**. Steps 2
+to 6 — every step that actually filters anything — are each marked *optional*,
+and that is worth pausing on.
 
 <Warning>
 **A guardrail with no filters at all is a valid guardrail.** Skip every optional
@@ -91,11 +93,11 @@ the text AWS returns when the guardrail blocks something. There is a checkbox to
 apply the same message to responses.
 
 <Note>
-**The blocked message does not reach anyone calling through TrustGate.** AWS
-does return it, but the gateway builds its own refusal and discards it. Set it
-for whatever else calls this guardrail directly; do not expect to see it in a
-TrustGate refusal. What the caller gets instead is described in
-[What the caller receives](#what-the-caller-receives).
+**This message does not reach anyone calling through TrustGate.** AWS does
+return it, but the gateway builds its own refusal and discards it. Set it for
+whatever else calls this guardrail directly; the text a TrustGate caller sees is
+the policy's own **Block message**, described in
+[When triggered](#when-triggered).
 </Note>
 </Step>
 
@@ -178,13 +180,10 @@ Two independent toggles, **Grounding** and **Relevance**, each with a score
 threshold from 0 to 0.99 and an action.
 
 <Warning>
-**Neither can ever fire through this policy**, for two separate reasons.
-
-They evaluate the *model's answer*, and a policy created in the TrustGate
-console only inspects requests. And even on the response leg, both need a
-reference source and a query marked as such — AWS's own test panel has a
-**Reference source** field for exactly this — and the gateway sends one
-unmarked block of text.
+**Neither can ever fire through this policy.** Both need a reference source and
+a query marked as such — AWS's own test panel has a **Reference source** field
+for exactly this — and the gateway sends one unmarked block of text, on the
+request leg and on the response leg alike.
 
 Configure them if other things call this guardrail. Through TrustGate they are
 inert, and a guardrail whose only active policy is contextual grounding allows
@@ -198,10 +197,10 @@ Check the summary and create. The guardrail is usually **Ready** immediately.
 </Steps>
 
 <Note>
-**Every output action you set is unused by a policy created in the TrustGate
-console**, because that policy inspects requests only. Setting them does no
-harm and costs nothing — but if you are configuring this guardrail solely for
-TrustGate, only the input actions will ever be read.
+**Output actions are read only when the policy screens the response.** A policy
+set to the request leg alone never looks at them. Setting them does no harm and
+costs nothing — but if you are configuring this guardrail for a request-leg
+policy, only the input actions will ever be read.
 </Note>
 
 ### The identifier, and why the version matters
@@ -286,15 +285,17 @@ Create an IAM user with `bedrock:ApplyGuardrail` on the guardrail and paste its
 access key ID and secret into the policy. **Session token** is there for
 temporary credentials.
 
-<Warning>
-**The keys are stored as provided and are shown again whenever the policy is
-reopened.** Rotate them on your normal schedule, and prefer the role where it is
+The secret is stored encrypted and is never returned to the browser. Reopen the
+policy and the field shows only that a secret is set, not the secret itself: you
+replace it rather than read it. AWS shows a secret access key once, when the key
+is created, and never again, so keep your own copy where you keep your other
+secrets. Rotate on your normal schedule, and prefer the role where it is
 available to you.
 
-If you use a **session token**, note that nothing refreshes it. Temporary
-credentials expire, and when they do every request fails closed until someone
-pastes new ones. Static keys without a session token, or a role, are what you
-want for anything long-lived.
+<Warning>
+**Nothing refreshes a session token.** Temporary credentials expire, and when
+they do every request fails closed until someone pastes new ones. Static keys
+without a session token, or a role, are what you want for anything long-lived.
 </Warning>
 
 ---
@@ -326,13 +327,10 @@ in **Part 1** before changing it: this decides what the gateway does with an
 anonymised verdict from AWS, and it does nothing at all unless the entity is set
 to anonymise on the AWS side.
 
-**Block message** — leave your expectations low here.
-
-<Warning>
-**The block message is stored and never used.** The field is saved with the
-policy, and the `403` names the matched policy and the matched name — never this
-text. Do not rely on it to tell your callers anything.
-</Warning>
+**Block message** — the text returned to the caller when the guardrail blocks a
+request. The `403` still names which of the guardrail's policies matched, and
+the name it matched where AWS provides one, so wording of your own does not hide
+which filter fired.
 
 ### Advanced Settings
 
@@ -346,11 +344,12 @@ change it.
 
 ### Stage and mode
 
-**The form offers no choice of leg.** A policy you create here screens the
-**request** on its way to the model, which this policy always does. The gateway
-can also screen the model's answer for this policy — evaluating it, and masking
-it in place — but the form has no control for it, so today it can only be turned
-on outside the console.
+The policy runs on the **request**, on the **response**, or on **both**.
+Screening the request stops a prompt before it reaches the model; screening the
+response evaluates the model's answer and can mask it in place the same way.
+Each leg is its own call to AWS, so screening both roughly doubles what the
+policy costs per turn. Start with the request, measure, and add the response leg
+once you know what it costs you.
 
 Start in **Observe**, which records every decision without refusing or rewriting
 anything, and switch to **Enforce** once the decisions look right.
@@ -388,9 +387,10 @@ request continues to the model. The model never sees the original.
 <Warning>
 **A block anywhere discards the masking.** If sensitive data would be masked but
 another policy blocks the same message, the block wins and nothing is sent. And
-if masking is chosen but cannot be carried out — AWS returned no masked text, or
-the request body cannot be re-encoded — the gateway **blocks** rather than
-forward the original. Masking that fails is never a silent pass-through.
+if masking is chosen but cannot be carried out — AWS returned no masked text,
+the request format has no re-encoder, or the body cannot be re-encoded with the
+masked text — the gateway **blocks** rather than forward the original. Masking
+that fails is never a silent pass-through.
 </Warning>
 
 ### Modes and failures
@@ -406,6 +406,14 @@ forward the original. Masking that fails is never a silent pass-through.
 
 **Observe never masks.** It records what would have happened and forwards the
 original text. Masking is only ever applied in **Enforce**.
+
+The decision recorded on the event is **`allowed`**, **`block`**,
+**`anonymized`**, **`reported`** or **`failed_closed`**. **`anonymized`** is
+Enforce-only: in **Observe** a prompt that would have been masked records
+**`reported`** instead, which is also what Observe records in place of a block.
+**`failed_closed`** is the one to look for first on a new policy — it is what
+AWS being unreachable, a missing permission, a wrong region or a credential that
+cannot be resolved records on every request.
 
 <Warning>
 **In Enforce this policy fails closed, and there is no setting to change that.**
@@ -423,11 +431,10 @@ level, so at a default log level it is invisible on the gateway too.
   results.
 - **Contextual grounding can never fire.** See the note in **Part 1**. A
   guardrail relying on it looks healthy and allows everything.
-- **The form cannot turn on screening of the model's answer.** A policy created
-  there inspects requests only.
+- **Each leg is a separate call.** A policy screening both the request and the
+  response calls AWS twice per turn.
 - **Streaming responses are not inspected**, on any leg. They pass through
   untouched.
-- **The block message is never returned to the caller.**
 - **Text only.** Files, images and audio are not sent to AWS.
 - **LLM traffic only.** The policy does not apply to MCP (Model Context Protocol)
   tool calls.
@@ -447,9 +454,9 @@ hello, write me a short greeting
 ```
 
 Expect a normal reply and the decision **`allowed`**. In **Enforce**, a `502`
-here means the gateway could not get an answer out of AWS at all: region,
-credentials, permission or guardrail ID. Nothing below will work until this
-does.
+here, recorded as **`failed_closed`**, means the gateway could not get an answer
+out of AWS at all: region, credentials, permission or guardrail ID. Nothing
+below will work until this does.
 </Step>
 <Step title="Sensitive information — masking works">
 Send a prompt containing an entity your guardrail is configured to anonymise,
@@ -459,7 +466,10 @@ for example an email address:
 my email is juan.perez@example.com, write me a short greeting
 ```
 
-With **PII action** set to *Anonymize*, expect the decision **`anonymized`**.
+With **PII action** set to *Anonymize* and the policy in **Enforce**, expect the
+decision **`anonymized`**. In **Observe** the same prompt records **`reported`**
+and the original address still reaches the model, so switch to **Enforce**
+before reading this step.
 
 **Read the reply, not just the status.** It must not contain the address. That
 is what proves the model never received it.
@@ -471,9 +481,11 @@ plain **`allowed`**, the entity is not in your guardrail at all.
 <Step title="A denied topic — blocking works">
 Send something your guardrail's denied topics or content filters should refuse.
 
-Expect the decision **`block`**, a `403` naming the policy that fired, and **no
-time at the provider** in the timing breakdown. That the provider leg is empty is
-the evidence that matters: the request never reached the model.
+Expect the decision **`block`** and a `403` naming the policy that fired. To
+prove the request never reached the model, open **Activity**, open the request,
+and read its **Policies** tab: the **Aggregated Latency** breakdown there has a
+**Provider** row, and that row is empty. The Playground shows a single latency
+figure and does not break it down.
 </Step>
 </Steps>
 
@@ -491,11 +503,11 @@ fields recorded.
 | `502` that starts on its own, with nothing changed | A **session token** or other temporary credential expired | Replace the credential; nothing refreshes a pasted session token |
 | Every assume-role call is denied | The role's trust policy requires an `sts:ExternalId` | Remove that condition — the policy cannot send one |
 | `403` where you expected masking | The entity is set to *Block* in AWS, or **PII action** is *Block request* | AWS must say *Mask* and the policy must say *Anonymize* — two words, one decision; see the warning in **Part 1** |
-| `403` naming the sensitive-information policy although **PII action** is *Anonymize* | AWS returned no masked text, or the request body could not be re-encoded | Expected, and deliberate: the original is never forwarded when masking fails |
+| `403` naming the sensitive-information policy although **PII action** is *Anonymize* | AWS returned no masked text, the request format has no re-encoder, or the body could not be re-encoded with the masked text | Expected, and deliberate: the original is never forwarded when masking fails |
 | Nothing is ever blocked, and the guardrail looks correct in AWS | The guardrail's only active policy is contextual grounding | It cannot fire here. Add a topic, content or word policy |
 | Behaviour changed with no change to the policy | The policy points at `DRAFT` and someone edited the guardrail | Pin **Guardrail version** to a published version |
 | A jailbreak in the system prompt or a tool result is never caught | Only the last user message is sent | Expected. Use a guardrail that inspects the whole conversation |
-| Your **Block message** never reaches the caller | It is stored and never read | Expected; the refusal names the matched policy and name instead |
+| Every request is recorded as **`failed_closed`** | AWS cannot be reached, or the credential cannot be resolved | Check the region first, then the permission on the guardrail and the credential |
 
 ---
 
@@ -503,5 +515,6 @@ fields recorded.
 
 - [Guardrails](/trustgate/policies/guardrails) — the other guardrail policies, and how to choose between them
 - [Google Model Armor](/trustgate/policies/google-model-armor) — the other provider guardrail that can mask in place
+- [Azure Content Safety](/trustgate/policies/azure-content-safety) — severity scoring on the request leg, with no masking
 - [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
 - [Event schema](/platform/event-schema) — the fields each decision records
