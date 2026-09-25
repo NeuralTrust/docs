@@ -10,14 +10,17 @@ budgets, rate limits, what may be said, which tools may run.
 ## Type
 
 The **type** is what the policy does — a rate limit, an LLM budget, a prompt
-template, a guardrail. Types come from the **Library**, grouped as Traffic
-Control, Quota, Routing, Prompt Management, Tool Governance and Guardrails. The
-Library is the authoritative list of what this gateway can enforce.
+template, a guardrail. Types come from the **Library**, grouped as Guardrails,
+Traffic Control, Quota, Prompt Management and Tool Governance, in that order.
+The Library is the authoritative list of what this gateway can enforce.
 
 The same type can be configured more than once. Two rate limits with different
 numbers for different applications are two policies of one type, not a conflict.
-Since the type has its own column in the list, name a policy for what the type
-does not say: `Token budget · prod`, not `Token budget`.
+The list keeps one row per type — the type's name, with its Library group
+underneath — and the policies themselves sit behind it, under
+**Configurations**. So a policy's own name is only read once you are already
+inside, next to the others of its type. Name it for what the type does not say:
+`Token budget · prod`, not `Token budget`.
 
 ## Mode
 
@@ -26,31 +29,59 @@ The **mode** is how the policy reacts when it matches.
 | Mode | Effect |
 |---|---|
 | **Enforce** | Block the traffic that violates the policy. |
-| **Observe** | Log the violation and let the traffic through. The decision the policy would have taken is recorded on the event. |
-| **Throttle** | Delay the traffic that violates the policy instead of blocking it. Only the Rate Limiter offers it. |
+| **Observe** | Log the violation and let the traffic through. The decision the policy would have taken is recorded, and nothing is blocked. |
+| **Throttle** | Delay the traffic that violates the policy, then let it through. Only the Rate Limiter offers it. |
 
 Observe is how you find out what a policy would do before it does it. A type
 that supports only one mode shows no choice: Tool Injection and the Per-Tool
 Rate Limiter always enforce.
 
+**Throttle never refuses anything.** Traffic over the line waits — the window
+divided by the limit, up to a short ceiling — and is then admitted and counted
+like any other. That makes it a way to smooth a burst, not a way to hold a rate:
+where the pause a limit would need is longer than the ceiling, more traffic gets
+through than the numbers read. Choose **Enforce** when the limit has to be a
+ceiling.
+
 ## Scope
 
 Scope has two sides, and they answer different questions:
 
-| Side | Question |
+| Side | What you choose |
 |---|---|
-| **Requests from** | All traffic, specific **groups**, or specific **applications**. |
-| **Resources** | All resources, or selected MCP servers — the Model Context Protocol servers your agents call tools on — and, within a server, selected tools. |
+| **Requests from** | *All traffic*, selected **Groups**, or selected **Applications**. |
+| **Resources** | *All resources*, or selected MCP servers — the Model Context Protocol servers your agents call tools on — and, within a server, selected tools. |
 
-A policy with both sides open is **gateway-wide**; narrowing either side makes it
-**targeted**. The two sides intersect: a policy scoped to one group *and* one
-server applies only where both are true, which is how you write "the contractors
-group may not call the deployment tools" without touching anything else. A tool
-only exists inside the server that serves it, so a tool-level scope always
-follows from choosing a server first.
+**Only Requests from decides how far a policy reaches.** *All traffic* makes it a
+gateway-wide policy — one no application can opt out of — however narrow its
+**Resources** are. Choosing Groups or Applications is the only thing that
+narrows it to those callers. Resources narrows what the policy touches *inside*
+whatever Requests from already chose; it never turns a gateway-wide policy into
+a targeted one.
+
+The two sides intersect: a policy whose Requests from names one group *and*
+whose Resources name one server applies only where both are true, which is how
+you write "the contractors group may not call the deployment tools" without
+touching anything else. A tool only exists inside the server that serves it, so
+a tool-level scope always follows from choosing a server first.
 
 **Coverage** in the list is the number of applications the scope actually
 reaches. A number larger than you expected means the scope is not what you think.
+
+### Reading the Scope column
+
+The list condenses the pair into one phrase, and each policy under
+**Configurations** shows its own pair in full. Most of it reads the way you set
+it — *All traffic*, *All resources*, *2 applications*, *3 groups*, a server and
+a tool by name, *except* a group you excluded, or **Multiple scopes** when the
+configurations of one type do not all agree. One phrase does not:
+
+**Matches nothing** is a scope that was narrowed to MCP servers and tools which
+have since been deleted from this gateway. When the last one it named goes, the
+scope is left naming nothing at all, and a policy scoped to nothing enforces
+nothing — on any traffic, in any mode, however healthy the rest of the row
+looks. Open it and point Resources back at *All resources*, or pick the servers
+and tools you meant now.
 
 ## Status
 
@@ -64,6 +95,17 @@ Saving a policy takes effect immediately for everything in its scope; there is
 no draft state. Deleting removes enforcement just as immediately and loses the
 configuration, so pause rather than delete when testing whether a policy is the
 cause of something.
+
+## Order
+
+More than one policy usually matches the same request, and the gateway runs them
+in a defined order. **You control that order.** It matters whenever a policy
+changes the request rather than only judging it: a template that rewrites
+the prompt, a compression that shrinks it, a guardrail that masks what it found.
+Whatever a policy writes is what the policies after it read — and the ones
+before it never saw. So a size limit placed after a compression measures the
+compressed body; the same limit placed before it measures what actually arrived.
+Decide which of those you meant, and order them that way.
 
 ## Where to attach
 

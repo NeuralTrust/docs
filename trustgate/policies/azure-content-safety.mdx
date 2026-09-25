@@ -51,43 +51,124 @@ measure it in your own environment rather than assuming.
 
 ---
 
-## Part 1 — Set up Azure AI Content Safety (TBD)
-
-<Note>
-This walkthrough is being written against a real account. Until then, follow
-Azure's own documentation to create the resource, and come back for **Part 2**.
-</Note>
+## Part 1 — Set up Azure AI Content Safety
 
 Everything in this part happens in **your own** Azure subscription. TrustGate
-never creates or changes anything there. These are the values the policy will
-ask you for:
+never creates or changes anything there.
+
+This is the lightest of the three provider setups, because of what is *not* in
+it:
+
+<Note>
+**None of the filtering is configured on the Azure side.** There is no object to
+build, no categories to enable, no thresholds to set and no list to maintain.
+Azure scores the text; everything that decides what is blocked lives on the
+TrustGate policy in **Part 3**.
+
+If you have come from the Bedrock or Model Armor pages, this is the difference.
+You create a resource and copy two values out of it.
+</Note>
+
+<Steps>
+<Step title="Find Content safety in the portal">
+It is not a standalone service any more. It sits under **Microsoft Foundry**,
+reached from **More services** → **Content safety** in the left-hand navigation.
+
+An empty list here shows a *Welcome to Azure!* panel offering a free trial,
+which looks like it is telling you that you have no subscription. It is not — it
+is telling you that you have no Content Safety resources yet. Use **Create**.
+</Step>
+
+<Step title="Fill in the Basics tab">
+| Field | What to enter |
+|---|---|
+| **Subscription** | The subscription the resource will be billed to. |
+| **Resource group** | An existing one, or **Create new**. |
+| **Region** | Arrives pre-filled with Azure's default. See the warning below. |
+| **Name** | Becomes the subdomain of the endpoint, so pick something you will recognise. |
+| **Pricing tier** | Required, and it has **no default** — the form will not validate until you choose. **Free F0** is offered and is enough to follow this page. |
+
+<Warning>
+**The region field arrives pre-filled with Azure's default, and it decides where
+your text is analysed.** Change it deliberately rather than leaving it as you
+found it: every request makes that round trip, and the text is processed in
+whichever region ends up here. For anything with a data-residency constraint
+this is the field that matters most on the page, and it is the one most easily
+left alone.
+
+Content Safety is not offered in every Azure region, so check that the one you
+need is in the list before you plan around it.
+</Warning>
+
+Azure may note that the subscription has not registered the Cognitive Services
+resource type before, and offer to register it for you. Let it. On a
+subscription with restrictive policies that registration can fail, and the error
+it produces later is not obviously about registration.
+
+The **Network**, **Identity** and **Tags** tabs can be left as they are. Note
+that Identity switches on a system-assigned managed identity by default — this
+policy authenticates with a key and never uses it.
+</Step>
+
+<Step title="Create it, then open the resource">
+**Review + create**, then **Create**. Deployment takes a minute or two, and the
+resource's **Status** reads *Active* when it is ready.
+
+The resource group's own location does not have to match the resource's, and
+often will not. What matters for this policy is the resource's.
+</Step>
+
+<Step title="Copy the key and build the endpoint">
+**Keys and Endpoint**, under *Resource Management* in the resource's left-hand
+navigation. The resource issues **two keys** so you can rotate one while the
+other is live; either works.
+
+The endpoint is also shown on the resource's **Overview**, and this is where the
+one real trap on this page lives.
+
+<Warning>
+**The endpoint the portal gives you is not the endpoint the policy needs.** What
+both pages show is the resource root:
+
+```
+https://YOUR-RESOURCE.cognitiveservices.azure.com/
+```
+
+The policy needs the **Analyze Text** operation, with its `api-version`:
+
+```
+https://YOUR-RESOURCE.cognitiveservices.azure.com/contentsafety/text:analyze?api-version=2024-09-01
+```
+
+Paste the first and the policy saves without complaint, then fails on every
+request — and you will not see Azure's `404`, because any non-2xx becomes one
+generic gateway error. Build the second by hand.
+</Warning>
+</Step>
+</Steps>
+
+### The values the policy will ask you for
 
 | What you need | Where it comes from |
 |---|---|
-| An Azure AI Content Safety resource | Created in your Azure subscription. A multi-service Azure AI Services resource also exposes Content Safety. |
-| A region | Chosen when you create the resource. It decides where the text is analysed, and every request makes that round trip. |
-| The **Analyze Text** endpoint URL, **including its `api-version` query string** | Built from the resource endpoint on the portal's **Keys and Endpoint** page — not that endpoint on its own. See the warning above. |
-| A subscription key | The same **Keys and Endpoint** page. A resource issues two so you can rotate one while the other is live; either works. |
-| A severity scale | Not a value from Azure but a choice you make: four levels (0, 2, 4, 6) or eight (0–7). It is sent with every call and decides the numbers Azure returns. |
-| A blocking threshold for each category | Also a choice: one severity per category, out of **Hate**, **Violence**, **Self-harm** and **Sexual content**. |
+| The **Analyze Text** endpoint URL, **including its `api-version`** | Built from the resource endpoint on **Keys and Endpoint** or **Overview** — not that endpoint on its own. |
+| A subscription key | **Keys and Endpoint**. Either of the two. |
+| A severity scale | Not a value from Azure but a choice you make on the policy: four levels (0, 2, 4, 6) or eight (0–7). |
+| A blocking threshold for each category | Also on the policy: one severity per category, out of **Hate**, **Violence**, **Self-harm** and **Sexual content**. |
 
-Nothing else about the resource is configured from TrustGate. There is no
-blocklist, no custom term list and no per-category configuration on the Azure
-side that this policy reads.
-
----
+Nothing else about the resource is read by this policy. There is no blocklist, no
+custom term list and no per-category configuration on the Azure side.
 
 ## Part 2 — Give the gateway a key
 
 The policy authenticates with the resource's **subscription key**. Copy it from
 the resource and paste it into the policy.
 
-<Warning>
-**The key is stored as provided and is shown again whenever the policy is
-reopened.** Treat it like any other credential. Because the resource issues two
-keys, you can rotate by pasting the second one into the policy and then
-regenerating the first.
-</Warning>
+The key is stored encrypted and is never returned to the browser. Reopen the
+policy and the field shows only that a key is set, not the key itself: you
+replace it rather than read it, and the Azure portal is the only place you can
+read one. Because the resource issues two keys, you can rotate by pasting the
+second one into the policy and then regenerating the first.
 
 ---
 
@@ -182,6 +263,12 @@ refusal may name a category you do not recognise from the console.
 | The request carries no text to analyse | Forwarded; Azure is not called | Forwarded; Azure is not called |
 | Azure returns any non-2xx, or the call fails or times out | **`502`, refused** | Recorded, request continues |
 
+The decision recorded on the event is **`allowed`**, **`block`**, **`reported`**
+or **`failed_closed`**. **`failed_closed`** is the one to look for first on a new
+policy: it is what a wrong endpoint, a wrong key or an unreachable resource
+records on every request, and it is by far the most common first-run outcome.
+**`reported`** is what **Observe** records in place of a block.
+
 <Warning>
 **In Enforce this policy fails closed, and there is no setting to change that.**
 Every failure collapses into the same `502`: a wrong key, a wrong endpoint, a
@@ -234,9 +321,10 @@ hello, write me a short greeting
 Expect a normal reply and the decision **`allowed`**.
 
 In **Enforce**, this step is also the endpoint test. A harmless prompt that
-comes back `502` means the gateway could not get an answer out of Azure: wrong
-endpoint, wrong key, or the resource unreachable. Fix that before going on —
-nothing below will work until this does.
+comes back `502`, recorded as **`failed_closed`**, means the gateway could not
+get an answer out of Azure: wrong endpoint, wrong key, or the resource
+unreachable. Fix that before going on — nothing below will work until this
+does.
 </Step>
 <Step title="Observe — read the severities before you trust the thresholds">
 Switch the policy to **Observe** and send content you consider borderline for
@@ -249,10 +337,12 @@ rather than guessing. Set **Block at** from what you see here.
 <Step title="Enforce — blocking works">
 Back in **Enforce**, send something that should breach a category you enabled.
 
-Expect `403`, the decision **`block`**, and **no time at the provider** in the
-timing breakdown. That the provider leg is empty is the evidence that matters:
-the request never reached the model. Read the categories the refusal names to
-confirm it fired on the one you expected.
+Expect `403` and the decision **`block`**. To prove the request never reached
+the model, open **Activity**, open the request, and read its **Policies** tab:
+the **Aggregated Latency** breakdown there has a **Provider** row, and that row
+is empty. The Playground shows a single latency figure and does not break it
+down. Read the categories the refusal names to confirm it fired on the one you
+expected.
 </Step>
 </Steps>
 
@@ -272,6 +362,7 @@ fields recorded.
 | Nothing is ever blocked | The category is toggled off, or its **Block at** is above anything the scale returns | Turn the category on; check the threshold against the severity scale |
 | A threshold changed by itself | You switched the **Severity scale** and it snapped to the nearest legal value | Re-read all four thresholds after changing the scale |
 | The policy will not save | The API key or endpoint is empty, the endpoint is not an absolute `http(s)` URL, or every category is off | The console names the field; all three are checked before the request is sent |
+| Every request is recorded as **`failed_closed`** | Azure could not be reached, or it answered with a non-2xx | Check the endpoint first — the bare resource URL is the usual cause — then the key |
 | Model output is never screened | Expected — there is no response leg | Use a guardrail with a response leg for output |
 
 ---
@@ -279,6 +370,7 @@ fields recorded.
 ## Related
 
 - [Guardrails](/trustgate/policies/guardrails) — the other guardrail policies, and how to choose between them
+- [AWS Bedrock Guardrail](/trustgate/policies/bedrock-guardrail) — a provider guardrail that also screens responses and can mask in place
 - [Google Model Armor](/trustgate/policies/google-model-armor) — a provider guardrail that also screens responses and can mask in place
 - [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
 - [Event schema](/platform/event-schema) — the fields each decision records

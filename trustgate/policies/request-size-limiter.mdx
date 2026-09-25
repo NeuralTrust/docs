@@ -46,9 +46,9 @@ the *= N bytes* line and keep it under 8,388,608.
 
 <Note>
 **A body over the wire limit is refused with `413` by the HTTP server, not by
-this policy.** No policy runs, so no decision is recorded and nothing appears on
-the event for it. A `413` with no matching event is the wire limit, not a
-misconfigured ceiling.
+this policy.** No policy runs, so no decision is recorded and the request's
+**Policies** tab in **Activity** has nothing to show for it. A `413` with no
+decision behind it is the wire limit, not a misconfigured ceiling.
 
 The refusal carries the HTTP layer's own default body, and it is not JSON: the
 content type is `text/plain; charset=utf-8`, the body is the literal string
@@ -111,8 +111,8 @@ you expect a tool to receive.
 
 ### Mode
 
-**Enforce** and **Observe**. In Observe the request is measured, recorded on the
-event as over the limit, and passed through.
+**Enforce** and **Observe**. In Observe the request is measured, recorded as
+over the limit, and passed through.
 
 ---
 
@@ -160,9 +160,20 @@ On **MCP** traffic the same refusals come back as an error carried inside a `200
 response, under the code **`-32001`** — a non-2xx would drop the client's MCP
 session.
 
-Every request the policy allows carries four headers describing what it
-measured: the body's size in bytes, its character count, and the two ceilings it
-was compared against.
+Every request the policy lets through carries four headers describing what it
+measured:
+
+| Header | What it carries |
+|---|---|
+| `X-Request-Size-Bytes` | How many bytes this request was |
+| `X-Request-Size-Chars` | How many characters this request was |
+| `X-Size-Limit-Bytes` | The byte ceiling it was compared against |
+| `X-Size-Limit-Chars` | The character ceiling it was compared against |
+
+That includes requests that breached a ceiling in **Observe**: they are recorded
+as over the limit and then served with the headers set, so the figures are there
+for exactly the requests you most want to measure. Only a refusal — `411` or
+`413` in **Enforce** — goes back without them.
 
 They are the fastest way to size a ceiling, and they are not something the
 console shows you — they arrive on the response, where the application that made
@@ -178,7 +189,7 @@ ceilings from those.
 | Over the byte ceiling | `413`, refused | Recorded, **request served** |
 | Over the character ceiling | `413`, refused | Recorded, **request served** |
 | No `Content-Length`, and it is required | `411`, refused | Recorded, then measured as usual |
-| Over the gateway's 8 MiB wire limit | **`413` from the HTTP layer, no policy runs, no event** | **`413` from the HTTP layer, no policy runs, no event** |
+| Over the gateway's 8 MiB wire limit | **`413` from the HTTP layer, no policy runs, nothing recorded** | **`413` from the HTTP layer, no policy runs, nothing recorded** |
 | An MCP tool call over a ceiling | `-32001` inside a `200` response | Recorded, call served |
 | Zero or negative ceiling configured | Rejected at save time | Rejected at save time |
 
@@ -229,10 +240,20 @@ or the provider — not the policy. Fix it before going on.
 </Step>
 
 <Step title="Read what a normal request actually measures">
-Have a representative request sent from whatever normally calls this gateway.
-The gateway reports what it measured, and what the ceilings were, on the
-response — the four headers described above — so whoever maintains that
-application can read the numbers off and pass them to you.
+Have a representative request sent from whatever normally calls this gateway,
+and ask whoever maintains it to read four headers off the response and pass
+them back to you:
+
+```
+X-Request-Size-Bytes
+X-Request-Size-Chars
+X-Size-Limit-Bytes
+X-Size-Limit-Chars
+```
+
+The first two are what this request actually measured; the last two are the
+ceilings you set. Nothing in the console shows them, which is why this step has
+to be asked of someone else.
 
 This is the step that tells you whether your ceilings are set anywhere near real
 traffic. Do it before switching to **Enforce**, not after.
@@ -242,8 +263,10 @@ traffic. Do it before switching to **Enforce**, not after.
 Set **Allowed Payload Size** to something just under what step two measured, and
 send the same request again.
 
-Expect `413`, and a refusal saying how many bytes arrived. Confirm the model was
-never called: the timing breakdown records **no time at the provider**.
+Expect `413`, and a refusal saying how many bytes arrived. Then confirm the
+model was never called: open **Activity**, click the request, open its
+**Policies** tab and read **Aggregated Latency** — the **Provider** row should
+be empty.
 </Step>
 
 <Step title="The character ceiling refuses independently">
@@ -256,9 +279,11 @@ than the first firing twice.
 </Step>
 </Steps>
 
-Every decision is emitted as a metadata event, in Observe mode too, where nothing
-is blocked. See the [event schema](/platform/event-schema) for the fields
-recorded.
+Every decision this policy takes is recorded, in Observe mode too, where nothing
+is blocked. To read one, open **Activity**, click the request, and open its
+**Policies** tab: the policies chain lists this policy and the decision it made.
+The [event schema](/platform/event-schema) is the reference for everything a
+decision records.
 
 ---
 
@@ -268,13 +293,13 @@ recorded.
 |---|---|---|
 | Large requests are refused although the ceiling is well above them | The gateway's 8 MiB wire limit fired first | Expected, and not adjustable. Nothing above 8,388,608 bytes reaches a policy |
 | Raising **Allowed Payload Size** changed nothing | It was already at or above the wire limit | The useful range is below 8 MiB; the setting only *tightens* |
-| `413` with no decision on the event | The wire limit refused it before any policy ran | Expected. That `413` is not this policy |
+| `413` with no decision on the request's **Policies** tab | The wire limit refused it before any policy ran | Expected. That `413` is not this policy |
 | The policy will not save | **Max Characters per request** is 0, or the payload size is 0 | Both must be positive; the console accepts 0 in the character field and the gateway does not |
 | Requests are refused for characters although they look short | The count includes the whole serialised body — history, tool definitions, attachments | Have a real request measured — the gateway reports its character count on the response — and set the ceiling from that |
 | Every MCP tool call is refused with `-32001` | **Reject undeclared content length** is on, and MCP requests carry no headers | Turn it off, or scope the policy away from MCP applications |
 | A chunked or streaming client is refused with `411` | It sends no `Content-Length` | That is what the setting does. Turn it off, or have the client declare its size |
 | The byte ceiling never fires on MCP traffic | On MCP the policy measures the tool name and its arguments, not the HTTP body | Size a separate, tighter policy for MCP applications |
-| Nothing is ever refused | The policy is in **Observe**, or the traffic is not in scope | Switch to **Enforce**; check **Coverage** on the policy |
+| Nothing is ever refused | The policy is in **Observe**, or the traffic is not in scope | Switch to **Enforce**; check **Coverage** on the policy, and that its Scope does not read **Matches nothing** |
 | A long conversation is refused while a single huge prompt is not | Both are measured as one body; the conversation simply serialises larger | Expected. There is no per-message ceiling |
 | The model rejected a prompt for length although this policy allowed it | Context-window limits are enforced separately, on the chat path | Expected. This policy is about the body, not the model |
 

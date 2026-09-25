@@ -28,8 +28,8 @@ Open **Policies** → **Library** → **Rate Limiter**.
 
 | Field | What to enter |
 |---|---|
-| **Max requests** | How many requests the window allows. Required, and must be positive. |
-| **Window** | A number and a unit — **Seconds**, **Minutes** or **Hours**. Required. The shortest window the gateway accepts is one second. |
+| **Max requests** | How many requests the window allows. Required, and must be positive. The console pre-fills **60**. |
+| **Window** | A number and a unit — **Seconds**, **Minutes** or **Hours**. Required. The console pre-fills **1 minute**. The shortest window the gateway accepts is one second. |
 
 The window is **rolling**, not a clock-aligned bucket: the counter is the number
 of requests recorded in the last *window* at any instant, kept at one-second
@@ -44,16 +44,8 @@ which is worth reading before you save. **Max requests** exactly: with a limit o
 
 | Field | What to enter |
 |---|---|
-| **Retry after** | The number of seconds the refusal advertises in its `Retry-After` header. The console pre-fills **60 seconds** and lets you pick a unit; whatever you choose is converted to seconds on save. |
+| **Retry after** | How long a refused client is told to wait before trying again. The console pre-fills the **window you just entered**, so a refusal points at the moment the allowance comes back; change it if you want refused clients to wait longer or come back sooner. You may pick a unit, and whatever you choose is converted to seconds on save. |
 | **Group by header** | Optional. A request header whose value splits the counter — `X-User-Id`, say — so each distinct value gets its own allowance inside the policy's scope. |
-
-<Warning>
-**The console's default Retry-After is 60 seconds whatever your window is.** It is
-not derived from the window you just entered. Set a one-hour window and leave the
-field alone, and every refusal tells the caller to come back in a minute — fifty-nine
-minutes early, into another refusal. Set it to the window, or to however long you
-actually want a refused client to wait.
-</Warning>
 
 <Warning>
 **Group by header is a partition, not an exemption.** A request that does not
@@ -77,11 +69,11 @@ nothing.
 
 ### Scope
 
-| Scope | What the counter counts |
+| Requests from | What the counter counts |
 |---|---|
-| **Gateway-wide** | One counter for all the traffic in scope. An organisation-level ceiling nobody can opt out of. |
-| **Targeted** | One counter per application. Two applications sharing one policy keep independent allowances. |
-| **Group by header** | One counter per header value, inside whichever of the two above applies. |
+| **All traffic** | One counter for all the traffic in scope. An organisation-level ceiling nobody can opt out of. |
+| **Applications** or **Groups** | One counter per application. Two applications sharing one policy keep independent allowances. |
+| *(plus **Group by header**)* | One counter per header value, inside whichever of the two above applies. |
 
 ### Mode
 
@@ -189,8 +181,9 @@ whichever kind you actually run.
   be admitted, so a limit can be overshot slightly under concurrency. It is a
   ceiling for sustained traffic, not a mutual exclusion lock.
 - **Throttle never refuses**, and its delay is capped at two seconds.
-- **`Retry-After` is a number you configured**, not the time until the next slot
-  actually frees. Nothing recomputes it per request.
+- **`Retry-After` is one fixed number**, not the time until the next slot
+  actually frees. It is the window unless you changed it, and nothing recomputes
+  it per request.
 - **Every request costs one**, whatever it asks the model to do.
 - **The refusal body is the gateway's own shape**, not your provider's error
   shape, whichever wire format your client speaks. A client that only knows how
@@ -233,13 +226,14 @@ response headers.
 <Step title="The limit refuses">
 Keep sending until you have made one more request than **Max requests**.
 
-Expect `429`, a retry-after matching what you configured, and **no time at the
-provider** in the timing breakdown. That the provider leg is empty is the
-evidence that matters: the refused request never reached the model.
+Expect `429`, and a wait matching what **Retry after** says. Then confirm the
+refused request never reached the model: open **Activity**, click the request,
+open its **Policies** tab, and read **Aggregated Latency**. The **Provider** row
+should be empty. That the provider leg is empty is the evidence that matters.
 
-In **Observe** you will see no `429` — look for the violation on the event
-instead. In **Throttle** you will see no `429` either; you will see the request
-take visibly longer and then succeed.
+In **Observe** you will see no `429` — look for the refusal the policy would
+have made on that same **Policies** tab instead. In **Throttle** you will see no
+`429` either; you will see the request take visibly longer and then succeed.
 </Step>
 
 <Step title="The partition holds (only if you set Group by header)">
@@ -252,9 +246,11 @@ shared counter, which is the point of the warning above.
 </Step>
 </Steps>
 
-Every decision is emitted as a metadata event, in Observe mode too, where nothing
-is blocked. See the [event schema](/platform/event-schema) for the fields
-recorded.
+Every decision this policy takes is recorded, in Observe mode too, where nothing
+is blocked. To read one, open **Activity**, click the request, and open its
+**Policies** tab: the policies chain lists this policy and the decision it made.
+The [event schema](/platform/event-schema) is the reference for everything a
+decision records.
 
 ---
 
@@ -263,11 +259,11 @@ recorded.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Nothing is ever refused | The policy is in **Observe** or **Throttle** | Only **Enforce** returns `429` |
-| Nothing is ever refused, and the mode is Enforce | The traffic is not in scope | Check **Coverage** on the policy — a number smaller than you expected means the scope is not what you think |
-| One application's traffic exhausts another's allowance | The policy is gateway-wide | Target it at applications, which gives each its own counter |
+| Nothing is ever refused, and the mode is Enforce | The traffic is not in scope | Check **Coverage** on the policy — a number smaller than you expected means the scope is not what you think. A Scope reading **Matches nothing** means it reaches no traffic at all |
+| One application's traffic exhausts another's allowance | **Requests from** is *All traffic*, so there is one counter for everybody | Set **Requests from** to Applications, which gives each its own counter |
 | Everyone shares one allowance although **Group by header** is set | The clients are not sending that header, so they all fall back to the shared counter | Make the header mandatory in the client, or accept the shared counter |
 | **Group by header** does nothing on MCP | MCP requests carry no headers into the policy | Expected. Use a targeted policy per MCP application instead |
-| Clients retry immediately and are refused again | `Retry-After` is the console's 60-second default, not your window | Set **Retry after** to the window, or to whatever wait you want |
+| Clients wait longer than they had to | `Retry-After` is one fixed number — the whole window — while a rolling counter frees its oldest slot earlier | Expected. Lower **Retry after** if you want refused clients back sooner |
 | Slightly more requests get through than the limit allows | The read and the increment are not atomic under concurrency | Expected. Lower the limit if you need a hard ceiling |
 | Throttle lets far more through than the configured rate | The per-request delay is capped at two seconds | Expected for limits slower than about 30 per minute. Use **Enforce** if you need a ceiling |
 | `502` on every request, including harmless ones | The counter store is unreachable | This policy fails closed on the LLM leg regardless of mode. Fix the store |

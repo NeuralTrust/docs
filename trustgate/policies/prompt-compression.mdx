@@ -1,6 +1,7 @@
 ---
 title: "Prompt Compression"
-description: "Remove the bytes a model does not need from a request before it is billed: JSON whitespace, terminal escape codes, trailing spaces and blank lines. Nothing to configure."
+sidebarTitle: "Prompt Compression"
+description: "Remove the bytes a model does not need from a request before it is billed: JSON whitespace, terminal escape codes, trailing spaces and blank lines. No settings to choose — only a mode and a scope."
 ---
 
 Applies to **LLM**.
@@ -9,9 +10,90 @@ Tool results, logs and pasted JSON carry indentation, escape sequences and blank
 lines the model does not need and you pay for on every turn. Compression removes
 them before the request is billed.
 
-There is **nothing to configure**. A policy of this type is a name and a scope.
+**It can never refuse a request.** Anything it cannot rewrite with certainty it
+forwards exactly as it arrived. That is the whole design, and it is why there is
+nothing to tune.
 
-## What it removes
+---
+
+## Configure the policy
+
+Open **Policies** → **Library** → **Prompt Compression**. It sits under **Prompt
+Management**.
+
+**There is nothing to configure**, and the panel shows that by omission: the
+policy opens on **Basics** and there is no **Configuration** tab behind it,
+because this policy has no settings. What you set is a name, a mode and a scope.
+
+The thresholds it works to — a minimum size below which a piece of content is
+left alone, and a cap on the size of the whole body — are fixed. They are the
+values that keep a provider's prompt cache stable, and both are described under
+[What it leaves alone](#what-it-leaves-alone) so you can predict what the policy
+will do without being able to change it.
+
+### Mode and scope
+
+**Enforce** and **Observe**, as two cards.
+
+| Mode | What reaches the model |
+|---|---|
+| **Enforce** | The compressed request. |
+| **Observe** | The original request. The saving that *would* have been made is still worked out and recorded. |
+
+Observe is a genuine dry run here, which is unusual for a policy that rewrites:
+the smaller request is built and measured in both modes, and only the last step
+differs. What Observe reports is what Enforce would have done, to the byte. Run
+it in Observe, read the numbers on real traffic, and switch when you are
+convinced.
+
+<Note>
+**In Observe the recorded size still goes down.** The request's before and after
+sizes are the ones the rewrite produced, not the ones the model received — the
+model received the original. Read a shrinking request in Observe as *"this is
+what it would have saved"*, never as evidence that the smaller request was sent.
+</Note>
+
+Scope works as it does for every policy — **Requests from**, for applications
+and groups. See [Policies overview](/trustgate/policies/overview#scope).
+
+---
+
+## How the decision is made
+
+<Steps>
+<Step title="A body over the cap is skipped whole">
+A request body larger than **1 MiB** is forwarded untouched, so a single very
+large request cannot make every other request pay for it. This is a veto on the
+*whole* request: nothing inside it is compressed.
+</Step>
+
+<Step title="The request shape is checked">
+Only OpenAI-style Chat Completions (OpenAI, Azure OpenAI, Groq, DeepSeek, xAI,
+OpenRouter) and Anthropic Messages are understood. A client on any other route
+is forwarded untouched — another whole-request veto, and not one the caller can
+do anything about by changing what it sends.
+</Step>
+
+<Step title="The payload is checked for anything the rewrite cannot reproduce">
+If the request carries something the policy cannot put back byte for byte, it is
+forwarded untouched rather than approximated. The list is under
+[What it leaves alone](#what-it-leaves-alone). Whole-request veto again.
+</Step>
+
+<Step title="Each piece of content is compressed on its own">
+Every message, the system prompt included, and the arguments of every tool call.
+Each one is looked at separately, and a piece of content below **256 bytes** is
+left byte-identical — *that* piece, and nothing else in the request.
+</Step>
+
+<Step title="If the result is not smaller, the original goes upstream">
+The rewritten request is measured against the one that arrived. If it did not
+come out smaller, the original is forwarded. A "compression" that inflates a
+request would waste tokens and churn the provider's cache, so it is never sent.
+</Step>
+</Steps>
+
+### What it removes
 
 Every message in the request, the system prompt included, goes through three
 transforms, in this order:
@@ -26,27 +108,200 @@ The result is deterministic: the same input compresses to the same bytes on
 every turn, so a provider's prompt cache keeps matching the conversation's
 prefix instead of missing on every request.
 
-## What it leaves alone
+### What it leaves alone
 
 The policy never trades tokens for silent data loss, so it steps aside whenever
-it cannot be sure of a lossless rewrite. The whole request passes through
-untouched when:
+it cannot be sure of a lossless rewrite. Two different things get called
+"skipping", and the difference is worth holding on to.
 
-- Any content is under **256 bytes**. Short, stable text such as a system prompt
-  is worth more as a cache hit than as a few saved bytes.
-- The body is over **1 MiB**.
-- The request carries something the rewrite cannot reproduce exactly: image,
+**Vetoes on the whole request.** Nothing in the request is touched, and it is
+forwarded exactly as it arrived, when:
+
+- the body is over **1 MiB**;
+- the request is not OpenAI-style Chat Completions (OpenAI, Azure OpenAI, Groq,
+  DeepSeek, xAI, OpenRouter) or Anthropic Messages;
+- the request carries something the rewrite cannot reproduce exactly: image,
   audio or document parts, an Anthropic `cache_control` marker, Anthropic
-  `tool_result` blocks, or fields the gateway does not model.
-- The request is not OpenAI-style Chat Completions (OpenAI, Azure OpenAI, Groq,
-  DeepSeek, xAI, OpenRouter) or Anthropic Messages.
+  `tool_result` blocks, or fields the gateway does not model;
+- a system message is not the first message of the conversation, or there is
+  more than one of them. The gateway holds the system prompt in a single place,
+  so rebuilding such a request would quietly merge and reorder those messages.
+  Rather than do that, it leaves the request alone entirely.
+
+**A skip that covers one piece of content only.** Content below **256 bytes**
+protects *itself*: that message, or that tool call's arguments, is left
+byte-identical, because a short stable message is worth more as a cache hit than
+as a few saved bytes. Every other message and every other tool call in the same
+request is compressed as usual.
+
+<Warning>
+**The size threshold is per message; the body cap is per request.** They sit
+beside each other and read alike, and they behave nothing alike. A short system
+prompt in a conversation full of tool results does not stop those tool results
+being compressed — only it is left alone. The **1 MiB** body cap is the one that
+stops everything.
+</Warning>
+
+**And one outcome that looks like a skip.** If the rewrite runs but the result
+is not smaller than the original, the original is forwarded. Nothing went wrong;
+there was simply nothing worth removing. A request made of prose usually lands
+here.
 
 Any error on the way passes the request through unchanged rather than refusing
-it. In **Observe** mode nothing is rewritten; the trace records that the request
-would have been compressed.
+it.
 
-## What to expect
+### Modes and failures
 
-It pays off on requests carrying structured data — tool results, logs, pasted
-JSON. On prose it changes almost nothing. The trace on each request records
-whether it was compressed.
+| Situation | Enforce | Observe |
+|---|---|---|
+| The request compresses | The smaller request is sent | **The original is sent**, and the saving it would have made is recorded |
+| The rewrite is not smaller | The original is sent | The original is sent |
+| The body is over **1 MiB** | The original is sent, recorded as skipped | Same |
+| The route is in neither understood shape | The original is sent, recorded as skipped | Same |
+| The request carries something that cannot be reproduced exactly | The original is sent, recorded as skipped | Same |
+| The request cannot be read, rewritten or re-encoded | The original is sent | The original is sent |
+
+<Note>
+**This policy never blocks anything, in either mode.** There is no refusal it
+can produce, no failure that stops traffic, and no setting that would make it
+fail closed. Every path above ends with a request reaching the model. If you are
+looking for a policy that refuses oversized requests, that is
+[Request Size Limiter](/trustgate/policies/request-size-limiter), not this one.
+</Note>
+
+### Limits
+
+- **Request only.** There is no response leg, and no leg to choose.
+- **Nothing to tune.** No thresholds, no transforms to switch off, no
+  per-application variation beyond scope. The panel has no **Configuration**
+  tab because there is nothing to put in it.
+- **Two request shapes only** — OpenAI-style Chat Completions and Anthropic
+  Messages. Any other route is forwarded untouched.
+- **It cannot refuse anything.** Use it for cost, never for control.
+- **The saving is structural, not universal.** It pays off on requests carrying
+  structured data — tool results, logs, pasted JSON. On prose it changes almost
+  nothing, and that is the expected result rather than a fault.
+- **A system message anywhere but first, or more than one of them, costs you
+  the whole request.** Not a line of it is compressed.
+- **LLM traffic only.** The policy does not apply to MCP (Model Context
+  Protocol) tool calls.
+
+---
+
+## Verify the policy
+
+Open the **Playground**, pick the application the policy applies to, and send
+these **in this order**. Starting with the control means a failure tells you
+something specific.
+
+After each one, open **Activity**, open that request, and go to its **Policies**
+tab. The Prompt Compression row carries **Bytes in** and **Bytes out** for that
+request, and the difference between them is the only place the console shows
+this policy working.
+
+<Steps>
+<Step title="Control — the path works at all">
+```
+hello, write me a short greeting
+```
+
+Expect a normal reply. If this fails, the problem is the application, the model
+or the provider — not the policy. Fix it before going on.
+
+Then check that a **Prompt Compression** row is on the **Policies** tab at all.
+If it is not, the policy's scope does not cover this application: check
+**Requests from** on the policy, and **Coverage** on the Policies list.
+
+Expect **Bytes out** to equal **Bytes in** here — a greeting has nothing in it
+to remove.
+</Step>
+
+<Step title="Something worth compressing — the size comes down">
+Send a prompt carrying a pretty-printed JSON document in a fenced block, a few
+hundred bytes of it or more:
+
+````
+summarise this tool result:
+
+```json
+{
+    "order": {
+        "id": "A-1042",
+        "status": "shipped",
+        "lines": [
+            { "sku": "TS-01", "qty": 2 },
+            { "sku": "MG-07", "qty": 1 }
+        ]
+    }
+}
+```
+````
+
+Expect **Bytes out** below **Bytes in**. That is the policy doing the one thing
+it does. If the two are equal, check that the JSON really sits inside a fenced
+block opened with ```` ```json ````, rather than being dropped loosely into the
+prose around it — indentation in prose is deliberately preserved.
+
+**Read the reply too.** The model must answer about the order as though nothing
+had happened to the request. Compression is lossless, and the answer is where
+you would notice if it were not.
+</Step>
+
+<Step title="A short message beside it — the threshold is per message">
+Stay in the same conversation and ask a one-line follow-up, such as `and who
+sent it?`. The request now carries both your short question and the earlier JSON.
+
+Expect **Bytes out** still below **Bytes in**. The short message protected
+itself and nothing more; everything else in the request was compressed as usual.
+This is the check worth doing, because the per-message threshold is the one
+people read as a whole-request rule.
+</Step>
+
+<Step title="Prose — the honest no-op">
+Start a new conversation and send a paragraph or two of ordinary prose — long
+enough to be past the **256-byte** threshold, so that the threshold is not the
+explanation:
+
+```
+write me three sentences about the weather in Lisbon, then explain in a short
+paragraph why the Atlantic keeps the city milder in winter than other European
+capitals at the same latitude, and finish with one sentence on what that means
+for somebody deciding which month to visit in
+```
+
+Expect **Bytes out** equal to **Bytes in**. Nothing failed: there was nothing to
+take out. Prose is the normal case for this result, and it is the reason to
+judge the policy on traffic that carries tool results rather than on a handful
+of test prompts.
+</Step>
+</Steps>
+
+Every decision lands on the request itself, in Observe mode too. Open
+**Activity**, open the request, and read its **Policies** tab. The
+[event schema](/platform/event-schema) lists the full set of fields a decision
+records.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The panel has no **Configuration** tab | This policy has no settings | Expected. **Basics** — a name, a mode and a scope — is all there is |
+| There is no Prompt Compression row on the request's **Policies** tab | The policy's scope does not cover this application | Check **Requests from**, and **Coverage** on the Policies list |
+| **Bytes out** always equals **Bytes in** | Nothing to remove, or the rewrite did not come out smaller | Expected on prose. Try a request carrying tool results or fenced JSON |
+| **Bytes out** is lower, but the model clearly answered from the original | The policy is in **Observe**, which measures the saving and forwards the original | Switch to **Enforce** |
+| A request full of JSON was not compressed at all | A whole-request veto: over **1 MiB**, a route in neither understood shape, or content that cannot be reproduced exactly — images, audio, documents, cache markers, tool results | None of these is a setting. Check what the client is sending |
+| One turn of a conversation compresses and the next does not | The later turn added something that vetoes the whole request — an image, or a second system message | Compare the two requests in **Activity** |
+| Nothing compresses since a system message was added mid-conversation | A system message must be the first message, and there can be only one | Have the client send one system message, at the front |
+| A short message stayed byte-identical while the rest of the request shrank | The **256-byte** threshold is per message | Expected. The short one is left alone to protect the cache prefix |
+| A request that could not be compressed was not refused | This policy cannot refuse anything | By design. Use [Request Size Limiter](/trustgate/policies/request-size-limiter) to refuse |
+
+---
+
+## Related
+
+- [Prompt Template](/trustgate/policies/prompt-template) — the other Prompt Management policy, and one that changes what the model is told rather than only how many bytes it is told in
+- [Request Size Limiter](/trustgate/policies/request-size-limiter) — the policy that refuses oversized requests, which this one never does
+- [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
+- [Event schema](/platform/event-schema) — the fields each decision records
