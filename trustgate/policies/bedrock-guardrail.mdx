@@ -34,50 +34,224 @@ it in your own environment rather than assuming.
 
 ---
 
-## Part 1 — Build the guardrail in AWS (TBD)
-
-<Note>
-This walkthrough is being written against a real account. Until then, follow
-AWS's own documentation to create the guardrail, and come back for **Part 2**.
-</Note>
+## Part 1 — Build the guardrail in AWS
 
 Everything in this part happens in **your own** AWS account. TrustGate never
-creates or changes anything there. These are the values the policy will ask you
-for, and the AWS-side decisions that change what it does:
+creates or changes anything there, and it reads the guardrail rather than
+configuring it: every decision below is made here and cannot be overridden from
+the policy later.
 
-| What you need | Where it comes from |
-|---|---|
-| A Bedrock guardrail | Created in your AWS account. Its policies — denied topics, content filters, word lists, sensitive information — are configured there and read from there; nothing about them is set in TrustGate. |
-| The **guardrail identifier** | Shown on the guardrail in AWS. This is what the policy sends on every call. |
-| A **region** | The region the guardrail lives in. The gateway calls the Bedrock runtime endpoint for the region you configure, so a guardrail in another region is simply not found. |
-| A **version**, or `DRAFT` | A guardrail has a working draft and published versions. `DRAFT` is what the policy uses if you leave the field empty; it moves whenever someone edits the guardrail. |
-| A **per-entity action** for each sensitive entity — *Block* or *Anonymize* | Set on the guardrail in AWS, not in TrustGate. This is the decision that matters most; read the warning below. |
-| Permission to call `bedrock:ApplyGuardrail` on that guardrail | An IAM policy in your account, attached to whatever identity the gateway uses. See **Part 2**. |
+### Finding Guardrails, which is harder than it should be
+
+Two things get in the way, and both send you somewhere that looks right.
 
 <Warning>
-**TrustGate's PII action does not set AWS's per-entity action.** They are two
-different decisions, and both have to agree before anything is ever masked.
+**Amazon Bedrock now opens on a console that has no Guardrails in it.** The
+landing experience lists Models, Workbench and Getting started, and Guardrails
+is in none of them. Its own welcome panel is where this is explained, in a
+comparison table: guardrails belong to the other Bedrock experience.
 
-AWS decides, per entity, whether a match comes back as blocked or as anonymised.
-TrustGate's **PII action** decides only what the gateway does with an anonymised
-verdict — and its default, *Block request*, **turns AWS's anonymise verdict into
-a hard block**. A guardrail configured to mask email addresses, dropped into a
-policy left at its defaults, refuses the request instead.
-
-Real masking needs both: the entity set to *Anonymize* in the AWS console **and**
-**PII action** set to *Anonymize* here. An entity AWS comes back as blocked is
-always a block, whatever this setting says.
+**And searching for "Guardrails" returns two unrelated features.** The first
+result is AWS Control Tower's, which governs accounts and has nothing to do with
+filtering content. The one you want is labelled **Amazon Bedrock feature**.
 </Warning>
 
+So: search for **Guardrails** in the console search bar and pick the **Amazon
+Bedrock** result. The page you want is headed *Guardrails* with **Amazon
+Bedrock** in the breadcrumb.
+
+### Choose the region before you create anything
+
+A guardrail belongs to one region. The gateway calls the Bedrock endpoint for
+the region you configure on the policy, so a guardrail created anywhere else
+simply does not exist as far as TrustGate is concerned — you get a failure, not
+a warning.
+
+Pick the region you will actually use, confirm it in the console's region
+selector, and leave it alone for the rest of this walkthrough. You will enter
+the same region on the policy in Part 3.
+
+### Create the guardrail
+
+**Create guardrail** opens a seven-step wizard. Steps 2 to 6 are each marked
+*optional*, and that is worth pausing on.
+
+<Warning>
+**A guardrail with no filters at all is a valid guardrail.** Skip every optional
+step and AWS creates it, marks it **Ready**, and gives it an identifier. Dropped
+into a policy it inspects every request, costs a call each time, and allows
+everything — and from TrustGate it is indistinguishable from a guardrail that
+works. Configure at least one filter before you leave.
+</Warning>
+
+<Steps>
+<Step title="Provide guardrail details">
+A **Name**, an optional **Description**, and **Messaging for blocked prompts** —
+the text AWS returns when the guardrail blocks something. There is a checkbox to
+apply the same message to responses.
+
 <Note>
-**Contextual grounding is read but can never fire.** The gateway sends one
-unqualified block of text and never marks any part of it as the grounding source
-or the query, which is what AWS requires before it evaluates grounding or
-relevance. A guardrail whose only active policy is contextual grounding will
-allow everything, and it will look exactly like a guardrail that is working.
+**The blocked message does not reach anyone calling through TrustGate.** AWS
+does return it, but the gateway builds its own refusal and discards it. Set it
+for whatever else calls this guardrail directly; do not expect to see it in a
+TrustGate refusal. What the caller gets instead is described in
+[What the caller receives](#what-the-caller-receives).
+</Note>
+</Step>
+
+<Step title="Configure content filters">
+Five harmful categories — **Hate**, **Insults**, **Sexual**, **Violence** and
+**Misconduct** — each with a strength of *None*, *Low*, *Medium* or *High*, and
+a separate **Prompt attacks** filter with its own strength. A checkbox applies
+the same filters to responses.
+
+Each category also has an action, and the choice matters more than the strength:
+
+| Action | What AWS does |
+|---|---|
+| **Block** | Refuses the content when the category fires |
+| **Detect (no action)** | Records the detection and lets the content through |
+
+**Detect is not a gentler block — it is no block.** A category set to *Detect*
+produces nothing for the gateway to act on, so TrustGate forwards the request as
+clean. The detection exists only in your AWS telemetry.
+
+**Content filters tier** is a choice between *Classic* and *Standard*. Classic
+covers English, French and Spanish. Standard covers over fifty languages but
+**requires you to opt into cross-Region inference**, which means the text leaves
+the region you just chose. If data residency is a constraint for you, that is
+the deciding factor rather than language coverage.
+</Step>
+
+<Step title="Add denied topics">
+Up to thirty topics, each a **Name**, a **Definition**, and up to five optional
+**sample phrases**. AWS asks you to describe the topic rather than the
+prohibition — its own guidance is to avoid starting the definition with "don't".
+
+The definition is capped at **200 characters on Classic** and 1,000 on Standard,
+which is a consequence of the tier choice in the previous step that is easy to
+meet unexpectedly.
+
+Each topic takes an **Input action** and an **Output action**, independently.
+</Step>
+
+<Step title="Add word filters">
+A **profanity filter** using AWS's own list, and up to **10,000 custom words or
+phrases** of 100 characters each. Custom terms can be typed in, uploaded from a
+local file, or read from an S3 object — worth knowing if you already maintain a
+term list somewhere.
+
+Each entry again takes separate input and output actions.
+</Step>
+
+<Step title="Add sensitive information filters">
+This is the step that decides whether anything is ever masked, and the one most
+worth getting right.
+
+**PII types** are chosen from a fixed list, grouped as *General*, *Finance*,
+*IT*, *USA Specific*, *Canada Specific* and *UK Specific*. Each entity you add
+takes an **Input action** and an **Output action**.
+
+<Warning>
+**AWS calls it Mask. The policy in TrustGate calls it Anonymize.** They are the
+two halves of one decision and they do not share a word, which is exactly how
+people get this wrong.
+
+Setting an entity to **Mask** here is only half of it. The policy's **PII
+action** decides what the gateway does with that verdict, and its default —
+*Block request* — **turns AWS's mask into a hard refusal**. An entity you
+carefully set to Mask, in a policy left at its defaults, refuses the request.
+
+Masking needs **Mask** here *and* **Anonymize** on the policy. An entity AWS
+returns as blocked is always a block, whatever the policy says.
+</Warning>
+
+**There are no entities for Spain or continental Europe.** The list covers the
+United States with five, Canada with two and the United Kingdom with three;
+there is no national identity document for anywhere else. For a Spanish DNI or
+an equivalent, your only route here is a **regex pattern** — up to thirty are
+allowed, alongside the PII types, each with its own actions.
+</Step>
+
+<Step title="Add contextual grounding check">
+Two independent toggles, **Grounding** and **Relevance**, each with a score
+threshold from 0 to 0.99 and an action.
+
+<Warning>
+**Neither can ever fire through this policy**, for two separate reasons.
+
+They evaluate the *model's answer*, and a policy created in the TrustGate
+console only inspects requests. And even on the response leg, both need a
+reference source and a query marked as such — AWS's own test panel has a
+**Reference source** field for exactly this — and the gateway sends one
+unmarked block of text.
+
+Configure them if other things call this guardrail. Through TrustGate they are
+inert, and a guardrail whose only active policy is contextual grounding allows
+everything while looking configured.
+</Warning>
+</Step>
+
+<Step title="Review and create">
+Check the summary and create. The guardrail is usually **Ready** immediately.
+</Step>
+</Steps>
+
+<Note>
+**Every output action you set is unused by a policy created in the TrustGate
+console**, because that policy inspects requests only. Setting them does no
+harm and costs nothing — but if you are configuring this guardrail solely for
+TrustGate, only the input actions will ever be read.
 </Note>
 
----
+### The identifier, and why the version matters
+
+The guardrail's page shows its **ID** — a short string such as `ln5mkuwnz801`,
+not the name you gave it. That identifier is what goes on the policy.
+
+Below it sits a **Working draft** and a **Versions** list that starts empty.
+**Create version** takes an optional description and assigns the number itself:
+the first is **Version 1**.
+
+<Warning>
+**Leave the version empty on the policy and it follows the working draft, which
+moves.** Anyone editing the guardrail in AWS changes what your gateway enforces
+— with no deployment, no change in TrustGate, and nothing in your own change log
+to point at afterwards.
+
+Publish a version and name it on the policy. Then an edit in AWS is a new
+version that nothing uses until someone chooses it.
+</Warning>
+
+Creating a version does not select it. The console's own test panel stays on
+**Working draft** until you change it, and so does anything else.
+
+### Test it before you leave AWS
+
+The guardrail's page has a **Test** panel, and it has one option that makes it
+far more useful than it looks: **Use ApplyGuardrail API**.
+
+That is the same operation the gateway calls. Testing through it tells you what
+AWS itself decides, separately from what TrustGate does with that answer — which
+is the difference you will want when something behaves unexpectedly later.
+
+Choose the version, tick **Use ApplyGuardrail API**, set the source to **Input**,
+and paste text that should trip one of your filters. **View trace** breaks the
+result down by policy.
+
+Two behaviours are worth seeing here rather than discovering in production:
+
+**A masked entity comes back as rewritten text.** An email address set to Mask
+returns the whole input with the address replaced by `{EMAIL}` — the entity name
+in braces. That rewritten text is exactly what the gateway reinjects when the
+policy's **PII action** is *Anonymize*, so the model receives the placeholder
+and never the address.
+
+**A block hides everything else.** Send text containing both a blocked entity
+and a masked one, and the trace reports only the blocked one. The masked entity
+is not listed as masked, and not listed as detected either. A block ends the
+evaluation, so the first thing to reach for when a trace looks thinner than you
+expected is whether something blocked earlier in it.
 
 ## Part 2 — Give the gateway access to AWS
 
@@ -316,7 +490,7 @@ fields recorded.
 | `502` on every request, including harmless ones | Wrong region, wrong guardrail ID, missing `bedrock:ApplyGuardrail`, or credentials that cannot be resolved | Check the region first — it is the one that fails silently — then the permission on the guardrail |
 | `502` that starts on its own, with nothing changed | A **session token** or other temporary credential expired | Replace the credential; nothing refreshes a pasted session token |
 | Every assume-role call is denied | The role's trust policy requires an `sts:ExternalId` | Remove that condition — the policy cannot send one |
-| `403` where you expected masking | The entity is set to *Block* in AWS, or **PII action** is *Block request* | Both have to say anonymise; see the warning in **Part 1** |
+| `403` where you expected masking | The entity is set to *Block* in AWS, or **PII action** is *Block request* | AWS must say *Mask* and the policy must say *Anonymize* — two words, one decision; see the warning in **Part 1** |
 | `403` naming the sensitive-information policy although **PII action** is *Anonymize* | AWS returned no masked text, or the request body could not be re-encoded | Expected, and deliberate: the original is never forwarded when masking fails |
 | Nothing is ever blocked, and the guardrail looks correct in AWS | The guardrail's only active policy is contextual grounding | It cannot fire here. Add a topic, content or word policy |
 | Behaviour changed with no change to the policy | The policy points at `DRAFT` and someone edited the guardrail | Pin **Guardrail version** to a published version |
