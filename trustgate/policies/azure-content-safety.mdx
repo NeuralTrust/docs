@@ -51,53 +51,13 @@ measure it in your own environment rather than assuming.
 
 ---
 
-## Part 1 — Set up Azure AI Content Safety (work in progress)
-
-<Note>
-**This part is still being written.** What is below has been confirmed in a real
-Azure portal and is safe to rely on. What is missing is the last stretch of the
-walkthrough — the region list, the pricing tiers on offer, and the exact page
-the key and endpoint are copied from. Those are being captured now.
-</Note>
+## Part 1 — Set up Azure AI Content Safety
 
 Everything in this part happens in **your own** Azure subscription. TrustGate
 never creates or changes anything there.
 
-### Before anything else: do you have a subscription?
-
-This is the step that stops people, and it is not about permissions.
-
-<Warning>
-**A Microsoft tenant is not an Azure subscription, and having the first does not
-give you the second.** A company using Microsoft 365 has a Microsoft Entra
-directory — users, groups, sign-in — and very often no Azure subscription at
-all. Without one there is nowhere for a resource to exist, so nothing can be
-created.
-
-The symptom is not an error. The Content safety page shows a cheerful *Welcome
-to Azure!* panel offering a free trial, which reads like a product tour rather
-than the blocker it is.
-
-Being an administrator of the directory does not help either: directory roles
-and Azure roles are separate systems. You can administer the tenant and still
-have no access to Azure.
-</Warning>
-
-Check it before you start: search for **Subscriptions** in the portal's search
-bar. An empty list means someone has to create a subscription — a free trial, a
-pay-as-you-go, or access to an existing one — and grant you a role on it. That
-is a billing decision, not a technical one, so it is worth starting early.
-
-### Where the service lives
-
-Content Safety is not a standalone service in the portal any more. It sits under
-**Microsoft Foundry**, reachable from **More services → Content safety** in the
-left-hand navigation, alongside the other Azure AI services.
-
-### What you will not find in Azure
-
-Worth saying plainly, because anyone arriving from the Bedrock or Model Armor
-pages will go looking for it:
+This is the lightest of the three provider setups, because of what is *not* in
+it:
 
 <Note>
 **None of the filtering is configured on the Azure side.** There is no object to
@@ -105,24 +65,96 @@ build, no categories to enable, no thresholds to set and no list to maintain.
 Azure scores the text; everything that decides what is blocked lives on the
 TrustGate policy in **Part 3**.
 
-That makes this the lightest provider setup of the three. You create a resource
-and copy two values out of it.
+If you have come from the Bedrock or Model Armor pages, this is the difference.
+You create a resource and copy two values out of it.
 </Note>
+
+<Steps>
+<Step title="Find Content safety in the portal">
+It is not a standalone service any more. It sits under **Microsoft Foundry**,
+reached from **More services** → **Content safety** in the left-hand navigation.
+
+An empty list here shows a *Welcome to Azure!* panel offering a free trial,
+which looks like it is telling you that you have no subscription. It is not — it
+is telling you that you have no Content Safety resources yet. Use **Create**.
+</Step>
+
+<Step title="Fill in the Basics tab">
+| Field | What to enter |
+|---|---|
+| **Subscription** | The subscription the resource will be billed to. |
+| **Resource group** | An existing one, or **Create new**. |
+| **Region** | See the warning below. It defaults to **East US**. |
+| **Name** | Becomes the subdomain of the endpoint, so pick something you will recognise. |
+| **Pricing tier** | Required, and it has **no default** — the form will not validate until you choose. **Free F0** is offered and is enough to follow this page. |
+
+<Warning>
+**The region defaults to East US, and it decides where your text is analysed.**
+Every request makes that round trip, and the text is processed in whichever
+region you leave here. For anything with a data-residency constraint this is the
+field that matters most on the page, and it is the one most easily left alone.
+
+European regions are available, including **Spain Central**.
+</Warning>
+
+Azure may note that the subscription has not registered the Cognitive Services
+resource type before, and offer to register it for you. Let it. On a
+subscription with restrictive policies that registration can fail, and the error
+it produces later is not obviously about registration.
+
+The **Network**, **Identity** and **Tags** tabs can be left as they are. Note
+that Identity switches on a system-assigned managed identity by default — this
+policy authenticates with a key and never uses it.
+</Step>
+
+<Step title="Create it, then open the resource">
+**Review + create**, then **Create**. Deployment takes a minute or two, and the
+resource's **Status** reads *Active* when it is ready.
+
+The resource group's own location does not have to match the resource's, and
+often will not. What matters for this policy is the resource's.
+</Step>
+
+<Step title="Copy the key and build the endpoint">
+**Keys and Endpoint**, under *Resource Management* in the resource's left-hand
+navigation. The resource issues **two keys** so you can rotate one while the
+other is live; either works.
+
+The endpoint is also shown on the resource's **Overview**, and this is where the
+one real trap on this page lives.
+
+<Warning>
+**The endpoint the portal gives you is not the endpoint the policy needs.** What
+both pages show is the resource root:
+
+```
+https://YOUR-RESOURCE.cognitiveservices.azure.com/
+```
+
+The policy needs the **Analyze Text** operation, with its `api-version`:
+
+```
+https://YOUR-RESOURCE.cognitiveservices.azure.com/contentsafety/text:analyze?api-version=2024-09-01
+```
+
+Paste the first and the policy saves without complaint, then fails on every
+request — and you will not see Azure's `404`, because any non-2xx becomes one
+generic gateway error. Build the second by hand.
+</Warning>
+</Step>
+</Steps>
 
 ### The values the policy will ask you for
 
 | What you need | Where it comes from |
 |---|---|
-| An Azure AI Content Safety resource | Created in your Azure subscription. A multi-service Azure AI Services resource also exposes Content Safety. |
-| A region | Chosen when you create the resource. It decides where the text is analysed, and every request makes that round trip. |
-| The **Analyze Text** endpoint URL, **including its `api-version` query string** | Built from the resource endpoint on the portal's **Keys and Endpoint** page — not that endpoint on its own. See the warning at the top of this page. |
-| A subscription key | The same **Keys and Endpoint** page. A resource issues two so you can rotate one while the other is live; either works. |
-| A severity scale | Not a value from Azure but a choice you make: four levels (0, 2, 4, 6) or eight (0–7). It is sent with every call and decides the numbers Azure returns. |
-| A blocking threshold for each category | Also a choice: one severity per category, out of **Hate**, **Violence**, **Self-harm** and **Sexual content**. |
+| The **Analyze Text** endpoint URL, **including its `api-version`** | Built from the resource endpoint on **Keys and Endpoint** or **Overview** — not that endpoint on its own. |
+| A subscription key | **Keys and Endpoint**. Either of the two. |
+| A severity scale | Not a value from Azure but a choice you make on the policy: four levels (0, 2, 4, 6) or eight (0–7). |
+| A blocking threshold for each category | Also on the policy: one severity per category, out of **Hate**, **Violence**, **Self-harm** and **Sexual content**. |
 
-Nothing else about the resource is configured from TrustGate. There is no
-blocklist, no custom term list and no per-category configuration on the Azure
-side that this policy reads.
+Nothing else about the resource is read by this policy. There is no blocklist, no
+custom term list and no per-category configuration on the Azure side.
 
 ## Part 2 — Give the gateway a key
 
