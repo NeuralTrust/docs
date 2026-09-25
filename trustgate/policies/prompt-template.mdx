@@ -184,6 +184,18 @@ content and nothing else. The values for a template's placeholders travel with
 the same request, sent by the calling application; how they are put there is a
 question for whoever builds it, not something you set in the console.
 
+<Warning>
+**In an OpenAI-shaped request the application's own system prompt is a message
+too, and a reference in it is found.** The gateway reads the content of every
+message without caring what role it carries. A `{template://…}` an application
+left in its own system prompt therefore resolves like any other — and rendering
+it replaces the whole message list, system prompt included. Only Anthropic's
+separate top-level system field sits outside the messages and is never scanned.
+
+Worth checking before you publish a library: a reference sitting in an
+application's system prompt for its own reasons is not inert.
+</Warning>
+
 **Those values never reach the model.** The gateway takes them off the request
 before it goes upstream — in Observe too, and even when the policy has no
 library configured at all. No provider ever sees them.
@@ -209,33 +221,34 @@ the model as a fresh, historyless conversation.
 | **If a variable is missing** | **Reject request** (`400`) or **Use empty string**, for a placeholder that neither a gateway source nor the caller could fill. | **Reject request** |
 
 <Note>
-**Require template reference does not start in the same position everywhere.** A
-policy you create here has it **on** and refuses a request that names no
-template. A policy that came from somewhere other than this form, with nothing
-stored for this setting, has it **off** and lets untemplated requests through
-untouched. Same setting, opposite starting point.
+**A template reference is required either way, whatever created the policy.** A
+policy you create here has **Require template reference** on and refuses a
+request that names no template. A policy that came from somewhere other than this
+form, with nothing stored for this setting, refuses those requests too: on the
+gateway side, nothing stored means the reference is required. Open such a policy
+here and the toggle reads **On**, which is what it has been doing all along.
+
+There is no path on which an untemplated request quietly passes because nobody
+set this.
 </Note>
 
-<Warning>
-**In the library job, a value from the caller overrides a gateway one of the
-same name.** Values resolved from headers and claims are placed first, and the
-caller's own values are applied on top. A caller that sends a value for
-`{{tenant}}` replaces the one you sourced from `X-Tenant-Id`. This is pinned by
-a test. It is the behaviour, not an accident.
+<Note>
+**In the library job, a value the gateway resolved wins.** A placeholder you
+sourced from a header or a JWT claim is filled from that header or claim, and a
+value the caller sends under the same name does not displace it. A caller cannot
+scope a prompt to someone else's tenant by guessing what you called the
+placeholder.
 
-That matters because scoping a prompt to a tenant from a trusted header is
-exactly what an operator reaches for. If the placeholder is guessable, the scope
-is advisory.
+Which source you choose is therefore the decision that matters, and it is a real
+one. A gateway-resolved placeholder is exactly as trustworthy as the header or
+the claim behind it — read the warning about JWT claims above before you lean on
+one. A placeholder you leave for the caller to fill is, by definition, the
+caller's to choose: do not put anything in it that would be an authorisation
+decision.
 
-Two defences, and use both. Give gateway-sourced placeholders names a caller has
-no reason to guess — `{{internal-tenant-id}}` rather than `{{tenant}}`. And do
-not put anything in a prompt that would be an authorisation decision if the
-caller chose it.
-
-**The injection job is unaffected.** It never reads anything the caller sent, so
-a placeholder there resolves from the header or the claim and from nothing
-else.
-</Warning>
+**The injection job never reads anything the caller sent at all.** A placeholder
+there resolves from the header or the claim and from nothing else.
+</Note>
 
 Values are escaped before they are substituted into a template written as a
 message list, so a caller cannot break out of the message its value is placed in
@@ -254,9 +267,9 @@ something to ask whoever manages your gateway for.
 |---|---|---|
 | **Template Engine** | The placeholder rendering engine. | Locked to mustache. A second engine name exists but is not implemented, and a policy carrying it is **refused on save**. |
 | **Position** | Where injected content goes. | Locked to the system prompt, the only place the gateway accepts. |
-| **Role** | The role the injected content is inserted under. | Always the system role. A policy carrying another role gets a message of that role prepended to the conversation instead. |
-| **On Existing System** | Merge — append after a blank line to the application's own system prompt — or replace, which discards it. | **No control in the form. A policy you save here always merges.** Overriding an application's own system prompt, rather than adding to it, is not something the console can do today. |
-| **Escape JSON Control Chars** | Strips raw control bytes, keeping newlines and tabs. | No control in the form; on. In the injection job it applies to the whole rendered prompt, in the library job only to the substituted values. |
+| **Role** | The role the injected content is inserted under. | No control in the form, and no normalisation. A prompt you create here is inserted as the system role; a stored role is loaded and written back unchanged, so a policy carrying another one keeps it through every console save and gets a message of that role prepended to the conversation instead. |
+| **On Existing System** | Merge — append after a blank line to the application's own system prompt — or replace, which discards it. | **No control in the form, and no normalisation either.** A policy you *create* here merges. An existing one keeps what it carries: the stored value is loaded and written straight back, so a policy set to replace goes on replacing through every save you make here. |
+| **Escape JSON Control Chars** | Strips raw control bytes, keeping newlines and tabs. | No control in the form. On for a policy you create here; a stored **off** is loaded and written back, so it survives a console save too. In the injection job it applies to the whole rendered prompt, in the library job only to the substituted values. |
 | **Required Variables** | Per-version type, allowed values and maximum length for a client variable, checked before rendering. | **No editor.** Preserved for a policy that has them. A template you build here validates no client input at all. |
 | **Versions and labels** | Several labelled versions of one template. | One version, labelled `latest`. Extra versions are preserved and shown as a count. |
 
@@ -363,19 +376,31 @@ template would fire; useless for seeing what it does.
   Anthropic Messages. Unlike
   [Prompt Compression](/trustgate/policies/prompt-compression), which steps
   aside on a wire format it does not model, this policy carries no such guard. A
-  client calling the gateway's Gemini route is in neither shape, and the policy
-  does not notice: it writes the prompt into a request with nowhere to put it,
-  and records the injection as done. The model never sees the prompt, and a
-  `{template://…}` reference in such a request is never found at all.
-- **A template reference is found only in message content.** One in the
-  application's own system prompt is ignored — not an error, just not a
-  reference — and is forwarded to the model as literal text.
+  client calling the gateway's Gemini route is in neither shape, and such a
+  request has nowhere to put the prompt: the model never receives it, and a
+  `{template://…}` reference in it is never found either. What is recorded is
+  what the model actually received, so nothing will claim an injection that did
+  not happen — but nothing refuses the request either. Attach this policy only
+  to applications whose route it understands.
+- **A template reference is found in the content of any message, whatever role
+  that message carries.** In an OpenAI-shaped request the application's own
+  system prompt *is* a message, so a reference left there is found and rendered
+  like any other. Only Anthropic's separate top-level system field is never
+  scanned; a reference there is forwarded to the model as literal text.
+- **A reference inside structured content is never found.** When a message's
+  content is sent as a list of parts rather than as plain text, the gateway does
+  not look inside it. Nothing is detected, nothing is rendered, nothing refuses
+  the request, and the model receives the literal `{template://…}` text. The
+  request is recorded exactly like one that carried no reference at all, so
+  there is nothing to alert on.
 - **One template per request.** Two *different* references are a `400`; the same
   reference repeated across turns is fine.
 - **Rendering discards the conversation.** See the warning above.
-- **Merging is the only thing this form can produce.** A prompt you write here is
-  always added to the application's own system prompt; replacing that prompt is
-  not something the console can do.
+- **Merging is the only thing this form can *choose*.** A prompt you create here
+  is added to the application's own system prompt, and no control offers
+  anything else. That is not the same as normalising: a policy already set to
+  replace that prompt keeps replacing it, and saving from the console will not
+  change it back.
 - **A template you build here validates no client input.** **Required Variables**
   has no editor, so type, allowed-value and length checks are out of reach from
   the console, and a value the caller sends that matches no placeholder is
@@ -453,8 +478,8 @@ reference, supplying whatever the template's placeholders need.
 Expect the event to record **`rendered`** and to name the resolved template. The
 reply must answer the template's question, not the literal reference text. If the
 model says something about a `template://` address, the reference was forwarded
-instead of resolved — check the mode, and check the reference is in a message
-rather than in the application's own system prompt.
+instead of resolved — check the mode, then check that the message's content was
+sent as plain text rather than as a list of parts.
 </Step>
 
 <Step title="Prompt library — history really is discarded">
@@ -468,8 +493,11 @@ application team after it ships.
 </Step>
 </Steps>
 
-Every decision is emitted as a metadata event, in Observe mode too. See the
-[event schema](/platform/event-schema) for the fields recorded.
+Every decision lands on the request itself, in Observe mode too. Open
+**Activity**, open the request, and read its **Policies** tab — the Prompt
+Template row is there with the decision it reached. The
+[event schema](/platform/event-schema) lists the full set of fields a decision
+records.
 
 ---
 
@@ -488,10 +516,10 @@ Every decision is emitted as a metadata event, in Observe mode too. See the
 | `400` saying the reference is ambiguous | Two *different* references on one request | Only one template can be rendered. Repeating the same one is fine |
 | `500` saying rendering failed | The rendered content is not a valid list of messages | Usually a substituted value broke the JSON, or the list was hand-edited outside the console |
 | `502` on every request | The request cannot be read, or the stored configuration cannot be parsed | Both fail in Observe too. Check the request first, then the stored settings |
-| The reference text reaches the model verbatim | The policy is in **Observe**, or the reference sat in the application's own system prompt | Only message content is scanned |
+| The reference text reaches the model verbatim | The policy is in **Observe**, the message's content was sent as a list of parts rather than plain text, or the reference sat in Anthropic's top-level system field | A reference in an ordinary message is found whatever its role; those are the three places one is not |
 | The model lost the conversation | A named template rendered, which replaces the whole message list | Expected. The event counts the discarded turns |
-| A caller's value overrode the tenant you set from a header | The caller's own values are applied after the gateway's | Rename the placeholder to something unguessable, and do not make decisions on it |
-| The application's own system prompt disappeared | The policy is set to replace that prompt rather than add to it, which cannot have come from this form | A policy you save here always merges |
+| A value the caller sent for a placeholder was ignored | That placeholder reads a **Header** or a **JWT claim**, and a gateway-resolved value wins | Expected. Set its **Source** to **Sent by the client** if the caller is the one meant to fill it |
+| The application's own system prompt disappeared | The policy is set to replace that prompt rather than add to it, which cannot have come from this form | Re-saving from the console does **not** fix it — the stored setting is preserved, not reset. Ask whoever manages your gateway to change it |
 | The values a caller sent show up nowhere downstream | They are removed from the request before it leaves the gateway, always | Expected |
 | A version the policy carries is not in the panel | The console edits the first version only | The others are preserved; the callout counts them |
 

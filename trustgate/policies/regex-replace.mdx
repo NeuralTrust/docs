@@ -27,8 +27,8 @@ Open **Policies** → **Library** → **Regex Replace**.
 
 | Value | What is rewritten |
 |---|---|
-| **request** | The system prompt and the content of every message, before the request reaches the model. |
-| **response** | The assistant's content, before it reaches the caller. |
+| **Request** | The system prompt and the content of every message, before the request reaches the model. |
+| **Response** | The assistant's content, before it reaches the caller. |
 
 **One policy rewrites one leg.** To rewrite both, create two policies.
 
@@ -89,9 +89,15 @@ number is followed by more characters — `$1x` is read as a group named `1x`.
 
 **Enforce** is the only mode in which this policy does anything. In **Observe** a
 rule that matches is recorded as `observed` and **the original text is forwarded
-unchanged** — which for a rewriting policy means it is a no-op with an event.
+unchanged** — which for a rewriting policy means it is a no-op with a record.
 That is still worth a first pass: it tells you how often your patterns fire
 before they start changing traffic.
+
+`observed` is not a decision you will see at a glance. Only an applied rewrite
+sets the request's **Decision** to `rewritten`; `observed` and `no_match` are
+recorded against the policy itself, on the request's **Policies** tab in
+**Activity**. Open the request and read the policy's own entry, not the decision
+alone.
 
 ---
 
@@ -100,7 +106,7 @@ before they start changing traffic.
 <Steps>
 <Step title="The leg matching Target is decoded">
 The other leg passes through without the rules being applied at all. A policy
-with **Target** `request` does nothing on the response, and vice versa.
+with **Target** set to **Request** does nothing on the response, and vice versa.
 </Step>
 
 <Step title="Every rule is applied in order, to every field">
@@ -127,7 +133,7 @@ There is no fourth step. Nothing here produces a `403`.
 
 | Situation | Enforce | Observe |
 |---|---|---|
-| A rule matches | Content rewritten, event `rewritten` | Event `observed`, **original content forwarded** |
+| A rule matches | Content rewritten, decision `rewritten` | Recorded as `observed`, **original content forwarded**, no decision set |
 | No rule matches | Forwarded untouched, recorded as no match | Forwarded untouched, recorded as no match |
 | The leg does not match **Target** | Forwarded untouched | Forwarded untouched |
 | Streaming response | Forwarded untouched | Forwarded untouched |
@@ -211,18 +217,18 @@ these **in this order**.
 hello, write me a short greeting
 ```
 
-Expect a normal reply and no rewrite — the event records that nothing matched. If
-this fails, the problem is the application or the model, not the rules. Fix it
-before going on.
+Expect a normal reply and no rewrite: open the request in **Activity** and its
+**Policies** tab records that nothing matched. If this fails, the problem is the
+application or the model, not the rules. Fix it before going on.
 </Step>
 
 <Step title="A rule fires — the rewrite happens">
 Send text your first rule should match.
 
 Expect the decision **`rewritten`**. **Read the model's reply, not just the
-status**: with **Target** `request`, the reply must behave as though it had been
-asked the rewritten question. That is what proves the model received the rewrite
-and not the original.
+status**: with **Target** set to **Request**, the reply must behave as though it
+had been asked the rewritten question. That is what proves the model received
+the rewrite and not the original.
 </Step>
 
 <Step title="The chain holds — later rules see earlier output">
@@ -235,8 +241,11 @@ check the order.
 </Step>
 </Steps>
 
-Every decision is emitted as a metadata event. See the
-[event schema](/platform/event-schema) for the fields recorded.
+Everything this policy does is recorded on the request in **Activity**, in
+Observe mode too: open the request and read its **Policies** tab, where this
+policy shows whether it rewrote anything and which rules fired. The
+[event schema](/platform/event-schema) documents the underlying fields if you
+need to match on them from an alert.
 
 ---
 
@@ -244,9 +253,10 @@ Every decision is emitted as a metadata event. See the
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| The policy will not save | An invalid pattern, no rules, or no **Target** | All three are validated at save; the error names the rule index |
+| The policy will not save | An invalid pattern, no rules, or no **Target** | All three are validated at save; the error names the rule |
+| The save error says "rule 0" and there is no rule 0 | The error counts rules from zero; the cards count from one | "rule 0" is the card titled **Rule 1**, "rule 1" is **Rule 2**, and so on |
 | Nothing is ever rewritten | **Target** is the other leg | One policy rewrites one leg; create a second |
-| Nothing is rewritten, and the event says `observed` | The policy is in **Observe** | Observe forwards the original — switch to **Enforce** |
+| Nothing is rewritten, and the decision is not `rewritten` | The policy is in **Observe** | Open the request's **Policies** tab: this policy records `observed`, which means a rule matched and the original was forwarded. Switch to **Enforce** |
 | The pattern works in your editor but not here | Backreferences, lookaround, atomic groups or possessive quantifiers — none of which RE2 has | Rewrite with capture-and-restore; a pattern using them would not have saved |
 | The replacement lost a `$` | `$` starts a capture-group reference | Write `$$` |
 | The replacement inserted nothing where a group should be | The group number does not exist, or `$1x` was read as a group named `1x` | Count the groups; use `${1}` |

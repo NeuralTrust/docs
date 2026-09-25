@@ -87,26 +87,30 @@ to change.
 
 ### Scope
 
-<Warning>
-**The Scope selector on this form does nothing.** *Application* and *Global* are
-stored with the policy and never read. The counters are always partitioned by the
-policy's own scope: one counter for everything when the policy is gateway-wide,
-one per application when it is targeted. Change the policy's scope, not this
-field.
-</Warning>
+This form has no scope of its own. **The policy's own scope is the control** —
+the **Requests from** and **Resources** you set alongside the rules. Resources
+decides which MCP servers and tools the policy runs on at all; **Requests from**
+decides how the counters are partitioned.
 
-| Policy scope | What the counter counts |
+| Requests from | What the counter counts |
 |---|---|
-| **Gateway-wide** | Every execution of the matched tool, from every application, against one counter. |
-| **Targeted** | One counter per application, so one agent's loop does not spend another's allowance. |
+| **All traffic** | Every execution of the matched tool, from every application, against one counter. |
+| **Applications** or **Groups** | One counter per application, so one agent's loop does not spend another's allowance. |
+
+That choice is not cosmetic. One shared counter is an organisation-level ceiling
+on a tool nobody can opt out of; one counter per application keeps a single
+misbehaving agent's problem to itself. Decide which of the two you want before
+you set the numbers, because the same limit means something different under
+each — and *One execution, counted twice*, below, is a case where it changes the
+answer outright.
 
 ### Mode
 
 **This policy has only one mode, and the console shows no mode selector for it.**
 It always enforces. There is no Observe, so **there is no way to find out what it
-would do before it does it**. Roll it out with a generous limit, watch the counts
-on the events, and tighten from there — that is the nearest thing to a dry run
-this policy offers.
+would do before it does it**. Roll it out with a generous limit, watch what it
+does on the **Policies** tab of the requests in **Activity**, and tighten from
+there — that is the nearest thing to a dry run this policy offers.
 
 ---
 
@@ -150,10 +154,10 @@ model and removes the tool call from the answer instead.
 
 A tool an agent runs through MCP shows up twice at the gateway: once as the MCP
 call that executes it, and again as the result the agent reports on its next LLM
-turn. On a **gateway-wide** policy both hit the same counter, so one execution is
-charged twice.
+turn. When **Requests from** is *All traffic* both hit the same counter, so one
+execution is charged twice.
 
-**Attaching the policy per application is the fix you can make from the
+**Narrowing Requests from to Applications is the fix you can make from the
 console**, and the one to reach for: there the two sides keep separate counters
 and the problem does not arise at all.
 
@@ -175,7 +179,8 @@ and each is charged.
 ### What the caller receives
 
 **Reject** on **LLM** traffic is `429` with these headers, where `<scope>` is
-`global` for a gateway-wide policy and `consumer` for a targeted one:
+`global` when **Requests from** is *All traffic* and `consumer` when it names
+applications or groups:
 
 | Header | Value |
 |---|---|
@@ -191,8 +196,8 @@ On **MCP** traffic it is an error carried inside a `200` response, under the cod
 **`-32004`**, with the same headers. The upstream tool is never invoked.
 
 **Strip tool** and **Inject error** both return `200`. Nothing tells the caller a
-policy acted, apart from the event — and, for *Inject error*, the assistant
-message the gateway wrote.
+policy acted, apart from the record in **Activity** — and, for *Inject error*,
+the assistant message the gateway wrote.
 
 ### Modes and failures
 
@@ -235,7 +240,6 @@ when sizing availability.
   reopened is not re-counted — and a straggling result reported several turns
   late is not counted at all.
 - **The windows are fixed, not sliding.** See the note above.
-- **The Scope field on the form does nothing.**
 - **Inject error cannot act on a streaming response**, and silently becomes
   Strip tool.
 - **On MCP only Reject exists**, and a policy configured otherwise cannot be
@@ -276,8 +280,10 @@ below so often seems never to fire.
 <Step title="The limit acts">
 Back in the **Playground**, send the first prompt again.
 
-With **Reject**, expect `429`, a refusal naming your tool, and **no time at the
-provider** in the timing breakdown — the request never reached the model.
+With **Reject**, expect `429` and a refusal naming your tool. To confirm the
+request never reached the model, open **Activity**, click the request, open its
+**Policies** tab and read **Aggregated Latency**: the **Provider** row should be
+empty.
 
 With **Strip tool**, expect `200` and a reply that behaves as though the tool did
 not exist; the tool is gone from what the model received.
@@ -298,8 +304,11 @@ exactly. That is agent-side, and not something the console can show you.
 </Step>
 </Steps>
 
-Every decision is emitted as a metadata event. See the
-[event schema](/platform/event-schema) for the fields recorded.
+Every decision this policy takes is recorded. To read one, open **Activity**,
+click the request, and open its **Policies** tab: the policies chain lists this
+policy and the decision it made. The
+[event schema](/platform/event-schema) is the reference for everything a
+decision records.
 
 ---
 
@@ -308,14 +317,13 @@ Every decision is emitted as a metadata event. See the
 | Symptom | Cause | Fix |
 |---|---|---|
 | Nothing is ever limited | The tool never comes back as a reported result, so the counter is never charged | Confirm the agent reports the tool result back through the gateway |
-| Nothing is limited although the counter shows executions | The request does not declare the tool | Enforcement reads declared tools; a request without them is not checked |
-| The allowance is spent twice as fast as expected | One execution counted on both the chat side and the MCP side, on a gateway-wide policy | Target the policy per application, or have the agent send the model's tool-call identifier with the MCP call |
+| Nothing is limited although the executions were counted | The request does not declare the tool | Enforcement reads declared tools; a request without them is not checked |
+| The allowance is spent twice as fast as expected | One execution counted on both the chat side and the MCP side, because **Requests from** is *All traffic* | Set **Requests from** to Applications, or have the agent send the model's tool-call identifier with the MCP call |
 | The two sides are still counted separately | The identifier is empty, longer than 128 characters, or carries something other than letters, digits, hyphens and underscores | Use the model's identifier exactly as it was given |
 | A rule never fires although its pattern looks right | An earlier rule matches the same tool first | Rules are ordered; move the specific pattern above the general one |
 | Twice the allowance ran in a couple of minutes | The window is fixed and it rolled over between the two bursts | Expected. Shorten the window, or add a second, longer one to the same rule |
 | **Inject error** produced no message, and the tool was missing from the request instead | The request was streaming, so the behaviour fell back to **Strip tool** | Expected. Use a non-streaming request if you need the explanation |
 | The policy will not attach to an MCP application | A rule, or the default, uses a behaviour MCP cannot carry out | Set every behaviour to **Reject** for that policy |
-| Changing **Scope** on the form changed nothing | That field is stored and never read | Change the policy's own scope instead |
 | No mode selector appears | This policy only supports Enforce | Expected |
 | `502` on every LLM request | The counter store is unreachable | This policy fails closed on the LLM leg, and has no Observe mode to soften it |
 | MCP calls are all allowed while the LLM leg returns `502` | The MCP leg fails open on the same failure | Expected. Healthy MCP traffic is not evidence of a healthy policy |
