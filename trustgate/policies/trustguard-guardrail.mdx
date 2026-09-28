@@ -160,10 +160,11 @@ distinguishable.
 </Step>
 
 <Step title="A block verdict refuses the request">
-The caller gets `403`, and the response says the request was blocked by security
-policy. Where the finding has a detector or gate behind it, that name is in the
-message too, and the refusal carries identifiers you can use to find the request
-in **Activity**.
+An LLM caller gets `403`. An MCP caller gets a JSON-RPC error. Either way, the
+response says the request was blocked by security policy. Where the finding has
+a detector or gate behind it, that name is in the message too, and the refusal
+carries identifiers you can use to find the request in **Activity**. See
+[What the caller receives](#what-the-caller-receives).
 
 **The findings themselves are not in the response** — no matched text, no
 confidence scores. Those are on the event and in **Activity**.
@@ -205,7 +206,94 @@ gateway policy in **Enforce** against a TrustGuard policy in **Observe** blocks
 nothing, and nothing in this screen says so.
 </Note>
 
+### What the caller receives
+
+A block on the LLM plane is an HTTP `403` with a JSON body. The body is the same
+whatever dialect the client speaks, and on either leg.
+
+<CodeGroup>
+  ```json Detector
+  {
+    "status": "block",
+    "message": "Request blocked by security policy: jailbreak (Prompt Guard).",
+    "type": "trustguard_blocked",
+    "reason": "jailbreak",
+    "plugin": "prompt_guard",
+    "detector_name": "Prompt Guard",
+    "trace_id": "8b2d6c1e9f4a4b7e9d3c5a1f0e7b2c4d",
+    "request_id": "c41f0a9e-2d7b-4e5a-9c3f-1b8e6d2a7f50"
+  }
+  ```
+
+  ```json Gate
+  {
+    "status": "block",
+    "message": "Request blocked by security policy: gate_block (Block external email).",
+    "type": "trustguard_blocked",
+    "reason": "gate_block",
+    "gate_name": "Block external email",
+    "trace_id": "0f6a2e9b7c1d4e8a9b3c5d7e1f2a4b6c",
+    "request_id": "7e3b1c9a-5f2d-4a8e-b6c0-9d1e4f7a2b35"
+  }
+  ```
+</CodeGroup>
+
+An MCP call is refused with a JSON-RPC error over HTTP `200`, because MCP clients
+treat a `4xx` as a broken transport and drop the session. The code is `-32001`,
+the message is the same, and `data` carries the same body:
+
+```json MCP
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "error": {
+    "code": -32001,
+    "message": "Request blocked by security policy: indirect_prompt_injection (Indirect injection).",
+    "data": {
+      "status": "block",
+      "message": "Request blocked by security policy: indirect_prompt_injection (Indirect injection).",
+      "type": "trustguard_blocked",
+      "reason": "indirect_prompt_injection",
+      "plugin": "indirect_prompt_injection",
+      "detector_name": "Indirect injection",
+      "trace_id": "3c9e1a7b5d2f4e6a8b0c2d4e6f8a1b3c",
+      "request_id": "a2d4f6b8-1c3e-4a5b-9d7f-2e4c6a8b0d13"
+    }
+  }
+}
+```
+
+| Field | Content |
+|---|---|
+| `status` | TrustGuard's verdict: `block`, `ask` when an Ask gate matched and the gateway refused it, or `transform` when a masking verdict could not be mapped back onto the request. |
+| `message` | `Request blocked by security policy: <reason> (<detector or gate>).`, with whatever part the finding has. Without a finding, `request blocked due to a policy infraction`. |
+| `type` | Always `trustguard_blocked` for a policy refusal. |
+| `reason` | The signal of the finding that decided, such as `jailbreak`, `pii`, or `gate_block`. |
+| `plugin` | The catalog detector, for a detector finding. |
+| `detector_name` or `gate_name` | The name you gave the detector or the gate. |
+| `trace_id`, `request_id` | TrustGuard's identifiers for the evaluation. Search **Activity** with either. |
+
+When several findings fired, the body names one: the enforced finding with the
+highest confidence. The rest, with their evidence and scores, are only in
+**Activity**.
+
+The other refusals have their own bodies:
+
+| Refusal | LLM | MCP code |
+|---|---|---|
+| TrustGuard rate limit | `429`. The body and the `Retry-After` and `X-RateLimit-*` headers are TrustGuard's, forwarded as they came. With no body, `{"error":"rate limit exceeded","message":"Request blocked: rate limit exceeded."}` | `-32004` |
+| Entitlements unavailable | `503`. TrustGuard's body, or `{"error":"rate limit entitlements unavailable"}` | `-32005` |
+| Credential rejected | `502`, `{"error":"trustguard_unauthorized","message":"trustguard authentication or configuration rejected","upstream_status":401}` | `-32001` |
+| **On Error** fail closed, TrustGuard unreachable or `5xx` | `502`, `{"error":"trustguard_error","message":"trustguard unavailable"}` | `-32001` |
+| **On Timeout** fail closed, TrustGuard too slow | `504`, `{"error":"trustguard_error","message":"trustguard did not answer in time"}` | `-32001` |
+
+On MCP, each of these is a JSON-RPC error over HTTP `200`, with the same body in
+`data` and, for a rate limit, the same headers on the response.
+
 ### Modes and failures
+
+The status codes are the LLM plane's. On MCP, the same refusals arrive as the
+JSON-RPC errors in [What the caller receives](#what-the-caller-receives).
 
 | Situation | Enforce | Observe |
 |---|---|---|
