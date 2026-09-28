@@ -17,10 +17,28 @@ Some providers do not authenticate with a single key:
 
 | Provider | What it needs |
 |---|---|
-| **Azure OpenAI** | The Azure endpoint and API version, then either an API key or a service principal (tenant, client ID, client secret). |
+| **Azure OpenAI** | The Azure endpoint, an **API surface**, and either an API key or a service principal (tenant, client ID, client secret). See the note below — **API version** applies to only one of the four surfaces. |
 | **Amazon Bedrock** | Access key ID, secret access key and region — plus a session token for temporary credentials. |
 | **Vertex AI** | A GCP service-account JSON, uploaded or pasted. Project ID is read from the file. |
 | **OpenAI-compatible** | A base URL, and whatever that endpoint expects, including nothing. |
+
+<Note>
+**Azure OpenAI routes through one of four API surfaces**, chosen per instance:
+
+| Surface | What it targets |
+|---|---|
+| **Azure OpenAI deployments** (default) | The classic deployments path, with **API version** in the query string. |
+| **Foundry OpenAI v1 chat** | Microsoft Foundry's OpenAI-compatible chat completions surface. |
+| **Foundry OpenAI v1 responses** | Foundry's OpenAI-compatible Responses surface. |
+| **Foundry Anthropic messages** | Foundry's Anthropic-compatible Messages surface. |
+
+**Foundry OpenAI v1 chat** and **Foundry OpenAI v1 responses** call
+`/openai/v1/...`, and **Foundry Anthropic messages** calls
+`/anthropic/v1/messages`. All three ignore **API version** entirely; only
+**Azure OpenAI deployments** uses the classic deployments path and needs it. Pick the surface that matches how the deployment was created in
+Azure — it decides the path, the request and response shape, and the
+authentication headers the gateway sends, not just which model names resolve.
+</Note>
 
 Keys are stored encrypted and never shown again. On an existing entry, leaving
 the key blank keeps the stored one; typing a new one replaces it. Rotating a
@@ -52,6 +70,15 @@ keys, two Azure deployments, one key per cost centre. Each is configured and
 tested on its own, and each is selectable independently when routing or an
 application picks a destination.
 
+## Prompt caching
+
+Providers differ in what they cache on their own and what a request has to
+mark. Anthropic and Bedrock cache only what the client marks, OpenAI and Azure
+cache long prefixes automatically, and Mistral takes a cache key. TrustGate
+carries the client's markers to whichever provider answers, and prices cache
+reads and writes at the rates above. [Prompt caching](/trustgate/concepts/prompt-caching)
+has the full table, including which Bedrock models accept a cache checkpoint.
+
 ## Every provider
 
 These are the providers the gateway knows how to talk to. Anything not listed
@@ -71,7 +98,7 @@ routing change and nothing else.
 | <img src="/images/registry/providers/google_cloud.svg" alt="" width="18" height="18" /> **Google Vertex AI** | `vertex` | google | A GCP service-account JSON, uploaded or pasted, and a location. Project ID is read from the file. |
 | <img src="/images/registry/providers/anthropic.svg" alt="" width="18" height="18" /> **Anthropic** | `anthropic` | anthropic | API key. |
 | <img src="/images/registry/providers/aws.svg" alt="" width="18" height="18" /> **AWS Bedrock** | `bedrock` | anthropic | Access key ID, secret access key and region; a session token for temporary credentials. |
-| <img src="/images/registry/providers/azure_openai.svg" alt="" width="18" height="18" /> **Azure OpenAI** | `azure` | openai | Azure endpoint and API version, then either an API key or a service principal (tenant, client ID, client secret). |
+| <img src="/images/registry/providers/azure_openai.svg" alt="" width="18" height="18" /> **Azure OpenAI** | `azure` | openai | Azure endpoint, an API surface (deployments by default, or one of three Foundry surfaces), then either an API key or a service principal (tenant, client ID, client secret). See [What a provider needs](#what-a-provider-needs). |
 | <img src="/images/registry/providers/mistral.png" alt="" width="18" height="18" /> **Mistral** | `mistral` | openai | API key. |
 | <img src="/images/registry/providers/groq.svg" alt="" width="18" height="18" /> **Groq** | `groq` | openai | API key. |
 | <img src="/images/registry/providers/deepseek.svg" alt="" width="18" height="18" /> **DeepSeek** | `deepseek` | openai | API key. |

@@ -46,6 +46,11 @@ least one is required — a policy with an empty list is refused on save.
 | **Description** | What the model reads when deciding whether to call it. Write it for the model, not for a person. |
 | **Parameters** | The arguments the tool takes. Without them the model calls the tool with no arguments. |
 
+The card does not lay these out as four fields in a row: **Type** sits on its
+own, and **Name**, **Description** and **Parameters** are grouped inside a
+bordered **Function** panel below it. If you are looking for **Name** at the top
+of the card, that is why it is not there.
+
 <Warning>
 **Parameters cannot be filled in from the console.** The generated panel has no
 editor for a value of that kind: you get the label and its help text, and no
@@ -135,16 +140,27 @@ original body is forwarded byte for byte. The outcomes are still recorded.
 
 <Step title="Otherwise the tool list is written back">
 Only the fields the tool list actually changed are written back onto the body the
-client sent, rather than the body being rebuilt from scratch. Fields particular
-to your provider, which that internal shape does not cover, survive the round
-trip.
+client sent, rather than the body being rebuilt from scratch, so fields
+particular to your provider — the ones that internal shape does not cover —
+normally survive the round trip.
+
+**Normally, not always.** Two fallback paths rebuild the whole body instead: when
+the gateway cannot re-encode the request it read, and when it cannot work out
+which fields the injection changed. The request still goes upstream with your
+tools on it, but on either of those paths anything the internal shape does not
+model is gone from it.
 </Step>
 </Steps>
 
-The event records what happened to **each** injected tool on each request:
-`appended`, `replaced`, `dropped` or `rejected`. That per-tool record is the only
-way to see a **Client Wins** drop, which is otherwise invisible — the request
-succeeds and your tool simply was not there.
+The decision records what happened to **each** injected tool on each request:
+`appended`, `replaced` or `dropped`. That per-tool record is the only way to see
+a **Client Wins** drop, which is otherwise invisible — the request succeeds and
+your tool simply was not there.
+
+A rejected request is the exception, and it follows from there being no partial
+injection: nothing was placed, so there is no per-tool outcome to record. What is
+kept is the rejection itself and the name of the tool that collided, and nothing
+else.
 
 ### Modes and failures
 
@@ -188,6 +204,9 @@ alarm on rather than reading a quiet request as an injected one.
   added on the way to the model, and nothing is inspected on the way back.
 - **It fails open and silently on a request it cannot read.** See the warning
   above.
+- **Provider-specific fields usually survive, but not always.** Two fallback
+  paths rebuild the body from scratch and drop whatever the gateway's internal
+  shape does not model. See the last step above.
 - **LLM traffic only.** The policy does not apply to MCP (Model Context
   Protocol) tool calls. A tool served by an MCP server is governed on the MCP
   side, not here.
@@ -270,8 +289,10 @@ at all — read your list before you save it.
 </Step>
 </Steps>
 
-Every decision is emitted as a metadata event. See the
-[event schema](/platform/event-schema) for the fields recorded.
+Every decision lands on the request itself. Open **Activity**, open the request,
+and read its **Policies** tab — the Tool Injection row is there with the decision
+it reached. The [event schema](/platform/event-schema) lists the full set of
+fields a decision records, the per-tool outcomes included.
 
 ---
 
