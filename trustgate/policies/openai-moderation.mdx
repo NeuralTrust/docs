@@ -1,7 +1,7 @@
 ---
 title: "OpenAI Moderation"
 sidebarTitle: "OpenAI Moderation"
-description: "Score text with OpenAI's Moderations API and refuse what crosses a category threshold, on the request leg, the response leg, or both."
+description: "Score text with OpenAI's Moderations API and refuse what crosses a category threshold — on the request always, and on the model's response too if you turn that on."
 ---
 
 The **OpenAI Moderation** policy sends text to
@@ -44,7 +44,7 @@ Open **Policies** → **Library** → **OpenAI Moderation**.
 |---|---|
 | **Model** | The Moderations model: `omni-moderation-latest` (default) or `omni-moderation-2024-09-26`. OpenAI has retired every `text-moderation-*` model; a new write cannot select one. |
 | **API Key** | An OpenAI credential of your own. Required. |
-| **Stages** | Which legs are inspected — see [Which legs to inspect](#which-legs-to-inspect). |
+| **Inspect model responses** | Off by default, directly below **API Key** with no section heading of its own — see [Inspecting the response too](#inspecting-the-response-too). |
 | **Categories** | An allow-list of categories to evaluate. Empty evaluates everything OpenAI returns. |
 | **Thresholds** | A score per category, between 0 and 1. A score **at or above** the threshold blocks. |
 | **Block On Flagged** | Refuses any category OpenAI itself marks as flagged, with no threshold of your own. Off when you turn it off explicitly — see the warning in [Making it block](#making-it-block) for what happens when you leave it untouched. |
@@ -75,20 +75,29 @@ show you the key. You can replace it, and you cannot read it. Rotating means
 pasting the new key over that marker, which is also the only way to correct a
 key you typed wrongly.
 
-### Which legs to inspect
+### Inspecting the response too
 
-**Stages** decides where this policy looks. Each leg it inspects is its own call
-to OpenAI on every turn, so this is the setting that decides what the policy
-costs you.
+**The request is always inspected** — that is not a setting, and it is one call
+to OpenAI on every turn. **Inspect model responses**, the toggle directly below
+**API Key**, is off by default. Turn it on and the model's answer is sent to
+the Moderations API too, checked against the same **Categories**,
+**Thresholds** and **Block On Flagged** as the request: a second call to
+OpenAI on every turn. There is no way to inspect the response only — the
+request is always inspected first.
 
-| Choice | What it buys, and what it costs |
-|---|---|
-| The request | One call per turn. Refuses the prompt before it reaches the model, so nothing is spent on a call you were going to reject. |
-| The response | One call per turn. The only way to inspect what the model itself produced. |
-| Both | Two calls per turn, and two chances to refuse. |
+Measure what the request alone costs you before you turn this on; it is the
+call that can stop something before it reaches the model, and it is the one
+this policy always makes.
 
-If you are not sure, start with the request: it is the leg that can stop
-something rather than record it, and it is the cheaper of the two.
+A policy set up through the admin API whose plugin settings leave `stages`
+unset inspects the response whenever the policy's own stages include it; the
+console shows that as **Inspect model responses** turned on.
+
+<Note>
+**A streamed response is not inspected**, even with **Inspect model responses**
+on, unless streaming inspection has been configured on this policy through the
+admin API. From the console, only a non-streamed response is evaluated.
+</Note>
 
 ### Mode and scope
 
@@ -222,8 +231,11 @@ open, in Enforce too — there is nothing OpenAI could have refused.
 - **It cannot mask.** There is no anonymise action; the call is blocked or it is
   not. For redaction use [TrustGuard](/trustgate/policies/trustguard-guardrail)
   or [Regex Replace](/trustgate/policies/regex-replace).
-- **Streaming responses are not inspected.** They pass through untouched, and
-  nothing is recorded. Enforce on the request leg.
+- **Inspect model responses is off by default.** The model's answer is not
+  scored until you turn it on.
+- **A streamed response is not inspected**, even with **Inspect model
+  responses** on, unless streaming inspection has been configured on this
+  policy through the admin API. Nothing is recorded for it either way.
 - **Text only, and structure is lost.** Roles, tool calls, tool definitions and
   attachments are not sent — the request leg becomes one newline-joined blob. A
   detector that would care which participant said something cannot.
@@ -295,8 +307,8 @@ need to match on them from an alert.
 | Every request is refused with `403` | A threshold of `0`, or one far below what normal traffic scores | Raise it; read the scores in Observe first |
 | `502` on every request, decision `failed_closed` | The Moderations call is failing — wrong or revoked key, rate limit, or an outage | Check the event's `failure_reason` field, then replace the key or check OpenAI's status |
 | The policy will not save | **API Key** is empty | It is required |
-| Responses are never inspected | **Stages** covers the request only | Add the response leg — it is a second call to OpenAI per turn |
-| Streamed responses are never inspected | Streaming is not supported | Enforce on the request leg |
+| Responses are never inspected | **Inspect model responses** is off, which is the default | Turn on the **Inspect model responses** toggle, below **API Key** |
+| Streamed responses are never inspected | Streaming inspection is not enabled from the console | Expected; only a non-streamed response is inspected, or configure streaming inspection on the policy through the admin API |
 | High scores on benign traffic | The system prompt is part of the scored text | Read it in Observe and account for it in the threshold |
 | The saved key cannot be read back | It is stored encrypted and never returned to the browser | Expected — replace it rather than reading it, and keep your own copy |
 | MCP tool calls are never inspected | This policy sees chat traffic only | Use [TrustGuard](/trustgate/policies/trustguard-guardrail), which covers MCP too |
