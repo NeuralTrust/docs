@@ -1,0 +1,363 @@
+---
+title: "Prompt caching"
+description: "The cache markers your client sends reach the provider that answers, in that provider's own syntax. What each provider caches on its own, what it needs from you, and what the gateway can cost you in cache hits."
+---
+
+A provider bills a cached prompt prefix at a discount, but only when every byte
+before the cache boundary matches the previous request. TrustGate sits in the
+middle of that prefix, so it does three things:
+
+- **Same format, untouched.** When your client and the provider speak the same
+  API — an Anthropic client on an Anthropic registry, an OpenAI Chat client on
+  OpenAI — the request goes upstream as you sent it. Cache markers are never
+  added, moved or dropped. An OpenAI Chat client on Azure, DeepSeek, xAI,
+  Cerebras or an OpenAI-compatible endpoint is same format too.
+- **Cross format, translated.** When they differ, your markers are rewritten
+  into the target's own mechanism, and anything the target does not accept is
+  left out rather than sent.
+- **Usage in your dialect.** Cache reads and writes come back in the fields
+  your client already reads, and they are priced and traced the same way for
+  every provider.
+
+TrustGate never inserts a cache marker of its own. If your client sends none,
+the only caching you get is what the provider does automatically.
+
+## What each provider needs
+
+Some providers cache a repeated prefix automatically. Others cache only what
+the request marks.
+
+| Provider | What the client sends to get caching |
+|---|---|
+| **Anthropic** | `cache_control` markers on tools, system blocks or message blocks, or a top-level `cache_control` for automatic caching. |
+| **AWS Bedrock** | Markers, as for Anthropic. Only the models in [Bedrock models](#bedrock-models) accept them. |
+| **OpenAI** | Nothing: long prefixes are cached automatically. `prompt_cache_key` improves the hit rate for traffic that shares a prefix. GPT-5.6 and later also take explicit breakpoints on the Responses API. |
+| **Azure OpenAI** | Nothing, as for OpenAI. `prompt_cache_key` helps. |
+| **OpenRouter** | Markers for `anthropic/*`, `google/gemini*`, `qwen/*` and `openai/` GPT-5.6 and later. Other models cache as their upstream does. |
+| **Mistral** | `prompt_cache_key`. |
+| **DeepSeek, Groq, xAI, Google AI Studio, Vertex AI** | Nothing. Whatever caching the provider does happens on its own. |
+| **Cohere, Cerebras, OpenAI Compatible** | Nothing the gateway can pass on. Cached tokens are reported when the provider returns them. |
+
+A provider decides for itself how long a prefix has to be before it caches it.
+A marker on a shorter prefix is accepted and ignored.
+
+## What each target receives
+
+Your client marks cache boundaries in its own dialect:
+
+| Client dialect | Cache fields TrustGate reads |
+|---|---|
+| Anthropic Messages | `cache_control` on tools, system blocks and message blocks (`ttl` of `5m` or `1h`); top-level `cache_control` |
+| OpenAI Chat Completions | `cache_control` on content parts and on tools (the OpenRouter style); top-level `cache_control`; `prompt_cache_key`, `prompt_cache_retention`, `prompt_cache_options` |
+| OpenAI Responses | `prompt_cache_breakpoint` on input parts; `prompt_cache_key`, `prompt_cache_retention`, `prompt_cache_options` |
+
+On a cross-format request, the target gets the part of that intent it accepts:
+
+| Target | What it receives |
+|---|---|
+| **Anthropic** | `cache_control` on tools, system and messages, 5m or 1h, plus top-level automatic caching. |
+| **AWS Bedrock** | A `cachePoint` after each marked tool, system block and message, on supported models only. See [Bedrock models](#bedrock-models). |
+| **OpenAI Responses**, GPT-5.6 and later | `prompt_cache_breakpoint` on system, user and tool-output items, plus `prompt_cache_key` and `prompt_cache_options`. Up to 4 breakpoints with `prompt_cache_options.mode: "explicit"`, otherwise 3. |
+| **OpenAI Responses**, earlier models | `prompt_cache_key` and `prompt_cache_retention`. |
+| **OpenAI Chat**, GPT-5.6 and later | `prompt_cache_key` and `prompt_cache_options`. |
+| **OpenAI Chat**, earlier models | `prompt_cache_key` and `prompt_cache_retention`. |
+| **Azure OpenAI** | `prompt_cache_key`, plus `prompt_cache_retention` unless the deployment name reads GPT-5.6 or later. |
+| **OpenRouter**, `anthropic/*` | `cache_control` on system and message parts, 5m or 1h, plus top-level automatic caching. |
+| **OpenRouter**, `google/gemini*`, `qwen/*`, `openai/` GPT-5.6 and later | `cache_control` on system and message parts, 5m only. |
+| **OpenRouter**, other models | No cache fields. |
+| **Mistral** | `prompt_cache_key`. |
+| **Google AI Studio, Vertex AI, Groq, DeepSeek, xAI, Cohere, Cerebras, OpenAI Compatible** | No cache fields. |
+
+Markers on assistant turns and images do not reach OpenAI Responses, and no
+target in the OpenRouter rows takes tool markers.
+
+**When there are more markers than the target allows**, they are trimmed the
+same way everywhere:
+
+1. At most **4 breakpoints** reach Anthropic, Bedrock and OpenRouter. The
+   earliest message breakpoints go first, then the earliest tool breakpoints.
+   The last breakpoint of tools, system and messages is always kept.
+2. **1h comes before 5m.** Providers require longer TTLs first, so a 1h
+   breakpoint after a 5m one is sent as 5m. Where the target has no 1h cache,
+   every breakpoint is sent as 5m.
+3. `prompt_cache_options.mode: "explicit"` is removed when no breakpoint is left,
+   since explicit mode with nothing marked would turn caching off.
+
+A **same-format** request skips all of this. Your markers reach the provider
+exactly as sent, and the provider's own limits apply. An OpenAI Chat request
+routed to OpenRouter or Groq is the exception: it is re-encoded, so the rows
+above apply to it.
+
+<Note>
+**Routing decides which row you get.** With [fallback or load
+balancing](/trustgate/llm/routing), the same request can land on a provider that
+takes your markers and on one that does not. The request succeeds either way;
+only the cache hit rate differs.
+</Note>
+
+### Bedrock models
+
+TrustGate sends `cachePoint` only to models that take it. The model is read
+after routing, with one inference-profile prefix (`us.`, `eu.`, `apac.`, `jp.`,
+`au.`, `ca.`, `us-gov.`, `global.`) removed.
+
+| Model | cachePoint | 1h TTL | On tools |
+|---|---|---|---|
+| Claude Opus 5.5, Opus 5, Fable 5.1, Fable 5, Mythos 5.1, Mythos 5, Sonnet 5, Opus 4.8, 4.7, 4.6, 4.5, Sonnet 4.6, 4.5, Haiku 4.5 | Yes | Yes | Yes |
+| Claude 3.7 Sonnet, Claude 3.5 Sonnet v2 | Yes | No, sent as 5m | Yes |
+| Nova Micro, Lite, Pro, Premier, Nova 2 Lite | Yes | No, sent as 5m | No |
+| Any other model | No | – | – |
+
+A foundation-model or system inference-profile ARN resolves through the model
+ID it ends with. An application inference profile, provisioned throughput or
+custom model ARN does not say which model it runs, so it gets no `cachePoint`.
+
+If Bedrock still rejects a request over its cache checkpoints, TrustGate
+retries that request once without them, and the call is served uncached.
+
+## Examples
+
+### OpenAI Chat client to Claude on Anthropic
+
+The client marks a long system prompt for an hour and the ticket history for
+five minutes. The question that changes on every call comes after the last
+marker.
+
+```json Client request
+{
+  "model": "claude-sonnet-4-6",
+  "prompt_cache_key": "support-bot",
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "You are the support assistant for Acme. Policies: ...",
+          "cache_control": { "type": "ephemeral", "ttl": "1h" }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Ticket history: ...",
+          "cache_control": { "type": "ephemeral" }
+        },
+        { "type": "text", "text": "What should I reply to the customer?" }
+      ]
+    }
+  ]
+}
+```
+
+Anthropic receives the same boundaries as Messages blocks. `prompt_cache_key`
+has no Anthropic equivalent and is left out.
+
+```json What Anthropic receives (excerpt)
+{
+  "model": "claude-sonnet-4-6",
+  "system": [
+    {
+      "type": "text",
+      "text": "You are the support assistant for Acme. Policies: ...",
+      "cache_control": { "type": "ephemeral", "ttl": "1h" }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Ticket history: ...",
+          "cache_control": { "type": "ephemeral" }
+        },
+        { "type": "text", "text": "What should I reply to the customer?" }
+      ]
+    }
+  ]
+}
+```
+
+On the second call the client reads the hit where an OpenAI client always does:
+
+```json Response usage (excerpt)
+{
+  "usage": {
+    "prompt_tokens": 18250,
+    "completion_tokens": 212,
+    "total_tokens": 18462,
+    "prompt_tokens_details": { "cached_tokens": 17800 }
+  }
+}
+```
+
+### Anthropic client to Claude on Bedrock
+
+The same markers on a Bedrock registry become `cachePoint` blocks, each placed
+right after what it covers.
+
+```json Client request (excerpt)
+{
+  "model": "global.anthropic.claude-sonnet-4-6",
+  "tools": [
+    {
+      "name": "lookup_order",
+      "description": "Find an order by ID.",
+      "input_schema": { "type": "object", "properties": { "id": { "type": "string" } } },
+      "cache_control": { "type": "ephemeral", "ttl": "1h" }
+    }
+  ],
+  "system": [
+    {
+      "type": "text",
+      "text": "You are the support assistant for Acme. Policies: ...",
+      "cache_control": { "type": "ephemeral", "ttl": "1h" }
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Contract: ...",
+          "cache_control": { "type": "ephemeral" }
+        },
+        { "type": "text", "text": "Summarise clause 4." }
+      ]
+    }
+  ]
+}
+```
+
+```json What Bedrock receives (excerpt)
+{
+  "system": [
+    { "text": "You are the support assistant for Acme. Policies: ..." },
+    { "cachePoint": { "type": "default", "ttl": "1h" } }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "text": "Contract: ..." },
+        { "cachePoint": { "type": "default" } },
+        { "text": "Summarise clause 4." }
+      ]
+    }
+  ],
+  "toolConfig": {
+    "tools": [
+      { "toolSpec": { "name": "lookup_order", "description": "Find an order by ID.", "inputSchema": { "json": { "type": "object", "properties": { "id": { "type": "string" } } } } } },
+      { "cachePoint": { "type": "default", "ttl": "1h" } }
+    ]
+  }
+}
+```
+
+On Claude 3.7 Sonnet the `ttl` would be omitted, which is Bedrock's 5m default.
+On Nova the tool `cachePoint` would be left out as well.
+
+## Usage and cost
+
+A cached request has three token counts that matter: tokens **read** from the
+cache, tokens **written** to it, and the share of the writes made with a **1h**
+TTL. TrustGate reports them in the fields your client already reads:
+
+| Client dialect | Cache read | Cache write | 1h write |
+|---|---|---|---|
+| OpenAI Chat | `usage.prompt_tokens_details.cached_tokens` | `usage.prompt_tokens_details.cache_write_tokens` | – |
+| OpenAI Responses | `usage.input_tokens_details.cached_tokens` | `usage.input_tokens_details.cache_write_tokens` | – |
+| Anthropic Messages | `usage.cache_read_input_tokens` | `usage.cache_creation_input_tokens` | `usage.cache_creation.ephemeral_1h_input_tokens` |
+| Gemini | `usageMetadata.cachedContentTokenCount` | – | – |
+| Cohere | `usage.cached_tokens` | – | – |
+
+Anthropic clients get `cache_creation`, with both the 5m and the 1h count, only
+when the provider reported that split. Streaming responses carry the same
+fields.
+
+Every trace records the same counts under `usage`, whichever dialect the
+client spoke:
+
+| Field | Meaning |
+|---|---|
+| `prompt_tokens` | The whole prompt, cached and written tokens included. |
+| `cached_input_tokens` | Tokens read from the cache. Present when above zero. |
+| `cache_write_input_tokens` | Tokens written to the cache. Present when above zero. |
+| `cache_write_1h_input_tokens` | The part of the writes made with a 1h TTL. Present when above zero. |
+
+They are exported over OpenTelemetry as `trustgate.usage.cached_input_tokens`,
+`trustgate.usage.cache_write_input_tokens` and
+`trustgate.usage.cache_write_1h_input_tokens`. See the [event
+schema](/platform/event-schema).
+
+**Cost.** Each count is priced at its own rate: reads at the cache-read rate,
+writes at the cache-write rate, and the rest of the prompt at the input rate. A
+model with no published cache rate bills those tokens at its input rate. A 1h
+write costs **twice the input rate** on the Anthropic and Bedrock providers,
+which is what both charge for Claude, and the plain cache-write rate everywhere
+else.
+
+A registry's [contract pricing](/trustgate/registry/models#contract-pricing)
+applies to cache rates too. The list discount reduces them with the input rate.
+A model override can set `cache_read`, `cache_write` and `cache_write_1h`
+through the registry API. An override that sets only input and output bills
+cached tokens at its input rate, and 1h writes on Anthropic and Bedrock at
+twice that.
+
+A token budget in [LLM Budget](/trustgate/policies/llm-budget) does not count
+cache reads. A dollar budget counts them at the cache-read rate.
+
+## When caching is lost
+
+| Situation | What happens |
+|---|---|
+| The target takes no cache fields | Your markers are left out. The request succeeds, with whatever caching the provider does on its own. |
+| A Bedrock model outside the table, or an ARN that hides the model | No `cachePoint` is sent. The request succeeds uncached. |
+| A 1h marker on a target or model without a 1h cache | It is sent as 5m. The prefix is cached for five minutes. |
+| More markers than the target allows | The earliest message and tool markers are dropped, as described above. |
+| A policy changes the prompt | The prefix is only reused up to the first byte the policy changed. See below. |
+
+### Policies that edit the request
+
+Most policies only judge a request. The ones that change it take one of two
+paths:
+
+| Policy | What it changes | Effect on the cached prefix |
+|---|---|---|
+| [Regex Replace](/trustgate/policies/regex-replace), [TrustGuard](/trustgate/policies/trustguard-guardrail) masking, [Bedrock Guardrail](/trustgate/policies/bedrock-guardrail) and [Model Armor](/trustgate/policies/google-model-armor) anonymisation | Matched or sensitive text | When something is masked, the request is rebuilt from what TrustGate understands of it. Cache markers keep their position and TTL. Content TrustGate does not model, such as Anthropic thinking and document blocks, is left out. When nothing matches, the request goes upstream byte for byte. |
+| [Tool Injection](/trustgate/policies/tool-injection) | Adds gateway tools | Injected tools are appended after yours, so your tool prefix does not change. A client tool replaced with **Gateway Wins** keeps its marker. |
+| [Per-Tool Rate Limiter](/trustgate/policies/per-tool-rate-limiter) | Withdraws a tool that is over its limit | Only the tool list changes. While a tool is withdrawn, the tool prefix misses the cache. |
+| [Prompt Compression](/trustgate/policies/prompt-compression) | Whitespace and JSON in messages | Skips any request whose messages or tools carry cache markers, so a marked request is never compressed. |
+| [Prompt Template](/trustgate/policies/prompt-template) | Adds to the system prompt | A template that renders differently per user or per call gives each one a different prefix. |
+
+Tool Injection and the Per-Tool Rate Limiter edit the request in place: in the
+common case, every byte they do not change goes upstream as you sent it. The
+masking policies rebuild it instead, so the body is no longer your exact bytes.
+It is still the same bytes on every request with the same input, so a mask that
+always hits the same text keeps the prefix cached.
+
+Policies that rewrite a buffered response keep the cache usage fields in it.
+
+## Tips
+
+- **Put what does not change first.** Tools, then the system prompt, then
+  earlier turns. Anything that varies per call goes after the last marker.
+- **Keep the system prompt stable.** A timestamp, request ID or user name near
+  the top invalidates everything after it. Prompt Template variables count too.
+- **Send `prompt_cache_key` for OpenAI, Azure and Mistral.** It is the one cache
+  field all three take, and OpenAI Chat and Responses clients can send it to any
+  of them. An Anthropic client has no field for it, so Mistral does not cache
+  its requests. Use one key per prompt family, not one per user.
+- **Mark the last stable block, not every block.** Four breakpoints is the most
+  any target takes, and extra ones are trimmed.
+- **Choose 1h only for prefixes reused over the hour.** A 1h write costs twice
+  the input rate against the cheaper 5m write. It pays off when the prefix is
+  read again after the five-minute cache would have expired.
+- **Check the hit rate on the trace.** No `cached_input_tokens` on a repeated
+  request means the prefix changed, the target does not cache it, or
+  the prefix is under the provider's minimum.
