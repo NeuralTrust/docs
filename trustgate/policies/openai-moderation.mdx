@@ -45,26 +45,29 @@ Open **Policies** → **Library** → **OpenAI Moderation**.
 | **Model** | The Moderations model: `omni-moderation-latest` (default) or `omni-moderation-2024-09-26`. OpenAI has retired every `text-moderation-*` model; a new write cannot select one. |
 | **API Key** | An OpenAI credential of your own. Required. |
 | **Inspect model responses** | Off by default, directly below **API Key** with no section heading of its own — see [Inspecting the response too](#inspecting-the-response-too). |
-| **Categories** | An allow-list of categories to evaluate. Empty evaluates everything OpenAI returns. |
-| **Thresholds** | A score per category, between 0 and 1. A score **at or above** the threshold blocks. |
-| **Block On Flagged** | Refuses any category OpenAI itself marks as flagged, with no threshold of your own. Off when you turn it off explicitly — see the warning in [Making it block](#making-it-block) for what happens when you leave it untouched. |
 
-Only **Model** and **API Key** have to be filled in to save. The rest is what
-turns a scoring instrument into a guardrail — see
+Three fields, and only **API Key** is required. `categories`, `thresholds`
+and `block_on_flagged` are not here: they are policy settings that only the
+admin API sets, and the console preserves whatever is stored for them exactly
+as it is — saving this form never touches them. What that means for a
+policy nobody has touched outside the console is in
 [Making it block](#making-it-block).
 
 <Note>
 **Saving validates more than "is it filled in."** The gateway rejects the
 write with `422 validation_failed` for: an unknown **Model** (unless it is
-exactly the model already stored on this policy); a **Categories** or
-**Thresholds** key outside the 13 OpenAI defines — `harassment`,
+exactly the model already stored on this policy); a `categories` or
+`thresholds` key outside the 13 OpenAI defines — `harassment`,
 `harassment/threatening`, `hate`, `hate/threatening`, `illicit`,
 `illicit/violent`, `self-harm`, `self-harm/intent`, `self-harm/instructions`,
 `sexual`, `sexual/minors`, `violence`, `violence/graphic` — again unless it is
-already stored; or **Block On Flagged** explicitly set to `false` with no
-**Thresholds** configured, since that policy could never block or report
-anything. A model or key already stored under older rules stays editable;
-only a newly introduced bad value is refused.
+already stored; or `block_on_flagged` explicitly set to `false` with no
+`thresholds` configured, since that policy could never block or report
+anything. This applies to any write, console or admin API: the console
+round-trips whatever is already stored for these settings unchanged, and the
+gateway validates the full payload regardless. A model or key already stored
+under older rules stays editable; only a newly introduced bad value is
+refused.
 </Note>
 
 ### The key, once saved
@@ -80,10 +83,10 @@ key you typed wrongly.
 **The request is always inspected** — that is not a setting, and it is one call
 to OpenAI on every turn. **Inspect model responses**, the toggle directly below
 **API Key**, is off by default. Turn it on and the model's answer is sent to
-the Moderations API too, checked against the same **Categories**,
-**Thresholds** and **Block On Flagged** as the request: a second call to
-OpenAI on every turn. There is no way to inspect the response only — the
-request is always inspected first.
+the Moderations API too, checked against whatever `categories`, `thresholds`
+and `block_on_flagged` are already stored on the policy — the same ones the
+request is checked against: a second call to OpenAI on every turn. There is no
+way to inspect the response only — the request is always inspected first.
 
 Measure what the request alone costs you before you turn this on; it is the
 call that can stop something before it reaches the model, and it is the one
@@ -101,47 +104,58 @@ admin API. From the console, only a non-streamed response is evaluated.
 
 ### Mode and scope
 
-Start in **Observe** and read the recorded scores before you choose thresholds.
-That is not ceremony here — you cannot pick a sensible threshold for your traffic
-without seeing what your traffic actually scores.
+Start in **Observe** and read the recorded scores before `thresholds` are set.
+That is not ceremony here — nobody can pick a sensible threshold for your
+traffic without seeing what it actually scores, so read the scores yourself
+and hand them to whoever sets `thresholds` through the admin API.
 
 ---
 
 ## Making it block
 
+`categories`, `thresholds` and `block_on_flagged` are settings on the policy,
+not fields on the console form. Whoever manages your gateway sets them through
+the admin API; the console shows nothing for them, and saving the console form
+— a model change, a new key, the response toggle — leaves whatever is already
+stored for them untouched.
+
 <Warning>
-**A policy saved with nothing touched beyond Model and API Key is not inert.**
-When **Thresholds** is empty and **Block On Flagged** is left untouched (not
-saved as `false`), the policy defaults **Block On Flagged** to **on** — it has
-to act on something, and the flagged verdict is the only signal left. Turn
-**Block On Flagged** off explicitly, or set at least one threshold, if you want
-a policy that only scores and never refuses.
+**A policy that has only ever been touched through the console is not inert.**
+Nothing there ever sets `thresholds` or `block_on_flagged`, so both stay
+unset, and the plugin defaults `block_on_flagged` to **on** for a policy with
+no `thresholds` — it has to act on something, and the flagged verdict is the
+only signal left. If you want a policy that only scores and never refuses,
+someone has to set `block_on_flagged` to `false` through the admin API, or set
+at least one threshold.
 </Warning>
 
 Two settings decide whether a call is ever refused, and either one on its own
 is enough.
 
-**Block On Flagged** is the switch. OpenAI's own answer says whether it
-considers a category flagged, and turning this on refuses anything it flags —
-no number of yours to pick, and no reading of scores first. It is the quickest
+`block_on_flagged` is the switch. OpenAI's own answer says whether it
+considers a category flagged, and setting this to `true` refuses anything it
+flags — no number to pick, and no reading of scores first. It is the quickest
 way to make this policy a guardrail, and the trade is that you are accepting
-OpenAI's judgement of your traffic rather than your own. Turn it off explicitly
-once you would rather rely only on your own **Thresholds**.
+OpenAI's judgement of your traffic rather than your own. It has to be set to
+`false` explicitly, through the admin API, once you would rather rely only on
+`thresholds`.
 
-**Thresholds** are the dial. Give a category a score between 0 and 1, and a
-score **at or above** it refuses the call. This is what you want once **Observe**
-has shown you how your own traffic actually scores, because the number that
+`thresholds` is the dial. A score between 0 and 1 per category, and a score
+**at or above** it refuses the call. This is what you want once **Observe**
+has shown what your own traffic actually scores, because the number that
 matters is the one that sits between your normal traffic and what you want
-refused. Setting at least one threshold also turns off the **Block On Flagged**
-default above, since the policy then has something else to act on.
+refused. Setting at least one threshold also turns off the
+`block_on_flagged` default above, since the policy then has something else to
+act on.
 
-A category with neither a threshold nor an explicit **Block On Flagged** is
+A category with neither a threshold nor an explicit `block_on_flagged` is
 still scored and still recorded — it simply never refuses anything on its own.
 
 The category names have to be exactly the ones OpenAI uses. The reliable way to
-learn them is to run in **Observe** and read the per-category scores on the
-request's **Policies** tab in **Activity** — every category OpenAI scored is
-named there.
+learn them, from the console, is to run in **Observe** and read the
+per-category scores on the request's **Policies** tab in **Activity** — every
+category OpenAI scored is named there. Hand those names to whoever sets
+`thresholds`.
 
 <Warning>
 **A threshold of `0` blocks everything in that category.** The comparison is
@@ -151,10 +165,10 @@ It is the most common way to take an application offline with this policy.
 </Warning>
 
 <Warning>
-**Categories is an allow-list that also switches off thresholds.** A category
-outside the list is not evaluated at all, so a threshold you set for it is never
-consulted and nothing reports that it was ignored. If you list categories, list
-every category you have a threshold for.
+**`categories` is an allow-list that also switches off thresholds.** A
+category outside the list is not evaluated at all, so a threshold set for it
+is never consulted and nothing reports that it was ignored. Whoever sets
+`categories` needs to list every category that has a threshold.
 </Warning>
 
 ---
@@ -270,13 +284,15 @@ per-category scores on its **Policies** tab.
 
 You are looking for two numbers: how high your acceptable traffic scores, and how
 high the traffic you want refused scores. A threshold between them is the only
-one worth setting. Take the exact category names from that tab too.
+one worth using — hand it, and the exact category names from that tab, to
+whoever sets `thresholds` through the admin API.
 </Step>
 
 <Step title="Enforce — confirm a violation is refused">
-Set a **Threshold** between the two numbers you just read, or turn on **Block On
-Flagged**, switch the policy to **Enforce**, and resend the prompt that scored
-above it.
+Have whoever manages your gateway set a `threshold` between the two numbers
+you just read, or set `block_on_flagged` to `true`, through the admin API.
+Then switch the policy to **Enforce** yourself, from the console, and resend
+the prompt that scored above it.
 
 Expect the decision **`block`** and a `403` naming the category and the score.
 Then confirm the model was never called: open the request in **Activity**, go to
@@ -284,9 +300,9 @@ its **Policies** tab, and read **Aggregated Latency**. The **Provider** row
 should show no time at all. That the provider leg is empty is the evidence that
 matters.
 
-If the same prompt is allowed, the category you set a threshold for is not the
-one that scored — or it is missing from **Categories**, which stops it being
-evaluated at all.
+If the same prompt is allowed, the category the threshold was set for is not
+the one that scored — or it is missing from `categories`, which stops it
+being evaluated at all.
 </Step>
 </Steps>
 
@@ -302,14 +318,14 @@ need to match on them from an alert.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Nothing is ever blocked, scores look right | **Block On Flagged** was explicitly turned off, and no **Threshold** is set | Turn one back on — a policy where both are simply left untouched already blocks on the flagged verdict by default |
-| A threshold is set and still nothing blocks | The category is not in **Categories**, so it is never evaluated | Add it, or clear **Categories** to evaluate everything |
-| Every request is refused with `403` | A threshold of `0`, or one far below what normal traffic scores | Raise it; read the scores in Observe first |
+| Nothing is ever blocked, scores look right | `block_on_flagged` was explicitly set to `false` through the admin API, and no `threshold` is set | Have whoever manages your gateway turn it back on — a policy where neither was ever set already blocks on the flagged verdict by default |
+| A threshold is set and still nothing blocks | The category is not in `categories`, so it is never evaluated | Have it added, or `categories` cleared, through the admin API |
+| Every request is refused with `403` | A threshold of `0`, or one far below what normal traffic scores | Have it raised through the admin API; read the scores in Observe first |
 | `502` on every request, decision `failed_closed` | The Moderations call is failing — wrong or revoked key, rate limit, or an outage | Check the event's `failure_reason` field, then replace the key or check OpenAI's status |
 | The policy will not save | **API Key** is empty | It is required |
 | Responses are never inspected | **Inspect model responses** is off, which is the default | Turn on the **Inspect model responses** toggle, below **API Key** |
 | Streamed responses are never inspected | Streaming inspection is not enabled from the console | Expected; only a non-streamed response is inspected, or configure streaming inspection on the policy through the admin API |
-| High scores on benign traffic | The system prompt is part of the scored text | Read it in Observe and account for it in the threshold |
+| High scores on benign traffic | The system prompt is part of the scored text | Read it in Observe and flag it to whoever sets the threshold |
 | The saved key cannot be read back | It is stored encrypted and never returned to the browser | Expected — replace it rather than reading it, and keep your own copy |
 | MCP tool calls are never inspected | This policy sees chat traffic only | Use [TrustGuard](/trustgate/policies/trustguard-guardrail), which covers MCP too |
 
