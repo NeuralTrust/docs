@@ -336,24 +336,33 @@ confidence thresholds in the Model Armor template.
 | Sensitive data, action *Anonymize* | Rewritten in place | Recorded, original text sent |
 | *Anonymize* with no de-identify template | **`403`, refused** | Recorded, original text sent |
 | *Anonymize*, but the masked text cannot be applied | **`403`, refused** | Recorded, original text sent |
-| A filter selected in **Block on** did not run | **`502`, refused** | Recorded, request continues |
-| Model Armor unreachable, times out, or errors | **`502`, refused** | Recorded, request continues |
+| A filter selected in **Block on** did not run | **`502`, refused** | Recorded, decision `failed_open`, request continues |
+| Model Armor unreachable, times out, or errors | **`502`, refused** | Recorded, decision `failed_open`, request continues |
+| The gateway cannot decode the request or response body before calling Model Armor | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
 
 **Observe never masks.** It records what would have happened and forwards the
 original text. Masking is only ever applied in **Enforce**.
 
 The decision recorded on the event is **`allowed`**, **`block`**,
-**`anonymized`**, **`reported`** or **`failed_closed`**. **`anonymized`** is
+**`anonymized`**, **`reported`**, **`failed_open`** or **`failed_closed`**. **`anonymized`** is
 Enforce-only: in **Observe** a prompt that would have been masked records
 **`reported`** instead, which is also what Observe records in place of a block.
 **`failed_closed`** is the one to look for first on a new policy — it is what
 Model Armor being unreachable, or a credential that cannot be resolved, records
-on every request.
+on every request in Enforce; the same failure records **`failed_open`** in
+Observe. The event's `failure_reason` field says why: `transport` (the call
+failed, timed out, or Model Armor answered with an error), `verdict_incomplete`
+(a filter selected in **Block on** did not run), `config_invalid` (the stored
+settings could not be used), or `decode_failed` (the gateway's own body could
+not be decoded before Model Armor was ever called).
 
 <Warning>
-**In Enforce this policy fails closed, and there is no setting to change that.**
-If Model Armor cannot be reached, requests are refused rather than forwarded
-unscreened. Validate in Observe, and account for this when sizing availability.
+**In Enforce this policy fails closed for every failure except one, and there
+is no setting to change either.** If Model Armor cannot be reached, requests
+are refused rather than forwarded unscreened. The exception is a body the
+gateway cannot decode before Model Armor is ever called — that always fails
+open, in Enforce too, since there was nothing for Model Armor to analyse.
+Validate in Observe, and account for this when sizing availability.
 </Warning>
 
 <Note>
