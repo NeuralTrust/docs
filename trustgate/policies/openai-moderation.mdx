@@ -42,16 +42,30 @@ Open **Policies** → **Library** → **OpenAI Moderation**.
 
 | Field | What to choose |
 |---|---|
-| **Model** | The Moderations model, from a list of four. Defaults to `omni-moderation-latest`. |
+| **Model** | The Moderations model: `omni-moderation-latest` (default) or `omni-moderation-2024-09-26`. OpenAI has retired every `text-moderation-*` model; a new write cannot select one. |
 | **API Key** | An OpenAI credential of your own. Required. |
 | **Stages** | Which legs are inspected — see [Which legs to inspect](#which-legs-to-inspect). |
 | **Categories** | An allow-list of categories to evaluate. Empty evaluates everything OpenAI returns. |
 | **Thresholds** | A score per category, between 0 and 1. A score **at or above** the threshold blocks. |
-| **Block On Flagged** | Refuses any category OpenAI itself marks as flagged, with no threshold of your own. Off by default. |
+| **Block On Flagged** | Refuses any category OpenAI itself marks as flagged, with no threshold of your own. Off when you turn it off explicitly — see the warning in [Making it block](#making-it-block) for what happens when you leave it untouched. |
 
 Only **Model** and **API Key** have to be filled in to save. The rest is what
 turns a scoring instrument into a guardrail — see
 [Making it block](#making-it-block).
+
+<Note>
+**Saving validates more than "is it filled in."** The gateway rejects the
+write with `422 validation_failed` for: an unknown **Model** (unless it is
+exactly the model already stored on this policy); a **Categories** or
+**Thresholds** key outside the 13 OpenAI defines — `harassment`,
+`harassment/threatening`, `hate`, `hate/threatening`, `illicit`,
+`illicit/violent`, `self-harm`, `self-harm/intent`, `self-harm/instructions`,
+`sexual`, `sexual/minors`, `violence`, `violence/graphic` — again unless it is
+already stored; or **Block On Flagged** explicitly set to `false` with no
+**Thresholds** configured, since that policy could never block or report
+anything. A model or key already stored under older rules stays editable;
+only a newly introduced bad value is refused.
+</Note>
 
 ### The key, once saved
 
@@ -86,23 +100,34 @@ without seeing what your traffic actually scores.
 
 ## Making it block
 
-A policy with nothing but a model and a key scores every call and refuses none
-of them. Two settings change that, and either one on its own is enough.
+<Warning>
+**A policy saved with nothing touched beyond Model and API Key is not inert.**
+When **Thresholds** is empty and **Block On Flagged** is left untouched (not
+saved as `false`), the policy defaults **Block On Flagged** to **on** — it has
+to act on something, and the flagged verdict is the only signal left. Turn
+**Block On Flagged** off explicitly, or set at least one threshold, if you want
+a policy that only scores and never refuses.
+</Warning>
+
+Two settings decide whether a call is ever refused, and either one on its own
+is enough.
 
 **Block On Flagged** is the switch. OpenAI's own answer says whether it
 considers a category flagged, and turning this on refuses anything it flags —
 no number of yours to pick, and no reading of scores first. It is the quickest
 way to make this policy a guardrail, and the trade is that you are accepting
-OpenAI's judgement of your traffic rather than your own.
+OpenAI's judgement of your traffic rather than your own. Turn it off explicitly
+once you would rather rely only on your own **Thresholds**.
 
 **Thresholds** are the dial. Give a category a score between 0 and 1, and a
 score **at or above** it refuses the call. This is what you want once **Observe**
 has shown you how your own traffic actually scores, because the number that
 matters is the one that sits between your normal traffic and what you want
-refused.
+refused. Setting at least one threshold also turns off the **Block On Flagged**
+default above, since the policy then has something else to act on.
 
-A category with neither a threshold nor **Block On Flagged** is still scored and
-still recorded — it simply never refuses anything.
+A category with neither a threshold nor an explicit **Block On Flagged** is
+still scored and still recorded — it simply never refuses anything on its own.
 
 The category names have to be exactly the ones OpenAI uses. The reliable way to
 learn them is to run in **Observe** and read the per-category scores on the
@@ -162,26 +187,34 @@ it.
 | A category crosses its threshold | `403`, refused, decision `block` | Decision `reported`, request continues |
 | OpenAI flags a category, **Block On Flagged** on | `403`, refused, decision `block` | Decision `reported`, request continues |
 | OpenAI flags a category, no threshold and **Block On Flagged** off | **Allowed**, decision `allowed` | Allowed, decision `allowed` |
-| The Moderations call fails for any reason | **`502`, refused**, decision `unavailable` | Decision `failed_open`, request continues |
+| The Moderations call fails, or its response is incomplete | **`502`, refused**, decision `failed_closed` | Decision `failed_open`, request continues |
+| The gateway cannot decode the request/response body before calling OpenAI | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
 | The policy configuration cannot be parsed | `502`, refused | `502`, refused |
 | Streaming response | Not inspected | Not inspected |
 
-On failure in Enforce the caller gets `502`, and a response saying only that
-content moderation is temporarily unavailable.
+On failure in Enforce the caller gets `502`, body type `guardrail_unavailable`,
+with the message `This content could not be checked right now.`
 
 Those decision names are what you read on the request's **Policies** tab in
 **Activity**: `allowed`, `reported`, `block`, and — when the call to OpenAI
-itself failed — `failed_open` in Observe or `unavailable` in Enforce. Expect
-`unavailable` on a first run: a key that is wrong, revoked or out of quota looks
-from here exactly like an outage at OpenAI.
+itself failed — `failed_open` in Observe or `failed_closed` in Enforce. Expect
+`failed_closed` on a first run: a key that is wrong, revoked or out of quota
+looks from here exactly like an outage at OpenAI. The event's `failure_reason`
+field says which: `transport` (the call failed or timed out), `verdict_incomplete`
+(OpenAI's response did not cover a category the policy asked about),
+`config_invalid` (the stored settings could not be used), or `decode_failed`
+(the gateway's own request or response body could not be decoded before OpenAI
+was ever called).
 
 <Warning>
-**In Enforce this policy fails closed, and there is no setting to change that.**
-Every failure class collapses into that one response: a revoked key, an OpenAI
-rate limit, a malformed request and an outage are indistinguishable from the
-caller's side and from the policy's event. When it starts refusing everything,
-the gateway cannot tell you which of those it is — check the key and OpenAI's
-status page yourself.
+**In Enforce this policy fails closed, except for one case, and there is no
+setting to change either.** A revoked key, an OpenAI rate limit, a malformed
+response and an outage all refuse the caller with the same `502` — the
+response itself does not say which. Check the event's `failure_reason` field
+before OpenAI's status page; it distinguishes `transport`, `verdict_incomplete`
+and `config_invalid`. The exception is `decode_failed`: the gateway's own body
+could not be decoded before OpenAI was ever consulted, so it always fails
+open, in Enforce too — there is nothing OpenAI could have refused.
 </Warning>
 
 ### Limits
@@ -257,10 +290,10 @@ need to match on them from an alert.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Nothing is ever blocked, scores look right | No **Threshold** and **Block On Flagged** off — where a new policy starts | Set one of them; either is enough |
+| Nothing is ever blocked, scores look right | **Block On Flagged** was explicitly turned off, and no **Threshold** is set | Turn one back on — a policy where both are simply left untouched already blocks on the flagged verdict by default |
 | A threshold is set and still nothing blocks | The category is not in **Categories**, so it is never evaluated | Add it, or clear **Categories** to evaluate everything |
 | Every request is refused with `403` | A threshold of `0`, or one far below what normal traffic scores | Raise it; read the scores in Observe first |
-| `502` on every request, decision `unavailable` | The Moderations call is failing — wrong or revoked key, rate limit, or an outage | The decision cannot tell you which; replace the key first, then check OpenAI's status |
+| `502` on every request, decision `failed_closed` | The Moderations call is failing — wrong or revoked key, rate limit, or an outage | Check the event's `failure_reason` field, then replace the key or check OpenAI's status |
 | The policy will not save | **API Key** is empty | It is required |
 | Responses are never inspected | **Stages** covers the request only | Add the response leg — it is a second call to OpenAI per turn |
 | Streamed responses are never inspected | Streaming is not supported | Enforce on the request leg |

@@ -401,26 +401,36 @@ that fails is never a silent pass-through.
 | Sensitive information comes back anonymised, **PII action** *Block request* | **`403`, refused** | Recorded, original text sent |
 | Sensitive information comes back anonymised, **PII action** *Anonymize* | Rewritten in place | Recorded, **original text sent** |
 | *Anonymize*, but the masked text cannot be applied | **`403`, refused** | Recorded, original text sent |
-| AWS unreachable, throttled, denied, or the credentials cannot be resolved | **`502`, refused** | Recorded, request continues |
+| AWS unreachable, throttled, denied, the credentials cannot be resolved, or AWS intervened with no finding this plugin reads | **`502`, refused** | Recorded, decision `failed_open`, request continues |
+| The gateway cannot decode the request/response body before calling AWS | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
 
 **Observe never masks.** It records what would have happened and forwards the
 original text. Masking is only ever applied in **Enforce**.
 
 The decision recorded on the event is **`allowed`**, **`block`**,
-**`anonymized`**, **`reported`** or **`failed_closed`**. **`anonymized`** is
-Enforce-only: in **Observe** a prompt that would have been masked records
-**`reported`** instead, which is also what Observe records in place of a block.
-**`failed_closed`** is the one to look for first on a new policy — it is what
-AWS being unreachable, a missing permission, a wrong region or a credential that
-cannot be resolved records on every request.
+**`anonymized`**, **`reported`**, **`failed_open`** or **`failed_closed`**.
+**`anonymized`** is Enforce-only: in **Observe** a prompt that would have been
+masked records **`reported`** instead, which is also what Observe records in
+place of a block. **`failed_closed`** is the one to look for first on a new
+policy — it is what AWS being unreachable, a missing permission, a wrong
+region or a credential that cannot be resolved records on every request in
+Enforce; the same failure records **`failed_open`** in Observe. The event's
+`failure_reason` field says why: `transport` (the call failed, timed out, was
+throttled, or was denied), `verdict_incomplete` (AWS intervened but with no
+finding this plugin reads), `config_invalid` (the stored settings could not be
+used), or `decode_failed` (the gateway's own body could not be decoded before
+AWS was ever called — this one always fails open, in Enforce too).
 
 <Warning>
-**In Enforce this policy fails closed, and there is no setting to change that.**
-If AWS cannot be reached, requests are refused rather than forwarded unscreened.
-Every failure class collapses into the same `502` with no detail — an expired
-credential, a denied permission, a wrong region and a throttle are
-indistinguishable to the caller. The gateway logs the underlying error at debug
-level, so at a default log level it is invisible on the gateway too.
+**In Enforce this policy fails closed for every failure except one, and there
+is no setting to change either.** If AWS cannot be reached, requests are
+refused rather than forwarded unscreened. An expired credential, a denied
+permission, a wrong region and a throttle all collapse into the same `502`
+with no detail to the caller — the gateway logs the underlying error at debug
+level, so at a default log level it is invisible on the gateway too. The
+exception is a body the gateway cannot decode before AWS is ever called —
+that always fails open, in Enforce too, since there was nothing for AWS to
+evaluate.
 </Warning>
 
 ### Limits

@@ -202,6 +202,16 @@ content**. The toggle decides whether the category is sent to Azure at all;
 **Block at** is the severity at which it blocks. A category breaches when the
 severity Azure returns is **greater than or equal to** its **Block at** value.
 
+<Note>
+**A policy saved before this rule existed can have a threshold on a category
+whose toggle is off — and Azure still scores that category.** The gateway
+requests every category with a **Block at** value alongside the ones you
+toggled on, so an older policy with this gap keeps working exactly as before.
+Saving a policy with that gap today is rejected, and the console cannot
+produce it: toggling a category off while leaving its threshold set is no
+longer a state you can create from here.
+</Note>
+
 A new policy starts with all four categories enabled at **Block at** 4. At least
 one category must stay enabled or the policy will not save.
 
@@ -261,20 +271,29 @@ refusal may name a category you do not recognise from the console.
 | A category's severity meets its threshold | `403`, refused | Recorded, request continues |
 | No category meets its threshold | Request continues | Request continues |
 | The request carries no text to analyse | Forwarded; Azure is not called | Forwarded; Azure is not called |
-| Azure returns any non-2xx, or the call fails or times out | **`502`, refused** | Recorded, request continues |
+| Azure returns any non-2xx, times out, or its response is missing a thresholded category | **`502`, refused** | Recorded, decision `failed_open`, request continues |
+| The gateway cannot decode the request body before calling Azure | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
 
-The decision recorded on the event is **`allowed`**, **`block`**, **`reported`**
-or **`failed_closed`**. **`failed_closed`** is the one to look for first on a new
-policy: it is what a wrong endpoint, a wrong key or an unreachable resource
-records on every request, and it is by far the most common first-run outcome.
-**`reported`** is what **Observe** records in place of a block.
+The decision recorded on the event is **`allowed`**, **`block`**, **`reported`**,
+**`failed_open`** or **`failed_closed`**. **`failed_closed`** is the one to look
+for first on a new policy: it is what a wrong endpoint, a wrong key or an
+unreachable resource records on every request in Enforce, and it is by far the
+most common first-run outcome; the same failure records **`failed_open`** in
+Observe. **`reported`** is what **Observe** records in place of a block. The
+event's `failure_reason` field says why: `transport` (the call failed, timed
+out, or Azure answered non-2xx), `verdict_incomplete` (a thresholded category
+was missing from Azure's response), `config_invalid` (the stored settings
+could not be used), or `decode_failed` (the gateway's own body could not be
+decoded before Azure was ever called).
 
 <Warning>
-**In Enforce this policy fails closed, and there is no setting to change that.**
-Every failure collapses into the same `502`: a wrong key, a wrong endpoint, a
-throttled resource and a conversation past Azure's length limit are
-indistinguishable to the caller, and the response carries no detail about which
-one it was. Validate in Observe, and account for this when sizing availability.
+**In Enforce this policy fails closed for every failure except one, and there
+is no setting to change either.** A wrong key, a wrong endpoint, a throttled
+resource and a conversation past Azure's length limit all collapse into the
+same `502`, with no detail in the response about which one it was. The
+exception is a body the gateway cannot decode before Azure is ever called —
+that always fails open, in Enforce too, since there was nothing for Azure to
+analyse. Validate in Observe, and account for this when sizing availability.
 </Warning>
 
 ### Limits
