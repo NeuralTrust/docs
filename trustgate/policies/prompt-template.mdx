@@ -189,8 +189,10 @@ question for whoever builds it, not something you set in the console.
 too, and a reference in it is found.** The gateway reads the content of every
 message without caring what role it carries. A `{template://…}` an application
 left in its own system prompt therefore resolves like any other — and rendering
-it replaces the whole message list, system prompt included. Only Anthropic's
-separate top-level system field sits outside the messages and is never scanned.
+it replaces the whole message list, system prompt included. Formats that keep
+the system prompt in a separate field — Anthropic's `system`, Gemini's
+`systemInstruction`, Responses' `instructions`, Bedrock's `system` — keep it
+outside the conversation, and it is never scanned.
 
 Worth checking before you publish a library: a reference sitting in an
 application's system prompt for its own reasons is not inert.
@@ -267,7 +269,7 @@ something to ask whoever manages your gateway for.
 |---|---|---|
 | **Template Engine** | The placeholder rendering engine. | Locked to mustache. A second engine name exists but is not implemented, and a policy carrying it is **refused on save**. |
 | **Position** | Where injected content goes. | Locked to the system prompt, the only place the gateway accepts. |
-| **Role** | The role the injected content is inserted under. | No control in the form, and no normalisation. A prompt you create here is inserted as the system role; a stored role is loaded and written back unchanged, so a policy carrying another one keeps it through every console save and gets a message of that role prepended to the conversation instead. |
+| **Role** | The role the injected content is inserted under. | No control in the form, and no normalisation. A prompt you create here is inserted as the system role; a stored role is loaded and written back unchanged, so a policy carrying another one keeps it through every console save and gets a message of that role prepended to the conversation instead. Whether a given role can be carried at all depends on the request format; see [Supported request formats](#supported-request-formats). |
 | **On Existing System** | Merge — append after a blank line to the application's own system prompt — or replace, which discards it. | **No control in the form, and no normalisation either.** A policy you *create* here merges. An existing one keeps what it carries: the stored value is loaded and written straight back, so a policy set to replace goes on replacing through every save you make here. |
 | **Escape JSON Control Chars** | Strips raw control bytes, keeping newlines and tabs. | No control in the form. On for a policy you create here; a stored **off** is loaded and written back, so it survives a console save too. In the injection job it applies to the whole rendered prompt, in the library job only to the substituted values. |
 | **Required Variables** | Per-version type, allowed values and maximum length for a client variable, checked before rendering. | **No editor.** Preserved for a policy that has them. A template you build here validates no client input at all. |
@@ -285,6 +287,41 @@ model, and never on the answer coming back.
 
 Scope works as it does for every policy — **Requests from**, for applications
 and groups. See [Policies overview](/trustgate/policies/overview#scope).
+
+---
+
+## Supported request formats
+
+The policy edits each chat format in the field its model reads, so the same
+prompt reaches the model whichever route the application calls.
+
+| Format | Where the system prompt goes | Other roles |
+|---|---|---|
+| OpenAI-compatible, Cohere, Mistral | A system message | Any role is prepended as a message |
+| Anthropic | The top-level system field: added to it, or created if the request has none | User and assistant are prepended; other roles are not applied |
+| Gemini and Vertex | The system instruction: merge appends to it, replace leaves only the injected prompt | User is prepended; other roles are not applied |
+| OpenAI Responses, including a Responses body sent to the chat route | The request's instructions | User, assistant and developer are prepended as input items |
+| Bedrock Converse | The system blocks | User is merged into the first user turn; other roles are not applied |
+
+A role a format cannot carry is forwarded without that injection, and the event
+records it as not applied. Observe never blocks on it.
+
+A named template is found in each format's own conversation field. On
+Anthropic, Gemini, Responses and Bedrock its system text is merged into the
+request's system prompt; on OpenAI-compatible formats the rendered messages
+replace the conversation.
+
+**Requests that are not chat** — embeddings, files, images, audio, rerank —
+pass through untouched. The exception is a policy with **Require template
+reference** on: such a request names no template, so it is refused with `400`
+in Enforce.
+
+**A chat request the policy cannot edit safely is refused in Enforce.** When
+templates are configured and the body is one the policy cannot rewrite without
+risking a wrong result — an unusual spelling of a key, a duplicated key, a
+system field it cannot read, malformed messages — the gateway answers `400`
+rather than forward the request without the prompt. In Observe the request
+goes through unchanged.
 
 ---
 
@@ -307,7 +344,8 @@ result **replaces the whole message list**.
 <Step title="Then the injected prompts are applied, in the order listed">
 Each template is rendered from its variables and merged into the system
 prompt — the application's own system prompt if the request carries one,
-otherwise a new system message at the front of the conversation.
+otherwise a new one. Where the system prompt lives depends on the request
+format; see [Supported request formats](#supported-request-formats).
 
 **Merge appends after a blank line, and the application's own system prompt
 comes first.**
@@ -331,6 +369,7 @@ you where to look:
 | `400` | The template was not found | No template of that name, or the label could not be resolved |
 | `400` | A template reference is required | No reference on the request, with **Require template reference** on |
 | `400` | The reference is ambiguous | Two *different* references on one request |
+| `400` | The request cannot be edited safely | **Enforce** only, with templates configured: a chat request whose body the policy cannot rewrite without risking a wrong result |
 | `500` | Rendering failed | The rendered content is not a valid list of messages. A `500` rather than a `400` — this one is the template's fault, not the caller's |
 
 ### Modes and failures
@@ -343,6 +382,8 @@ you where to look:
 | A missing context variable, **Skip this template** | That template dropped, `200` | Recorded, request continues |
 | A missing context variable, **Reject request** | `400` | Recorded, request continues |
 | Any other rejection above | `400`, or `500` for a render failure | Recorded, request continues |
+| A chat request whose body cannot be edited safely | `400`, refused | Recorded, request continues |
+| A role the request format cannot carry | Forwarded without that injection, recorded as not applied | Recorded, request continues |
 | The request is empty, or cannot be read | **`502`, refused** | **`502`, refused** |
 | The policy configuration cannot be parsed | **`502`, refused** | **`502`, refused** |
 
@@ -372,27 +413,21 @@ template would fire; useless for seeing what it does.
 ### Limits
 
 - **Request only.** There is no response leg, and no leg to choose.
-- **It understands two request shapes only** — OpenAI Chat Completions and
-  Anthropic Messages. Unlike
-  [Prompt Compression](/trustgate/policies/prompt-compression), which steps
-  aside on a wire format it does not model, this policy carries no such guard. A
-  client calling the gateway's Gemini route is in neither shape, and such a
-  request has nowhere to put the prompt: the model never receives it, and a
-  `{template://…}` reference in it is never found either. What is recorded is
-  what the model actually received, so nothing will claim an injection that did
-  not happen — but nothing refuses the request either. Attach this policy only
-  to applications whose route it understands.
+- **Chat formats only.** The policy edits the chat formats listed in
+  [Supported request formats](#supported-request-formats). Anything that is not
+  a chat request passes through untouched.
 - **A template reference is found in the content of any message, whatever role
   that message carries.** In an OpenAI-shaped request the application's own
   system prompt *is* a message, so a reference left there is found and rendered
-  like any other. Only Anthropic's separate top-level system field is never
+  like any other. Only a separate system field, on the formats that have one, is never
   scanned; a reference there is forwarded to the model as literal text.
-- **A reference inside structured content is never found.** When a message's
-  content is sent as a list of parts rather than as plain text, the gateway does
-  not look inside it. Nothing is detected, nothing is rendered, nothing refuses
-  the request, and the model receives the literal `{template://…}` text. The
-  request is recorded exactly like one that carried no reference at all, so
-  there is nothing to alert on.
+- **On OpenAI-compatible and Anthropic requests, a reference inside structured
+  content is not found.** When a message's content is sent as a list of parts
+  rather than as plain text, the gateway does not look inside it. Nothing is
+  rendered, nothing refuses the request, and the model receives the literal
+  `{template://…}` text. The event does record that the request carried a
+  reference it did not read, so it can be alerted on. Gemini, Responses and
+  Bedrock content is always a list of parts, and their text parts are read.
 - **One template per request.** Two *different* references are a `400`; the same
   reference repeated across turns is fine.
 - **Rendering discards the conversation.** See the warning above.
@@ -478,8 +513,8 @@ reference, supplying whatever the template's placeholders need.
 Expect the event to record **`rendered`** and to name the resolved template. The
 reply must answer the template's question, not the literal reference text. If the
 model says something about a `template://` address, the reference was forwarded
-instead of resolved — check the mode, then check that the message's content was
-sent as plain text rather than as a list of parts.
+instead of resolved — check the mode, then, on an OpenAI-compatible or Anthropic request, check that
+the message's content was sent as plain text rather than as a list of parts.
 </Step>
 
 <Step title="Prompt library — history really is discarded">
@@ -516,7 +551,7 @@ records.
 | `400` saying the reference is ambiguous | Two *different* references on one request | Only one template can be rendered. Repeating the same one is fine |
 | `500` saying rendering failed | The rendered content is not a valid list of messages | Usually a substituted value broke the JSON, or the list was hand-edited outside the console |
 | `502` on every request | The request cannot be read, or the stored configuration cannot be parsed | Both fail in Observe too. Check the request first, then the stored settings |
-| The reference text reaches the model verbatim | The policy is in **Observe**, the message's content was sent as a list of parts rather than plain text, or the reference sat in Anthropic's top-level system field | A reference in an ordinary message is found whatever its role; those are the three places one is not |
+| The reference text reaches the model verbatim | The policy is in **Observe**, the message's content on an OpenAI-compatible or Anthropic request was sent as a list of parts rather than plain text, or the reference sat in a separate system field such as Anthropic's top-level `system` | A reference in an ordinary message is found whatever its role; those are the three places one is not |
 | The model lost the conversation | A named template rendered, which replaces the whole message list | Expected. The event counts the discarded turns |
 | A value the caller sent for a placeholder was ignored | That placeholder reads a **Header** or a **JWT claim**, and a gateway-resolved value wins | Expected. Set its **Source** to **Sent by the client** if the caller is the one meant to fill it |
 | The application's own system prompt disappeared | The policy is set to replace that prompt rather than add to it, which cannot have come from this form | Re-saving from the console does **not** fix it — the stored setting is preserved, not reset. Ask whoever manages your gateway to change it |
