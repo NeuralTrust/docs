@@ -1,0 +1,112 @@
+---
+title: "Google Antigravity"
+description: "Configure TrustGuard lifecycle hooks for the Antigravity IDE and CLI"
+---
+
+Google Antigravity is the coding agent that succeeds Gemini CLI. The IDE, the
+CLI, and `agy` can read repositories, edit files, run shell commands, and call
+tools on a developer's machine.
+
+TrustGuard lifecycle hooks evaluate those local actions. The hooks ship in the
+[trustguard-gemini-cli-plugin](https://github.com/NeuralTrust/trustguard-gemini-cli-plugin)
+repository, the same package Gemini CLI uses.
+
+## NeuralTrust controls
+
+| Product | Scope | Controls |
+| --- | --- | --- |
+| **[TrustGuard](/trustguard/overview)** | Evaluates tool calls before they run, and records the rest of the agent lifecycle, against an organization [policy](/trustguard/concepts/policies). | Block · Ask on `PreToolUse`. Telemetry for the other events |
+
+`PreToolUse` is the only event that can stop a tool. `PostToolUse`,
+`PreInvocation`, `PostInvocation`, and `Stop` are sent to TrustGuard and the
+hook answers `{}`, so the agent keeps running. An allow on `PreToolUse` does
+not suppress Antigravity's own review prompt.
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| Egress from developer machines to `{TRUSTGUARD_BASE_URL}` | The console shows the [base URL](/trustguard/api/evaluate#base-url) for your workspace. |
+| The **Google Antigravity** collector | **Agent Runtime → Collectors → Catalog → AI assistants & coding agents → Google Antigravity**. Create the `tgk_…` key on its **Auth** tab and assign the policy on the **Policies** tab. |
+| Node.js | Antigravity and the hook bootstrap both need it. |
+| Egress to GitHub Releases | On first use the bootstrap downloads the checksum-pinned `trustguard-gemini-cli` binary. |
+
+<Note>
+Create the policy in **Observe** mode. Observe records decisions in **Activity**
+without enforcing them. Review the results, then switch the policy to
+**Enforce**. See [Policies](/trustguard/concepts/policies).
+</Note>
+
+Developers do **not** need NeuralTrust accounts.
+
+## Install the hooks
+
+```bash
+git clone https://github.com/NeuralTrust/trustguard-gemini-cli-plugin.git
+cd trustguard-gemini-cli-plugin
+make build
+python3 scripts/install-antigravity-hooks.py --user
+```
+
+That merges a `trustguard` entry into `~/.gemini/config/hooks.json` and leaves
+every other hook in place. Antigravity reads that file at startup. Restart the
+IDE or CLI, then run `/hooks` in the CLI to confirm the commands.
+
+The user file is the default because some CLI versions ignore the workspace
+file `.agents/hooks.json`. To install it anyway:
+
+```bash
+python3 scripts/install-antigravity-hooks.py --workspace /path/to/project
+```
+
+macOS and Linux call `trustguard/hooks/trustguard-hook.sh`. Windows calls
+`trustguard-hook.ps1`. Both forward the event name to `trustguard-gemini-cli`.
+
+## Deploy the managed config
+
+Antigravity and Gemini CLI share one config file. Deploy it with MDM:
+
+```json
+{
+  "data_url": "https://<your-trustguard-host>",
+  "api_key": "tgk_…",
+  "fail_mode": "open"
+}
+```
+
+| OS | Managed config path |
+| --- | --- |
+| macOS | `/Library/Application Support/TrustGuard/gemini-cli.json` |
+| Linux | `/etc/trustguard/gemini-cli.json` |
+| Windows | `%ProgramData%\TrustGuard\gemini-cli.json` |
+
+For a pilot without MDM, write the same JSON to `~/.trustguard/gemini-cli.json`
+and `chmod 600` it.
+
+`fail_mode: "open"` allows the tool when TrustGuard cannot be reached.
+`fail_mode: "closed"` denies `PreToolUse` in that case and still lets the
+telemetry events through, so a network blip does not freeze the agent.
+
+## What is evaluated
+
+| Antigravity event | Sent to TrustGuard | Effect on the agent |
+| --- | --- | --- |
+| `PreToolUse` on `run_command` | The shell command (`CommandLine`) | `deny` with the TrustGuard reason, `ask`, or `allow` |
+| `PreToolUse` on other tools | The tool name and arguments | Same |
+| `PostToolUse` | The tool result or error | None |
+| `PreInvocation` / `PostInvocation` | The model and invocation | None |
+| `Stop` | Why the run ended | None |
+
+Activity shows these calls with `source.application` = `antigravity-plugin`.
+
+## Verify
+
+1. Run a shell command Antigravity would execute, such as listing a directory.
+2. In **Activity**, confirm an event with `source.application` = `antigravity-plugin`.
+3. Put the policy in **Enforce** and add a rule that blocks that command. The next `PreToolUse` should return `deny` and Antigravity should not run it.
+
+## Related
+
+- [Gemini CLI plugin](https://github.com/NeuralTrust/trustguard-gemini-cli-plugin)
+- [Policies](/trustguard/concepts/policies)
+- [Integrations](/integrations/overview#ai-coding-agents)
