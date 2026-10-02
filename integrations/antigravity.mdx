@@ -15,12 +15,18 @@ repository, the same package Gemini CLI uses.
 
 | Product | Scope | Controls |
 | --- | --- | --- |
-| **[TrustGuard](/trustguard/overview)** | Evaluates tool calls before they run, and records the rest of the agent lifecycle, against an organization [policy](/trustguard/concepts/policies). | Block · Ask on `PreToolUse`. Telemetry for the other events |
+| **[TrustGuard](/trustguard/overview)** | Evaluates the prompt, the tool call, and the model reply against an organization [policy](/trustguard/concepts/policies). | Block · force-ask on `PreToolUse`. A blocked prompt is injected back to the model |
 
-`PreToolUse` is the only event that can stop a tool. `PostToolUse`,
-`PreInvocation`, `PostInvocation`, and `Stop` are sent to TrustGuard and the
-hook answers `{}`, so the agent keeps running. An allow on `PreToolUse` does
-not suppress Antigravity's own review prompt.
+`PreToolUse` is the only event that can stop a tool. A policy ask becomes
+`force_ask`, so Antigravity's "Always Allow" cannot skip it. TrustGuard does
+not answer `allow` on `PreToolUse`: that would auto-approve the tool and skip
+the developer's own review settings.
+
+Prompt blocking is soft. With `prompt_enforcement` set to `inject` (the
+default), a blocked prompt is shown to the model before it answers.
+`inject_terminate` also ends the turn when the reply is blocked. `off` only
+records the event. The hard guarantee remains `PreToolUse`: if the model
+ignores the message and calls a tool, that call is still evaluated.
 
 ## Before you start
 
@@ -44,13 +50,28 @@ Developers do **not** need NeuralTrust accounts.
 ```bash
 git clone https://github.com/NeuralTrust/trustguard-gemini-cli-plugin.git
 cd trustguard-gemini-cli-plugin
-make build
 python3 scripts/install-antigravity-hooks.py --user
 ```
 
 That merges a `trustguard` entry into `~/.gemini/config/hooks.json` and leaves
-every other hook in place. Antigravity reads that file at startup. Restart the
-IDE or CLI, then run `/hooks` in the CLI to confirm the commands.
+every other hook in place. It also downloads the pinned binary when one is not
+already installed, then checks that `PreToolUse` returns `deny` when TrustGuard
+cannot be reached. If that check fails, the install stops. A binary from the
+`v0.1.0` release answers `{}` and never calls TrustGuard, so this check is how
+you tell an outdated binary from a working one.
+
+`make build` only writes `./bin/trustguard-gemini-cli`. The hooks do not look
+there. To try a local build, copy it where the bootstrap looks first. That
+copy takes priority over the downloaded release:
+
+```bash
+make build
+cp bin/trustguard-gemini-cli ~/.trustguard/bin/trustguard-gemini-cli
+python3 scripts/install-antigravity-hooks.py --user
+```
+
+Antigravity reads `hooks.json` at startup. Restart the IDE or CLI, then run
+`/hooks` in the CLI to confirm the commands.
 
 The user file is the default because some CLI versions ignore the workspace
 file `.agents/hooks.json`. To install it anyway:
@@ -70,9 +91,13 @@ Antigravity and Gemini CLI share one config file. Deploy it with MDM:
 {
   "data_url": "https://<your-trustguard-host>",
   "api_key": "tgk_…",
-  "fail_mode": "open"
+  "fail_mode": "open",
+  "prompt_enforcement": "inject"
 }
 ```
+
+`prompt_enforcement` is `inject`, `inject_terminate`, or `off`. `inject` is the
+default. Observe mode records the decision and does not inject or terminate.
 
 | OS | Managed config path |
 | --- | --- |
@@ -91,19 +116,21 @@ telemetry events through, so a network blip does not freeze the agent.
 
 | Antigravity event | Sent to TrustGuard | Effect on the agent |
 | --- | --- | --- |
-| `PreToolUse` on `run_command` | The shell command (`CommandLine`) | `deny` with the TrustGuard reason, `ask`, or `allow` |
+| `PreToolUse` on `run_command` | The shell command (`CommandLine`) | `deny`, `force_ask`, or `overwrite` when a transform returns replacement text. A clean allow leaves the decision empty |
 | `PreToolUse` on other tools | The tool name and arguments | Same |
 | `PostToolUse` | The tool result or error | None |
-| `PreInvocation` / `PostInvocation` | The model and invocation | None |
+| `PreInvocation` | The user prompt from the session transcript | `injectSteps` when the prompt is blocked and enforcement is on |
+| `PostInvocation` | The model reply from the session transcript | `terminate` only with `prompt_enforcement: inject_terminate` |
 | `Stop` | Why the run ended | None |
 
 Activity shows these calls with `source.application` = `antigravity-plugin`.
 
 ## Verify
 
-1. Run a shell command Antigravity would execute, such as listing a directory.
-2. In **Activity**, confirm an event with `source.application` = `antigravity-plugin`.
-3. Put the policy in **Enforce** and add a rule that blocks that command. The next `PreToolUse` should return `deny` and Antigravity should not run it.
+1. The installer prints `smoke ok` and a path to `trustguard-gemini-cli`. If it exits because `PreToolUse` did not return `deny`, the installed binary is older than the Antigravity support. Copy a current build into `~/.trustguard/bin` and run the installer again.
+2. Run a shell command Antigravity would execute, such as listing a directory.
+3. In **Activity**, confirm an event with `source.application` = `antigravity-plugin`. A prompt event should contain the text you typed, not a line that only names the model.
+4. Put the policy in **Enforce** and add a rule that blocks that command. The next `PreToolUse` should return `deny` and Antigravity should not run it. A rule that asks should return `force_ask`, including after "Always Allow".
 
 ## Related
 
