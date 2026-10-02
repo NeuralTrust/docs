@@ -1,6 +1,6 @@
 ---
 title: "End-user attribution"
-description: "Attribute traffic behind a shared API key to the person a client application was serving — automatically for Open WebUI (plain headers or its signed JWT), with TrustGate's own headers from any client, or verified end to end with your identity provider."
+description: "Attribute traffic behind a shared API key to the person a client application was serving — declared by the client in headers, or verified by sending each person's own identity-provider token."
 ---
 
 A chat front-end authenticates to TrustGate with **one** API key and serves **many**
@@ -37,9 +37,8 @@ TrustGate takes the **first** source that names somebody:
 | Order | Source | Where | Recorded `source` |
 |---|---|---|---|
 | 1 | `X-TG-User-Id`, `X-TG-User-Email`, `X-TG-User-Name`, `X-TG-User-Role` | Request headers | `trustgate` |
-| 2 | `X-OpenWebUI-User-Id`, `X-OpenWebUI-User-Email`, `X-OpenWebUI-User-Name`, `X-OpenWebUI-User-Role` | Request headers | `open_webui` |
-| 3 | `X-OpenWebUI-User-Jwt` — Open WebUI's signed user token | Request header | `open_webui` |
-| 4 | `user` | OpenAI-style JSON request body | `openai_user` |
+| 2 | A client's own convention — see [Clients TrustGate recognizes](#clients-trustgate-recognizes) | Request headers | the client, e.g. `open_webui` |
+| 3 | `user` | OpenAI-style JSON request body | `openai_user` |
 
 TrustGate's own namespace comes first on purpose: if you set `X-TG-*`, you did so
 deliberately, so a request carrying both yours and a vendor's is attributed the way you
@@ -49,70 +48,18 @@ read only when no header named anyone.
 You do not have to send all four fields. Any one of id, email or name is enough; a header
 set where every value is blank is skipped, and the next source is tried.
 
-### Open WebUI
+### Clients TrustGate recognizes
 
-Open WebUI forwards its user headers when you turn on one environment variable. Set it
-where Open WebUI runs, not on TrustGate:
+Some clients already forward the signed-in user in their own headers. TrustGate reads those
+conventions as they are, so the client needs no change and TrustGate no setup:
 
-```yaml
-# docker-compose.yml — Open WebUI
-services:
-  open-webui:
-    environment:
-      - ENABLE_FORWARD_USER_INFO_HEADERS=true
-      - OPENAI_API_BASE_URL=https://<your-gateway>/v1
-      - OPENAI_API_KEY=<your TrustGate API key>
-```
+| Client | What it sends | Set up |
+|---|---|---|
+| Open WebUI | `X-OpenWebUI-User-*` headers, or one signed `X-OpenWebUI-User-Jwt` | [Open WebUI](/integrations/open-webui#choose-how-users-are-identified) |
 
-It is **off by default**. With it on, Open WebUI adds `X-OpenWebUI-User-Id`,
-`-Email`, `-Name`, `-Role` and `X-OpenWebUI-Chat-Id` to every request it sends to
-TrustGate, and attribution starts working with no further configuration on either side.
-
-If a proxy of your own sits between Open WebUI and TrustGate, check that it does not strip
-unknown request headers.
-
-Open WebUI percent-encodes the name it forwards (`José` arrives as `Jos%C3%A9`); TrustGate
-decodes it, so Activity shows the name as the person wrote it.
-
-#### Signed user JWT
-
-Open WebUI can sign the user instead of sending plain headers. Setting
-`FORWARD_USER_INFO_HEADER_JWT_SECRET` alongside `ENABLE_FORWARD_USER_INFO_HEADERS` makes it
-**stop** sending the `X-OpenWebUI-User-*` headers and send one HS256 token in
-`X-OpenWebUI-User-Jwt` instead:
-
-```yaml
-# docker-compose.yml — Open WebUI
-services:
-  open-webui:
-    environment:
-      - ENABLE_FORWARD_USER_INFO_HEADERS=true
-      - FORWARD_USER_INFO_HEADER_JWT_SECRET=<a secret you choose>
-```
-
-TrustGate reads the user from the token's claims, with nothing to configure on the gateway:
-
-| Claim | Recorded as |
-|---|---|
-| `sub` | `id` — Open WebUI's own user id |
-| `email` | `email` |
-| `name` | `name` |
-| `role` | `role` |
-
-Only tokens whose `iss` is `open-webui` are read. Each claim is trimmed and capped like the
-header values, a claim that is not a string is ignored, and a token over 4 KB is ignored.
-The plain headers, if a request carries them too, take precedence.
-
-<Note>
-TrustGate does **not** check the token's signature or expiry: that takes the secret you
-set in Open WebUI, which the gateway does not hold. Unverified, the token is worth exactly
-what the plain headers it replaces were — anyone with the API key could mint one — so it is
-recorded under the same rules: telemetry only, never the principal. For a verified user,
-see [Verified attribution with SSO](#verified-attribution-with-sso).
-</Note>
-
-If you renamed the header with `FORWARD_USER_INFO_HEADER_JWT`, TrustGate will not find it:
-keep the default name.
+A signed token from a client is read for its claims; its signature is not checked, because
+the secret belongs to the client. It is recorded under the same rules as any other
+declaration.
 
 ### Your own client
 
@@ -184,46 +131,20 @@ name or role.
 ## Verified attribution with SSO
 
 Everything above is declared by the client. To attribute traffic to a person the gateway has
-**verified**, the client sends each user's own identity-provider token instead of a shared
-API key, and TrustGate records the person that token names as the request's **principal**.
+**verified**, the client sends each user's own identity-provider token as
+`Authorization: Bearer`, in place of a shared API key. TrustGate validates it — signature
+against the IdP's keys, issuer, expiry, audience, and the application's allowed client ids
+— and records the person it names as the request's **principal**. Configuring the provider
+is covered in [Authentication](/trustgate/concepts/auth).
 
-Open WebUI does this when it signs users in with your IdP and its connection to TrustGate
-uses **OAuth** authentication: every request then carries the signed-in user's access token
-from your IdP — Entra ID, Okta, Google, Keycloak — as `Authorization: Bearer`, in place of the
-API key.
+This needs a client that signs users in with your IdP and can forward their token, and a
+token issued for the audience TrustGate expects. [Open WebUI](/integrations/open-webui#verified-users-with-sso)
+does both with its OAuth connection.
 
-<Steps>
-  <Step title="Trust your IdP on TrustGate">
-    Configure the identity provider under **Machine identity** on the gateway and enter the
-    application through it rather than with a key — see
-    [Authentication](/trustgate/concepts/auth). TrustGate validates the token's signature
-    against the IdP's JWKS, its issuer, expiry and audience, then the application's allowed
-    client ids.
-  </Step>
-  <Step title="Have Open WebUI ask for a token TrustGate accepts">
-    Open WebUI must request an access token whose audience is the one you configured on
-    TrustGate. Many IdPs issue a token for a default resource (Microsoft Graph, for Entra)
-    unless asked for another, so add that audience's scope to Open WebUI's login scopes:
-
-    ```bash
-    OAUTH_SCOPES="openid email profile <your TrustGate audience scope>"
-    ```
-
-    Then have users sign out and back in so Open WebUI obtains a fresh token.
-  </Step>
-  <Step title="Point the connection at TrustGate with OAuth">
-    In Open WebUI, **Admin Panel → Settings → Connections**, set the TrustGate connection's
-    **Auth** to **OAuth**. Keep `ENABLE_FORWARD_USER_INFO_HEADERS` on if you also want the
-    declared user — it costs nothing and fills in the name.
-  </Step>
-</Steps>
-
-The verified person is recorded as `principal_subject` (the token's `sub`) and
-`principal_email`. The email is the token's `email` claim, or, when the IdP sends none,
-the first of `emailAddress`, `preferred_username`, `upn` and `unique_name` that is an address. Unlike a
-declared user, the principal reaches policies: guardrail rules that match on the user see
-this person.
-
+The principal is recorded as `principal_subject` (the token's `sub`) and `principal_email`:
+the token's `email` claim or, when the IdP sends none, the first of `emailAddress`,
+`preferred_username`, `upn` and `unique_name` that is an address. Unlike a declared user,
+the principal reaches policies: guardrail rules that match on the user see this person.
 A forged or expired token is rejected with `401`; it never attributes anything.
 
 ## Grouping a conversation
@@ -249,9 +170,9 @@ headers are read.
 **Activity.** The *User* column shows the declared person instead of the API key's
 principal. Because the name is unverified it is marked as such, and opening a request
 shows who declared it and, beside it, the credential that authenticated — both facts at
-once. When the declared email is the verified principal's — Open WebUI forwarding both the
-user's IdP token and its own user headers — the user is shown as **verified**: the gateway
-vouched for that very person.
+once. When the declared email is the verified principal's — a client forwarding both the user's
+IdP token and its own user headers — the user is shown as **verified**: the gateway vouched
+for that very person.
 
 **Event stream.** Two fields on the TrustGate event, both documented in the
 [Event schema](/platform/event-schema):
@@ -274,7 +195,7 @@ data:
 
 | | The principal | The declared end user |
 |---|---|---|
-| Comes from | The credential that authenticated (API key, or a token your IdP issued) | A header, Open WebUI's unverified JWT, or a body field the caller controls |
+| Comes from | The credential that authenticated (API key, or a token your IdP issued) | A header, a client's unverified token, or a body field the caller controls |
 | Verified | Yes | **No** |
 | Stored as | `principal_subject`, `principal_email`, `principal_method` | `end_user`, `end_user_detail` |
 | Affects policy | Yes — guardrail rules can match on it | **Never** |
@@ -292,3 +213,4 @@ person connects their own upstream accounts.
 - [Event schema](/platform/event-schema): the field contract alerts and analytics match on
 - [Applications](/trustgate/access/applications): API keys, bindings, and the principal behind a request
 - [Authentication](/trustgate/concepts/auth): trusting your identity provider and admitting its tokens
+- [Open WebUI](/integrations/open-webui): every way Open WebUI identifies its users, end to end

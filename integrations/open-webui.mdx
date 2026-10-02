@@ -1,0 +1,215 @@
+---
+title: "Open WebUI"
+description: "Put Open WebUI's chat behind TrustGate: one connection for every model, and every request attributed to the person who sent it — declared by Open WebUI, or verified by your identity provider."
+---
+
+[Open WebUI](https://openwebui.com) is a self-hosted chat front-end for LLMs. It talks
+to any OpenAI-compatible API, so it connects to TrustGate's LLM plane like any other
+OpenAI provider: one URL, one key, and every model the application routes to shows up
+in its model picker.
+
+A chat front-end serves many people through one connection. Open WebUI can tell
+TrustGate who each request is for, so **Activity**, analytics and cost reports show the
+person, not just the application. How much you can trust that name depends on the mode
+you pick — see [Choose how users are identified](#choose-how-users-are-identified).
+
+## Integration capabilities
+
+| Product | What it does | What it controls |
+| --- | --- | --- |
+| **[TrustGate](/trustgate/overview)** | Routes each chat request and applies the application's governance: allowed models, rate limits, budgets, and [TrustGuard](/trustguard/overview) policies | Which models · spend ceilings · content policy |
+| **Open WebUI** | Serves the chat UI, signs users in, and forwards who each request is for | Who can use the chat |
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| A TrustGate application with an LLM plane | Create it in the console and issue its API key. The key is shown once. See [Applications](/trustgate/access/applications). |
+| Its **LLM Gateway URL** and slug | Settings → General, or the application's Connect tab. See [Connect](/trustgate/llm/connect). |
+| Admin access to Open WebUI | Connections and environment variables are admin settings. |
+
+<Steps>
+
+<Step title="Add TrustGate as a connection" titleSize="h2" id="1-add-trustgate-as-a-connection">
+In Open WebUI, open **Admin Panel → Settings → Connections**, and under **OpenAI API** add
+a connection:
+
+| Field | Value |
+|---|---|
+| **URL** | `https://<llm-host>/<application-slug>/v1` |
+| **Auth** | **Bearer**, with the application's key (`ag_…`) |
+
+Or set it from the environment where Open WebUI runs:
+
+```yaml
+# docker-compose.yml — Open WebUI
+services:
+  open-webui:
+    environment:
+      - OPENAI_API_BASE_URL=https://<llm-host>/<application-slug>/v1
+      - OPENAI_API_KEY=<your TrustGate application key>
+```
+
+If Open WebUI runs in Docker and TrustGate on the same host, use
+`host.docker.internal` instead of `localhost`.
+</Step>
+
+<Step title="Check the models" titleSize="h2" id="2-check-the-models">
+Open WebUI lists models from the application's [`/v1/models`](/trustgate/endpoints/models),
+so the picker shows what the application routes to. To show fewer, or to add a value the
+list does not carry — `auto` for an application that load-balances — use the connection's
+**Model IDs** filter. See [What goes in `model`](/trustgate/llm/connect#what-goes-in-model).
+
+Send a chat and open **Activity** in the console: the request is there, under the
+application.
+</Step>
+
+<Step title="Identify your users" titleSize="h2" id="3-identify-your-users">
+Without this, every request is the application's. Pick a mode below and turn it on;
+nothing changes on TrustGate's side for the first two.
+</Step>
+
+</Steps>
+
+## Choose how users are identified
+
+| Mode | Open WebUI sends | Verified | What Activity shows |
+|---|---|---|---|
+| [User headers](#user-headers) | `X-OpenWebUI-User-*` headers | No | The user, marked unverified |
+| [Signed user JWT](#signed-user-jwt) | One HS256 token in `X-OpenWebUI-User-Jwt` | No | The user, marked unverified |
+| [SSO token](#verified-users-with-sso) | Each user's own IdP access token, instead of the key | **Yes** | The user, verified |
+
+The first two are **declared**: TrustGate records who Open WebUI says it was serving, for
+telemetry and cost attribution, and never lets the name authorize anything — see
+[End-user attribution](/trustgate/observability/end-user-attribution). The third is
+**authenticated**: TrustGate verifies the token, and the person becomes the request's
+principal, which policies can act on.
+
+### User headers
+
+Set one variable where Open WebUI runs. It is off by default:
+
+```yaml
+services:
+  open-webui:
+    environment:
+      - ENABLE_FORWARD_USER_INFO_HEADERS=true
+```
+
+Open WebUI then adds these to every request, and TrustGate reads them with no setup:
+
+| Header | Recorded as |
+|---|---|
+| `X-OpenWebUI-User-Id` | `id` — Open WebUI's own user id |
+| `X-OpenWebUI-User-Email` | `email` |
+| `X-OpenWebUI-User-Name` | `name` |
+| `X-OpenWebUI-User-Role` | `role` |
+| `X-OpenWebUI-Chat-Id` | `session_id` — one per conversation |
+
+Open WebUI percent-encodes the name (`José` arrives as `Jos%C3%A9`); TrustGate decodes it.
+If a proxy of your own sits between Open WebUI and TrustGate, check that it does not strip
+unknown request headers.
+
+### Signed user JWT
+
+Add a secret, and Open WebUI **stops** sending the user headers and sends one token in
+their place:
+
+```yaml
+services:
+  open-webui:
+    environment:
+      - ENABLE_FORWARD_USER_INFO_HEADERS=true
+      - FORWARD_USER_INFO_HEADER_JWT_SECRET=<a secret you choose>
+```
+
+The token is HS256, issued by `open-webui`, and expires after five minutes by default. TrustGate reads
+the user from its claims, again with no setup:
+
+| Claim | Recorded as |
+|---|---|
+| `sub` | `id` |
+| `email` | `email` |
+| `name` | `name` |
+| `role` | `role` |
+
+<Note>
+TrustGate does **not** check the token's signature: that takes the secret you set in Open
+WebUI, which the gateway does not hold. The token is therefore worth what the user headers
+were — anyone holding the application key could mint one — and is recorded the same way:
+declared, never the principal. The token is signed, not encrypted: anyone who sees the
+request can read the user in it. For a user TrustGate verifies, use
+[SSO](#verified-users-with-sso).
+</Note>
+
+Keep the default header name. If you rename it with `FORWARD_USER_INFO_HEADER_JWT`,
+TrustGate does not find it and the user is not recorded.
+
+### Verified users with SSO
+
+When Open WebUI signs users in with your identity provider, its connection to TrustGate can
+send each person's own access token instead of the application key. TrustGate validates the
+token — signature against the IdP's keys, issuer, expiry, audience — and records the person
+it names as the request's principal.
+
+<Steps>
+
+<Step title="Trust your IdP on TrustGate">
+Configure the identity provider under **Machine identity** on the gateway, and enter the
+application through it rather than with a key. See [Authentication](/trustgate/concepts/auth),
+and the [Entra ID](/trustgate/concepts/authorization/entra-id) and
+[Okta](/trustgate/concepts/authorization/okta) manuals. Note the **audience** you set: the
+token Open WebUI sends must carry it.
+</Step>
+
+<Step title="Sign Open WebUI in with the same IdP">
+Configure Open WebUI's OAuth/OIDC login against that provider, and make it request an
+access token for TrustGate's audience. Many IdPs issue a token for a default resource —
+Microsoft Graph, for Entra — unless asked for another, so add the audience's scope to the
+login scopes:
+
+```yaml
+services:
+  open-webui:
+    environment:
+      - OPENID_PROVIDER_URL=https://<your-idp>/.well-known/openid-configuration
+      - OAUTH_CLIENT_ID=<client id>
+      - OAUTH_CLIENT_SECRET=<client secret>
+      - OAUTH_SCOPES=openid email profile <your TrustGate audience scope>
+      - ENABLE_OAUTH_SIGNUP=true
+```
+
+Users who were already signed in must sign out and back in to get a token with the new
+scope.
+</Step>
+
+<Step title="Switch the connection to OAuth">
+In **Admin Panel → Settings → Connections**, set the TrustGate connection's **Auth** to
+**OAuth**. Open WebUI now sends the signed-in user's token as `Authorization: Bearer` on
+each request, in place of the application key.
+
+Keep `ENABLE_FORWARD_USER_INFO_HEADERS` on if you like: when the user Open WebUI declares has
+the same email as the verified principal, Activity shows them once, as verified.
+</Step>
+
+</Steps>
+
+The principal is recorded as `principal_subject` (the token's `sub`) and `principal_email`,
+the token's `email` claim or, when the IdP sends none, the first of `emailAddress`,
+`preferred_username`, `upn` and `unique_name` that is an address. A forged, expired or
+wrongly scoped token is rejected with `401`.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| Activity shows the application but no user | `ENABLE_FORWARD_USER_INFO_HEADERS` is off, a proxy strips the headers, or `FORWARD_USER_INFO_HEADER_JWT` renamed the token header. |
+| Every chat is `401` after switching to OAuth | The token's audience is not the one TrustGate expects: add the audience scope to `OAUTH_SCOPES` and sign in again. Or the user signed in to Open WebUI with a local account, which has no IdP token to send. |
+| New SSO users see "Account activation pending" | Open WebUI's default role for new sign-ups is `pending`. Approve them in **Admin Panel → Users**, or set `DEFAULT_USER_ROLE=user`. |
+| The user shows as unverified with SSO on | The declared email differs from the token's: Activity shows the declared user, unverified, so a mismatch is visible rather than hidden. |
+
+## Related
+
+- [End-user attribution](/trustgate/observability/end-user-attribution): every source TrustGate reads, and how declared users differ from principals
+- [Authentication](/trustgate/concepts/auth): trusting an identity provider and admitting its tokens
+- [Connect](/trustgate/llm/connect): the base URL, the key, and what goes in `model`
