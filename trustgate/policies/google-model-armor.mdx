@@ -148,20 +148,12 @@ and the **template ID**.
 
 ## Part 2 — Grant the gateway access
 
-TrustGate must prove to Google that it may call Model Armor in your project.
-The form offers two ways, and the first is the one to prefer.
+TrustGate must prove to Google that it may call Model Armor in your project. It
+does that with a **service account key**: you create a service account in your
+project, give it access to Model Armor, and paste its key into the policy.
 
-| Method | What TrustGate stores | You revoke by | Use when |
-|---|---|---|---|
-| **[Impersonation](#method-a--impersonation-recommended)** | An email address | Removing one binding in your project | **Recommended.** Any managed deployment. |
-| **[Service account key](#method-b--service-account-key)** | An encrypted copy of the private key | Deleting the key in Google Cloud and pasting a new one | Impersonation is unavailable to you. |
-
-### Method A — Impersonation (recommended)
-
-The keyless path. You create a service account in your project, give it access to
-Model Armor, and allow the gateway's identity to borrow it for a few minutes at a
-time. **No secret of yours is ever stored**, because an email address is useless
-without the grant you control.
+You revoke access by deleting the key in Google Cloud and, if you want to replace
+it, pasting a new one into the policy.
 
 <Steps>
 <Step title="Create a service account and give it Model Armor access">
@@ -179,62 +171,31 @@ gcloud projects add-iam-policy-binding YOUR_PROJECT \
 `resourcemanager.projects.setIamPolicy` permission, which project editors do not
 have. If the second command is refused, a project administrator has to run it.
 </Warning>
-</Step>
-
-<Step title="Let the gateway borrow that service account">
-Ask your NeuralTrust contact for the gateway's service account identity, then
-grant the token-creator role **on the service account you just created** — not on
-the project:
-
-```bash
-gcloud iam service-accounts add-iam-policy-binding \
-  model-armor-caller@YOUR_PROJECT.iam.gserviceaccount.com \
-  --member="serviceAccount:GATEWAY_IDENTITY" \
-  --role="roles/iam.serviceAccountTokenCreator" \
-  --project=YOUR_PROJECT
-```
-
-This is the gateway's only access, it is scoped to that one service account, and
-removing this single binding cuts it off without touching anything else in your
-project.
 
 IAM changes take a minute or two to propagate. A permission error on the first
 call right after granting is expected — retry before changing anything.
 </Step>
 
-<Step title="Keep the email">
-`model-armor-caller@YOUR_PROJECT.iam.gserviceaccount.com` is what goes into the
-policy. Nothing else.
+<Step title="Create a key for the service account">
+```bash
+gcloud iam service-accounts keys create model-armor-caller-key.json \
+  --iam-account=model-armor-caller@YOUR_PROJECT.iam.gserviceaccount.com \
+  --project=YOUR_PROJECT
+```
+
+Paste the contents of the JSON file into the policy.
+
+The key is never returned to the browser. Reopen the policy and the field shows
+only that a key is set, not the key itself: you replace it rather than read it.
+Google Cloud hands you the key file once, when you create it, so keep your own
+copy where you keep your other secrets, and rotate it on your normal schedule.
 </Step>
 </Steps>
 
-### Method B — Service account key
-
-Create a key for the service account from Method A and paste the JSON into the
-policy.
-
-The key is stored encrypted and is never returned to the browser. Reopen the
-policy and the field shows only that a key is set, not the key itself: you
-replace it rather than read it. Google Cloud hands you the key file once, when
-you create it, so keep your own copy where you keep your other secrets. Prefer
-impersonation where it is available, rotate on your normal schedule, and delete
-the key in Google Cloud once impersonation becomes possible.
-
 <Warning>
-**The credential field for the authentication you picked cannot be left empty.**
-The form shows one field at a time — the email, or the key — and refuses to save
-until it has a value.
+**The credential field cannot be left empty.** The form refuses to save until the
+**Service account key (JSON)** has a value.
 </Warning>
-
-<Note>
-**A deployment can also call Model Armor as the gateway's own identity**, with
-no credential on the policy at all. That is arranged at the deployment, not on
-this screen, and the form will not produce it for you. It only fits a
-self-hosted, single-tenant gateway — on a shared one every policy would call as
-the same identity, which would need a grant in every tenant's project — and that
-identity needs `roles/modelarmor.user` on your project. Ask whoever manages your
-gateway.
-</Note>
 
 ---
 
@@ -249,9 +210,7 @@ Open **Policies** → **Library** → **Google Model Armor**.
 | **Project** | The Google Cloud project ID that owns the template |
 | **Location** | The template's region. It selects the regional endpoint, so it must match exactly. |
 | **Template ID** | The Model Armor template identifier |
-| **Authentication** | *Impersonate a service account* (Method A) or *Explicit credentials* (Method B). The form draws one credential field at a time. |
-| **Service account email** | Method A only. Required. |
-| **Service account key (JSON)** | Method B only. Required. |
+| **Service account key (JSON)** | The key you created in Part 2. Required. |
 
 ### Block on
 
@@ -466,9 +425,9 @@ fields recorded.
 |---|---|---|
 | Permission error from Google | The service account lacks `roles/modelarmor.user`, or the grant has not propagated | Check the binding, then retry after a minute |
 | Template not found | **Location** does not match the template's region | Correct the location — there is no global endpoint |
-| `502` on every request in Enforce, recorded as **`failed_closed`** | Model Armor unreachable, or the credential cannot be resolved | Check the location, then confirm the impersonation grant is on the service account and not on the project |
+| `502` on every request in Enforce, recorded as **`failed_closed`** | Model Armor unreachable, or the credential cannot be resolved | Check the location, then confirm the key is valid and its service account has `roles/modelarmor.user` on the project |
 | `502` although the configuration is correct and Model Armor is reachable | A filter selected in **Block on** came back without having run | Deselect it if you do not need it, or check it is still configured on the Model Armor template |
-| The policy will not save | The credential field for the selected authentication is empty, **Project**, **Location** or **Template ID** is empty, or no filter is selected in **Block on** | The console names the field; fill it in, or select at least one filter |
+| The policy will not save | The **Service account key (JSON)** is empty, **Project**, **Location** or **Template ID** is empty, or no filter is selected in **Block on** | The console names the field; fill it in, or select at least one filter |
 | Sensitive data is blocked when you chose *Anonymize* | The Model Armor template has no de-identify template, or uses **Basic** | Switch it to **Advanced** and attach the de-identify template |
 | *Sensitive data action* seems ignored | The **Sensitive data** toggle is off | Turn it on — the toggles gate evaluation |
 | Blocked where you expected masking | Another filter blocked the same request | See the warning above: usually Responsible AI |
