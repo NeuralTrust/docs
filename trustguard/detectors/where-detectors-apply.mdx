@@ -1,0 +1,221 @@
+---
+title: "Where each detector applies"
+description: "Which part of an LLM or MCP request and response each TrustGuard detector reads — system prompt, user message, tool definitions, tool arguments, tool results, and model output — with the JSON fields for OpenAI, Anthropic, Gemini, and Cohere."
+---
+
+<p className="nt-lead">
+  A request to a model is not one block of text. It carries a system prompt, the
+  user's message, earlier turns, tool definitions, tool arguments, and tool
+  results — and each of those has a different author and a different risk.
+  TrustGuard splits the payload by role and sends each part only to the
+  detectors built for it.
+</p>
+
+This page is the map. Use it to predict which detector will fire on which part of
+a turn, and to understand why a rule you expected to match did not.
+
+## At a glance
+
+**Input** is the request sent to the model or MCP server. **Output** is what comes
+back. The phase is the one you pick on the [policy](/trustguard/concepts/policies)
+rule.
+
+| Phase | Part of the payload | Detectors that read it |
+|---|---|---|
+| Input | **System / developer instructions** | Prompt Guard |
+| Input | **User message** | Prompt Guard, Toxicity Detection, Custom Moderation, Data Loss Prevention |
+| Input | **URLs in the user message** | URL Analyzer (on the fetched page) |
+| Input | **Files attached to the user message** | Document Analyzer (on the extracted text) |
+| Input | **Tool definitions** — tool and parameter descriptions | Prompt Guard |
+| Input | **Tool-call argument values** | Data Loss Prevention |
+| Input | **Tool results** returned to the model | Indirect Prompt Injection |
+| Input | **Assistant turns replayed in history** | Prompt Guard, Toxicity Detection, Custom Moderation |
+| Output | **Assistant text** | Prompt Guard, Toxicity Detection, Custom Moderation, Data Loss Prevention |
+| Output | **MCP `tools/list` result** — tool descriptions and schemas | Indirect Prompt Injection |
+| Output | **MCP tool result** | Indirect Prompt Injection |
+
+Two consequences are worth knowing before you write rules:
+
+- **A tool result on an LLM call is Input, not Output.** The model asks for a tool
+  in one response; your agent runs it and sends the result back in the *next*
+  request. That is where TrustGuard sees it. On MCP, the result is the server's
+  response, so it arrives on Output.
+- **No single detector covers everything.** Prompt Guard never reads tool results,
+  and Indirect Prompt Injection never reads what the user typed. An agent that
+  calls tools needs both. See
+  [Agent & MCP security](/trustguard/detectors/agent-mcp-security#where-it-looks).
+
+## Detector by detector
+
+### Prompt Guard
+
+Reads text that is meant to steer the model:
+
+- **System and developer instructions**, treated as prompt-side content.
+- **The user's message**, including the text blocks of a multimodal message.
+- **Tool definitions** on an LLM request — each tool's description, and the
+  descriptions of its parameters. An instruction hidden in a description is how a
+  poisoned tool attacks before it is ever called.
+- **Assistant text**, on Output and when it is replayed in a later request's
+  history.
+
+Prompt Guard uses a different model for each side. Prompt-side text is scored for
+jailbreak attempts by whoever wrote it; assistant text is scored for a model that
+has already been jailbroken. You configure one detector; TrustGuard picks the
+model by where the text came from.
+
+It does **not** read tool results, tool-call arguments, or reasoning fields.
+
+### Toxicity Detection and Custom Moderation
+
+Both read conversational text in either direction:
+
+- **The user's message** on Input.
+- **Assistant text** on Output, and when it is replayed in history.
+
+They do not read the system prompt, tool definitions, or tool traffic.
+
+### Data Loss Prevention
+
+Reads text where personal data and secrets actually leave or enter:
+
+- **The user's message** on Input.
+- **Tool-call argument values** on Input — the values your agent is about to
+  send to a tool, such as an email address passed to a CRM lookup.
+- **Assistant text** on Output.
+
+It is the only detector that can **Transform**, masking a matched value in place.
+
+### Indirect Prompt Injection
+
+Reads content that came from a tool rather than from anyone in the conversation:
+
+- **Tool results** returned to the model. Structured results are walked
+  recursively and every string is scored, error messages included.
+- **MCP `tools/list` results** — tool descriptions, plus the titles,
+  descriptions, and defaults inside each input schema.
+- **MCP tool results** on Output.
+
+It does not read the user's message, the assistant's replies, or the system
+prompt. A turn with no tool involved produces no Indirect Prompt Injection
+findings.
+
+### URL Analyzer and Document Analyzer
+
+These two do not score the user's message directly. They pull external content
+*out of* it and score that:
+
+- **URL Analyzer** finds each URL in the user's message, fetches the page with
+  SSRF protections, and scores the returned text.
+- **Document Analyzer** extracts the text of each attached file — running OCR on
+  scans and images — and scores that.
+
+The extracted content goes to the two detectors you linked when you created the
+analyzer: an injection check and a PII check. The original user text is still
+scored by Prompt Guard as usual. A URL is not its content, so the two are
+evaluated separately.
+
+## What is never scanned
+
+| Content | Why |
+|---|---|
+| **Reasoning and thinking blocks** (`thinking`, `thoughtSignature`, thought-only parts) | They are not shown to the user, and scoring them produces findings nobody can act on. Only emitted text is scanned. |
+| **Tool-call arguments as prompt text** | The model wrote them, not the user. They are checked for sensitive data by Data Loss Prevention, never for jailbreaks. |
+| **Assistant history already scored** | An assistant turn evaluated on Output is not rescanned when it is replayed in the next request. |
+
+## Provider field reference
+
+When you send a full provider body to [`POST /v1/evaluate`](/trustguard/api/evaluate)
+— or when a gateway sends it for you — TrustGuard extracts the parts above from
+these fields.
+
+| Provider | System / instructions | User text | Tool definitions | Tool result | Assistant text (response) |
+|---|---|---|---|---|---|
+| **OpenAI Chat Completions** | `messages[role=system\|developer].content` | `messages[role=user].content` | `tools[].function.description` | `messages[role=tool].content` | `choices[].message.content`, `choices[].message.refusal` |
+| **OpenAI Responses** | `instructions` | `input[role=user]` text and `input_text` parts | `tools[].description` | `input[type=function_call_output].output` | `output[type=message].content[type=output_text].text` |
+| **Anthropic Messages** | `system` (string or text blocks) | `messages[role=user].content[type=text].text` | `tools[].description` | `content[type=tool_result]` text, including `is_error` results | `content[type=text].text` |
+| **Gemini** | `systemInstruction.parts[].text` | `contents[role=user].parts[].text` | `tools[].functionDeclarations[].description` | `parts[].functionResponse.response` | `candidates[].content.parts[].text` |
+| **Cohere Chat v2** | `messages[role=system].content` | `messages[role=user].content` | `tools[].function.description` | `messages[role=tool].content` | `message.content[type=text].text` |
+
+Tool-call arguments live in `tool_calls[].function.arguments` (OpenAI Chat,
+Cohere), `input[type=function_call].arguments` (OpenAI Responses), `tool_use.input`
+(Anthropic), and `functionCall.args` (Gemini). Those are the values Data Loss
+Prevention reads.
+
+### Example: one tool-using turn
+
+An OpenAI Chat Completions agent is asked to summarise a web page. The first
+request carries a system prompt, the user's message, and one tool:
+
+```json
+{
+  "messages": [
+    { "role": "system", "content": "Be concise. Use the available tools to fetch webpages when needed." },
+    { "role": "user", "content": "Fetch https://neuraltrust.ai and summarize what the page says." }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "web_fetch",
+        "description": "Fetches the content of a web page at the given URL and returns it as markdown."
+      }
+    }
+  ]
+}
+```
+
+| Field | Detectors |
+|---|---|
+| `messages[0].content` (system) | Prompt Guard |
+| `messages[1].content` (user) | Prompt Guard, Toxicity Detection, Custom Moderation, Data Loss Prevention |
+| `https://neuraltrust.ai`, fetched | URL Analyzer |
+| `tools[0].function.description` | Prompt Guard |
+
+The model answers with a tool call and no text, so Output has nothing to score.
+The agent runs the tool and sends the result back in the next request:
+
+```json
+{
+  "messages": [
+    { "role": "system", "content": "Be concise. Use the available tools to fetch webpages when needed." },
+    { "role": "user", "content": "Fetch https://neuraltrust.ai and summarize what the page says." },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        { "id": "call_5z3k", "type": "function",
+          "function": { "name": "web_fetch", "arguments": "{\"url\":\"https://neuraltrust.ai\"}" } }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_5z3k",
+      "content": "{\"title\":\"NeuralTrust | The Platform for AI and Agent Security\",\"content\":\"…\"}"
+    }
+  ]
+}
+```
+
+| Field | Detectors |
+|---|---|
+| `messages[2].tool_calls[0].function.arguments` | Data Loss Prevention |
+| `messages[3].content` (tool result, every string leaf) | Indirect Prompt Injection |
+
+The final response carries the summary in `choices[0].message.content`, which
+Prompt Guard, Toxicity Detection, Custom Moderation, and Data Loss Prevention read
+on Output.
+
+## MCP traffic
+
+On MCP, TrustGuard reads the JSON-RPC messages between the agent and the server.
+
+| Phase | MCP message | Content scored | Detector |
+|---|---|---|---|
+| Output | Result of `tools/list` | Each tool's `description`, and textual titles, descriptions, and defaults in its input schema | Indirect Prompt Injection |
+| Output | Result of `tools/call` | The tool result content | Indirect Prompt Injection |
+
+Scoring `tools/list` is what catches tool poisoning: a server that advertises a
+tool with instructions in its description is flagged before any tool is called.
+Only collectors that see the tool listing can do this — see
+[How it works](/trustguard/how-it-works) for which ones.
