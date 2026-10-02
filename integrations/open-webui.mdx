@@ -152,59 +152,111 @@ send each person's own access token instead of the application key. TrustGate va
 token — signature against the IdP's keys, issuer, expiry, audience — and records the person
 it names as the request's principal.
 
+You configure three places: your IdP, NeuralTrust, and Open WebUI. Have these at hand:
+
+| Value | Where it comes from |
+|---|---|
+| **Issuer** | Your IdP. Entra: `https://login.microsoftonline.com/{tenant_id}/v2.0`. Okta: `https://{okta_domain}/oauth2/{auth_server_id}`. |
+| **Audience** | The API you expose for TrustGate on the IdP, e.g. `api://trustgate`. |
+| **Open WebUI's client ID** | The OAuth client Open WebUI signs in with. It is the token's `azp`. |
+
 <Steps>
 
-<Step title="Trust your IdP on TrustGate">
-Configure the identity provider under **Machine identity** on the gateway, and enter the
-application through it rather than with a key. See [Authentication](/trustgate/concepts/auth),
-and the [Entra ID](/trustgate/concepts/authorization/entra-id) and
-[Okta](/trustgate/concepts/authorization/okta) manuals. Note the **audience** you set: the
-token Open WebUI sends must carry it.
+<Step title="On your IdP: issue tokens for TrustGate">
+Expose an API for TrustGate with a delegated scope users can be granted, and let Open WebUI's
+client request it. The token Open WebUI receives must carry TrustGate's audience in `aud`.
+
+- **Entra ID:** on the TrustGate app registration, **Expose an API** with a scope such as
+  `api://trustgate/access`, then add that scope to Open WebUI's app registration under
+  **API permissions**. See [Entra ID](/trustgate/concepts/authorization/entra-id).
+- **Okta:** use an authorization server whose audience is TrustGate's, with a scope Open
+  WebUI's client may request. See [Okta](/trustgate/concepts/authorization/okta).
+- **Keycloak:** add an **Audience** mapper to Open WebUI's client that includes TrustGate's
+  audience in the access token.
 </Step>
 
-<Step title="Sign Open WebUI in with the same IdP">
-Configure Open WebUI's OAuth/OIDC login against that provider, and make it request an
-access token for TrustGate's audience. Many IdPs issue a token for a default resource —
-Microsoft Graph, for Entra — unless asked for another, so add the audience's scope to the
-login scopes:
+<Step title="In NeuralTrust: add the trust anchor">
+Go to **Settings → Agent Gateway → Machine identity** → **Add trust anchor**:
+
+- **Kind**: **IdP (JWT)**
+- **Name**: e.g. `company-idp`
+- **Issuer**: your IdP's issuer, exactly as it appears in the token's `iss`
+- **Audience**: TrustGate's audience
+
+Save. No secret is stored: the gateway only verifies tokens. TrustGate finds the signing
+keys from the issuer; pin a **JWKS URL** under **Advanced** if your IdP does not publish
+discovery.
+</Step>
+
+<Step title="In NeuralTrust: enter the application through the IdP">
+Go to **Agent Gateway → Applications**, open the application Open WebUI connects to, and on
+**General → Authentication** choose **Identity provider** and select the anchor:
+
+- **Allowed client IDs**: Open WebUI's client ID, so only tokens issued to Open WebUI get in.
+  Leave it empty only when the audience is used by this application alone.
+
+**Save changes**. Providers and models stay as they were.
+
+<Warning>
+An application is entered one way: with its key **or** through an identity provider. Once it
+trusts the IdP, the application key no longer opens it. If other clients still call this
+application with the key, create a separate application for Open WebUI instead.
+</Warning>
+</Step>
+
+<Step title="In Open WebUI: sign in with the same IdP">
+Configure Open WebUI's OIDC login against that provider and ask for TrustGate's scope with
+the usual login scopes. Without it, many IdPs issue a token for a default resource, such as
+Microsoft Graph for Entra, and TrustGate rejects it:
 
 ```yaml
 services:
   open-webui:
     environment:
       - OPENID_PROVIDER_URL=https://<your-idp>/.well-known/openid-configuration
-      - OAUTH_CLIENT_ID=<client id>
+      - OAUTH_CLIENT_ID=<Open WebUI's client id>
       - OAUTH_CLIENT_SECRET=<client secret>
-      - OAUTH_SCOPES=openid email profile <your TrustGate audience scope>
+      - OAUTH_SCOPES=openid email profile <TrustGate's scope>
       - ENABLE_OAUTH_SIGNUP=true
 ```
 
 Users who were already signed in must sign out and back in to get a token with the new
-scope.
+scope. A user signed in with a local Open WebUI account has no IdP token to send.
 </Step>
 
-<Step title="Switch the connection to OAuth">
-In **Admin Panel → Settings → Connections**, set the TrustGate connection's **Auth** to
-**OAuth**. Open WebUI now sends the signed-in user's token as `Authorization: Bearer` on
-each request, in place of the application key.
+<Step title="In Open WebUI: switch the connection to OAuth">
+In **Admin Panel → Settings → Connections**, edit the TrustGate connection and set **Auth**
+to **OAuth**. The URL stays the same. Open WebUI now sends the signed-in user's token as
+`Authorization: Bearer` on each request, in place of the application key.
 
 Keep `ENABLE_FORWARD_USER_INFO_HEADERS` on if you like: when the user Open WebUI declares has
 the same email as the verified principal, Activity shows them once, as verified.
+</Step>
+
+<Step title="Check it in NeuralTrust">
+Send a chat, then open **Activity** in the console. The request shows the person as a
+**verified** user, and opening it shows how it authenticated.
+
+| Response | Meaning |
+|---|---|
+| `401` | The token failed verification: wrong issuer, wrong audience, or expired. |
+| `403` | The token verified, but its `azp` is not in **Allowed client IDs**. |
 </Step>
 
 </Steps>
 
 The principal is recorded as `principal_subject` (the token's `sub`) and `principal_email`,
 the token's `email` claim or, when the IdP sends none, the first of `emailAddress`,
-`preferred_username`, `upn` and `unique_name` that is an address. A forged, expired or
-wrongly scoped token is rejected with `401`.
+`preferred_username`, `upn` and `unique_name` that is an address.
 
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
 | Activity shows the application but no user | `ENABLE_FORWARD_USER_INFO_HEADERS` is off, a proxy strips the headers, or `FORWARD_USER_INFO_HEADER_JWT` renamed the token header. |
-| Every chat is `401` after switching to OAuth | The token's audience is not the one TrustGate expects: add the audience scope to `OAUTH_SCOPES` and sign in again. Or the user signed in to Open WebUI with a local account, which has no IdP token to send. |
+| Every chat is `401` after switching to OAuth | The token's audience or issuer is not the trust anchor's: add TrustGate's scope to `OAUTH_SCOPES` and sign in again. Or the user signed in to Open WebUI with a local account, which has no IdP token to send. |
+| Every chat is `403` after switching to OAuth | Open WebUI's client ID is missing from the application's **Allowed client IDs**. |
+| Other clients stopped working | The application now trusts the IdP, so its key no longer opens it. Give Open WebUI its own application. |
 | New SSO users see "Account activation pending" | Open WebUI's default role for new sign-ups is `pending`. Approve them in **Admin Panel → Users**, or set `DEFAULT_USER_ROLE=user`. |
 | The user shows as unverified with SSO on | The declared email differs from the token's: Activity shows the declared user, unverified, so a mismatch is visible rather than hidden. |
 
