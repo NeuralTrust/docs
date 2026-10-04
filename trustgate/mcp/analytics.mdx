@@ -1,0 +1,109 @@
+---
+title: "MCP analytics"
+description: "What agents do through the MCP Gateway: which servers and tools they call, how risky those tools say they are, who calls them, and which tools an application could give up."
+---
+
+**Analytics → MCP** shows the traffic of the [MCP Gateway](/trustgate/mcp/overview). Like
+every analytics tab it follows the toolbar: the date range, and the application filter —
+pick an application to see only its traffic.
+
+Only **tool calls** (`tools/call`) count as tool traffic. Connecting (`initialize`) and
+listing (`tools/list` and the other list methods) are MCP traffic too, but they are not
+anyone using a tool, so they never appear as tools.
+
+## Servers and tools
+
+**MCP Providers** lists each MCP server with its requests, average and p95 latency and error
+rate. **Tools** does the same per tool, by the name the agent called it — the
+[name the gateway exposed](/trustgate/mcp/overview#tool-names), prefixed when several
+servers are bound. Latency is the time the upstream server took to answer.
+
+A call counts as an error when the gateway or the server answered with an HTTP error, or the
+call returned a JSON-RPC error.
+
+## Tool risk
+
+MCP lets a server describe how each of its tools behaves, with
+[annotations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)
+in `tools/list`. The gateway reads them on every call and classifies the tool:
+
+| Risk | The server declares |
+|---|---|
+| **Read-only** | `readOnlyHint: true` — the tool changes nothing. |
+| **Destructive** | The tool may change things, and `destructiveHint` is `true` or not set — the protocol's default for a tool that writes. |
+| **Additive** | The tool may change things, but `destructiveHint: false` — it adds without overwriting or deleting. |
+| **Unannotated** | None of `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`. |
+
+A tool marked **open world** (`openWorldHint`, `true` by default once any hint is declared)
+reaches systems beyond its own server — the web, a third-party API — and carries a globe
+icon in the **Tools** table.
+
+The tab opens with the tool calls of the range and how many fell in each class, and the
+**Risk** column puts each tool in its class.
+
+<Warning>
+**Declared, not verified.** Annotations are the server's own description of its tools.
+The gateway reports them but cannot check them, so a server can label a destructive tool
+read-only. Use risk to find what deserves a look, and the server's documentation, or a
+[tool restriction](/trustgate/access/applications#what-it-may-use), to decide.
+</Warning>
+
+Many servers publish no annotations, so a large **Unannotated** share usually describes the
+servers, not a fault. A tool is never guessed into a class: assuming the protocol's defaults
+for a tool that declares nothing would call every one of them destructive. Calls made
+before the gateway started reading annotations are unannotated too.
+
+## Users
+
+**Users** lists who calls tools: per person, their tool calls, the servers they used,
+how many distinct tools, how many destructive calls, their errors and their last call. Sort
+by **Destructive** to see who uses the riskiest tools.
+
+A user is the [end user](/trustgate/observability/end-user-attribution) the client declared
+— for MCP, the `X-NeuralTrust-End-User` an application sends when it
+[acts for its users](/trustgate/mcp/end-users) — and otherwise the identity that
+authenticated: an employee signed in with your identity provider, or the application's own
+key. The list shows the 100 heaviest users of the range; calls with no identity at all are
+left out.
+
+Click a user to open their detail: the same servers and tools tables, risk included,
+narrowed to that person.
+
+## Unused tools
+
+Pick an application that has MCP servers and the tab adds **Unused tools**: for each server,
+the tools the application can call and how many of them it called in the last 30 days —
+*Used 3 of 41* — with the ones it never called. The 30 days are fixed, whatever the
+toolbar's range, so a quiet week does not make a tool look abandoned.
+
+*Can call* is the server's tool list narrowed by the application's
+[tool restrictions](/trustgate/access/applications#what-it-may-use). A server that cannot be
+listed from the console — it needs each caller's own account or URL values — says so instead.
+
+### Restrict to used tools
+
+An administrator can cut a server down to the tools actually used: **Restrict to used
+tools** asks for confirmation, then sets the application's tool restrictions for that server
+to exactly those tools. A tool removed this way stops being listed to the agent and a call to
+it is refused.
+
+What it changes, and what it does not:
+
+- **It only removes.** It never grants a tool the application could not already call.
+- **Other servers are untouched.** On an application that had no restrictions at all, its
+  other servers are explicitly kept fully open, and so are this server's prompts and
+  resources, since setting restrictions for the first time would otherwise close them.
+- **It is disabled when nothing was used**, because restricting to no tools would close the
+  server entirely.
+
+A tool that is needed but rare — a quarterly export — will show as unused. Check the list
+before restricting; you can always widen the restrictions again on the application.
+
+The change is recorded in the [audit log](/platform/audit-logs).
+
+## Related
+
+- [MCP Gateway](/trustgate/mcp/overview): how servers, tools and accounts fit together
+- [Applications](/trustgate/access/applications): tool restrictions and who a call runs as
+- [End users of your application](/trustgate/mcp/end-users): naming the person a call is for
+- [Event schema](/platform/event-schema): the `mcp.*` fields behind this tab

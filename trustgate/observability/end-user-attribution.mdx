@@ -153,17 +153,49 @@ A chat client sends each message as its own request. Without a conversation id e
 message looks like a fresh session, which makes session-scoped alerts and any
 "conversation" view useless.
 
-TrustGate takes the first of:
+TrustGate takes the first of these that carries a valid id. An id the client sent — a header
+or the configured body field — always wins over one the gateway infers:
 
 1. The session header configured on the gateway (`X-Session-Id` by default)
-2. `X-TG-Session-Id`
-3. `X-OpenWebUI-Chat-Id`
+2. A header a known client already sends:
+
+   | Header | Sent by |
+   |---|---|
+   | `X-Session-Id` | opencode |
+   | `X-TG-Session-Id` | TrustGate's own namespace, for any client |
+   | `X-OpenWebUI-Chat-Id` | [Open WebUI](/integrations/open-webui) |
+   | `X-Claude-Code-Session-Id` | Claude Code |
+   | `session_id`, `session-id` | Codex CLI |
+   | `x-session-affinity` | opencode |
+   | `Helicone-Session-Id` | Helicone-instrumented clients |
+   | `x-litellm-session-id`, `x-litellm-trace-id` | LiteLLM |
+
+3. Any other header named `x-<vendor>-session-id`
 4. The body field named by the gateway's session configuration, if set
-5. A generated id — one per request, which is the old behaviour
+5. On OpenAI Responses requests, the `conversation` id (Conversations API)
+6. On OpenAI Responses requests, the conversation of the response named in
+   `previous_response_id` — so a chain of turns stays one conversation even when the client
+   sends no id
+7. A generated id
 
 The value is recorded as `session_id` and echoed back on the response as `X-Session-Id`.
+
+The first three headers and the configured header and body field accept 1–256 characters.
+The rest accept 8–256 characters of letters, digits and `.` `_` `:` `-`: a header that only
+shares a name, or a short placeholder, must not merge unrelated traffic into one session.
+
+A generated id stands for a whole conversation only on OpenAI Responses, where it is the id
+of the chain of turns. On every other API it is a single request: it is echoed so a client
+can adopt it and send it back, but nothing records it as a session.
+
+<Note>
+`session_id` contains an underscore, which ingress-nginx drops unless
+`enable-underscores-in-headers: "true"` is set in its ConfigMap. Without it, Codex CLI
+requests fall through to the next source.
+</Note>
+
 Sessions are enabled by default; if a gateway sets `session.enabled: false`, none of these
-headers are read.
+sources are read.
 
 ## Where it shows up
 
