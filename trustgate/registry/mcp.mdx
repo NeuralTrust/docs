@@ -84,10 +84,84 @@ also where the assignments themselves are set.
 
 ## Tools are exposed here, governed elsewhere
 
-An entry exposes whatever tools its server advertises. Which of them a given
-application may actually call is set on the
+An entry exposes whatever tools its server advertises, unless you
+[lock its tools](#locking-a-servers-tools). Which of them a given application may
+actually call is set on the
 [application](/trustgate/access/applications#what-it-may-use); how often any of
 them may run is a [policy](/trustgate/policies/per-tool-rate-limiter).
+
+## Locking a server's tools
+
+A server decides its own tool list, and it can change that list at any time. A
+tool it adds tomorrow, or a description it rewrites, reaches every application
+that uses the entry with nobody having looked at it. Applications that restrict
+their tools are covered, because a tool they did not name never reaches them.
+Applications that allow every tool, which is the default, are not.
+
+**Lock tools** closes that gap for the whole server. Once an entry is locked, only
+the tools you have approved are exposed. A new tool, or an approved one whose
+description or input schema changes, is held back until someone approves it.
+
+### Turning it on
+
+Edit the entry and check **Lock tools**. The console lists the tools the server
+advertises right now, all checked, each with its full description and schema.
+Uncheck any you do not want, then confirm.
+
+- **Checked** tools are approved.
+- **Unchecked** tools are rejected. They stay hidden, and you can approve them
+  later.
+
+Approving the current list is what keeps a lock from cutting traffic: the
+moment it takes effect, every application keeps the tools it was already
+using.
+
+For a server where each user signs in with their own account, the list cannot be
+read ahead of time, because there is no account to ask with. Such a server is
+locked with nothing approved. Its tools appear for review the first time a user
+connects, and nothing is exposed until you approve them.
+
+### Reviewing tools
+
+**Review** on a locked entry sorts its tools into **To review**, **Approved** and
+**Rejected**. The registry list shows how many are waiting.
+
+| In **To review** | Why it is there |
+|---|---|
+| **New** | The server started advertising a tool nobody has approved. |
+| **Changed** | An approved tool's description or input schema changed. The review shows the old and the new side by side. |
+| No tag | An approved tool was missing from the server's list when the entry was locked again, so nobody has checked it since. |
+
+A changed tool is the one to read carefully. It is held back because the server
+already runs the new version: the definition you approved is no longer what a
+call would reach. Read the full description before approving it. It is text the
+server controls, and it is passed to your agents.
+
+Approving a tool exposes it straight away, and connected clients are told their
+tool list changed. Rejecting it keeps it hidden for as long as the server offers
+it. You can reverse either decision later.
+
+A hidden tool answers like a tool that does not exist. A client calling it by
+name learns nothing about what the server offers.
+
+### Turning it off
+
+Unchecking **Lock tools** needs the **Admin** role. The entry then exposes every
+tool the server advertises again, including any it adds later. Your decisions are
+kept: if you lock the entry again, its tools come back to review against them.
+
+<Warning>
+**Hybrid and external data planes must be upgraded first.** A data plane running a
+release older than tool locking ignores the lock and exposes every tool the server
+advertises. Before you lock an entry, upgrade every data plane that serves MCP
+traffic for that gateway. See [hybrid](/neuraltrust/deployment/hybrid) and
+[external](/neuraltrust/deployment/external) deployments.
+</Warning>
+
+Locking reads a tool's name, description and input schema. A server that changes
+what a tool *does* without changing how it describes it cannot be caught at the
+gateway. For that, rely on the server's own controls and on the
+[policies](/trustgate/policies/per-tool-rate-limiter) that govern each call.
 
 ## Every server
 
