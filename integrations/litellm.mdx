@@ -27,10 +27,6 @@ machine. For those, use a client integration such as
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | A custom guardrail file evaluates the request before the model call and the response afterward. On `stream: true`, `incremental_diff` inspects the full buffered completion before delivery. LiteLLM sends each evaluation to the [policy](/trustguard/concepts/policies) assigned to the collector. | Monitor · Block · Transform |
 
-The proxy can also carry the conversation, so policy applies across turns rather
-than to one message at a time. That requires the caller to send a session key.
-See [Multi-turn conversations](#multi-turn-conversations).
-
 ## Before you start
 
 | Requirement | Notes |
@@ -434,78 +430,6 @@ The example explicitly selects `incremental_diff`. Omitting the setting falls
 back to `block_only` for compatibility. It provides no guarantee that
 output is inspected before delivery, and output transformations are discarded
 
-## Multi-turn conversations
-
-A multi-turn attack spreads its intent across several messages. Each one reads as
-harmless on its own. See
-[multi-turn attacks](/trusttest/create/threat-detection/prompt-injections/multi-turn/overview).
-
-Two inputs give TrustGuard the conversation:
-
-| What the guardrail sends | What TrustGuard can then do |
-|---|---|
-| A stable `session_id` on **every** request of one conversation | Group the turns server-side in **Activity**, and feed the [stateful detectors](/trustguard/concepts/collectors#attribution). |
-| Earlier turns inside `payload.messages` | Score the newest message in one evaluation that also contains what came before. |
-
-Neither happens by default. `/v1/evaluate`
-[synthesizes a `session_id` when the field is omitted](/trustguard/api/evaluate#request),
-so a proxy whose callers send no conversation key produces one session per
-request.
-
-### Send a session ID
-
-LiteLLM does not invent a conversation key. The **caller** supplies one on every
-request.
-
-| How the caller sends it | Notes |
-|---|---|
-| `x-litellm-session-id` request header | The recommended form. Any non-empty string is accepted. |
-| Any `x-<vendor>-session-id` request header | LiteLLM matches that pattern generically. The value must be at least 8 characters of `A-Z`, `a-z`, `0-9`, `_`, or `-`. Requires LiteLLM 1.84.0 or later. |
-| `x-litellm-trace-id` request header | Takes **precedence** over `x-litellm-session-id`. Only use it if the value is stable for the whole conversation. |
-| Top-level body field `litellm_session_id` | For callers that cannot set headers. |
-| Body `metadata: {"session_id": "…"}` | The alternative body form. |
-| `X-OpenWebUI-Chat-Id` request header | Read by the guardrail itself, only when LiteLLM found none of the above. Open WebUI sends it on every request of a chat. |
-
-A header always overrides a body value.
-
-<CodeGroup>
-  ```python Python
-  client.chat.completions.create(
-      model="<your-model>",
-      messages=[...],
-      extra_headers={"x-litellm-session-id": conversation_id},
-  )
-  ```
-
-  ```ts TypeScript
-  await client.chat.completions.create(
-    { model: "<your-model>", messages: [...] },
-    { headers: { "x-litellm-session-id": conversationId } },
-  )
-  ```
-
-  ```bash curl
-  curl $PROXY/v1/chat/completions \
-    -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-    -H "x-litellm-session-id: $CONVERSATION_ID" \
-    -d '{"model":"<your-model>","messages":[{"role":"user","content":"…"}]}'
-  ```
-</CodeGroup>
-
-<Warning>
-`metadata: {"litellm_session_id": "…"}` does **not** work. Inside `metadata` the
-key is `session_id`.
-</Warning>
-
-Chat clients that resend the transcript already put earlier turns in
-`messages`. The guardrail forwards what LiteLLM extracted. Tool results must
-keep `role: "tool"` so
-[indirect prompt injection](/trustguard/detectors/agent-mcp-security) can
-see them.
-
-On `/v1/responses`, send `x-litellm-session-id` explicitly.
-`previous_response_id` does not supply a session key to the guardrail.
-
 ## Attribute requests to a user
 
 A proxy usually serves many people through a few keys. The guardrail's `consumer_id` names
@@ -638,11 +562,13 @@ enable it.
 
 ### Attributes
 
-- `session_id`: the conversation key the **caller** supplied. See
-  [Multi-turn conversations](#multi-turn-conversations).
+- `session_id`: the conversation key the **caller** supplied (`x-litellm-session-id`),
+  else Open WebUI's `X-OpenWebUI-Chat-Id`.
 - `consumer_id`: the virtual key's alias, then user email, user id, or team
   alias. The master key resolves to LiteLLM's proxy admin user id,
   `default_user_id`. A key with none of those fields sends no `consumer_id`.
+- `attributes.user`: the person behind the request, when one is named. See
+  [Attribute requests to a user](#attribute-requests-to-a-user).
 
 ### Troubleshooting
 
