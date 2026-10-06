@@ -48,8 +48,8 @@ See [Policies](/trustguard/concepts/policies).
 
 ## Set up the custom guardrail file
 
-The guardrail uses the `httpx` client included with LiteLLM, so it requires no
-additional dependency.
+The guardrail uses the `httpx` client and PyJWT, both included with the LiteLLM
+proxy, so it requires no additional dependency.
 
 <Accordion title="Custom guardrail: trustguard_guardrail.py">
 
@@ -60,6 +60,7 @@ from collections.abc import AsyncGenerator, AsyncIterable
 from typing import Any, Final, Optional
 
 import httpx
+import jwt
 from fastapi import HTTPException
 from litellm import ModelResponse, ModelResponseStream, stream_chunk_builder
 from litellm.llms.base_llm.base_model_iterator import convert_model_response_to_streaming
@@ -78,6 +79,10 @@ from litellm.llms.custom_httpx.http_handler import (
 )
 
 EVALUATE_PATH = "/v1/evaluate"
+OPENWEBUI_JWT_HEADER = "x-openwebui-user-jwt"
+OPENWEBUI_CHAT_HEADER = "x-openwebui-chat-id"
+OPENWEBUI_JWT_ISSUER = "open-webui"
+MAX_USER_VALUE_LEN = 256
 
 
 class TrustGuard(CustomGuardrail):
@@ -88,6 +93,7 @@ class TrustGuard(CustomGuardrail):
         timeout: float = 10.0,
         fail_open: bool = False,
         streaming_transform_mode: Optional[str] = None,
+        openwebui_jwt_secret: Optional[str] = None,
         http_client: Optional[httpx.AsyncClient] = None,
         **kwargs: Any,
     ) -> None:
@@ -99,6 +105,7 @@ class TrustGuard(CustomGuardrail):
         self.timeout = float(timeout)
         self.fail_open = bool(fail_open)
         self.streaming_transform_mode = streaming_transform_mode or "block_only"
+        self.openwebui_jwt_secret = (openwebui_jwt_secret or "").strip() or None
         self.http = http_client or get_async_httpx_client(
             llm_provider=httpxSpecialProvider.GuardrailCallback
         )
@@ -177,12 +184,17 @@ class TrustGuard(CustomGuardrail):
             "direction": "input" if input_type == "request" else "output",
             "protocol": "llm",
         }
-        session_id = get_session_id_from_request_data(request_data)
+        session_id = get_session_id_from_request_data(request_data) or self._header(
+            request_data, OPENWEBUI_CHAT_HEADER
+        )
         if session_id:
             body["session_id"] = str(session_id)
         consumer_id = self._consumer_id(request_data)
         if consumer_id:
             body["consumer_id"] = consumer_id
+        user = self._user(request_data)
+        if user:
+            body["attributes"] = {"user": user}
 
         try:
             response = await self.http.post(
@@ -249,6 +261,69 @@ class TrustGuard(CustomGuardrail):
                 return value
         return None
 
+    def _user(self, request_data: dict) -> Optional[dict]:
+        """The person the request is for, as TrustGuard's `attributes.user`."""
+        metadata = request_data.get("litellm_metadata") or request_data.get("metadata") or {}
+        headers = self._headers(request_data)
+
+        token = headers.get(OPENWEBUI_JWT_HEADER)
+        if self.openwebui_jwt_secret:
+            # Verified mode: only a token signed with Open WebUI's secret names
+            # the user. Plain headers and body fields are not trusted here.
+            if not isinstance(token, str) or not token.strip():
+                return None
+            claims = self._openwebui_claims(token.strip())
+            return self._clean({"id": claims.get("sub"), "email": claims.get("email")})
+
+        if isinstance(token, str) and token.strip():
+            claims = self._openwebui_claims(token.strip())
+            user = self._clean({"id": claims.get("sub"), "email": claims.get("email")})
+            if user:
+                return user
+
+        return self._clean({
+            "id": headers.get("x-openwebui-user-id") or metadata.get("user_api_key_end_user_id"),
+            "email": headers.get("x-openwebui-user-email"),
+        })
+
+    @staticmethod
+    def _headers(request_data: dict) -> dict:
+        metadata = request_data.get("litellm_metadata") or request_data.get("metadata") or {}
+        server_request = request_data.get("proxy_server_request") or {}
+        raw = metadata.get("headers") or server_request.get("headers") or {}
+        return {str(key).lower(): value for key, value in raw.items()}
+
+    @classmethod
+    def _header(cls, request_data: dict, name: str) -> Optional[str]:
+        value = cls._headers(request_data).get(name)
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    def _openwebui_claims(self, token: str) -> dict:
+        """Open WebUI's signed user token, verified when the secret is configured."""
+        try:
+            if self.openwebui_jwt_secret:
+                return jwt.decode(
+                    token,
+                    self.openwebui_jwt_secret,
+                    algorithms=["HS256"],
+                    issuer=OPENWEBUI_JWT_ISSUER,
+                    options={"require": ["exp", "iss", "sub"]},
+                )
+            claims = jwt.decode(token, options={"verify_signature": False})
+            return claims if claims.get("iss") == OPENWEBUI_JWT_ISSUER else {}
+        except jwt.PyJWTError as exc:
+            verbose_proxy_logger.warning("TrustGuard: ignoring Open WebUI user token: %s", exc)
+            return {}
+
+    @staticmethod
+    def _clean(user: dict) -> Optional[dict]:
+        cleaned = {
+            key: value.strip()[:MAX_USER_VALUE_LEN]
+            for key, value in user.items()
+            if isinstance(value, str) and value.strip()
+        }
+        return cleaned or None
+
     @staticmethod
     def _apply_transform(inputs: dict, transformed: Any, input_type: str) -> dict:
         payload = transformed if isinstance(transformed, dict) else {}
@@ -310,6 +385,7 @@ guardrails:
       timeout: 10.0
       fail_open: false
       streaming_transform_mode: incremental_diff
+      # openwebui_jwt_secret: os.environ/OPENWEBUI_JWT_SECRET  # see Attribute requests to a user
 ```
 
 `TRUSTGUARD_API_BASE` is the host (`https://trustguard.neuraltrust.ai` or your
@@ -388,6 +464,7 @@ request.
 | `x-litellm-trace-id` request header | Takes **precedence** over `x-litellm-session-id`. Only use it if the value is stable for the whole conversation. |
 | Top-level body field `litellm_session_id` | For callers that cannot set headers. |
 | Body `metadata: {"session_id": "…"}` | The alternative body form. |
+| `X-OpenWebUI-Chat-Id` request header | Read by the guardrail itself, only when LiteLLM found none of the above. Open WebUI sends it on every request of a chat. |
 
 A header always overrides a body value.
 
@@ -428,6 +505,58 @@ see them.
 
 On `/v1/responses`, send `x-litellm-session-id` explicitly.
 `previous_response_id` does not supply a session key to the guardrail.
+
+## Attribute requests to a user
+
+A proxy usually serves many people through a few keys. The guardrail's `consumer_id` names
+the LiteLLM **key** — its alias, or its owner's email — so every person behind a shared
+key looks the same in TrustGuard. The guardrail also sends the person the request is for,
+as `attributes.user` on [`/v1/evaluate`](/trustguard/api/evaluate#request), and
+**Activity** shows them in the **User** column: their email, or their id when there is no
+email.
+
+The guardrail takes the first source that names someone:
+
+| Order | Source | Recorded as |
+|---|---|---|
+| 1 | Open WebUI's signed user token, `X-OpenWebUI-User-Jwt` | `id` from `sub`, `email` |
+| 2 | Open WebUI's user headers, `X-OpenWebUI-User-Id` and `X-OpenWebUI-User-Email` | `id`, `email` |
+| 3 | LiteLLM's end user: `x-litellm-end-user-id`, the body `user` field, or a header you map in `user_header_mappings` | `id` |
+
+A request that names nobody is sent without `attributes`, exactly as before. Values are
+trimmed and capped at 256 characters.
+
+To attribute your own clients, have them send `x-litellm-end-user-id`, or map a header they
+already send. LiteLLM then also tracks spend for that end user:
+
+```yaml
+general_settings:
+  user_header_mappings:
+    - header_name: X-Company-User
+      litellm_user_role: customer
+```
+
+<Warning>
+These sources are asserted by whoever holds the LiteLLM key, and are not verified: anyone
+with the key can put any name in them. Use them to see and attribute traffic. When the name
+has to be trustworthy, verify it as below.
+</Warning>
+
+### Verified users from Open WebUI
+
+Open WebUI can sign its user with a secret you choose
+(`FORWARD_USER_INFO_HEADER_JWT_SECRET`, see [Open WebUI](/integrations/open-webui#signed-user-jwt)).
+You run both Open WebUI and LiteLLM, so give the guardrail the same secret:
+
+```yaml
+      openwebui_jwt_secret: os.environ/OPENWEBUI_JWT_SECRET
+```
+
+With it set, the guardrail checks the token's HS256 signature, issuer and expiry. Only a
+token that verifies names the user. A forged or expired token, plain user headers, and
+LiteLLM's end user are all ignored, so the user in TrustGuard is always someone Open WebUI
+signed for. A rejected token is logged as a warning and the request continues without a
+user; attribution never blocks traffic.
 
 ## Verify
 
@@ -491,6 +620,7 @@ Enforcement is request-level: a finding blocks the complete LiteLLM request.
 | `timeout` | Maximum duration of a TrustGuard request, in seconds. | `10.0` |
 | `fail_open` | Allow traffic when TrustGuard cannot return HTTP `200`. | `false` |
 | `streaming_transform_mode` | `block_only` (default) or `incremental_diff` for streamed redaction. | `block_only` |
+| `openwebui_jwt_secret` | Open WebUI's `FORWARD_USER_INFO_HEADER_JWT_SECRET`. When set, only a verified Open WebUI token attributes the user. | Unset: users are read unverified |
 
 **Failure behavior.** Connection errors, timeouts, and every non-`200` follow
 `fail_open`:
