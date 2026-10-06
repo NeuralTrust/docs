@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 import tempfile
 import unittest
 from collections.abc import AsyncIterator
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Final
 
 import httpx
+import jwt
 from fastapi import HTTPException
 from litellm import ModelResponse, ModelResponseStream
 from litellm.integrations.custom_guardrail import CustomGuardrail
@@ -53,6 +55,34 @@ def guard(client: httpx.AsyncClient) -> CustomGuardrail:
         event_hook=['pre_call', 'post_call'], default_on=True,
     )
 
+
+OPENWEBUI_SECRET: Final = 'openwebui-test-secret'
+
+
+def openwebui_token(secret: str = OPENWEBUI_SECRET, **claims: object) -> str:
+    """The token Open WebUI forwards when FORWARD_USER_INFO_HEADER_JWT_SECRET is set."""
+    now: Final = int(time.time())
+    return jwt.encode({'sub': 'owui-1', 'email': 'ana@example.com', 'name': 'Ana', 'role': 'user',
+                       'iss': 'open-webui', 'iat': now, 'exp': now + 300, **claims}, secret, algorithm='HS256')
+
+
+async def evaluated(request_data: dict, **options: object) -> dict:
+    """The /v1/evaluate body the guardrail sends for one request."""
+    sent: Final = []
+
+    def allow(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={'status': 'allow'})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(allow)) as client:
+        connector: Final = module.TrustGuard(api_base='https://guard.test', api_key='test', http_client=client,
+                                             guardrail_name='test', **options)
+        await connector.apply_guardrail({'texts': ['hello']}, request_data, 'request')
+    return sent[0]
+
+
+def with_headers(**headers: str) -> dict:
+    return {'proxy_server_request': {'headers': {name.replace('_', '-'): value for name, value in headers.items()}}}
 
 class DocumentedGuardrailTests(unittest.IsolatedAsyncioTestCase):
     async def test_email_spanning_chunks_never_reaches_client(self) -> None:
@@ -146,6 +176,54 @@ class DocumentedGuardrailTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as error:
             module.TrustGuard._apply_transform(inputs, {'messages': [{'role': 'assistant', 'content': None}]}, 'response')
         self.assertEqual(error.exception.status_code, 400)
+
+
+class EndUserAttributionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_open_webui_headers_name_the_user(self) -> None:
+        body: Final = await evaluated(with_headers(**{'X-OpenWebUI-User-Id': 'owui-1',
+                                                      'X-OpenWebUI-User-Email': 'ana@example.com'}))
+        self.assertEqual(body['attributes'], {'user': {'id': 'owui-1', 'email': 'ana@example.com'}})
+
+    async def test_open_webui_token_is_read_unverified_without_the_secret(self) -> None:
+        body: Final = await evaluated(with_headers(**{'X-OpenWebUI-User-Jwt': openwebui_token('any-secret')}))
+        self.assertEqual(body['attributes'], {'user': {'id': 'owui-1', 'email': 'ana@example.com'}})
+
+    async def test_a_token_open_webui_did_not_issue_is_ignored(self) -> None:
+        body: Final = await evaluated(with_headers(**{'X-OpenWebUI-User-Jwt': openwebui_token(iss='other')}))
+        self.assertNotIn('attributes', body)
+
+    async def test_litellm_end_user_names_the_user(self) -> None:
+        body: Final = await evaluated({'metadata': {'user_api_key_end_user_id': 'maria@example.com'}})
+        self.assertEqual(body['attributes'], {'user': {'id': 'maria@example.com'}})
+
+    async def test_a_request_naming_nobody_sends_no_attributes(self) -> None:
+        body: Final = await evaluated({})
+        self.assertNotIn('attributes', body)
+
+    async def test_values_are_capped(self) -> None:
+        body: Final = await evaluated(with_headers(**{'X-OpenWebUI-User-Id': 'a' * 300}))
+        self.assertEqual(body['attributes'], {'user': {'id': 'a' * 256}})
+
+    async def test_open_webui_chat_is_the_session_when_litellm_has_none(self) -> None:
+        body: Final = await evaluated(with_headers(**{'X-OpenWebUI-Chat-Id': 'chat-42'}))
+        self.assertEqual(body['session_id'], 'chat-42')
+
+    async def test_verified_mode_accepts_a_token_signed_with_the_secret(self) -> None:
+        body: Final = await evaluated(with_headers(**{'X-OpenWebUI-User-Jwt': openwebui_token()}),
+                                      openwebui_jwt_secret=OPENWEBUI_SECRET)
+        self.assertEqual(body['attributes'], {'user': {'id': 'owui-1', 'email': 'ana@example.com'}})
+
+    async def test_verified_mode_rejects_a_forged_or_expired_token(self) -> None:
+        for token in (openwebui_token('attacker'), openwebui_token(exp=int(time.time()) - 60)):
+            body = await evaluated(with_headers(**{'X-OpenWebUI-User-Jwt': token}),
+                                   openwebui_jwt_secret=OPENWEBUI_SECRET)
+            self.assertNotIn('attributes', body)
+
+    async def test_verified_mode_ignores_unsigned_sources(self) -> None:
+        request_data: Final = with_headers(**{'X-OpenWebUI-User-Email': 'boss@example.com'})
+        request_data['metadata'] = {'user_api_key_end_user_id': 'boss@example.com'}
+        body: Final = await evaluated(request_data, openwebui_jwt_secret=OPENWEBUI_SECRET)
+        self.assertNotIn('attributes', body)
 
 
 if __name__ == '__main__':
