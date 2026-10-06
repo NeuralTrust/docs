@@ -1,6 +1,6 @@
 ---
 title: Integrations
-description: "Forward NeuralTrust alert findings to your SIEM. Connect Microsoft Sentinel, Datadog, Splunk, Elastic, IBM QRadar, CrowdStrike Falcon Next-Gen SIEM, or a generic webhook and stream each new alert as an OCSF Detection Finding."
+description: "Forward NeuralTrust alert findings to your SIEM. Connect Microsoft Sentinel, Datadog, Splunk, Elastic, IBM QRadar, CrowdStrike Falcon Next-Gen SIEM, Rapid7 InsightIDR, or a generic webhook and stream each new alert as an OCSF Detection Finding."
 ---
 
 # Integrations
@@ -21,6 +21,7 @@ This forwards **alert findings** derived from TrustGuard and TrustGate telemetry
 | Elastic | Elasticsearch index / data stream |
 | IBM QRadar | LEEF 2.0 over syslog (TLS) |
 | CrowdStrike Falcon Next-Gen SIEM | HEC / HTTP Event Data Connector |
+| Rapid7 InsightIDR | Custom Logs event source (webhook) |
 | Webhook | Generic HTTP POST (optional header auth + HMAC signature) |
 
 You can connect more than one destination — each new alert fans out to every connected integration whose filters match.
@@ -48,7 +49,7 @@ You can connect more than one destination — each new alert fans out to every c
 
 ## OCSF Detection Finding format
 
-Every destination receives the same **OCSF Detection Finding** document (class UID **2004**, category **Findings**). Splunk, Datadog, Elastic, and webhooks get this JSON as the event body; QRadar receives a LEEF mapping derived from it; Sentinel wraps it for Log Analytics.
+Every destination receives the same **OCSF Detection Finding** document (class UID **2004**, category **Findings**). Splunk, Datadog, Elastic, Rapid7 InsightIDR, and webhooks get this JSON as the event body; QRadar receives a LEEF mapping derived from it; Sentinel wraps it for Log Analytics.
 
 ### Top-level fields
 
@@ -264,6 +265,22 @@ Open **Telemetry → Integrations**, choose a provider, and fill in its connecti
     | **Port** | No | Collector port (default `514`). |
     | **Use TLS** | No | Send over a TLS connection. |
     | **Skip TLS verification** | No | Accept self-signed collector certificates. |
+  </Accordion>
+
+  <Accordion title="Rapid7 InsightIDR">
+    Posts findings to an InsightIDR **Custom Logs** event source that uses the **Webhook** collection method. Each alert is sent as one JSON event whose body is the OCSF Detection Finding (see [OCSF format](#ocsf-detection-finding-format) above), so InsightIDR parses its fields natively.
+
+    | Field | Required | Description |
+    |---|---|---|
+    | **Webhook URL** | Yes | The URL InsightIDR generates for the event source, in the form `https://<region>.api.insight.rapid7.com/siem/custom/webhook/<id>`. |
+
+    In InsightIDR, go to **Data Collection → Add Data Source → Add Raw Data → Custom Logs**, set the collection method to **Webhook**, leave **JSON Events Key** empty, and copy the generated URL into **Webhook URL**.
+
+    The webhook URL is the only credential for the event source, so treat it as a secret: it is encrypted at rest and never shown again after saving. Only `https` URLs on `<region>.api.insight.rapid7.com` with the `/siem/custom/webhook/` path are accepted.
+
+    InsightIDR limits a single event to 100,000 characters. If an alert with many evidence events exceeds that limit, NeuralTrust keeps the earliest evidence, drops the rest, and sets `unmapped.neuraltrust.evidence_truncated` to `true`. The `count` field still reports the full number of occurrences.
+
+    To find forwarded alerts in **Log Search**, select the event source's log and filter with `where(class_uid = 2004)`.
   </Accordion>
 
   <Accordion title="Webhook">
