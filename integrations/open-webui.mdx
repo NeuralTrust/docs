@@ -249,6 +249,32 @@ The principal is recorded as `principal_subject` (the token's `sub`) and `princi
 the token's `email` claim or, when the IdP sends none, the first of `emailAddress`,
 `preferred_username`, `upn` and `unique_name` that is an address.
 
+## Behind LiteLLM
+
+If Open WebUI talks to a [LiteLLM](/integrations/litellm) proxy guarded by TrustGuard
+instead of to TrustGate, the same headers identify the user in **TrustGuard Activity**.
+LiteLLM keeps them, and the guardrail sends the person as `attributes.user` on each
+evaluation and Open WebUI's chat as the session. LiteLLM itself needs no change for this.
+
+| Open WebUI sends | TrustGuard records |
+|---|---|
+| `X-OpenWebUI-User-Id`, `X-OpenWebUI-User-Email` | The user, unverified |
+| `X-OpenWebUI-User-Jwt`, guardrail without the secret | The user, unverified |
+| `X-OpenWebUI-User-Jwt`, guardrail with `openwebui_jwt_secret` | The user, **verified** by its signature |
+| `X-OpenWebUI-Chat-Id` | The session, when LiteLLM has none |
+
+Behind LiteLLM, the signed token *can* be verified, because you hold the secret on both
+sides. Set `FORWARD_USER_INFO_HEADER_JWT_SECRET` in Open WebUI, and the same value as the
+guardrail's `openwebui_jwt_secret`:
+
+```yaml
+# LiteLLM config.yaml, under the TrustGuard guardrail's litellm_params
+      openwebui_jwt_secret: os.environ/OPENWEBUI_JWT_SECRET
+```
+
+Then only a token Open WebUI signed names the user; forged tokens and plain headers are
+ignored. See [Attribute requests to a user](/integrations/litellm#attribute-requests-to-a-user).
+
 ## Troubleshooting
 
 | Symptom | Cause |
