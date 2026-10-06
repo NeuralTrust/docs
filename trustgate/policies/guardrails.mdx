@@ -8,13 +8,16 @@ A guardrail inspects the traffic passing through the gateway and either lets it
 through, refuses it, or rewrites it. Six of them are available, and they differ
 in ways that matter before you pick one.
 
-## The one limit shared by all of them
+## Streamed responses
 
-**A streamed response cannot be inspected or blocked as it is being written.**
-The words are already reaching the reader by the time a detector would decide.
-Put a guardrail on the request leg, or on non-streamed responses, when you need
-it to actually stop something. On a streaming application, a response-side
-guardrail observes; it does not protect.
+TrustGuard, OpenAI Moderation, Google Model Armor and Regex Replace check a
+streamed response as it is generated. The gateway holds each stretch of text
+briefly, checks it, and only then lets it through. A violation stops the stream
+at that point, but the text released before it has already reached the reader.
+
+AWS Bedrock Guardrail does not check streamed responses, and Azure Content
+Safety checks requests only. Put them on the request leg, or rely on
+non-streamed responses, when you need them to stop something.
 
 ## Choosing one
 
@@ -51,14 +54,15 @@ a setup that happens in the provider's console before this one is any use.
 
 ## Two things worth knowing before you commit
 
-**Only TrustGuard keeps traffic flowing when it cannot be used** — unreachable,
-too slow, refusing the gateway's credentials, or not configured on the gateway.
-It forwards the call uninspected and records it as **Failed Open**, unless you
-set it to fail closed. Every other
-provider-backed guardrail here refuses the call in Enforce when its provider is
-unreachable, so an outage at the provider becomes an outage for your
-application. Decide which of those you want before you put a guardrail in front
-of production traffic.
+**A guardrail that cannot be reached does not stop your traffic.** When the
+provider is unreachable, too slow, or answers without a verdict, OpenAI
+Moderation, Azure Content Safety, Bedrock and Model Armor forward the call
+uninspected and record it as **Failed Open**, in Enforce as well as Observe.
+TrustGuard does the same unless you set it to fail closed. The trade is that a
+provider outage leaves that traffic unguarded rather than refused, so watch for
+`failed_open` in the event if the guard is something you rely on. The one
+exception: Bedrock and Model Armor still refuse in Enforce when the provider
+confirms sensitive data but returns nothing to mask it with.
 
 **Azure never sees the model's answer.** It runs on requests only. If what you
 need to inspect is what the model said, this is not the one.

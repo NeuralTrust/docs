@@ -80,9 +80,8 @@ call that can stop something before it reaches the model, and it is the one
 this policy always makes.
 
 <Note>
-**A streamed response is not inspected**, even with **Inspect model responses**
-on, unless streaming inspection has been configured on this policy through the
-admin API. From the console, only a non-streamed response is evaluated.
+With **Inspect model responses** on, a streamed response is inspected as it is
+generated, and a failure of that check lets the stream continue.
 </Note>
 
 ### Mode and scope
@@ -136,32 +135,27 @@ with the score OpenAI returned for it. The wording is
 | Situation | Enforce | Observe |
 |---|---|---|
 | OpenAI flags a category | `403`, refused, decision `block` | Decision `reported`, request continues |
-| The Moderations call fails, or its response is incomplete | **`502`, refused**, decision `failed_closed` | Decision `failed_open`, request continues |
+| The Moderations call fails, or its response is incomplete | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
 | The gateway cannot decode the request/response body before calling OpenAI | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
-| The policy configuration cannot be parsed | `502`, refused | `502`, refused |
-| Streaming response | Not inspected | Not inspected |
-
-On failure in Enforce the caller gets `502`, body type `guardrail_unavailable`,
-with the message `This content could not be checked right now.`
+| The policy configuration cannot be parsed | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
 
 Those decision names are what you read on the request's **Policies** tab in
 **Activity**: `allowed`, `reported`, `block`, and — when the call to OpenAI
-itself failed — `failed_open` in Observe or `failed_closed` in Enforce. Expect
-`failed_closed` on a first run: a key that is wrong, revoked or out of quota
+itself failed — `failed_open`, in Enforce and Observe alike. Expect
+`failed_open` on a first run: a key that is wrong, revoked or out of quota
 looks from here exactly like an outage at OpenAI. The event's `failure_reason`
-field says which: `transport` (the call failed or timed out), `config_invalid`
-(the stored settings could not be used), or `decode_failed` (the gateway's own
-request or response body could not be decoded before OpenAI was ever called).
+field says which: `transport` (the call failed or timed out), `verdict_incomplete`
+(OpenAI answered without a usable result), `config_invalid` (the stored
+settings could not be used), or `decode_failed` (the gateway's own request or
+response body could not be decoded before OpenAI was ever called).
 
 <Warning>
-**In Enforce this policy fails closed, except for one case, and there is no
-setting to change either.** A revoked key, an OpenAI rate limit, a malformed
-response and an outage all refuse the caller with the same `502` — the
-response itself does not say which. Check the event's `failure_reason` field
-before OpenAI's status page; it distinguishes `transport` and `config_invalid`.
-The exception is `decode_failed`: the gateway's own body
-could not be decoded before OpenAI was ever consulted, so it always fails
-open, in Enforce too — there is nothing OpenAI could have refused.
+**In Enforce this policy fails open, and there is no setting to change it.** A
+revoked key, an OpenAI rate limit, a malformed response and an outage all let
+the request through uninspected, and the caller sees nothing different. The
+only trace is `failed_open` on the event and the trace, so check the event's
+`failure_reason` field before OpenAI's status page, and treat a run of
+`failed_open` as the policy not guarding anything.
 </Warning>
 
 ### Limits
@@ -171,9 +165,8 @@ open, in Enforce too — there is nothing OpenAI could have refused.
   or [Regex Replace](/trustgate/policies/regex-replace).
 - **Inspect model responses is off by default.** The model's answer is not
   scored until you turn it on.
-- **A streamed response is not inspected**, even with **Inspect model
-  responses** on, unless streaming inspection has been configured on this
-  policy through the admin API. Nothing is recorded for it either way.
+- **A streamed response is inspected as it is generated**, with **Inspect model
+  responses** on. If the check itself fails, the stream is not cut.
 - **Text only, and structure is lost.** Roles, tool calls, tool definitions and
   attachments are not sent — the request leg becomes one newline-joined blob. A
   detector that would care which participant said something cannot.
@@ -232,10 +225,9 @@ need to match on them from an alert.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Every request is refused with `403` | Expected, out of the box: the policy already blocks anything OpenAI flags | Nothing to change at the console; switch to **Observe** if you want to see what would be flagged without refusing it |
-| `502` on every request, decision `failed_closed` | The Moderations call is failing — wrong or revoked key, rate limit, or an outage | Check the event's `failure_reason` field, then replace the key or check OpenAI's status |
+| Every request is recorded as `failed_open` and nothing is ever flagged | The Moderations call is failing — wrong or revoked key, rate limit, or an outage | Check the event's `failure_reason` field, then replace the key or check OpenAI's status |
 | The policy will not save | **API Key** is empty | It is required |
 | Responses are never inspected | **Inspect model responses** is off, which is the default | Turn on the **Inspect model responses** toggle, below **API Key** |
-| Streamed responses are never inspected | Streaming inspection is not enabled from the console | Expected; only a non-streamed response is inspected, or configure streaming inspection on the policy through the admin API |
 | High scores on benign traffic | The system prompt is part of the scored text | Nothing to change at the console — this policy scores the whole conversation, system prompt included |
 | The saved key cannot be read back | It is never returned to the browser | Expected — replace it rather than reading it, and keep your own copy |
 | MCP tool calls are never inspected | This policy sees chat traffic only | Use [TrustGuard](/trustgate/policies/trustguard-guardrail), which covers MCP too |

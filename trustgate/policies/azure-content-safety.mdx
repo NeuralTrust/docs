@@ -271,15 +271,14 @@ refusal may name a category you do not recognise from the console.
 | A category's severity meets its threshold | `403`, refused | Recorded, request continues |
 | No category meets its threshold | Request continues | Request continues |
 | The request carries no text to analyse | Forwarded; Azure is not called | Forwarded; Azure is not called |
-| Azure returns any non-2xx, times out, or its response is missing a thresholded category | **`502`, refused** | Recorded, decision `failed_open`, request continues |
+| Azure returns any non-2xx, times out, or its response is missing a thresholded category | Recorded, decision `failed_open`, request continues | Recorded, decision `failed_open`, request continues |
 | The gateway cannot decode the request body before calling Azure | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
 
 The decision recorded on the event is **`allowed`**, **`block`**, **`reported`**,
-**`failed_open`** or **`failed_closed`**. **`failed_closed`** is the one to look
-for first on a new policy: it is what a wrong endpoint, a wrong key or an
-unreachable resource records on every request in Enforce, and it is by far the
-most common first-run outcome; the same failure records **`failed_open`** in
-Observe. **`reported`** is what **Observe** records in place of a block. The
+or **`failed_open`**. **`failed_open`** is the one to look for first on a new
+policy: it is what a wrong endpoint, a wrong key or an unreachable resource
+records on every request, in Enforce and Observe alike, and it is by far the
+most common first-run outcome. **`reported`** is what **Observe** records in place of a block. The
 event's `failure_reason` field says why: `transport` (the call failed, timed
 out, or Azure answered non-2xx), `verdict_incomplete` (a thresholded category
 was missing from Azure's response), `config_invalid` (the stored settings
@@ -287,13 +286,12 @@ could not be used), or `decode_failed` (the gateway's own body could not be
 decoded before Azure was ever called).
 
 <Warning>
-**In Enforce this policy fails closed for every failure except one, and there
-is no setting to change either.** A wrong key, a wrong endpoint, a throttled
-resource and a conversation past Azure's length limit all collapse into the
-same `502`, with no detail in the response about which one it was. The
-exception is a body the gateway cannot decode before Azure is ever called —
-that always fails open, in Enforce too, since there was nothing for Azure to
-analyse. Validate in Observe, and account for this when sizing availability.
+**In Enforce this policy fails open, and there is no setting to change it.** A
+wrong key, a wrong endpoint, a throttled resource and a conversation past
+Azure's length limit all let the request through unchecked, with nothing in the
+response to say so. Only the event and the trace record it, as `failed_open`
+with a `failure_reason`. Validate in Observe, and treat a run of `failed_open`
+as the policy not guarding anything.
 </Warning>
 
 ### Limits
@@ -309,8 +307,8 @@ analyse. Validate in Observe, and account for this when sizing availability.
 - **Azure's length limit applies to the whole conversation.** Azure documents a
   10,000-character limit on Analyze Text. The policy sends the joined
   conversation and never truncates it, so a long enough conversation is rejected
-  by Azure — and because the policy fails closed, that is a `502` on that turn
-  and on every turn after it, because a conversation only grows. Treat this
+  by Azure — and because the policy fails open, that turn and every turn after
+  it goes through unchecked, because a conversation only grows. Treat this
   policy as suited to short exchanges until you have measured your own.
 - **Subscription key only.** No Microsoft Entra ID, no managed identity.
 - **Text only.** Files, images and audio are not sent to Azure.
@@ -339,11 +337,11 @@ hello, write me a short greeting
 
 Expect a normal reply and the decision **`allowed`**.
 
-In **Enforce**, this step is also the endpoint test. A harmless prompt that
-comes back `502`, recorded as **`failed_closed`**, means the gateway could not
-get an answer out of Azure: wrong endpoint, wrong key, or the resource
-unreachable. Fix that before going on — nothing below will work until this
-does.
+This step is also the endpoint test. A harmless prompt recorded as
+**`failed_open`** means the gateway could not get an answer out of Azure: wrong
+endpoint, wrong key, or the resource unreachable. The reply looks normal, so
+read the decision on the event rather than the reply. Fix that before going
+on — nothing below will work until this does.
 </Step>
 <Step title="Observe — read the severities before you trust the thresholds">
 Switch the policy to **Observe** and send content you consider borderline for
@@ -375,13 +373,13 @@ fields recorded.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `502` on every request, starting with the first, including harmless prompts | The endpoint is the bare resource URL, so Azure answers 404 and the gateway fails closed | Use the full **Analyze Text** URL including `api-version` |
-| `502` on every request after a key rotation | The key in the policy was the one you regenerated | Paste the current key; the resource has two for exactly this |
-| `502` that starts partway through a long conversation and never recovers | The joined conversation passed Azure's length limit | Nothing in the policy helps: the conversation only grows. Shorten the history the application sends, or screen with a guardrail that sends one message |
+| Every request is recorded as `failed_open` with `failure_reason: transport`, starting with the first | The endpoint is the bare resource URL, so Azure answers 404 and the request goes through unchecked | Use the full **Analyze Text** URL including `api-version` |
+| `failed_open` on every request after a key rotation | The key in the policy was the one you regenerated | Paste the current key; the resource has two for exactly this |
+| `failed_open` that starts partway through a long conversation and never recovers | The joined conversation passed Azure's length limit | Nothing in the policy helps: the conversation only grows. Shorten the history the application sends, or screen with a guardrail that sends one message |
 | Nothing is ever blocked | The category is toggled off, or its **Block at** is above anything the scale returns | Turn the category on; check the threshold against the severity scale |
 | A threshold changed by itself | You switched the **Severity scale** and it snapped to the nearest legal value | Re-read all four thresholds after changing the scale |
 | The policy will not save | The API key or endpoint is empty, the endpoint is not an absolute `http(s)` URL, or every category is off | The console names the field; all three are checked before the request is sent |
-| Every request is recorded as **`failed_closed`** | Azure could not be reached, or it answered with a non-2xx | Check the endpoint first — the bare resource URL is the usual cause — then the key |
+| Every request is recorded as **`failed_open`** | Azure could not be reached, or it answered with a non-2xx | Check the endpoint first — the bare resource URL is the usual cause — then the key |
 | Model output is never screened | Expected — there is no response leg | Use a guardrail with a response leg for output |
 
 ---
