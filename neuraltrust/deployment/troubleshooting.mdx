@@ -15,11 +15,11 @@ The console wizard used to emit `global.products.agentgateway: true`. The chart 
 
 ### `hybrid requires at least one product`
 
-No `global.products.*` is `true`. Frequently the same root cause as above: the key was set, but under a name the chart does not recognise. External and Central ignore these flags entirely.
+No `global.products.*` is `true`. Frequently the same root cause as above: the key was set, but under a name the chart does not recognise. External and Central do not raise this error.
 
 ### `agentgateway config-sync requires CONFIG_SYNC_TOKEN`
 
-The Secret holding the console-issued token is missing or not referenced. Create it and point `configSync.existingSecret` at it — [Hybrid install, step 3](/neuraltrust/deployment/hybrid#install). Set `configSync.enabled: false` only if you manage configuration in PostgreSQL out of band. Before chart 2.6.0 this message also named `CONFIG_SYNC_LKG_KEY`, which the chart now generates: do not create one.
+The Secret holding the console-issued token is missing or not referenced. Create it and point `configSync.existingSecret` at it — [Hybrid install, step 3](/neuraltrust/deployment/hybrid#install). Set `configSync.enabled: false` only if you manage configuration in PostgreSQL out of band. Do not create `CONFIG_SYNC_LKG_KEY` — the chart generates it.
 
 ### `hybrid trustgate/trustguard requires dataagent enrolment`
 
@@ -68,7 +68,7 @@ The Go services validate their whole configuration at boot and exit rather than 
 
 ### ImagePullBackOff despite setting a pull secret
 
-Only `control-plane-app.imagePullSecrets` is honoured for the console. Both `controlPlane.imagePullSecrets` and `global.imagePullSecrets` are silently ignored on that workload, so a value you can see in your values file may be doing nothing. Set `control-plane-app.imagePullSecrets` explicitly. This is a known defect and a fix is in progress.
+Every workload reads its own `imagePullSecrets`, then `global.imagePullSecrets`, then `gcr-secret`. Check that the Secret exists in the release namespace and that no component key overrides the global list: `helm template … | grep -A2 imagePullSecrets`.
 
 ## Config sync
 
@@ -169,10 +169,6 @@ Restart the affected workload explicitly:
 ```bash
 kubectl -n neuraltrust rollout restart deploy/<name>
 ```
-
-### Upgrade fails on an IPv6 single-stack cluster
-
-Fixed in chart 2.6.0. The MCP OAuth signing-key hook built the API server URL from `KUBERNETES_SERVICE_HOST`, which on IPv6 is a bare literal that is neither a parsable URL host nor a certificate SAN match. The Job exhausted its retries and, under Flux remediation or `helm upgrade --atomic`, rolled the whole release back. Upgrade the chart.
 
 ### `helm diff` shows a Secret key disappearing
 
