@@ -1,0 +1,417 @@
+---
+title: "Amazon Bedrock Runtime"
+description: "Point an AWS SDK at an application URL and keep calling Converse and InvokeModel exactly as you do today. The gateway relays the call to your Bedrock registry as received, and your policies still watch it."
+---
+
+An application accepts the **native Amazon Bedrock Runtime API**. A service that
+already talks to Bedrock through `boto3`, the AWS SDKs or LangChain changes one
+thing, the endpoint, and keeps its requests, its model identifiers and its
+response handling.
+
+This is not translation. The [chat endpoint](/trustgate/endpoints/chat) turns one
+provider dialect into another. Here nothing is turned into anything: the request
+you send is the request Bedrock receives, and the answer Bedrock gives is the
+answer you read. What the gateway adds is everything around the call: keys,
+rate limits, routing, policies, traces and cost.
+
+## Operations the gateway accepts
+
+Paths are relative to the application URL, `https://<llm-host>/<application-slug>`.
+All four are `POST`.
+
+| Path | Bedrock operation |
+|---|---|
+| `/model/{modelId}/converse` | Converse |
+| `/model/{modelId}/converse-stream` | ConverseStream |
+| `/model/{modelId}/invoke` | InvokeModel |
+| `/model/{modelId}/invoke-with-response-stream` | InvokeModelWithResponseStream |
+
+A path with a valid operation but a model identifier the gateway refuses is a
+`400` (`ValidationException`); any other path under `/model/...` is a `404`. Other Bedrock APIs are out of scope:
+agents and knowledge bases (`bedrock-agent-runtime`), asynchronous invocation,
+bidirectional streaming, `ApplyGuardrail`, `CountTokens` and the control plane.
+Keep those on AWS directly.
+
+## Model identifiers
+
+`modelId` takes whatever Bedrock takes, in the same position in the path:
+
+| Form | Example |
+|---|---|
+| Model ID | `amazon.nova-lite-v1:0` |
+| Cross-region inference profile ID | `us.anthropic.claude-3-5-sonnet-20241022-v2:0` |
+| ARN of a foundation model, an inference profile, an application inference profile or a provisioned throughput | `arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-lite-v1:0` |
+
+An ARN may arrive percent-encoded (`%3A`, `%2F`), which is what AWS SDKs send, or
+with raw slashes. The identifier is forwarded as you wrote it; the only change is
+that a raw `/` inside an ARN is escaped, because AWS would read it as another path
+segment.
+
+The gateway refuses an identifier it will not put in an upstream URL with a
+`400`: empty, longer than 2,048 bytes, containing anything other than letters,
+digits and `. _ : / -`, containing a `.` or `..` segment, or containing a `/`
+when it is not an ARN.
+
+The identifier is always a literal Bedrock model. `auto`, `@provider/model` and
+`pool:` have no routing meaning on these paths.
+
+## Where the call goes
+
+A native Bedrock call is only ever routed to the **Amazon Bedrock registries** of
+the application. It is never sent to another provider, even to one that serves a
+model of the same name, and never translated.
+
+| Situation | What the client gets |
+|---|---|
+| The application has no Bedrock registry | `404`, `ResourceNotFoundException`, from the gateway. |
+| The application's model filter does not include the identifier | `403`, `AccessDeniedException`, from the gateway, before AWS is called. |
+| Bedrock does not know the model, or the account of a registry has no access to it | With several Bedrock registries, the gateway tries the next one in order. If none of them takes it, **AWS's own answer is relayed**, with its status, its error type and its request ID. |
+
+Fallback and failover between Bedrock registries work as they do everywhere else.
+See [Routing](/trustgate/llm/routing).
+
+<Note>
+**The model filter matches the identifier as it arrives in the path, decoded.**
+An ARN is written with its `:` and `/` characters, not percent-encoded, and `*`
+wildcards are allowed. Allowing `anthropic.claude-3-5-sonnet-20241022-v2:0` does
+not allow the inference profile `us.anthropic.claude-3-5-sonnet-20241022-v2:0` or
+an ARN of the same model, unless a pattern covers them. Allow each form you use. See
+[Restricting models](/trustgate/llm/routing#restricting-models).
+</Note>
+
+## What is relayed unchanged
+
+On these paths the gateway is a signed relay:
+
+- **The request body**, byte for byte, unless a masking policy changed it (see
+  above). Converse is not re-serialised and an InvokeModel body, whatever its
+  model-specific shape, is not looked into.
+- **The model identifier**, as described above.
+- **`X-Amzn-Bedrock-*` request headers**, such as the guardrail, trace,
+  performance and service-tier ones, plus `Content-Type` and `Accept`.
+- **The AWS response**: status, body, `x-amzn-ErrorType`, the request ID and the
+  `X-Amzn-Bedrock-*` response headers. An AWS error reaches your SDK as AWS wrote
+  it.
+- **Streams** as AWS eventstream frames, one frame at a time. They are not
+  converted to Server-Sent Events.
+
+The request is signed again, with the credentials of the registry, before it
+reaches AWS. Nothing else from the client goes upstream: not its `Authorization`,
+not its `X-Amz-*` headers, not the gateway key.
+
+## What the guarantee does not cover
+
+Because the bytes are relayed rather than re-built, a few things behave differently from the
+other endpoints. Read this before you attach policies to an application that
+serves native Bedrock traffic.
+
+<Warning>
+**A masked call is no longer byte for byte.** Policies that mask, anonymise or
+redact text now do it on these routes too. The gateway reads which text the policy
+replaced and replaces the same text in the call you sent, in every field of it,
+including the text of base64 text documents. Only those text strings are
+rewritten, in place. Everything else, including the key order and the whitespace
+of the JSON, stays byte for byte as you sent it. A call no policy changes goes
+through untouched.
+
+**Masking never blocks a native call.** If the gateway cannot apply a mask safely,
+the call goes through unmasked: the request is forwarded as you sent it, or the
+response is returned as AWS gave it, and the policy result is recorded in the
+trace as **failed open** (`failed_open`) with the failure reason
+`mask_not_applicable:<cause>`. The causes are:
+
+- the change is not a replacement of text, for example the policy added text;
+- some of the removed text would remain anywhere in the result;
+- the text to mask is inside a signed thinking or reasoning block, which cannot be
+  edited without invalidating its signature;
+- a value shorter than three characters whose place in the call cannot be worked
+  out, or a masked call that does not read, place by place, as the policy's own
+  result;
+- something outside the text the policy reads would have changed, or the call
+  could not be read;
+- the response is an AWS error, which is never masked.
+
+Treat that outcome as a gap in the policy, not as a block: the text the policy
+wanted masked reached Bedrock, or your client. A policy in observe mode never
+masks. An explicit block decision from a policy still blocks the call with `403`.
+
+A value of three characters or more is replaced everywhere the policy could have
+read it in the call. A value shorter than that, such as `42`, is replaced only at
+the place where the policy found it: the same characters in a number, an
+identifier or another message are left alone.
+</Warning>
+
+- **Policies that only transform do not run.** Prompt template, tool injection,
+  prompt compression and semantic cache have nowhere to write on a byte-exact
+  route. They are skipped, not blocked, and the trace says so. A model allowlist
+  policy set to **Substitute with default model** cannot swap the model in the path
+  either, so on these routes it refuses the call instead.
+- **A policy that answers the request itself is refused.** A native call is
+  always relayed to Bedrock, so a canned answer from a policy becomes an error.
+- **A compressed request body is forwarded decompressed.** If a client sends
+  `Content-Encoding: gzip` (or `deflate`, or `br`), the gateway reads the
+  decoded body and forwards that, without the header. It is not forwarded in its
+  compressed form.
+- **Request bodies above 8 MiB are refused** with `413`. Bedrock accepts larger
+  multimodal requests than that.
+- **The model filter is literal**, as described [above](#where-the-call-goes).
+
+<Note>
+**If a request carries its own Bedrock `guardrailConfig`, two guardrail layers
+run.** AWS evaluates yours inside Bedrock, and the gateway's policies evaluate the
+same call on their own. They do not know about each other: each can block, and
+what one allows the other can still stop. That is usually what you want, but it
+is not one guardrail evaluated twice.
+</Note>
+
+## Authentication
+
+The credential a `boto3` client uses is the **application key**, sent in
+`X-AG-API-Key`. The other credentials the application accepts on every endpoint
+work here too: `x-api-key`, `x-goog-api-key`, an `Authorization: Bearer` token
+(a gateway key, or a token from your identity provider when the application uses
+one) and client certificates. See the [chat endpoint](/trustgate/endpoints/chat).
+Copy the exact form from the application's **Connect** tab. The SigV4
+`Authorization` header an AWS SDK adds is never read as a credential.
+
+AWS SDKs sign every request with SigV4, and the gateway handles that in two ways:
+
+- The SigV4 signature is **ignored**. It is never checked and never forwarded,
+  because the gateway does not hold your AWS credentials and does not need them.
+- The gateway signs the upstream call with the credentials of the Bedrock
+  registry. Those are the only AWS credentials that ever reach AWS.
+
+The simplest client does not sign at all. With `signature_version=botocore.UNSIGNED`
+`boto3` sends no credentials and no `Authorization` header, only the gateway key, and
+the gateway signs the call upstream. That is the form to prefer. If your SDK or
+framework insists on signing, give the client any syntactically valid access key and
+secret, and any region; the gateway does not read them, and the region of the
+**registry** decides where the call lands.
+
+A request with no application key is a `401` with `UnrecognizedClientException`.
+
+## Examples
+
+Both examples need the gateway key on every request. A `boto3` client adds it
+through an event hook on `before-send`, which runs after signing, so the key is a
+plain header and not part of the signature. `before-sign` also works; `before-send`
+is the one that leaves the SigV4 calculation exactly as `boto3` made it.
+
+The `endpoint_url` includes the application slug. `boto3` appends
+`/model/{modelId}/{operation}` to it.
+
+<Tabs>
+  <Tab title="boto3">
+    ```python
+    import boto3
+    import botocore
+    from botocore.config import Config
+
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name="us-east-1",
+        endpoint_url="https://<llm-host>/<application-slug>",
+        config=Config(signature_version=botocore.UNSIGNED),  # no credentials needed
+    )
+
+    client.meta.events.register(
+        "before-send.bedrock-runtime.*",
+        lambda request, **kwargs: request.headers.__setitem__(
+            "X-AG-API-Key", "<application key>"
+        ),
+    )
+
+    # Converse
+    response = client.converse(
+        modelId="us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        messages=[{"role": "user", "content": [{"text": "Explain zero trust in one sentence."}]}],
+    )
+    print(response["output"]["message"]["content"][0]["text"])
+
+    # ConverseStream
+    stream = client.converse_stream(
+        modelId="us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        messages=[{"role": "user", "content": [{"text": "Explain zero trust in one sentence."}]}],
+    )
+    for event in stream["stream"]:
+        if "contentBlockDelta" in event:
+            print(event["contentBlockDelta"]["delta"].get("text", ""), end="")
+    ```
+
+    If you prefer a signing client, create it with
+    `aws_access_key_id="unused", aws_secret_access_key="unused"` instead of the
+    `config`. The signature is ignored either way. This form was checked end to end
+    with `boto3` 1.42 for `converse`, `converse` with an ARN, and `converse_stream`.
+  </Tab>
+
+  <Tab title="LangChain">
+    ```python
+    import boto3
+    from langchain_aws import ChatBedrockConverse
+
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name="us-east-1",
+        endpoint_url="https://<llm-host>/<application-slug>",
+        aws_access_key_id="unused",
+        aws_secret_access_key="unused",
+    )
+    client.meta.events.register(
+        "before-send.bedrock-runtime.*",
+        lambda request, **kwargs: request.headers.__setitem__(
+            "X-AG-API-Key", "<application key>"
+        ),
+    )
+
+    llm = ChatBedrockConverse(
+        client=client,
+        model="us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        region_name="us-east-1",
+    )
+
+    print(llm.invoke("Explain zero trust in one sentence.").content)
+    ```
+
+    **With an application inference profile ARN, name the base model.**
+    `ChatBedrockConverse` calls `get_inference_profile` through its own control-plane
+    client when it is built, which does not go through the gateway: it raises
+    `NoCredentialsError`, or reaches real AWS with dummy credentials. Passing
+    `base_model_id` and `provider` skips that call:
+
+    ```python
+    llm = ChatBedrockConverse(
+        client=client,
+        model="arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/<id>",
+        base_model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
+        provider="anthropic",
+        region_name="us-east-1",
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## Errors
+
+An error the gateway makes itself, a rate limit, a policy block, a refused key or
+an unroutable model, is returned in the AWS error shape: an `x-amzn-ErrorType`
+header and a JSON body with `__type` and `message`. That is what lets `boto3`
+raise a typed exception instead of an error it cannot classify. The body keeps
+the gateway's own fields next to those, so `"error": "plugin_rejected"` tells a
+policy block from an IAM denial.
+
+| Status | Exception | Typical cause |
+|---|---|---|
+| 400 | `ValidationException` | A model identifier the gateway refuses to forward, or any other client error without a name of its own |
+| 401 | `UnrecognizedClientException` | No application key |
+| 403 | `AccessDeniedException` | A policy block, or a model outside the application's filter |
+| 404 | `ResourceNotFoundException` | No Bedrock registry on the application |
+| 405 | `ValidationException` | A method other than `POST` on a native route |
+| 408 | `ModelTimeoutException` | Timeout |
+| 424 | `ModelErrorException` | Error from the model |
+| 429 | `ThrottlingException` | Rate limit |
+| 503 | `ServiceUnavailableException` | No backend available |
+| other 5xx | `InternalServerException` | A failure on the gateway side, or an upstream failure |
+
+A request body above 8 MiB is refused with `413` by the gateway as a plain error,
+not in the AWS shape.
+
+An error from AWS itself is relayed as it came, status and type included, and is
+never wrapped again.
+
+A blocked call raises in `boto3` like any AWS error:
+
+```python
+from botocore.exceptions import ClientError
+
+try:
+    client.converse(modelId="amazon.nova-lite-v1:0", messages=messages)
+except ClientError as err:
+    err.response["Error"]["Code"]                      # "AccessDeniedException"
+    err.response["ResponseMetadata"]["HTTPStatusCode"]  # 403
+```
+
+`client.exceptions.AccessDeniedException` catches it by type. `AccessDeniedException`
+is not retried by the SDK's standard or adaptive retry modes.
+
+## Streaming
+
+On `converse-stream` and `invoke-with-response-stream`, output policies inspect
+the response **frame by frame**. Each frame is read as it arrives, and its text is
+released to the client as soon as it has been cleared, so a policy does not wait
+for the whole answer.
+
+A policy that masks text in a stream masks it: the frames that carry the text are
+rebuilt with the replacement, with their own headers and valid checksums, and every
+frame the mask does not touch is released byte for byte. When the text is split
+across frames, the whole replacement goes in the first one and the rest is taken out
+of the frames after it, which may end up with empty text but are never dropped. Text
+that was already delivered cannot be recalled, as on every other endpoint, so a mask
+that would reach into it cannot be applied. Neither can a policy that only adds
+text, since there is nothing in the stream to replace. A value shorter than three
+characters is replaced at the place the policy found it, as in a buffered call.
+When a mask cannot be applied the held frames are released as they came, the stream
+carries on, later blocks are inspected as usual, and the outcome is recorded as
+failed open with the reason `mask_not_applicable:<cause>`, once per kind of cause
+and stream.
+
+**Tool calls are masked too, and held until they are complete.** For
+`converse-stream`, and for Anthropic models on `invoke-with-response-stream`, the
+gateway holds a tool call from the frame that opens it to the frame that closes it,
+joins its input, and hands that input to your policies as text, so a policy that
+masks or blocks sees it. If a policy masks a value in a string of the input, the
+masked input goes in the first frame that carried input, the frames after it stay in
+place with an empty input, and the id and the name of the call are never changed.
+The call reaches your client when it is complete, so a tool call arrives slightly
+later than it would without a policy; the text around it is released as before.
+
+A tool call mask fails open, with the call released as it came, when the mask is not
+a replacement of text inside a string value of its input, for example a number or a
+key, when the input is not valid JSON, when a string in it cannot be read back
+exactly (an unpaired surrogate escape, for example), or when any removed text would
+remain in it. Model reasoning is not masked: a mask that reaches reasoning in a
+stream fails open. The tool calls of other model families are not understood and are
+not held, so a mask next to one fails open as well.
+
+**A tool call that cannot be held is released without inspection of its input.**
+The hold is bounded at 30 seconds and by the amount of data the gateway keeps in
+memory. A call that is larger than that, that takes longer than that, or that the
+stream ends without ever closing is released as it arrives, its input is not read
+as a text by your policies, and the trace of the request is flagged with the
+degraded reason `tool_input_uninspected`. The same flag is set for a call of a
+model family that is not understood. The call is not ended in either case.
+
+A policy that blocks the stream ends it. The status is already `200` by then and
+cannot change, so the stream finishes with an error frame in the AWS format, a
+`validationException`, which SDKs raise while you iterate:
+
+```python
+for event in stream["stream"]:   # raises EventStreamError (a ClientError)
+    ...                          # err.response["Error"]["Code"] == "validationException"
+```
+
+A client error is used on purpose: SDKs do not retry it, and a policy refusal is
+not worth retrying. If the upstream stream breaks for any other reason, the
+stream ends with an `internalServerException` frame.
+
+On native streams, a policy whose provider cannot be reached never ends the
+stream, whatever its failure setting: it fails open.
+
+## What you still get
+
+Native calls go through the same pipeline as any other request, so key
+authentication, rate limits, token budgets, routing and failover, traces and cost
+all apply. Usage is read from the response, from the body on Converse and from the
+`X-Amzn-Bedrock-*` token-count headers on InvokeModel, so cost and budgets are
+counted whatever the model's own response format is. Cost for an application
+inference profile or a provisioned throughput ARN needs the registry credentials to
+be allowed `bedrock:GetInferenceProfile` or `bedrock:GetProvisionedModelThroughput`
+on it; without that permission the usage is recorded without a cost. The first call
+with a new application inference profile or provisioned throughput ARN may take
+slightly longer, up to a second and a half, while the gateway looks up the model,
+and without those permissions a cost cap treats the call as an unknown model.
+
+Guardrail policies read the text of the call in a read-only view built from the
+body. That view understands Converse, and the request and response shapes of the
+common InvokeModel families such as Anthropic, Amazon Titan and Nova, Meta Llama,
+Mistral and Cohere. For a shape it does not recognise, it collects the text
+fields it finds, so input policies are never silently looking at nothing.
