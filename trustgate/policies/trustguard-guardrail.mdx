@@ -219,7 +219,8 @@ nothing, and nothing in this screen says so.
 ### What the caller receives
 
 A block on the LLM plane is an HTTP `403` with a JSON body. The body is the same
-whatever dialect the client speaks, and on either leg.
+whatever dialect the client speaks, and on either leg. `direction` says which leg
+was refused: `input` for the request, `output` for the model's response.
 
 <CodeGroup>
   ```json Detector
@@ -227,6 +228,7 @@ whatever dialect the client speaks, and on either leg.
     "status": "block",
     "message": "Request blocked by security policy: jailbreak (Prompt Guard).",
     "type": "trustguard_blocked",
+    "direction": "input",
     "reason": "jailbreak",
     "plugin": "prompt_guard",
     "detector_name": "Prompt Guard",
@@ -240,6 +242,7 @@ whatever dialect the client speaks, and on either leg.
     "status": "block",
     "message": "Request blocked by security policy: gate_block (Block external email).",
     "type": "trustguard_blocked",
+    "direction": "input",
     "reason": "gate_block",
     "gate_name": "Block external email",
     "trace_id": "0f6a2e9b7c1d4e8a9b3c5d7e1f2a4b6c",
@@ -263,6 +266,7 @@ the message is the same, and `data` carries the same body:
       "status": "block",
       "message": "Request blocked by security policy: indirect_prompt_injection (Indirect injection).",
       "type": "trustguard_blocked",
+      "direction": "output",
       "reason": "indirect_prompt_injection",
       "plugin": "indirect_prompt_injection",
       "detector_name": "Indirect injection",
@@ -278,6 +282,7 @@ the message is the same, and `data` carries the same body:
 | `status` | TrustGuard's verdict: `block`, `ask` when an Ask gate matched and the gateway refused it, or `transform` when a masking verdict could not be mapped back onto the request. |
 | `message` | `Request blocked by security policy: <reason> (<detector or gate>).`, with whatever part the finding has. Without a finding, `request blocked due to a policy infraction`. |
 | `type` | Always `trustguard_blocked` for a policy refusal. |
+| `direction` | `input` when the request was refused, `output` when the model's response was. |
 | `reason` | The signal of the finding that decided, such as `jailbreak`, `pii`, or `gate_block`. |
 | `plugin` | The catalog detector, for a detector finding. |
 | `detector_name` or `gate_name` | The name you gave the detector or the gate. |
@@ -286,6 +291,18 @@ the message is the same, and `data` carries the same body:
 When several findings fired, the body names one: the enforced finding with the
 highest confidence. The rest, with their evidence and scores, are only in
 **Activity**.
+
+The `403` also carries an `X-NeuralTrust-Block-Direction` header with the same
+`input` or `output`. Every policy that refuses a leg with a `403` sets it, not
+only this one, so a client can tell the two legs apart without reading the body.
+A refusal that is not a verdict on the content does not carry it: the ones
+below, and a fail-closed refusal of a stream that could not be inspected.
+
+On a streamed response that this policy stops after it has started, the status
+is already `200`. The stream ends with `finish_reason` `content_filter` and an
+error event whose object carries `"direction": "output"`, for OpenAI-shaped and
+Responses clients. Anthropic, Gemini, Cohere and Bedrock clients get their usual
+stream ending, without the field.
 
 The other refusals have their own bodies:
 
@@ -359,14 +376,16 @@ an outage from here.
 
 ### Limits
 
-- **Streaming responses are inspected only after the response was already
-  delivered.** They are buffered and sent to TrustGuard once the client has
-  drained the stream, off the caller's path. Everything is recorded; nothing can
-  be refused. A response guardrail on a streaming application observes; it does
-  not protect. Enforce on the request leg.
-- **A streamed response larger than 8 MiB is not inspected at all.** The buffer
-  is abandoned, a warning is logged, and — unlike every other skip — **no event
-  is emitted**. There is nothing in Activity to count.
+- **A streamed response is inspected while it streams, and what the client
+  already received stays with it.** The gateway holds the start of the answer
+  until TrustGuard has seen it, so a block there is a `403` before anything is
+  sent. A block later in the stream ends it as described in
+  [What the caller receives](#what-the-caller-receives), but the text delivered
+  before the cut cannot be taken back.
+- **On a long streamed response, each check reads only the latest 256 KiB.**
+  Text earlier than that is no longer sent, so a finding that needs it is
+  missed. The event records the stream as degraded, with the reason
+  `accumulation_cap`.
 - **Direction is the only control over what is inspected.** The policy is always
   active at every point in a request's journey, and nothing stored on it changes
   that, so there is no second setting anywhere that narrows it. **Direction** is
@@ -458,8 +477,8 @@ need to match on them from an alert.
 | Traffic passes with no finding at all, decision `failed_open` | TrustGuard could not be used — unreachable, an error, a timeout, a refused credential — and the relevant setting (**On Error** / **On Timeout**) is **fail open**, the default | Check the reason on the event and the failure count — silence is not evidence of clean traffic. Set **fail closed** if uninspected traffic is unacceptable |
 | `502` on every request while TrustGuard itself is down | **On Error** is set to **fail closed**, and a TrustGuard it cannot reach refuses rather than forwards | Expected. Wait for TrustGuard, or switch to **fail open** to trade the refusal for uninspected traffic |
 | `504` on every request while TrustGuard answers too slowly | **On Timeout** is set to **fail closed** — policies saved before the default changed often are | Raise the per-policy **Timeout**, investigate the slow detector, or switch **On Timeout** to fail open |
-| Streamed responses are recorded but never refused | They are inspected after delivery | Enforce on the request leg |
-| A large streamed response has no event of any kind | It exceeded the 8 MiB buffer cap | Expected; there is no event for this case |
+| A streamed response was cut part-way, and the client kept its start | The finding came after that part was delivered | Expected; text already sent cannot be taken back |
+| A long streamed response is recorded as degraded with `accumulation_cap` | Each check reads only the latest 256 KiB of the answer | Expected; earlier text is not read again |
 | An MCP tool result was not inspected | The result carries no text — image, audio, or a binary resource | Expected; an MCP result is inspected through its text |
 | An attachment on the model's answer was not inspected | Attachments are collected on the request leg only | Expected; inspect attachments before they reach the model |
 | Audio was not inspected anywhere | Audio is never collected, on either leg | Expected; there is no setting for it |
