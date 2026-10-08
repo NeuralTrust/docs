@@ -50,7 +50,9 @@ segment.
 The gateway refuses an identifier it will not put in an upstream URL with a
 `400`: empty, longer than 2,048 bytes, containing anything other than letters,
 digits and `. _ : / -`, containing a `.` or `..` segment, or containing a `/`
-when it is not an ARN.
+when it is not an ARN. An ARN must also name an AWS partition (`aws`, `aws-cn` or
+`aws-us-gov`), a region of that partition and a 12-digit account (a foundation model's
+ARN has none), or it is refused the same way.
 
 The identifier is always a literal Bedrock model. `auto`, `@provider/model` and
 `pool:` have no routing meaning on these paths.
@@ -114,8 +116,8 @@ rewritten, in place. Everything else, including the key order and the whitespace
 of the JSON, stays byte for byte as you sent it. A call no policy changes goes
 through untouched.
 
-**Masking never blocks a native call.** If the gateway cannot apply a mask safely,
-the call goes through unmasked: the request is forwarded as you sent it, or the
+**Masking does not block a native call unless you ask it to.** If the gateway cannot
+apply a mask safely, by default the call goes through unmasked: the request is forwarded as you sent it, or the
 response is returned as AWS gave it, and the policy result is recorded in the
 trace as **failed open** (`failed_open`) with the failure reason
 `mask_not_applicable:<cause>`. The causes are:
@@ -132,8 +134,19 @@ trace as **failed open** (`failed_open`) with the failure reason
 - the response is an AWS error, which is never masked.
 
 Treat that outcome as a gap in the policy, not as a block: the text the policy
-wanted masked reached Bedrock, or your client. A policy in observe mode never
-masks. An explicit block decision from a policy still blocks the call with `403`.
+wanted masked reached Bedrock, or your client. A client can cause it on purpose, for
+example by putting the value in a place no mask may rewrite, such as a key of
+`requestMetadata`. A masking policy can be set to block the call when its mask cannot
+be applied: the call is then refused with `403`, or the stream ends, and nothing is
+recorded as failed open. A policy in observe mode never masks. An explicit block
+decision from a policy always blocks the call with `403`.
+
+**Only a mask can fail open.** A policy that rewrites a native call for enforcement is
+not masking text, and its change cannot be carried onto the bytes you sent, so the
+call is refused with `403` instead of being forwarded as it was. That covers a tool
+filter that would remove a tool, a per-tool limit that would strip a tool, and a cost
+cap set to downgrade the model: the model of a native call is in its path, so a
+downgrade is refused like any other violation of the cap.
 
 A value of three characters or more is replaced everywhere the policy could have
 read it in the call. A value shorter than that, such as `42`, is replaced only at
@@ -146,6 +159,11 @@ identifier or another message are left alone.
   route. They are skipped, not blocked, and the trace says so. A model allowlist
   policy set to **Substitute with default model** cannot swap the model in the path
   either, so on these routes it refuses the call instead.
+- **A text document the gateway cannot read is refused.** A `txt`, `csv`, `md` or `html`
+  document of a Converse call, or a base64 `text/*` source of an Anthropic call, must
+  be base64 (padded or not) that decodes to valid UTF-8. One that does not is refused
+  with `400` (`ValidationException`, "document could not be inspected"): the model
+  would read it and no policy would.
 - **A policy that answers the request itself is refused.** A native call is
   always relayed to Bedrock, so a canned answer from a policy becomes an error.
 - **A compressed request body is forwarded decompressed.** If a client sends
@@ -393,8 +411,9 @@ A client error is used on purpose: SDKs do not retry it, and a policy refusal is
 not worth retrying. If the upstream stream breaks for any other reason, the
 stream ends with an `internalServerException` frame.
 
-On native streams, a policy whose provider cannot be reached never ends the
-stream, whatever its failure setting: it fails open.
+On native streams each policy's own failure setting is honoured, as on every other
+stream: a policy whose provider cannot be reached lets the stream through by default, and
+ends it when it is set to fail closed.
 
 ## What you still get
 
@@ -405,7 +424,8 @@ all apply. Usage is read from the response, from the body on Converse and from t
 counted whatever the model's own response format is. Cost for an application
 inference profile or a provisioned throughput ARN needs the registry credentials to
 be allowed `bedrock:GetInferenceProfile` or `bedrock:GetProvisionedModelThroughput`
-on it; without that permission the usage is recorded without a cost. The first call
+on it, and the profile must be in the registry's region; without that permission, or
+for a profile of another region, the usage is recorded without a cost. The first call
 with a new application inference profile or provisioned throughput ARN may take
 slightly longer, up to a second and a half, while the gateway looks up the model,
 and without those permissions a cost cap treats the call as an unknown model.
