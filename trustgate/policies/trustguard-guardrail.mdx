@@ -376,11 +376,12 @@ an outage from here.
 
 ### Limits
 
-- **Streaming responses are inspected only after the response was already
-  delivered.** They are buffered and sent to TrustGuard once the client has
-  drained the stream, off the caller's path. Everything is recorded; nothing can
-  be refused. A response guardrail on a streaming application observes; it does
-  not protect. Enforce on the request leg.
+- **A streamed response is inspected while it streams, and what the client
+  already received stays with it.** The gateway holds the start of the answer
+  until TrustGuard has seen it, so a block there is a `403` before anything is
+  sent. A block later in the stream ends it as described in
+  [What the caller receives](#what-the-caller-receives), but the text delivered
+  before the cut cannot be taken back.
 - **A streamed response larger than 8 MiB is not inspected at all.** The buffer
   is abandoned, a warning is logged, and — unlike every other skip — **no event
   is emitted**. There is nothing in Activity to count.
@@ -475,7 +476,7 @@ need to match on them from an alert.
 | Traffic passes with no finding at all, decision `failed_open` | TrustGuard could not be used — unreachable, an error, a timeout, a refused credential — and the relevant setting (**On Error** / **On Timeout**) is **fail open**, the default | Check the reason on the event and the failure count — silence is not evidence of clean traffic. Set **fail closed** if uninspected traffic is unacceptable |
 | `502` on every request while TrustGuard itself is down | **On Error** is set to **fail closed**, and a TrustGuard it cannot reach refuses rather than forwards | Expected. Wait for TrustGuard, or switch to **fail open** to trade the refusal for uninspected traffic |
 | `504` on every request while TrustGuard answers too slowly | **On Timeout** is set to **fail closed** — policies saved before the default changed often are | Raise the per-policy **Timeout**, investigate the slow detector, or switch **On Timeout** to fail open |
-| Streamed responses are recorded but never refused | They are inspected after delivery | Enforce on the request leg |
+| A streamed response was cut part-way, and the client kept its start | The finding came after that part was delivered | Expected; text already sent cannot be taken back |
 | A large streamed response has no event of any kind | It exceeded the 8 MiB buffer cap | Expected; there is no event for this case |
 | An MCP tool result was not inspected | The result carries no text — image, audio, or a binary resource | Expected; an MCP result is inspected through its text |
 | An attachment on the model's answer was not inspected | Attachments are collected on the request leg only | Expected; inspect attachments before they reach the model |
