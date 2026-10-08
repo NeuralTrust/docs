@@ -382,9 +382,10 @@ an outage from here.
   sent. A block later in the stream ends it as described in
   [What the caller receives](#what-the-caller-receives), but the text delivered
   before the cut cannot be taken back.
-- **A streamed response larger than 8 MiB is not inspected at all.** The buffer
-  is abandoned, a warning is logged, and — unlike every other skip — **no event
-  is emitted**. There is nothing in Activity to count.
+- **On a long streamed response, each check reads only the latest 256 KiB.**
+  Text earlier than that is no longer sent, so a finding that needs it is
+  missed. The event records the stream as degraded, with the reason
+  `accumulation_cap`.
 - **Direction is the only control over what is inspected.** The policy is always
   active at every point in a request's journey, and nothing stored on it changes
   that, so there is no second setting anywhere that narrows it. **Direction** is
@@ -477,7 +478,7 @@ need to match on them from an alert.
 | `502` on every request while TrustGuard itself is down | **On Error** is set to **fail closed**, and a TrustGuard it cannot reach refuses rather than forwards | Expected. Wait for TrustGuard, or switch to **fail open** to trade the refusal for uninspected traffic |
 | `504` on every request while TrustGuard answers too slowly | **On Timeout** is set to **fail closed** — policies saved before the default changed often are | Raise the per-policy **Timeout**, investigate the slow detector, or switch **On Timeout** to fail open |
 | A streamed response was cut part-way, and the client kept its start | The finding came after that part was delivered | Expected; text already sent cannot be taken back |
-| A large streamed response has no event of any kind | It exceeded the 8 MiB buffer cap | Expected; there is no event for this case |
+| A long streamed response is recorded as degraded with `accumulation_cap` | Each check reads only the latest 256 KiB of the answer | Expected; earlier text is not read again |
 | An MCP tool result was not inspected | The result carries no text — image, audio, or a binary resource | Expected; an MCP result is inspected through its text |
 | An attachment on the model's answer was not inspected | Attachments are collected on the request leg only | Expected; inspect attachments before they reach the model |
 | Audio was not inspected anywhere | Audio is never collected, on either leg | Expected; there is no setting for it |
