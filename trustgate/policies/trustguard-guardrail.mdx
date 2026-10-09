@@ -77,59 +77,23 @@ and a **Create collector** link that makes one without leaving the panel.
 | **Response** | The completion or tool result, before it reaches the caller. |
 | **Request & Response** | Both. The default. |
 
-### On error
+### When TrustGuard cannot answer
 
-A setting decides what happens when the gateway cannot get a verdict from
-TrustGuard: a network error, an error from TrustGuard itself, a credential
-TrustGuard refuses, a gateway with no TrustGuard URL or credentials, unavailable
-entitlements (`503`), or a mask the gateway cannot write back. A TrustGuard
-failure never cuts the request unless you ask it to.
+This policy always fails open. When the gateway cannot get a verdict from
+TrustGuard, the traffic is forwarded uninspected and the policy is recorded as
+**Failed Open**, with the reason. The caller sees nothing. That covers a network
+error, an error from TrustGuard itself, a credential TrustGuard refuses, a
+gateway with no TrustGuard URL or credentials, unavailable entitlements, a call
+that does not answer in time, and a mask the gateway cannot write back onto the
+request. A policy configuration the gateway cannot parse fails open as well.
 
-| Value | What happens |
-|---|---|
-| **Fail open** | The traffic is forwarded uninspected and the policy is recorded as **Failed Open**, with the reason. The caller sees nothing. **The default.** |
-| **Fail closed** | The request is refused. The caller gets an error rather than an uninspected answer. |
+This keeps your application working through a TrustGuard outage, at the cost of
+a window in which nothing is being inspected and nothing in front of the caller
+says so. Watch for `failed_open` in **Activity** and on the failure count.
 
-**Fail open** keeps your application working through a TrustGuard outage, at the
-cost of a window in which nothing is being inspected and nothing in front of the
-caller says so. Choose **fail closed** when the guardrail is the control you
-rely on — when traffic passing uninspected would be worse than traffic not
-passing at all. Regulated workloads and anything where the policy is your
-evidence of a control usually want it.
-
-### On timeout
-
-A call that ran out of time is a separate setting, because unlike a refused
-connection it is something a caller can bring about: enough text in one payload
-can push the detector past the deadline. Left unset, it follows **On Error**, so
-the default is **fail open**.
-
-| Value | What happens |
-|---|---|
-| **Fail open** | The traffic is forwarded uninspected, the same as **On Error**'s fail open. **The default.** |
-| **Fail closed** | The request is refused. |
-
-Set this to fail closed when a payload must never get through uninspected, even
-at the cost of refusing on a slow detector.
-
-<Note>
-Policies saved before this default changed keep the value they were saved with,
-which for most is **Fail closed**. Open the policy and change **On Timeout** if
-you want the new behaviour.
-</Note>
-
-### Timeout
-
-A duration bounding one TrustGuard call for this policy, from **250ms to
-120s**. Leave it empty to use the deployment-wide default instead — the only
-control that existed before this setting, and one that could not be raised for
-a single slow detector without raising it for every call on every gateway.
-
-**On Error** and **On Timeout** cover every way the call can fail. They never
-relax a TrustGuard **block** or a `429` rate limit, which are TrustGuard's
-answers rather than failures. A policy configuration the gateway cannot parse
-has no setting to read, so it always fails open — see
-[Modes and failures](#modes-and-failures).
+A failure never relaxes a TrustGuard **block** or a `429` rate limit. Those are
+TrustGuard's answers rather than failures, and they still refuse the request.
+See [Modes and failures](#modes-and-failures).
 
 ### Mode and scope
 
@@ -194,17 +158,15 @@ version and never sees the original. On the response leg the caller does.
 </Steps>
 
 <Warning>
-**By default, a transform the gateway cannot map back onto the request is
-forwarded unmasked.** TrustGuard's masked messages are matched back to the
+**A transform the gateway cannot map back onto the request is forwarded
+unmasked.** TrustGuard's masked messages are matched back to the
 original by position and role, so a masked payload whose line count changed — a
 system prompt with surrounding whitespace trimmed, or a multi-line secret
 collapsed into a single masked token — is applied correctly, and the leg is
 recorded as `transformed`. If the masked messages cannot be mapped back at all —
-a role or message-count mismatch — the gateway treats it as a failure: under
-**On Error: Fail open** the **original content** goes on, and the leg is
-recorded as `failed_open` with the reason `transform_failed`. Set **On Error**
-to **fail closed** if flagged content must never pass unmasked; the request is
-then refused (`403`) instead.
+a role or message-count mismatch — the gateway treats it as a failure: the
+policy fails open, the **original content** goes on, and the leg is recorded as
+`failed_open` with the reason `transform_failed`.
 </Warning>
 
 <Note>
@@ -279,7 +241,7 @@ the message is the same, and `data` carries the same body:
 
 | Field | Content |
 |---|---|
-| `status` | TrustGuard's verdict: `block`, `ask` when an Ask gate matched and the gateway refused it, or `transform` when a masking verdict could not be mapped back onto the request. |
+| `status` | TrustGuard's verdict: `block`, or `ask` when an Ask gate matched and the gateway refused it. |
 | `message` | `Request blocked by security policy: <reason> (<detector or gate>).`, with whatever part the finding has. Without a finding, `request blocked due to a policy infraction`. |
 | `type` | Always `trustguard_blocked` for a policy refusal. |
 | `direction` | `input` when the request was refused, `output` when the model's response was. |
@@ -296,7 +258,7 @@ The `403` also carries an `X-NeuralTrust-Block-Direction` header with the same
 `input` or `output`. Every policy that refuses a leg with a `403` sets it, not
 only this one, so a client can tell the two legs apart without reading the body.
 A refusal that is not a verdict on the content does not carry it: the ones
-below, and a fail-closed refusal of a stream that could not be inspected.
+below.
 
 On a streamed response that this policy stops after it has started, the status
 is already `200`. The stream ends with `finish_reason` `content_filter` and an
@@ -304,19 +266,14 @@ error event whose object carries `"direction": "output"`, for OpenAI-shaped and
 Responses clients. Anthropic, Gemini, Cohere and Bedrock clients get their usual
 stream ending, without the field.
 
-The other refusals have their own bodies:
+The other refusal has its own body:
 
 | Refusal | LLM | MCP code |
 |---|---|---|
 | TrustGuard rate limit | `429`. The body and the `Retry-After` and `X-RateLimit-*` headers are TrustGuard's, forwarded as they came. With no body, `{"error":"rate limit exceeded","message":"Request blocked: rate limit exceeded."}` | `-32004` |
-| **On Error** fail closed, entitlements unavailable | `503`. TrustGuard's body, or `{"error":"rate limit entitlements unavailable"}` | `-32005` |
-| **On Error** fail closed, credential rejected | `502`, `{"error":"trustguard_unauthorized","message":"trustguard authentication or configuration rejected","upstream_status":401}` | `-32001` |
-| **On Error** fail closed, no TrustGuard URL or credentials on the gateway | `502`, `{"error":"trustguard_unauthorized","message":"trustguard authentication or configuration rejected"}` | `-32001` |
-| **On Error** fail closed, TrustGuard unreachable or `5xx` | `502`, `{"error":"trustguard_error","message":"trustguard unavailable"}` | `-32001` |
-| **On Timeout** fail closed, TrustGuard too slow | `504`, `{"error":"trustguard_error","message":"trustguard did not answer in time"}` | `-32001` |
 
-On MCP, each of these is a JSON-RPC error over HTTP `200`, with the same body in
-`data` and, for a rate limit, the same headers on the response.
+On MCP, this is a JSON-RPC error over HTTP `200`, with the same body in
+`data` and the same headers on the response.
 
 ### Modes and failures
 
@@ -329,36 +286,30 @@ JSON-RPC errors in [What the caller receives](#what-the-caller-receives).
 | TrustGuard returns **Ask** | `403`, refused | Recorded, request continues |
 | A transform verdict | Content rewritten in place | Recorded, **original content sent** |
 | TrustGuard rate limit | `429`, refused | **`429`, refused** |
-| TrustGuard cannot be used, **On Error: Fail open** (the default) | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
-| TrustGuard cannot be used, **On Error: Fail closed** | Refused (`502`, or `503` for entitlements), decision `failed_closed` | **Refused, decision `failed_closed`** |
-| A transform that cannot be applied, **On Error: Fail open** | **Original content sent**, decision `failed_open` | Recorded, original content sent |
-| A transform that cannot be applied, **On Error: Fail closed** | `403`, refused | Recorded, original content sent |
-| TrustGuard times out, **On Timeout: Fail open** (the default) | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
-| TrustGuard times out, **On Timeout: Fail closed** | `504`, refused, decision `failed_closed` | **`504`, refused, decision `failed_closed`** |
+| TrustGuard cannot be used | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
+| A transform that cannot be applied | **Original content sent**, decision `failed_open` | Recorded, original content sent |
+| TrustGuard times out | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
 | The policy configuration cannot be parsed | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
 
 "TrustGuard cannot be used" is any of: unreachable, a `5xx`, a credential it
 refuses (including a `401` that survives a token refresh), unavailable
-entitlements (`503`), or a gateway with no TrustGuard URL or credentials.
+entitlements (`503`), a gateway with no TrustGuard URL or credentials, or a
+call that does not answer in time. In every case the policy fails open.
 
 <Warning>
 **Observe does not mean "never refuses".** A TrustGuard **rate limit** refuses
 the request in Observe exactly as in Enforce — `429`, with the retry-after and
 rate-limit headers TrustGuard returned forwarded to the caller — because it
-never reaches the point where the mode is read. The same is true of any failure
-when you set **On Error** or **On Timeout** to **fail closed**: the choice is
-read before the mode is.
+never reaches the point where the mode is read.
 </Warning>
 
 <Warning>
-**By default, a TrustGuard failure forwards traffic uninspected.** Whatever the
-failure — an outage, a timeout, a refused credential, a missing configuration —
-the request goes through and the policy is recorded as **Failed Open**, with the
-reason on the event. The caller sees nothing. Watch for `failed_open` in
-**Activity** and on the failure count: silence is not evidence of clean traffic.
-Set **On Error** and **On Timeout** to **fail closed** if uninspected traffic is
-unacceptable for this deployment; a TrustGuard outage then becomes an outage for
-your application.
+**A TrustGuard failure forwards traffic uninspected.** Whatever the failure — an
+outage, a timeout, a refused credential, a missing configuration — the request
+goes through and the policy is recorded as **Failed Open**, with the reason on
+the event. The caller sees nothing, and there is no setting to refuse instead.
+Watch for `failed_open` in **Activity** and on the failure count: silence is not
+evidence of clean traffic.
 </Warning>
 
 On a streamed response inspected block by block, a block TrustGuard could not
@@ -368,9 +319,8 @@ in a row this policy stops calling TrustGuard for the rest of that stream.
 
 Each inspected leg records one decision, and it is the first thing to read on
 the request's **Policies** tab in **Activity**: `allowed`, `reported`, `block`,
-`transformed`, `failed_open` when a failed call was waved through, and
-`failed_closed` when a failed call refused the request. Expect `failed_open`
-on a first run if something is misconfigured — a collector that was deleted,
+`transformed`, and `failed_open` when a failed call was waved through. Expect
+`failed_open` on a first run if something is misconfigured — a collector that was deleted,
 belongs to another gateway, or whose credential was refused looks exactly like
 an outage from here.
 
@@ -395,9 +345,9 @@ an outage from here.
 - **Audio is never collected**, on either leg. Image and file attachments are —
   but on the **request** leg only, and an MCP embedded resource carrying a
   binary blob rather than text has nothing to inspect.
-- **Reachability failures follow the fail open / fail closed choice; credential
-  failures do not.** A rejected credential or an unparseable configuration
-  refuses whatever you chose and whatever the mode.
+- **Every failure fails open.** An outage, a rejected credential, a missing
+  configuration, a timeout or an unparseable configuration forwards the traffic
+  uninspected, whatever the mode.
 
 ---
 
@@ -472,17 +422,14 @@ need to match on them from an alert.
 | Nothing is ever blocked although detectors are configured | The TrustGuard policy bound to the collector is in **Observe** | Two mode switches; both have to be **Enforce** |
 | Nothing recorded for the response leg | **Direction** is **Request** | Set it to **Request & Response** |
 | `429` telling the caller to retry later, including in Observe | TrustGuard rate limit for the plan | Expected — this path never consults the mode. Wait for the period the refusal names |
-| `503` on every request | TrustGuard cannot resolve plan entitlements, and **On Error** is **fail closed** | Not a gateway fault. Retry, then contact support. With **fail open** the traffic passes as `failed_open` instead |
-| Every request passes as `failed_open`, with nothing reaching TrustGuard | The collector was deleted, belongs to another gateway, the credential was refused, or the gateway has no TrustGuard URL or credentials | Re-select the collector and confirm it is bound to this gateway, then check the deployment's TrustGuard configuration. With **fail closed** these refuse with `502` instead |
-| Traffic passes with no finding at all, decision `failed_open` | TrustGuard could not be used — unreachable, an error, a timeout, a refused credential — and the relevant setting (**On Error** / **On Timeout**) is **fail open**, the default | Check the reason on the event and the failure count — silence is not evidence of clean traffic. Set **fail closed** if uninspected traffic is unacceptable |
-| `502` on every request while TrustGuard itself is down | **On Error** is set to **fail closed**, and a TrustGuard it cannot reach refuses rather than forwards | Expected. Wait for TrustGuard, or switch to **fail open** to trade the refusal for uninspected traffic |
-| `504` on every request while TrustGuard answers too slowly | **On Timeout** is set to **fail closed** — policies saved before the default changed often are | Raise the per-policy **Timeout**, investigate the slow detector, or switch **On Timeout** to fail open |
+| Every request passes as `failed_open`, with nothing reaching TrustGuard | The collector was deleted, belongs to another gateway, the credential was refused, or the gateway has no TrustGuard URL or credentials | Re-select the collector and confirm it is bound to this gateway, then check the deployment's TrustGuard configuration. |
+| Traffic passes with no finding at all, decision `failed_open` | TrustGuard could not be used — unreachable, an error, a timeout, a refused credential — and the policy failed open | Check the reason on the event and the failure count — silence is not evidence of clean traffic |
 | A streamed response was cut part-way, and the client kept its start | The finding came after that part was delivered | Expected; text already sent cannot be taken back |
 | A long streamed response is recorded as degraded with `accumulation_cap` | Each check reads only the latest 256 KiB of the answer | Expected; earlier text is not read again |
 | An MCP tool result was not inspected | The result carries no text — image, audio, or a binary resource | Expected; an MCP result is inspected through its text |
 | An attachment on the model's answer was not inspected | Attachments are collected on the request leg only | Expected; inspect attachments before they reach the model |
 | Audio was not inspected anywhere | Audio is never collected, on either leg | Expected; there is no setting for it |
-| Content passed unmasked where you expected masking, decision `failed_open` | TrustGuard's masked messages could not be mapped back onto the request — a role or message-count mismatch, for example a client that restructures messages before the gateway sees them | Check the degraded reason on the event. A masked payload that only changed line count (trimmed whitespace, a multi-line secret collapsed to one token) is applied correctly and shows as `transformed`. Set **On Error** to **fail closed** to refuse (`403`) instead of forwarding unmasked |
+| Content passed unmasked where you expected masking, decision `failed_open` | TrustGuard's masked messages could not be mapped back onto the request — a role or message-count mismatch, for example a client that restructures messages before the gateway sees them | Check the degraded reason on the event. A masked payload that only changed line count (trimmed whitespace, a multi-line secret collapsed to one token) is applied correctly and shows as `transformed`. |
 
 ---
 
