@@ -18,7 +18,7 @@ From there you have two supported paths:
 | :-- | --- | --- |
 | Best for | Clusters with outbound internet access | Air-gapped clusters, or policy that requires an internal registry |
 | You manage | One Kubernetes Secret | A registry, a copy of every image, and re-syncing on upgrade |
-| Values changes | None | `global.imageRegistry` and two collector overrides |
+| Values changes | None | `global.imageRegistry` and `global.imageRegistryScope` |
 
 Both paths pull the same images. Hybrid pulls the data path; External
 additionally pulls the console and analytics stack; a
@@ -112,45 +112,17 @@ GPU Firewall uses a separate image — see
 ```yaml
 global:
   imageRegistry: registry.example.com/neuraltrust
+  imageRegistryScope: all
 ```
 
-<Warning>
-**`global.imageRegistry` does not rewrite the OTel collector images.** Their
-repositories are pinned in full, so they keep pointing at the NeuralTrust
-registry and their pods fail to pull in an air-gapped cluster. Override them
-explicitly:
+`imageRegistry` moves every image onto your registry. `imageRegistryScope: all`
+includes the OTel collector images as well: the DataAgent egress sidecar and,
+with `global.observability.enabled`, the self-hosted collector. Without it they
+keep pulling from the NeuralTrust registry and fail in an air-gapped cluster. A
+collector `image.repository` you set yourself is left as it is.
 
-```yaml
-global:
-  clickstack:
-    egress:
-      image:
-        repository: registry.example.com/neuraltrust/opentelemetry-collector-contrib
-  observability:
-    collector:
-      image:
-        repository: registry.example.com/neuraltrust/opentelemetry-collector-contrib
-```
-
-Set only the ones you render. The first is the DataAgent egress sidecar, which
-every Hybrid install runs and External never deploys. The second applies to
-either mode, but only when `global.observability.enabled` is `true`. An External
-install with observability off needs neither, and `global.imageRegistry` covers
-it completely.
-
-The ingest gateway a central cluster runs is the same upstream collector, but it
-**is** rewritten by `global.imageRegistry` and needs no entry here. Override it
-per component only to pull it from somewhere else than your other images:
-
-```yaml
-clickstack-ingest-gateway:
-  image:
-    repository: registry.example.com/neuraltrust/opentelemetry-collector-contrib
-```
-
-Either way, re-run the `helm template | grep image:` command above afterwards and
-confirm no image still points at the NeuralTrust registry.
-</Warning>
+Re-run the `helm template | grep image:` command above and confirm no image
+still points at the NeuralTrust registry.
 
 Then create a pull Secret for **your** registry, named `gcr-secret`, in the
 release namespace:
