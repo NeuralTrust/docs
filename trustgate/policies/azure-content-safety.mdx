@@ -271,11 +271,12 @@ refusal may name a category you do not recognise from the console.
 | A category's severity meets its threshold | `403`, refused | Recorded, request continues |
 | No category meets its threshold | Request continues | Request continues |
 | The request carries no text to analyse | Forwarded; Azure is not called | Forwarded; Azure is not called |
-| Azure returns any non-2xx, times out, or its response is missing a thresholded category | Recorded, decision `failed_open`, request continues | Recorded, decision `failed_open`, request continues |
-| The gateway cannot decode the request body before calling Azure | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
+| The request is on a route that carries no chat (images, audio, files) | Forwarded, recorded as not inspected | Forwarded, recorded as not inspected |
+| Azure times out, errors, throttles, rejects the key or endpoint, or its response is missing a thresholded category | Recorded, decision `failed_open`, request continues | Recorded, decision `failed_open`, request continues |
+| The whole conversation is longer than Azure's 10,000 characters, or the gateway cannot decode the request body before calling Azure | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
 
 The decision recorded on the event is **`allowed`**, **`block`**, **`reported`**,
-or **`failed_open`**. **`failed_open`** is the one to look for first on a new
+**`failed_open`** or **`failed_closed`** (the content caused the failure and Enforce refused it). **`failed_open`** is the one to look for first on a new
 policy: it is what a wrong endpoint, a wrong key or an unreachable resource
 records on every request, in Enforce and Observe alike, and it is by far the
 most common first-run outcome. **`reported`** is what **Observe** records in place of a block. The
@@ -286,12 +287,17 @@ could not be used), or `decode_failed` (the gateway's own body could not be
 decoded before Azure was ever called).
 
 <Warning>
-**In Enforce this policy fails open, and there is no setting to change it.** A
-wrong key, a wrong endpoint, a throttled resource and a conversation past
-Azure's length limit all let the request through unchecked, with nothing in the
-response to say so. Only the event and the trace record it, as `failed_open`
-with a `failure_reason`. Validate in Observe, and treat a run of `failed_open`
-as the policy not guarding anything.
+**What happens when Azure cannot evaluate depends on the cause.**
+
+- **Azure is unavailable, or the policy is misconfigured: fail open.** A wrong key, a wrong endpoint, a
+  throttled resource, a timeout or a server error lets the request through
+  unchecked, with nothing in the response to say so. Only the event and the trace
+  record it, as `failed_open` with a `failure_reason`. Validate in Observe, and
+  treat a run of `failed_open` as the policy not guarding anything.
+- **The content caused it: blocked in Enforce.** A conversation past Azure's
+  length limit, or a body the gateway cannot decode, is refused with `403` and
+  recorded as `failed_closed`.
+- **Observe** only records either case and never blocks.
 </Warning>
 
 ### Limits
@@ -305,13 +311,16 @@ as the policy not guarding anything.
 - **Four categories, and nothing else.** No blocklists, no custom term lists, no
   jailbreak or prompt-shield detection, no protected-material detection.
 - **Azure's length limit applies to the whole conversation.** Azure documents a
-  10,000-character limit on Analyze Text. The policy sends the joined
-  conversation and never truncates it, so a long enough conversation is rejected
-  by Azure — and because the policy fails open, that turn and every turn after
-  it goes through unchecked, because a conversation only grows. Treat this
+  10,000-character limit on Analyze Text. The policy screens the system
+  prompt and every message, counts the joined conversation in characters before
+  calling Azure and never truncates it, so a conversation over the limit is
+  refused in Enforce and only recorded in Observe. Because a conversation only
+  grows, in Enforce that turn and every turn after it is refused. Treat this
   policy as suited to short exchanges until you have measured your own.
 - **Subscription key only.** No Microsoft Entra ID, no managed identity.
-- **Text only.** Files, images and audio are not sent to Azure.
+- **Text only.** Files, images and audio are not sent to Azure. A request on a
+  route that carries no chat, such as image generation, audio or files, is not
+  inspected: it is forwarded and recorded as not inspected, never refused.
 - **LLM traffic only.** The policy does not apply to MCP (Model Context Protocol)
   tool calls.
 
@@ -375,7 +384,7 @@ fields recorded.
 |---|---|---|
 | Every request is recorded as `failed_open` with `failure_reason: transport`, starting with the first | The endpoint is the bare resource URL, so Azure answers 404 and the request goes through unchecked | Use the full **Analyze Text** URL including `api-version` |
 | `failed_open` on every request after a key rotation | The key in the policy was the one you regenerated | Paste the current key; the resource has two for exactly this |
-| `failed_open` that starts partway through a long conversation and never recovers | The joined conversation passed Azure's length limit | Nothing in the policy helps: the conversation only grows. Shorten the history the application sends, or screen with a guardrail that sends one message |
+| `403`, decision `failed_closed`, that starts partway through a long conversation and never recovers | The joined conversation passed Azure's length limit | Nothing in the policy helps: the conversation only grows. Shorten the history the application sends, or screen with a guardrail that sends one message |
 | Nothing is ever blocked | The category is toggled off, or its **Block at** is above anything the scale returns | Turn the category on; check the threshold against the severity scale |
 | A threshold changed by itself | You switched the **Severity scale** and it snapped to the nearest legal value | Re-read all four thresholds after changing the scale |
 | The policy will not save | The API key or endpoint is empty, the endpoint is not an absolute `http(s)` URL, or every category is off | The console names the field; all three are checked before the request is sent |

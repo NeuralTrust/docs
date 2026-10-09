@@ -136,12 +136,15 @@ with the score OpenAI returned for it. The wording is
 |---|---|---|
 | OpenAI flags a category | `403`, refused, decision `block` | Decision `reported`, request continues |
 | The Moderations call fails, or its response is incomplete | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
-| The gateway cannot decode the request/response body before calling OpenAI | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
+| The request is on a route that carries no chat (images, audio, files) | Forwarded, recorded as not inspected | Forwarded, recorded as not inspected |
+| The upstream answered with an error (a non-2xx status) | The response is not inspected, recorded as not inspected | Same |
+| The content is larger than OpenAI accepts, or the gateway cannot decode the request/response body before calling OpenAI | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
 | The policy configuration cannot be parsed | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
 
 Those decision names are what you read on the request's **Policies** tab in
 **Activity**: `allowed`, `reported`, `block`, and — when the call to OpenAI
-itself failed — `failed_open`, in Enforce and Observe alike. Expect
+itself failed — `failed_open`, in Enforce and Observe alike, and `failed_closed`
+when the content caused the failure and Enforce refused it. Expect
 `failed_open` on a first run: a key that is wrong, revoked or out of quota
 looks from here exactly like an outage at OpenAI. The event's `failure_reason`
 field says which: `transport` (the call failed or timed out), `verdict_incomplete`
@@ -150,12 +153,18 @@ settings could not be used), or `decode_failed` (the gateway's own request or
 response body could not be decoded before OpenAI was ever called).
 
 <Warning>
-**In Enforce this policy fails open, and there is no setting to change it.** A
-revoked key, an OpenAI rate limit, a malformed response and an outage all let
-the request through uninspected, and the caller sees nothing different. The
-only trace is `failed_open` on the event and the trace, so check the event's
-`failure_reason` field before OpenAI's status page, and treat a run of
-`failed_open` as the policy not guarding anything.
+**What happens when OpenAI cannot evaluate depends on the cause.**
+
+- **OpenAI is unavailable, or the policy is misconfigured: fail open.** A revoked key, an OpenAI rate limit, a
+  malformed response, a timeout or an outage lets the request through
+  uninspected, and the caller sees nothing different. The only trace is
+  `failed_open` on the event and the trace, so check the event's `failure_reason`
+  field before OpenAI's status page, and treat a run of `failed_open` as the
+  policy not guarding anything.
+- **The content caused it: blocked in Enforce.** Content larger than OpenAI
+  accepts, or a body the gateway cannot decode, is refused with `403` and
+  recorded as `failed_closed`.
+- **Observe** only records either case and never blocks.
 </Warning>
 
 ### Limits
