@@ -79,17 +79,26 @@ and a **Create collector** link that makes one without leaving the panel.
 
 ### When TrustGuard cannot answer
 
-This policy always fails open. When the gateway cannot get a verdict from
-TrustGuard, the traffic is forwarded uninspected and the policy is recorded as
-**Failed Open**, with the reason. The caller sees nothing. That covers a network
-error, an error from TrustGuard itself, a credential TrustGuard refuses, a
-gateway with no TrustGuard URL or credentials, unavailable entitlements, a call
-that does not answer in time, and a mask the gateway cannot write back onto the
-request. A policy configuration the gateway cannot parse fails open as well.
+What happens when the gateway cannot get a verdict depends on the cause.
 
-This keeps your application working through a TrustGuard outage, at the cost of
-a window in which nothing is being inspected and nothing in front of the caller
-says so. Watch for `failed_open` in **Activity** and on the failure count.
+- **The service is unavailable: fail open.** A network error, an error from
+  TrustGuard itself, rate limiting from the provider, a credential TrustGuard
+  refuses, a gateway with no TrustGuard URL or credentials, unavailable
+  entitlements, a call that does not answer in time, or a policy configuration
+  the gateway cannot parse. The traffic is forwarded uninspected and the policy
+  is recorded as **Failed Open**, with the reason. The caller sees nothing.
+- **The content caused it: blocked in Enforce.** A request or response body the
+  gateway cannot read, content larger than TrustGuard accepts, or a mask the
+  gateway cannot write back over sensitive data TrustGuard found. In Enforce the
+  call is refused with `403` and recorded as **Failed Closed** (or **Blocked**,
+  marked degraded with the reason, for a mask that cannot be applied).
+- **Observe** only records either case and never blocks.
+
+Failing open keeps your application working through a TrustGuard outage, at the
+cost of a window in which nothing is being inspected and nothing in front of the
+caller says so. Watch for `failed_open` in **Activity** and on the failure
+count. Splitting long inputs into chunks is not available yet, so content over
+the limit is blocked in Enforce.
 
 A failure never relaxes a TrustGuard **block** or a `429` rate limit. Those are
 TrustGuard's answers rather than failures, and they still refuse the request.
@@ -158,15 +167,16 @@ version and never sees the original. On the response leg the caller does.
 </Steps>
 
 <Warning>
-**A transform the gateway cannot map back onto the request is forwarded
-unmasked.** TrustGuard's masked messages are matched back to the
+**A transform the gateway cannot map back onto the request blocks in
+Enforce.** TrustGuard's masked messages are matched back to the
 original by position and role, so a masked payload whose line count changed — a
 system prompt with surrounding whitespace trimmed, or a multi-line secret
 collapsed into a single masked token — is applied correctly, and the leg is
 recorded as `transformed`. If the masked messages cannot be mapped back at all —
-a role or message-count mismatch — the gateway treats it as a failure: the
-policy fails open, the **original content** goes on, and the leg is recorded as
-`failed_open` with the reason `transform_failed`.
+a role or message-count mismatch — the gateway treats it as a failure: in
+Enforce the leg is refused with `403` and recorded as `blocked`, marked degraded
+with the reason `transform_failed`. In Observe the original goes on and the
+failure is only recorded.
 </Warning>
 
 <Note>
@@ -287,7 +297,8 @@ JSON-RPC errors in [What the caller receives](#what-the-caller-receives).
 | A transform verdict | Content rewritten in place | Recorded, **original content sent** |
 | TrustGuard rate limit | `429`, refused | **`429`, refused** |
 | TrustGuard cannot be used | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
-| A transform that cannot be applied | **Original content sent**, decision `failed_open` | Recorded, original content sent |
+| A transform that cannot be applied | **`403`, refused**, decision `blocked`, marked degraded | Recorded, original content sent |
+| The content caused the failure (unreadable body, content over the limit) | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
 | TrustGuard times out | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
 | The policy configuration cannot be parsed | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
 
@@ -295,6 +306,8 @@ JSON-RPC errors in [What the caller receives](#what-the-caller-receives).
 refuses (including a `401` that survives a token refresh), unavailable
 entitlements (`503`), a gateway with no TrustGuard URL or credentials, or a
 call that does not answer in time. In every case the policy fails open.
+Failures caused by the content itself are the exception, as described in
+[When TrustGuard cannot answer](#when-trustguard-cannot-answer).
 
 <Warning>
 **Observe does not mean "never refuses".** A TrustGuard **rate limit** refuses
@@ -304,22 +317,23 @@ never reaches the point where the mode is read.
 </Warning>
 
 <Warning>
-**A TrustGuard failure forwards traffic uninspected.** Whatever the failure — an
-outage, a timeout, a refused credential, a missing configuration — the request
-goes through and the policy is recorded as **Failed Open**, with the reason on
-the event. The caller sees nothing, and there is no setting to refuse instead.
-Watch for `failed_open` in **Activity** and on the failure count: silence is not
+**A TrustGuard outage forwards traffic uninspected.** An outage, a timeout, a
+refused credential or a missing configuration lets the request go through, and
+the policy is recorded as **Failed Open**, with the reason on the event. The
+caller sees nothing. Watch for `failed_open` in **Activity** and on the failure count: silence is not
 evidence of clean traffic.
 </Warning>
 
 On a streamed response inspected block by block, a block TrustGuard could not
-inspect is let through, the other policies in the chain still inspect it, and
-the stream is recorded as `failed_open` when it ends. After three failed blocks
-in a row this policy stops calling TrustGuard for the rest of that stream.
+inspect because the service was unavailable is let through, the other policies
+in the chain still inspect it, and the stream is recorded as `failed_open` when
+it ends. A mask that cannot be applied ends the stream in Enforce. After three
+failed blocks in a row this policy stops calling TrustGuard for the rest of that stream.
 
 Each inspected leg records one decision, and it is the first thing to read on
 the request's **Policies** tab in **Activity**: `allowed`, `reported`, `block`,
-`transformed`, and `failed_open` when a failed call was waved through. Expect
+`transformed`, `failed_open` when a failed call was waved through, and
+`failed_closed` when the content itself caused the failure and Enforce refused it. Expect
 `failed_open` on a first run if something is misconfigured — a collector that was deleted,
 belongs to another gateway, or whose credential was refused looks exactly like
 an outage from here.
@@ -345,9 +359,11 @@ an outage from here.
 - **Audio is never collected**, on either leg. Image and file attachments are —
   but on the **request** leg only, and an MCP embedded resource carrying a
   binary blob rather than text has nothing to inspect.
-- **Every failure fails open.** An outage, a rejected credential, a missing
-  configuration, a timeout or an unparseable configuration forwards the traffic
-  uninspected, whatever the mode.
+- **An outage fails open; a content-caused failure blocks in Enforce.** An
+  outage, a rejected credential, a missing configuration, a timeout or an
+  unparseable configuration forwards the traffic uninspected, whatever the mode.
+  Content the gateway cannot read or TrustGuard cannot accept is refused in
+  Enforce.
 
 ---
 
@@ -429,7 +445,7 @@ need to match on them from an alert.
 | An MCP tool result was not inspected | The result carries no text — image, audio, or a binary resource | Expected; an MCP result is inspected through its text |
 | An attachment on the model's answer was not inspected | Attachments are collected on the request leg only | Expected; inspect attachments before they reach the model |
 | Audio was not inspected anywhere | Audio is never collected, on either leg | Expected; there is no setting for it |
-| Content passed unmasked where you expected masking, decision `failed_open` | TrustGuard's masked messages could not be mapped back onto the request — a role or message-count mismatch, for example a client that restructures messages before the gateway sees them | Check the degraded reason on the event. A masked payload that only changed line count (trimmed whitespace, a multi-line secret collapsed to one token) is applied correctly and shows as `transformed`. |
+| A request was refused with `403` because a mask could not be applied, or content passed unmasked in Observe | TrustGuard's masked messages could not be mapped back onto the request — a role or message-count mismatch, for example a client that restructures messages before the gateway sees them | Check the degraded reason on the event. A masked payload that only changed line count (trimmed whitespace, a multi-line secret collapsed to one token) is applied correctly and shows as `transformed`. |
 
 ---
 

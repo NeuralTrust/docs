@@ -116,11 +116,12 @@ rewritten, in place. Everything else, including the key order and the whitespace
 of the JSON, stays byte for byte as you sent it. A call no policy changes goes
 through untouched.
 
-**Masking never blocks a native call.** If the gateway cannot apply a mask safely,
-the call goes through unmasked: the request is forwarded as you sent it, or the
-response is returned as AWS gave it, and the policy result is recorded in the
-trace as **failed open** (`failed_open`) with the failure reason
-`mask_not_applicable:<cause>`. The causes are:
+**A mask that cannot be applied blocks the call in Enforce.** If the gateway cannot
+write a mask safely into the body it relays, it does not send the sensitive data
+on unmasked: the call is refused with `403`, or the stream ends, and the policy
+result is recorded in the trace as **blocked**, marked degraded with the failure
+reason `mask_not_applicable:<cause>`. In Observe nothing is masked and nothing is
+blocked. The causes are:
 
 - the change is not a replacement of text, for example the policy added text;
 - some of the removed text would remain anywhere in the result;
@@ -133,14 +134,12 @@ trace as **failed open** (`failed_open`) with the failure reason
   could not be read;
 - the response is an AWS error, which is never masked.
 
-Treat that outcome as a gap in the policy, not as a block: the text the policy
-wanted masked reached Bedrock, or your client. A client can cause it on purpose, for
-example by putting the value in a place no mask may rewrite, such as a key of
-`requestMetadata`. A mask that cannot be applied always lets
-the call through, recorded as failed open. A policy in observe mode never masks. An
-explicit block decision from a policy always blocks the call with `403`.
+A client can cause it on purpose, for example by putting the value in a place no
+mask may rewrite, such as a key of `requestMetadata`; the call is blocked rather
+than letting that value through. A policy in observe mode never masks. An explicit
+block decision from a policy always blocks the call with `403`.
 
-**Only a mask can fail open.** A policy that rewrites a native call for enforcement is
+**An enforcement rewrite always blocks.** A policy that rewrites a native call for enforcement is
 not masking text, and its change cannot be carried onto the bytes you sent, so the
 call is refused with `403` instead of being forwarded as it was. That covers a tool
 filter that would remove a tool, a per-tool limit that would strip a tool, and a cost
@@ -366,10 +365,8 @@ that was already delivered cannot be recalled, as on every other endpoint, so a 
 that would reach into it cannot be applied. Neither can a policy that only adds
 text, since there is nothing in the stream to replace. A value shorter than three
 characters is replaced at the place the policy found it, as in a buffered call.
-When a mask cannot be applied the held frames are released as they came, the stream
-carries on, later blocks are inspected as usual, and the outcome is recorded as
-failed open with the reason `mask_not_applicable:<cause>`, once per kind of cause
-and stream.
+When a mask cannot be applied the stream ends, and the outcome is recorded as
+blocked, marked degraded with the reason `mask_not_applicable:<cause>`.
 
 **Tool calls are masked too, and held until they are complete.** For
 `converse-stream`, and for Anthropic models on `invoke-with-response-stream`, the
@@ -381,13 +378,13 @@ place with an empty input, and the id and the name of the call are never changed
 The call reaches your client when it is complete, so a tool call arrives slightly
 later than it would without a policy; the text around it is released as before.
 
-A tool call mask fails open, with the call released as it came, when the mask is not
+A tool call mask cannot be applied, and the stream ends, when the mask is not
 a replacement of text inside a string value of its input, for example a number or a
 key, when the input is not valid JSON, when a string in it cannot be read back
 exactly (an unpaired surrogate escape, for example), or when any removed text would
 remain in it. Model reasoning is not masked: a mask that reaches reasoning in a
-stream fails open. The tool calls of other model families are not understood and are
-not held, so a mask next to one fails open as well.
+stream cannot be applied either. The tool calls of other model families are not
+understood and are not held, so a mask next to one cannot be applied.
 
 **A tool call that cannot be held is released without inspection of its input.**
 The hold is bounded at 30 seconds and by the amount of data the gateway keeps in
@@ -410,8 +407,9 @@ A client error is used on purpose: SDKs do not retry it, and a policy refusal is
 not worth retrying. If the upstream stream breaks for any other reason, the
 stream ends with an `internalServerException` frame.
 
-On native streams a guardrail fails open, as on every other stream: a policy whose
-provider cannot be reached lets the stream through.
+On native streams a guardrail follows the same split as on every other stream: a
+policy whose provider cannot be reached lets the stream through, while a failure
+caused by the content, such as a mask that cannot be applied, ends it in Enforce.
 
 ## What you still get
 

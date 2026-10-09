@@ -172,7 +172,7 @@ For MCP `tools/call`, `tool.name` is read from `payload.params.name`, not from
 | --- | --- | --- |
 | `block` | Deny the request or the response | Log; traffic continues |
 | `ask` | Deny the request because there is no user confirmation at the gateway | Log; traffic continues |
-| `transform` | Forward the masked or rewritten payload; if the rewrite cannot be applied, forward the original, recorded as `failed_open` | Log only; no rewrite |
+| `transform` | Forward the masked or rewritten payload; if the rewrite cannot be applied, refuse with `403`, recorded as `blocked` | Log only; no rewrite |
 | `report` / `allow` | Continue | Continue |
 
 Statuses reduce most-restrictive-first: `block` > `ask` > `transform` >
@@ -185,12 +185,19 @@ and `direction`. The TrustGuard base URL and credentials come from
 the gateway deployment's `TRUSTGUARD_*` environment. On SaaS they are
 platform-managed and require no user configuration.
 
-**Failure behavior.** The policy always fails open. A transport failure, a
-service error, a refused credential (`401`/`403`), unavailable entitlements
-(`503`), a missing TrustGuard base URL or gateway credential, a timeout, or a
-mask that cannot be applied lets the traffic continue and records the policy as
-**Failed Open** with the reason. A TrustGuard block and a rate limit (`429`)
-are TrustGuard's answer, not a failure, and still block.
+**Failure behavior.** The cause decides.
+
+- **Availability failures fail open.** A transport failure, a service error, a
+  refused credential (`401`/`403`), unavailable entitlements (`503`), a missing
+  TrustGuard base URL or gateway credential, or a timeout lets the traffic
+  continue and records the policy as **Failed Open** with the reason.
+- **Failures caused by the content block in Enforce** with `403`: a body that
+  cannot be read, content larger than TrustGuard accepts, or a mask that cannot
+  be applied over sensitive data TrustGuard found. They record **Failed Closed**
+  (or `blocked`, for the mask). Observe only records them.
+
+A TrustGuard block and a rate limit (`429`) are TrustGuard's answer, not a
+failure, and still block.
 
 **Policy routing.** The collector's default policy covers all of its traffic; a
 per-consumer override keyed on `consumer_id` wins where one matches. Resolution
@@ -219,11 +226,11 @@ available to gates and detector rules include `consumer.{name,tag,type}`,
 | No events in **Activity** | The collector has no default policy and no matching per-consumer override, so evaluate returns `allow` and the traffic runs unguarded |
 | Findings appear, nothing is blocked | The guardrail or policy is in **Observe** mode |
 | A masking policy logs but does not mask | The guardrail is in **Observe**. See [Verdict behavior](#verdict-behavior). Redaction also applies to DLP outcomes only |
-| A `transform` passed unmasked, decision `failed_open` | The rewrite could not be applied, so the policy failed open and the original went on. See [Verdict behavior](#verdict-behavior) |
+| A `transform` refused with `403`, decision `blocked` | The rewrite could not be applied over sensitive data, so Enforce refused rather than send it unmasked. In Observe the original goes on. See [Verdict behavior](#verdict-behavior) |
 | Responses are never inspected | `direction` is set to `request`. Set it to `request_response` |
 | A streamed response was recorded but not stopped | `post_response` evaluates the stream after the client drains it. Enforce required rules on the request direction |
 | An `ask` gate blocked instead of prompting | TrustGate has no interactive approval flow, so **Enforce** handles `ask` as a block. Use **Observe** to record it without stopping traffic |
-| Traffic continued during a TrustGuard outage or credential problem | The policy always fails open. Watch for `failed_open` in **Activity** |
+| Traffic continued during a TrustGuard outage or credential problem | A TrustGuard outage fails open; content-caused failures block in Enforce. Watch for `failed_open` in **Activity** |
 | The collector has no **Auth** tab | TrustGate is native and does not use a collector API key |
 | A `tgk_…` key is rejected as an MCP credential | A collector key is not an MCP credential. MCP applications authenticate with OAuth or an `ag_…` key |
 
