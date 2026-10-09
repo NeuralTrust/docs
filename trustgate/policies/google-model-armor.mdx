@@ -304,7 +304,7 @@ confidence thresholds in the Model Armor template.
 | A filter matches and blocks | `403`, refused | Recorded, request continues |
 | Sensitive data, action *Anonymize* | Rewritten in place | Recorded, original text sent |
 | *Anonymize* with no de-identify template | **`403`, refused** | Recorded, original text sent |
-| *Anonymize*, but the masked text cannot be applied | **`403`, refused** | Recorded, original text sent |
+| *Anonymize*, but the masked text cannot be applied | Original text sent, decision `failed_open` | Recorded, original text sent |
 | A filter selected in **Block on** did not run | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
 | A filter selected in **Block on** did not run, but Model Armor returned masked text | Masked text applied, decision `anonymized`, `failure_reason` `verdict_incomplete` | Decision `failed_open`, request continues |
 | Model Armor unreachable, times out, or errors | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
@@ -330,10 +330,9 @@ not be decoded before Model Armor was ever called).
 Model Armor cannot be reached, requests are forwarded unscreened rather than
 refused, and the caller sees a normal reply. Only the event and the trace
 record it, as `failed_open` with a `failure_reason`. Validate in Observe, and
-treat a run of `failed_open` as the policy not guarding anything. The exception
-is *Anonymize* when Model Armor flags sensitive data but returns no masked
-text: that request is refused, because Model Armor confirmed the data and gave
-the gateway no way to mask it.
+treat a run of `failed_open` as the policy not guarding anything. The same
+holds for *Anonymize* when Model Armor returns masked text that the gateway
+cannot apply: the request is forwarded unmasked and recorded as `failed_open`.
 </Warning>
 
 <Note>
@@ -352,9 +351,11 @@ not need it, or check it is still configured on the Model Armor template.
 - **Only the last user message is inspected on the request leg.** No system
   prompt, no conversation history, no tool definitions, no tool calls or
   results.
-- **Masking that fails is a block.** If Model Armor returns no de-identified
-  text, or the request format cannot be re-encoded with it, the request is
-  refused rather than forwarded. The original is never sent.
+- **Masking that cannot be applied lets the call through.** If Model Armor
+  returns no de-identified text at all, the request is refused (see the warning
+  on the de-identify template). If it returns masked text that the request
+  format cannot be re-encoded with, the original is forwarded unmasked and
+  recorded as `failed_open`.
 - **A filter that did not run is not a result.** The request continues and is recorded as `failed_open`. See the note above.
 - **Inspect model responses is off by default.** Only the request is screened
   until you turn it on; turning it on doubles the calls to Model Armor per
