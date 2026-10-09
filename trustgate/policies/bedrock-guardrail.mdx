@@ -315,9 +315,10 @@ Open **Policies** → **Library** → **AWS Bedrock Guardrail**.
 
 ### Guardrail
 
-**Guardrail ID** — the guardrail's identifier in AWS. Required, and the console
-checks only that it is not empty; whether it exists is discovered on the first
-request.
+**Guardrail ID** — the guardrail's identifier in AWS: the identifier itself or
+the full guardrail ARN. Required. The console checks its shape when you save;
+whether the guardrail exists is discovered on the first request, and an
+identifier AWS does not accept is a configuration problem that fails open.
 
 ### Inspection
 
@@ -353,13 +354,15 @@ which filter fired.
 
 ### Advanced Settings
 
-**Guardrail version** — defaults to `DRAFT`. Point production at a published
+**Guardrail version** — `DRAFT` or a published version number, checked when you
+save. Defaults to `DRAFT`. Point production at a published
 version number instead: `DRAFT` changes the moment anyone edits the guardrail in
 AWS, with no change to this policy and no event to tell you.
 
 **Session name** — the STS session name, for the IAM role method. Defaults to
 `BedrockClientSession`. It shows up in CloudTrail, which is the only reason to
-change it.
+change it. The console checks it when you save: 2 to 64 characters from letters,
+digits and `+ = , . @ _ -`.
 
 ### Stage and mode
 
@@ -414,9 +417,12 @@ that fails is never a silent pass-through.
 | Sensitive information comes back anonymised, **PII action** *Block request* | **`403`, refused** | Recorded, original text sent |
 | Sensitive information comes back anonymised, **PII action** *Anonymize* | Rewritten in place | Recorded, **original text sent** |
 | *Anonymize*, but the masked text cannot be applied | **`403`, refused**, decision `blocked`, marked degraded | Recorded, original text sent |
-| AWS unreachable, throttled, denied, or the credentials cannot be resolved | Recorded, decision `failed_open`, request continues | Recorded, decision `failed_open`, request continues |
+| AWS unreachable, throttled or over its quota, denied, the credentials cannot be resolved, or AWS rejects the guardrail ID, version or role | Recorded, decision `failed_open`, request continues | Recorded, decision `failed_open`, request continues |
+| The request is on a route that carries no chat (images, audio, files) | Forwarded, recorded as not inspected | Forwarded, recorded as not inspected |
+| The upstream answered with an error (a non-2xx status) | The response is not inspected, recorded as not inspected | Same |
+| AWS evaluated only part of the text (partial coverage) and nothing it did evaluate blocks | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
 | AWS intervened in a way this plugin cannot read | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
-| The content is larger than AWS accepts, or the gateway cannot decode the request/response body before calling AWS | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
+| AWS rejects the content of the call, or the gateway cannot decode the request/response body before calling AWS | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
 
 **Observe never masks.** It records what would have happened and forwards the
 original text. Masking is only ever applied in **Enforce**.
@@ -436,16 +442,17 @@ used), or `decode_failed` (the gateway's own body could not be decoded before
 AWS was ever called).
 
 <Warning>
-**An AWS outage fails open in Enforce.** If
+**An AWS outage or a configuration problem fails open in Enforce.** If
 AWS cannot be reached, requests are forwarded unscreened rather than refused.
-An expired credential, a denied permission, a wrong region and a throttle all
+An expired credential, a denied permission, a wrong region, a throttle or
+quota error, and a guardrail ID, version or role that AWS rejects all
 look the same to the caller: a normal reply. Only the event and the trace
 record it, as `failed_open` with a `failure_reason` — the gateway logs the
 underlying error at debug level, so at a default log level it is invisible on
 the gateway too.
 
-A failure caused by the content is different. Content larger than AWS accepts,
-an AWS intervention this plugin cannot read, a body the gateway cannot decode, or
+A failure caused by the content is different. Content AWS rejects, a text AWS
+evaluated only in part, an AWS intervention this plugin cannot read, a body the gateway cannot decode, or
 *Anonymize* when AWS reports sensitive information but the masked text cannot be
 applied: in Enforce the request is refused with `403`, because forwarding it
 would send the content unscreened. In Observe these are only recorded and never
@@ -463,7 +470,12 @@ block.
   until you turn it on; turning it on doubles the calls to AWS per turn.
 - **A streamed response is not inspected**, even with **Inspect model
   responses** on.
-- **Text only.** Files, images and audio are not sent to AWS.
+- **Text only.** Files, images and audio are not sent to AWS. A request on a
+  route that carries no chat is not inspected: it is forwarded and recorded as
+  not inspected, never refused. The same holds for an upstream error response.
+- **Long texts are sent whole.** The gateway does not shorten or split the
+  message. AWS judges it, rejects it, or evaluates only part of it, and a part
+  evaluated only in part blocks in Enforce.
 - **LLM traffic only.** The policy does not apply to MCP (Model Context Protocol)
   tool calls.
 

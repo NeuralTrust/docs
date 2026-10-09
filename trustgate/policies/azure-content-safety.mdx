@@ -271,8 +271,9 @@ refusal may name a category you do not recognise from the console.
 | A category's severity meets its threshold | `403`, refused | Recorded, request continues |
 | No category meets its threshold | Request continues | Request continues |
 | The request carries no text to analyse | Forwarded; Azure is not called | Forwarded; Azure is not called |
+| The request is on a route that carries no chat (images, audio, files) | Forwarded, recorded as not inspected | Forwarded, recorded as not inspected |
 | Azure times out, errors, throttles, rejects the key or endpoint, or its response is missing a thresholded category | Recorded, decision `failed_open`, request continues | Recorded, decision `failed_open`, request continues |
-| The content is longer than Azure accepts, or the gateway cannot decode the request body before calling Azure | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
+| The whole conversation is longer than Azure's 10,000 characters, or the gateway cannot decode the request body before calling Azure | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
 
 The decision recorded on the event is **`allowed`**, **`block`**, **`reported`**,
 **`failed_open`** or **`failed_closed`** (the content caused the failure and Enforce refused it). **`failed_open`** is the one to look for first on a new
@@ -288,7 +289,7 @@ decoded before Azure was ever called).
 <Warning>
 **What happens when Azure cannot evaluate depends on the cause.**
 
-- **Azure is unavailable: fail open.** A wrong key, a wrong endpoint, a
+- **Azure is unavailable, or the policy is misconfigured: fail open.** A wrong key, a wrong endpoint, a
   throttled resource, a timeout or a server error lets the request through
   unchecked, with nothing in the response to say so. Only the event and the trace
   record it, as `failed_open` with a `failure_reason`. Validate in Observe, and
@@ -310,13 +311,16 @@ decoded before Azure was ever called).
 - **Four categories, and nothing else.** No blocklists, no custom term lists, no
   jailbreak or prompt-shield detection, no protected-material detection.
 - **Azure's length limit applies to the whole conversation.** Azure documents a
-  10,000-character limit on Analyze Text. The policy sends the joined
-  conversation and never truncates it, so a long enough conversation is rejected
-  by Azure — and in Enforce that turn and every turn after it is refused,
-  because a conversation only grows. Treat this
+  10,000-character limit on Analyze Text. The policy screens the system
+  prompt and every message, counts the joined conversation in characters before
+  calling Azure and never truncates it, so a conversation over the limit is
+  refused in Enforce and only recorded in Observe. Because a conversation only
+  grows, in Enforce that turn and every turn after it is refused. Treat this
   policy as suited to short exchanges until you have measured your own.
 - **Subscription key only.** No Microsoft Entra ID, no managed identity.
-- **Text only.** Files, images and audio are not sent to Azure.
+- **Text only.** Files, images and audio are not sent to Azure. A request on a
+  route that carries no chat, such as image generation, audio or files, is not
+  inspected: it is forwarded and recorded as not inspected, never refused.
 - **LLM traffic only.** The policy does not apply to MCP (Model Context Protocol)
   tool calls.
 
