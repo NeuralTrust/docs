@@ -12,7 +12,7 @@ There are four answers, and the console offers them as one **Strategy** choice.
 | Strategy | Picks | Reach for it when |
 |---|---|---|
 | **Simple routing** | The registry the model name points at. | One provider, or the client always names the model. |
-| **Smart routing** | A tier, by how hard the prompt is. | Two or more model strengths serve the same application and cost should follow difficulty. |
+| **Smart routing** | A model from an ordered ladder, retained while the conversation is warm. | Balance cost and capability across conversations, with an optional upgrade for harder turns. |
 | **Fallback** | The first registry in an ordered chain that succeeds. | You want resilience across providers, or a cheaper degrade path under load. |
 | **Load balancing** | A member of a pool, by algorithm. | Traffic should spread — evenly, by weight, or by load. |
 
@@ -32,33 +32,78 @@ to re-route later without touching the client.
 
 ## Smart routing
 
-The console lists it beside the load-balancing algorithms, but it is a different
-kind of decision: not *which member takes the next request* but *which model
-this request deserves*.
+Smart routing chooses a model before generation from an ordered ladder of
+**two or three models**. It selects when a conversation starts, then keeps that
+model while the conversation is warm. Keeping the same model lets subsequent
+turns reuse the provider's [prompt cache](/trustgate/concepts/prompt-caching).
+Routing thresholds are built in; you choose the models and their order.
 
-Smart routing classifies each prompt into a complexity band and sends it to the
-tier configured for that band. The bands are fixed labels — you never set a
-threshold:
+### Choose the models
 
-| Band | Traffic |
+Each slot names a **provider and a specific model**. Order them from lower cost
+to higher capability:
+
+| Slot | Role |
 |---|---|
-| **Simple** | Short, low-stakes, straightforward. Put the cheapest capable model here. |
-| **Medium** | Everyday production traffic. |
-| **Hard** | Long, multi-step, technical. The model that justifies its cost. |
+| **Budget** | A capable, lower-cost model for simpler requests. |
+| **Balanced** | An everyday model between Budget and Most capable, in a three-model setup. |
+| **Most capable** | The strongest model in the ladder for demanding requests. |
 
-Each tier is a **registry and a model**. Tiers may share a registry — one OpenAI
-connection serving `gpt-4o-mini` on Simple and `gpt-4o` on Medium is the common
-shape. You need at least two tiers, and each band can be used once.
+Start with **Two models** when Budget and Most capable cover the application's
+workload. Choose **Three models** when a Balanced model adds useful capability
+at a lower cost than the top slot. Slots may share a provider with different
+models, or use different providers. Each provider/model pair must be distinct.
 
-A prompt whose complexity falls below every configured tier goes to the
-**cheapest** tier, not to a random pick. That makes the cheapest tier
-load-bearing in a way the others are not: if its registry is deleted, smart
-routing is dropped and the pool reverts to round robin. Losing a middle or top
-tier just removes that rung.
+Choose models that support the application's inputs, tools and context sizes.
+Use representative application tasks to check the ladder's order: Budget should
+handle routine work, and each higher slot should add capability for harder work.
 
-The point of smart routing is cost without a product decision per request. Check
-**Analytics** after turning it on: if the tier mix is not what you expected, the
-model on **Simple** is usually too weak for what you thought was simple.
+### Conversations and prompt caching
+
+The initial request selects a model according to request complexity. Later turns
+keep that selection while the conversation is warm. After an idle gap longer
+than the routing cache lifetime, the next request selects again.
+
+Use a stable **`X-Session-Id`** for each conversation, with session extraction
+configured on the gateway. Reuse the ID across turns and retries; give a new
+conversation a new ID. Send the conversation history through the client's normal
+message fields, or continue it through the API's conversation mechanism.
+
+The routing lifetime controls how long a model selection remains active between
+requests. Provider caching follows the provider's own rules. Keep the prompt
+prefix stable and use the appropriate cache fields described in
+[Prompt caching](/trustgate/concepts/prompt-caching).
+
+### Prioritize quality over savings
+
+**Prioritize quality over savings** is off by default for a new configuration.
+With it off, the selected model stays in place while the conversation is warm.
+
+Turn it on when conversations often move from routine work to more demanding
+requests. A harder new user turn can move the conversation **one slot upward,
+once during the warm period**. The upgraded model then stays in place until the
+next idle expiry; the selection does not move downward while warm. Retries and
+tool continuations retain the selection.
+
+An upgrade changes the model serving the conversation and can require a new
+provider cache write. Use the toggle when the extra capability matters more than
+preserving the original cache and its savings.
+
+### Configure in the console
+
+1. Open **Applications**, select an application, and open **Routing**.
+2. Under **Strategy** → **Load balancing**, choose **Smart routing**.
+3. Choose **Two models** or **Three models**.
+4. Select a **Provider** and **Model** for each slot, in the order shown above.
+5. Choose whether to enable **Prioritize quality over savings**, then save.
+6. Open **Connect** and use its generated snippet with `"model": "auto"`.
+
+When changing provider connections, review the ladder so it continues to contain
+two or three distinct, available provider/model pairs. After rollout, check
+**Analytics** for model usage, cache reads and writes, cost and latency. Compare
+with the application's previous traffic mix to assess the effect of the setup.
+Pair routing with [LLM Budget](/trustgate/policies/llm-budget) when you also need
+a spend ceiling.
 
 ## Fallback
 

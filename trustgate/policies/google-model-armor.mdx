@@ -304,17 +304,20 @@ confidence thresholds in the Model Armor template.
 | A filter matches and blocks | `403`, refused | Recorded, request continues |
 | Sensitive data, action *Anonymize* | Rewritten in place | Recorded, original text sent |
 | *Anonymize* with no de-identify template | **`403`, refused** | Recorded, original text sent |
-| *Anonymize*, but the masked text cannot be applied | **`403`, refused** | Recorded, original text sent |
-| A filter selected in **Block on** did not run | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
-| A filter selected in **Block on** did not run, but Model Armor returned masked text | Masked text applied, decision `anonymized`, `failure_reason` `verdict_incomplete` | Decision `failed_open`, request continues |
-| Model Armor unreachable, times out, or errors | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
-| The gateway cannot decode the request or response body before calling Model Armor | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
+| *Anonymize*, but the masked text cannot be applied | **`403`, refused**, decision `blocked`, marked degraded | Recorded, original text sent |
+| A filter selected in **Block on** was skipped by Model Armor, for example above its token limit | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
+| A filter selected in **Block on** is not enabled in the template | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
+| Model Armor unreachable, times out, rate limits, or rejects the credential, the template name or the location | Decision `failed_open`, request continues | Decision `failed_open`, request continues |
+| The request is on a route that carries no chat (images, audio, files) | Forwarded, recorded as not inspected | Forwarded, recorded as not inspected |
+| The upstream answered with an error (a non-2xx status) | The response is not inspected, recorded as not inspected | Same |
+| A buffered text is larger than 512 KiB, or the gateway cannot decode the request or response body before calling Model Armor | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
 
 **Observe never masks.** It records what would have happened and forwards the
 original text. Masking is only ever applied in **Enforce**.
 
 The decision recorded on the event is **`allowed`**, **`block`**,
-**`anonymized`**, **`reported`** or **`failed_open`**. **`anonymized`** is
+**`anonymized`**, **`reported`**, **`failed_open`** or **`failed_closed`** (the
+content caused the failure and Enforce refused it). **`anonymized`** is
 Enforce-only: in **Observe** a prompt that would have been masked records
 **`reported`** instead, which is also what Observe records in place of a block.
 **`failed_open`** is the one to look for first on a new policy — it is what
@@ -326,24 +329,29 @@ settings could not be used), or `decode_failed` (the gateway's own body could
 not be decoded before Model Armor was ever called).
 
 <Warning>
-**In Enforce this policy fails open, and there is no setting to change it.** If
-Model Armor cannot be reached, requests are forwarded unscreened rather than
-refused, and the caller sees a normal reply. Only the event and the trace
-record it, as `failed_open` with a `failure_reason`. Validate in Observe, and
-treat a run of `failed_open` as the policy not guarding anything. The exception
-is *Anonymize* when Model Armor flags sensitive data but returns no masked
-text: that request is refused, because Model Armor confirmed the data and gave
-the gateway no way to mask it.
+**A Model Armor outage or a configuration problem fails open in Enforce.** If Model Armor cannot be
+reached, times out, answers with a server error or rate limits, or the credential
+is rejected, requests are forwarded unscreened rather than refused, and the
+caller sees a normal reply. Only the event and the trace record it, as
+`failed_open` with a `failure_reason`. Validate in Observe, and treat a run of
+`failed_open` as the policy not guarding anything.
+
+A failure caused by the content is different: a buffered text larger than 512 KiB,
+a filter Model Armor skipped that decides blocking, a body the gateway
+cannot decode, or *Anonymize* when the masked text cannot be applied. In Enforce
+the request is refused with `403`, because forwarding it would send the content
+unscreened. In Observe these are only recorded and never block.
 </Warning>
 
 <Note>
 **A filter that did not run counts as a failure, not as a clean result.** Model
 Armor can answer successfully and still report that one of the filters you
 selected in **Block on** never executed. Silence from a filter that did not run
-looks exactly like silence from a filter that found nothing, so the policy
-records it as `failed_open` with `failure_reason` `verdict_incomplete`, and the
-request continues. When Model Armor also returned masked text, that text is
-still applied and the decision is `anonymized`. Deselect the filter if you do
+looks exactly like silence from a filter that found nothing. If Model Armor
+skipped it, for example because the content is above its token limit, the policy
+refuses in Enforce with `failure_reason` `verdict_incomplete`. If your template
+does not enable the filter, that is not the content's fault: the request
+continues, recorded as `failed_open`. Deselect the filter if you do
 not need it, or check it is still configured on the Model Armor template.
 </Note>
 
@@ -354,14 +362,21 @@ not need it, or check it is still configured on the Model Armor template.
   results.
 - **Masking that fails is a block.** If Model Armor returns no de-identified
   text, or the request format cannot be re-encoded with it, the request is
-  refused rather than forwarded. The original is never sent.
-- **A filter that did not run is not a result.** The request continues and is recorded as `failed_open`. See the note above.
+  refused in Enforce rather than forwarded. The original is never sent.
+- **A filter that did not run is not a result.** Skipped by Model Armor, it blocks in Enforce; not enabled in the template, it fails open. See the note above.
 - **Inspect model responses is off by default.** Only the request is screened
   until you turn it on; turning it on doubles the calls to Model Armor per
   turn.
 - **A streamed response is inspected as it is generated**, with **Inspect model
   responses** on. If the check itself fails, the stream is not cut.
-- **Text only.** Files, images, and audio are not sent to Model Armor.
+- **Text only.** Files, images, and audio are not sent to Model Armor. A request
+  on a route that carries no chat is not inspected: it is forwarded and recorded
+  as not inspected, never refused. The same holds for an upstream error
+  response, which carries no completion to inspect.
+- **Size.** Below 512 KiB the whole text goes to Model Armor, never a part of it.
+  Above 512 KiB a buffered text is refused in Enforce, before the call. If Model
+  Armor itself skips a detection, for example above its token limit, Enforce
+  refuses too.
 - **LLM traffic only.** The policy does not apply to MCP (Model Context Protocol)
   tool calls.
 
@@ -424,9 +439,9 @@ fields recorded.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Permission error from Google | The service account lacks `roles/modelarmor.user`, or the grant has not propagated | Check the binding, then retry after a minute |
-| Template not found | **Location** does not match the template's region | Correct the location — there is no global endpoint |
+| Template not found | **Location** does not match the template's region. A template, project or location Model Armor rejects is a configuration problem: the request is forwarded and recorded as `failed_open` | Correct the location — there is no global endpoint |
 | Every request is recorded as **`failed_open`** with `failure_reason: transport` | Model Armor unreachable, or the credential cannot be resolved | Check the location, then confirm the key is valid and its service account has `roles/modelarmor.user` on the project |
-| `failed_open` with `failure_reason: verdict_incomplete` although the configuration is correct and Model Armor is reachable | A filter selected in **Block on** came back without having run | Deselect it if you do not need it, or check it is still configured on the Model Armor template |
+| `failed_open` with `failure_reason: verdict_incomplete` although the configuration is correct and Model Armor is reachable | A filter selected in **Block on** came back without having run | Deselect it if you do not need it, or check it is still configured on the Model Armor template. If Model Armor skipped it (for example above its token limit), Enforce refuses instead |
 | The policy will not save | The **Service account key (JSON)** is empty, **Project**, **Location** or **Template ID** is empty, or no filter is selected in **Block on** | The console names the field; fill it in, or select at least one filter |
 | Sensitive data is blocked when you chose *Anonymize* | The Model Armor template has no de-identify template, or uses **Basic** | Switch it to **Advanced** and attach the de-identify template |
 | *Sensitive data action* seems ignored | The **Sensitive data** toggle is off | Turn it on — the toggles gate evaluation |
