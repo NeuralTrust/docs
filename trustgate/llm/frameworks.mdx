@@ -1,0 +1,272 @@
+---
+title: "Frameworks & SDKs"
+description: "Point a framework's own client at the LLM Gateway or the MCP Gateway. The base URL, the application key, and the argument each library uses for them."
+sidebarTitle: "Frameworks & SDKs"
+---
+
+The two values are the ones on [Connect your application](/trustgate/llm/connect):
+the LLM Gateway URL and the application key. What you pass as the model name is
+[what goes in `model`](/trustgate/llm/connect#what-goes-in-model).
+
+An OpenAI-compatible client takes `https://<llm-host>/<application-slug>/v1`.
+Anthropic's Python client does not: it appends `/v1` itself, so the base URL
+stops at the application slug.
+
+The MCP Gateway is a different host. Its URL ends in `/mcp`, and the key is the
+`X-AG-API-Key` header. See [Connect an agent](/trustgate/mcp/connect).
+
+## LangChain
+
+```python
+from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
+
+ChatOpenAI(
+    model="<model>",
+    base_url="https://<llm-host>/<application-slug>/v1",
+    api_key="ag_…",
+)
+
+# No /v1. This base URL is handed to Anthropic's Python client.
+ChatAnthropic(
+    model="<model>",
+    base_url="https://<llm-host>/<application-slug>",
+    api_key="ag_…",
+)
+```
+
+The MCP client is `langchain-mcp-adapters`. Its transport value is
+`streamable_http`, with an underscore. The dict key is the name you give that
+server:
+
+```python
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+MultiServerMCPClient({
+    "trustgate": {
+        "transport": "streamable_http",
+        "url": "https://<mcp-host>/<application-slug>/mcp",
+        "headers": {"X-AG-API-Key": "ag_…"},
+    },
+})
+```
+
+## LlamaIndex
+
+Use `OpenAILike`, not `OpenAI`, when the model name is not an OpenAI model name.
+
+```python
+from llama_index.llms.openai_like import OpenAILike
+
+OpenAILike(
+    model="<model>",
+    api_base="https://<llm-host>/<application-slug>/v1",
+    api_key="ag_…",
+    is_chat_model=True,
+    is_function_calling_model=True,
+)
+```
+
+## LiteLLM, DSPy, and CrewAI
+
+The `openai/` prefix is how these libraries select an OpenAI-compatible
+endpoint. DSPy's class is `LM` and its argument is `api_base`. CrewAI's class
+is `LLM` and its argument is `base_url`.
+
+```python
+import litellm
+
+litellm.completion(
+    model="openai/<model>",
+    api_base="https://<llm-host>/<application-slug>/v1",
+    api_key="ag_…",
+)
+```
+
+```python
+import dspy
+
+dspy.LM(
+    "openai/<model>",
+    api_base="https://<llm-host>/<application-slug>/v1",
+    api_key="ag_…",
+)
+```
+
+```python
+from crewai import LLM
+from crewai_tools import MCPServerAdapter
+
+LLM(
+    model="openai/<model>",
+    base_url="https://<llm-host>/<application-slug>/v1",
+    api_key="ag_…",
+)
+
+# transport is "streamable-http", with a hyphen.
+MCPServerAdapter({
+    "url": "https://<mcp-host>/<application-slug>/mcp",
+    "transport": "streamable-http",
+    "headers": {"X-AG-API-Key": "ag_…"},
+})
+```
+
+## OpenAI Agents SDK
+
+`OpenAIChatCompletionsModel` calls Chat Completions through an `AsyncOpenAI`
+client. Tracing is on by default and exports traces to OpenAI with that same
+key, so disable it. Otherwise the `ag_…` key is sent to OpenAI.
+
+```python
+from agents import OpenAIChatCompletionsModel, set_tracing_disabled
+from openai import AsyncOpenAI
+
+set_tracing_disabled(True)
+
+OpenAIChatCompletionsModel(
+    model="<model>",
+    openai_client=AsyncOpenAI(
+        base_url="https://<llm-host>/<application-slug>/v1",
+        api_key="ag_…",
+    ),
+)
+```
+
+## Pydantic AI
+
+```python
+from pydantic_ai.mcp import MCPToolset
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
+
+OpenAIChatModel(
+    "<model>",
+    provider=OpenAIProvider(
+        base_url="https://<llm-host>/<application-slug>/v1",
+        api_key="ag_…",
+    ),
+)
+
+MCPToolset(
+    "https://<mcp-host>/<application-slug>/mcp",
+    headers={"X-AG-API-Key": "ag_…"},
+)
+```
+
+## AutoGen
+
+`model_info` is required when the model name is not in AutoGen's catalog.
+
+```python
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+from autogen_ext.tools.mcp import McpWorkbench, StreamableHttpServerParams
+
+OpenAIChatCompletionClient(
+    model="<model>",
+    base_url="https://<llm-host>/<application-slug>/v1",
+    api_key="ag_…",
+    model_info={...},
+)
+
+McpWorkbench(
+    StreamableHttpServerParams(
+        url="https://<mcp-host>/<application-slug>/mcp",
+        headers={"X-AG-API-Key": "ag_…"},
+    )
+)
+```
+
+## smolagents
+
+`OpenAIServerModel` is the OpenAI-compatible client. `MCPClient` takes the
+server dict `MCPAdapt` reads, including `headers`.
+
+```python
+from smolagents import MCPClient, OpenAIServerModel
+
+OpenAIServerModel(
+    model_id="<model>",
+    api_base="https://<llm-host>/<application-slug>/v1",
+    api_key="ag_…",
+)
+
+MCPClient({
+    "url": "https://<mcp-host>/<application-slug>/mcp",
+    "transport": "streamable-http",
+    "headers": {"X-AG-API-Key": "ag_…"},
+})
+```
+
+## Semantic Kernel
+
+`OpenAIChatCompletion` has no base-URL argument. Pass an `AsyncOpenAI` client
+as `async_client`.
+
+```python
+from openai import AsyncOpenAI
+from semantic_kernel.connectors.ai.open_ai import OpenAIChatCompletion
+from semantic_kernel.connectors.mcp import MCPStreamableHttpPlugin
+
+OpenAIChatCompletion(
+    ai_model_id="<model>",
+    async_client=AsyncOpenAI(
+        base_url="https://<llm-host>/<application-slug>/v1",
+        api_key="ag_…",
+    ),
+)
+
+MCPStreamableHttpPlugin(
+    name="<name>",
+    url="https://<mcp-host>/<application-slug>/mcp",
+    headers={"X-AG-API-Key": "ag_…"},
+)
+```
+
+## Haystack
+
+```python
+from haystack.components.generators.chat import OpenAIChatGenerator
+from haystack.utils import Secret
+from haystack_integrations.tools.mcp import MCPToolset, StreamableHttpServerInfo
+
+OpenAIChatGenerator(
+    api_base_url="https://<llm-host>/<application-slug>/v1",
+    api_key=Secret.from_token("ag_…"),
+)
+
+MCPToolset(
+    StreamableHttpServerInfo(
+        url="https://<mcp-host>/<application-slug>/mcp",
+        headers={"X-AG-API-Key": "ag_…"},
+    ),
+    eager_connect=True,
+)
+```
+
+## Go and Rust
+
+The Go client is `github.com/openai/openai-go`. `WithBaseURL` keeps the
+trailing slash:
+
+```go
+import (
+    "github.com/openai/openai-go"
+    "github.com/openai/openai-go/option"
+)
+
+client := openai.NewClient(
+    option.WithBaseURL("https://<llm-host>/<application-slug>/v1/"),
+    option.WithAPIKey("ag_…"),
+)
+```
+
+The Rust client is the `async-openai` crate:
+
+```rust
+use async_openai::{Client, config::OpenAIConfig};
+
+let config = OpenAIConfig::new()
+    .with_api_base("https://<llm-host>/<application-slug>/v1")
+    .with_api_key("ag_…");
+let client = Client::with_config(config);
+```
