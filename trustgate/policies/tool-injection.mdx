@@ -153,9 +153,27 @@ model is gone from it.
 </Steps>
 
 The decision records what happened to **each** injected tool on each request:
-`appended`, `replaced` or `dropped`. That per-tool record is the only way to see
-a **Client Wins** drop, which is otherwise invisible — the request succeeds and
-your tool simply was not there.
+`appended`, `replaced`, `dropped` or `skipped`. That per-tool record is the only
+way to see a **Client Wins** drop, which is otherwise invisible — the request
+succeeds and your tool simply was not there.
+
+<Note>
+**Chat Completions requests to `gpt-6.1-sol` and `gpt-6-astra` are forwarded
+with nothing injected.** Those models reject function tools on Chat
+Completions, so the request goes upstream unchanged, the decision is
+`skipped`, and each configured tool is recorded as `skipped`. Matching includes
+a vendor prefix (`openai/gpt-6.1-sol`), an `ft:` fine-tune
+(`ft:gpt-6.1-sol:org::id`), a dated snapshot (`gpt-6.1-sol-2026-10-01`,
+`gpt-6-astra-2026-08-01`), and a body that names no model when the binding
+default is one of those two. A model named on the body is the one that is
+checked. Other models are unchanged. Use the Responses API to have the tools
+injected on `gpt-6.1-sol` and `gpt-6-astra`: a Responses request to those
+models still receives them.
+
+Function tools the client sends itself on Chat Completions for these models
+are answered with `400`: `invalid_request_error`, `param` `tools`, `code`
+`unsupported_value`. The message points at the Responses API.
+</Note>
 
 A rejected request is the exception, and it follows from there being no partial
 injection: nothing was placed, so there is no per-tool outcome to record. What is
@@ -172,6 +190,7 @@ Enforce is the only mode, so there is one column.
 | Collision, **Gateway Wins** | The gateway's definition replaces the other, event `replaced` |
 | Collision, **Client Wins** | The gateway's tool is not injected, event `dropped` |
 | Collision, **Reject** | `400`, the whole injection abandoned, nothing reaches the model |
+| Chat Completions to `gpt-6.1-sol` or `gpt-6-astra` | Forwarded unchanged, decision `skipped`, each configured tool `skipped` |
 | The request body cannot be read | **Forwarded with no tools injected, and no event** |
 | The request arrives in a shape the gateway cannot convert | **Forwarded with no tools injected, and no event** |
 | The tool list cannot be written back | `502`, refused |
@@ -308,6 +327,7 @@ fields a decision records, the per-tool outcomes included.
 | The model never calls the tool | It was in the request and the model did not choose it | Almost always the **Description**. Confirm the injection on the event first, then rewrite the description |
 | The client errors on an unknown tool call | The application does not implement the injected tool | The gateway does not execute tools. Inject only what the application handles |
 | The tool is missing and the request succeeded | A collision resolved as `dropped` by **Client Wins**, or the scope does not cover this application | Check the per-tool outcome on the event, then check **Requests from** |
+| The tool is missing on Chat Completions to `gpt-6.1-sol` or `gpt-6-astra`, and the request succeeded | Those models reject function tools on Chat Completions, so nothing is injected | Expected. The decision and each configured tool are `skipped`. Use the Responses API to have the tools injected. The same skip covers a vendor prefix, an `ft:` fine-tune, a dated snapshot, and a body that names no model when the binding default is one of them |
 | The tool is missing and there is no event at all | The body could not be read, or it arrived in a shape the gateway cannot convert | This path is silent by design. Do not read silence as success |
 | `400` on every request, naming one of your tools | **On Conflict** is **Reject** and something always collides — often a duplicate name inside your own list | Read your own list first, then the client's |
 | A tool earlier in your list was not injected on a rejected request | **Reject** abandons the whole injection | Expected; there is no partial injection |

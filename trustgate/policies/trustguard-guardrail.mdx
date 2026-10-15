@@ -339,6 +339,35 @@ the request's **Policies** tab in **Activity**: `allowed`, `reported`, `block`,
 belongs to another gateway, or whose credential was refused looks exactly like
 an outage from here.
 
+### Streamed tool calls
+
+When this policy inspects the response, a tool call on an OpenAI-shaped Chat
+Completions stream, and on Mistral, is held whole. The gateway keeps every
+argument fragment of that one choice until the call is complete and TrustGuard
+has returned a verdict, and it sends none of them before then. When the verdict
+allows the call, the held chunks are released together, in one burst at
+`[DONE]`. Several tool indexes on the same choice stay held together until
+every one of them is whole.
+
+A stream that cannot be inspected as that one call is refused before any
+fragment is sent, whichever failure direction is set:
+
+- more than one choice, including `n` greater than 1 and a second choice later
+  in the stream. The guard folds tool calls by index alone, so two choices that
+  share an index become one arguments string, and a finish on one choice ends
+  the stream
+- one chunk that carries several choices
+- a choice index that is not a JSON integer, such as `"1"` or `1.0`
+- a tool whose name changes after the call opened, on the same choice and
+  index, without a new call id
+
+The hold is capped by `BEDROCK_NATIVE_TOOL_HOLD`, which defaults to 30 seconds,
+and by 256 KiB of held stream bytes. If the call is still open when a cap is
+reached, the stream's failure direction decides. The default is fail open: the
+unfinished call is released and the stream is recorded as degraded, with the
+reason `tool_input_uninspected`. Fail closed refuses the stream and releases
+nothing.
+
 ### Limits
 
 - **A streamed response is inspected while it streams, and what the client
