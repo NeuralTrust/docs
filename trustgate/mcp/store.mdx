@@ -1,13 +1,15 @@
 ---
 title: "Employee portal"
-description: "The self-service side of MCP: people browse the catalogue, install servers for themselves, connect their own accounts, and ask for what they cannot have — while admins keep the shelf."
+description: "The self-service side of TrustGate: people install MCP servers for themselves, connect their own accounts, find the models they can call, hold one personal key for both, and ask for what they cannot have — while admins keep the shelf."
 ---
 
 Applications are for things your team built. The **Employee portal** is for people.
 
 Every gateway has one. A person opens it, installs what they are allowed,
 connects their own accounts, and their agents reach those tools through one fixed
-MCP URL — the same catalogue, from a client instead of a browser.
+MCP URL — the same catalogue, from a client instead of a browser. On a SaaS
+gateway it also lists the models they can call, and gives them one **personal
+key** for their models and their tools.
 
 Neither governs applications and applications do not govern it. An application's
 surface is what an admin bound; a person's Employee portal is what they installed, bounded
@@ -21,20 +23,29 @@ by their [Access](/trustgate/access/overview) level.
 | TrustGate **Viewer** and up | Their own portal, alongside the console. |
 | TrustGate **Admin** | Theirs, plus a preview of anyone else's ([seeing what someone else sees](/trustgate/access/overview#seeing-what-someone-else-sees)). |
 
-People enter with their NeuralTrust login or your identity provider. There is no
-key to hand out: the portal is entered by a person, and an application key cannot
-open it.
+People enter with their NeuralTrust login or your identity provider. From code
+or a client that cannot sign in, a person uses their own
+[personal key](#personal-key) instead — it opens their portal and nothing else.
+An application key cannot open it: the portal is a person's, and a key that runs
+as an application is refused.
 
 ## What a person sees
 
-Two tabs. **Catalog** is everything they may install, searchable, each card
-showing whether it is installed, waiting on their account, or outside their
-access. **My Access** is what they hold, with the state of their own account on
-each, and a **Connections** list of the servers that want a personal account.
+Two sections, **MCP Catalog** and **Models Catalog**. A Hybrid gateway has no
+models through the portal, so there it is the MCP Catalog alone. The
+**Personal key** button in the header serves both.
+
+In the **MCP Catalog**, the filter beside the search switches between **All** —
+everything they may install, each card showing whether it is installed, waiting
+on their account, or outside their access — and **My access**: what they hold,
+with the state of their own account on each, and a **Connections** list of the
+servers that want a personal account.
 
 Opening a server shows what it does, how many tools it brings, and one **Next
 step** line — connect, reconnect, finish setup, request access, or nothing to do.
 That line is the whole instruction; there is nothing else to read.
+
+The **Models Catalog** is covered in [Models](#models) below.
 
 ## Installing
 
@@ -57,27 +68,95 @@ An install answer is a state, not a success flag:
 The same states name the badges in the portal: **Installed**, **Connect**,
 **Reconnect needed**, **Pending**, **Needs admin setup**.
 
+## Disconnecting an account
+
+A person can take back an account they linked. On the server, under
+**Connections**, **Disconnect** deletes the account TrustGate holds for them:
+its tools stop working for them until they connect again, and the server stays
+installed. A server that uses one account shared by everyone shows no
+Disconnect — that account is an administrator's, and is disconnected from the
+registry.
+
+## Models
+
+The **Models Catalog** has a card for each LLM provider the gateway has, and one
+for each provider of TrustGate's catalog it has not connected yet. Each says
+what it serves (Chat, Embeddings, …) and where the person stands:
+
+| State | What it means |
+|---|---|
+| **Connected** | They can call it now — all its models, or the ones their level names. |
+| **Pending** | They asked; an admin has not decided yet. |
+| **No access** | Outside their level. **Request access** asks for it. |
+
+Opening a provider they have shows **How to call them**: the base URL, a model
+picker, and a snippet for the language they pick. Any OpenAI-compatible client
+works — point it at the base URL and send the personal key.
+
+**Request access** asks for one provider, with a reason in the person's own
+words, and lands in [Approvals](/trustgate/access/overview#requests-instead-of-refusals)
+next to the MCP requests. Approving gives them that provider's models, all of
+them. A provider the gateway has not connected yet can be asked for too: the
+admin connects it, then approves.
+
+Which models a person reaches follows their [Access](/trustgate/access/overview#models)
+level, and it is enforced on every call: a model outside it is refused before
+the gateway calls the provider, however many other people use it.
+
+## Personal key
+
+One key per person and gateway, for their models and their MCP tools, on a SaaS
+gateway (a Hybrid one has none). The **Personal key** button in the header
+creates it, rotates it or revokes it:
+
+- It is shown **once**, when it is created or rotated. Afterwards only its first
+  and last characters are, and losing it means rotating it.
+- It lasts up to **90 days**. A rotation keeps what the key reaches; the old
+  secret stops working at once.
+- **Use it** has a ready snippet for the TrustGate SDK, the OpenAI SDK and an MCP
+  client.
+
+The key runs as its owner, with what Access grants them — never more. It opens
+their portal at `/store/mcp` (send it as `X-AG-API-Key`, `x-api-key` or
+`Authorization: Bearer`) and their models through the gateway, and nothing an
+application holds. From code, the [TrustGate SDK](/sdks/trustgate/people) takes
+it as is. An admin sees whether someone has one in **Access**, and can revoke it
+there.
+
 ## From an MCP client
 
 Everything a person installs is on one fixed URL — `/store/mcp` on the gateway's
 MCP host, the same address for everyone. Pointing Claude Code, Cursor or any
-other MCP client at it runs an OAuth sign-in the first time; after that the
-client sees that person's own catalogue, and a *tools changed* notification
-whenever they install, connect or lose a server.
+other MCP client at it runs an OAuth sign-in the first time; a client that only
+sends headers uses the person's [personal key](#personal-key) instead. After
+that the client sees that person's own catalogue, and a *tools changed*
+notification whenever they install, connect or lose a server.
 
-It is an MCP endpoint like any other, so the client also gets three tools of its
-own on top of the
-[gateway's usual two](/trustgate/mcp/overview#the-gateways-own-tools):
+It is an MCP endpoint like any other, so the client also gets the gateway's own
+tools — the [inventory](/trustgate/mcp/overview#the-gateways-own-tools), and
+these:
 
 | Tool | What it does |
 |---|---|
 | `trustgate_store_search` | Searches the whole catalogue, not only what is installed, and says of each hit whether it installs straight away or files a request. |
-| `trustgate_store_install` | Installs one catalogue code and answers with the states above — carrying the connect link, the setup form or the request form with it. |
+| `trustgate_store_install` | Installs one catalogue code and answers with the states above — carrying the connect link, the setup form or the request form with it. Called again on a server already installed whose account is missing, it returns the link to connect it. |
 | `trustgate_store_uninstall` | Removes one, asking which instance when several are installed. |
+| `trustgate_store_models` | Lists the providers and models the person's personal key reaches, and the base URL to call them at. |
+| `trustgate_store_request_models` | Asks for a provider's models. The answer is a link where the person writes why; the request is filed when they send it. |
+| `trustgate_store_personal_key` | Returns a link to a page where the person signs in and creates, rotates or revokes their personal key. The key is shown there, never to the agent. |
 
 An agent with no tool for what it was asked is meant to search here first.
 Installing through the portal is what keeps the new server governed, instead of
 the person wiring an upstream MCP URL into their client.
+
+Every request a tool files carries the person's own words. The tools take no
+reason: an agent asked for one would write it from its own task and an approver
+would read it as the person's, so the link opens a form the person fills in.
+
+The page a connect link opens ends with **Close and go back** to the app the
+link came from. Some clients only re-read their tool list when asked to, or when
+a conversation starts: if the new tools do not appear, refresh the connector's
+tools in the client.
 
 ## Open or curated
 
@@ -116,4 +195,5 @@ to install or uninstall, and each keeps its own accounts.
 
 The person's view is a page in the platform — the only page an **Employee** has.
 The MCP URL to hand to the company is under the gateway's settings, next to the
-LLM and MCP gateway URLs.
+LLM and MCP gateway URLs. The personal key is under the **Personal key** button
+in the portal's header.

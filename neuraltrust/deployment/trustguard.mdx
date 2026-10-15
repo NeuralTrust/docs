@@ -1,0 +1,93 @@
+---
+title: Deploy TrustGuard
+sidebarTitle: TrustGuard
+description: Run TrustGuard on its own in your cluster, with the control plane on NeuralTrust SaaS.
+---
+
+**TrustGuard** is the NeuralTrust detection engine for AI agents. It evaluates
+prompts, responses, and tool calls against your policies and returns findings,
+backed by ML classifiers. Your applications or gateway call it
+synchronously and decide how to enforce. TrustGuard is NeuralTrust's commercial
+offering and is licensed to enterprise customers.
+
+This page installs TrustGuard on its own as a [Hybrid](/neuraltrust/deployment/hybrid)
+data plane, with the control plane on NeuralTrust SaaS. The Hybrid page covers
+the architecture, [prerequisites](/neuraltrust/deployment/hybrid#prerequisites),
+and [network rules](/neuraltrust/deployment/hybrid#network) that apply here too.
+
+| Resource | Where |
+| --- | --- |
+| Source code | [github.com/NeuralTrust/TrustGuard](https://github.com/NeuralTrust/TrustGuard) (private) |
+| Container image | [`europe-west1-docker.pkg.dev/neuraltrust-app-prod/nt-docker/trustguard`](https://console.cloud.google.com/artifacts/docker/neuraltrust-app-prod/europe-west1/nt-docker/trustguard?project=neuraltrust-app-prod) |
+| Product slice | [`values-trustguard.yaml.example`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-trustguard.yaml.example) |
+
+<Note>
+The TrustGuard image is published to the NeuralTrust container registry.
+Pulling it requires a registry key, which NeuralTrust issues with an enterprise
+offer — [contact NeuralTrust](mailto:support@neuraltrust.ai) to get one. See [Container images](/neuraltrust/deployment/images) for pulling
+directly or mirroring into your own registry.
+</Note>
+
+This install runs `trustguard-data-plane` (port 8081) and `dataagent-trustguard`.
+
+<Steps>
+
+<Step title="Prepare the namespace and chart sources">
+
+Do step 1 of the [Hybrid install](/neuraltrust/deployment/hybrid#install) to
+create the namespace and the image pull Secret, then [get the chart sources](/neuraltrust/deployment/images#get-the-chart-sources)
+so `values-trustguard.yaml.example` is on disk.
+
+</Step>
+
+<Step title="Create the TrustGuard in the console">
+
+Create a private TrustGuard in **TrustGuard → Agent Security**. Take the
+`CONFIG_SYNC_TOKEN` and the DataAgent enrollment JWT from the wizard output —
+see [Console setup](/neuraltrust/deployment/console-setup).
+
+</Step>
+
+<Step title="Create the two Secrets">
+
+```bash
+kubectl create secret generic trustguard-config-sync -n neuraltrust \
+  --from-literal=CONFIG_SYNC_TOKEN='<trustguard-config-sync-token>'
+
+kubectl create secret generic dataagent-enrolment-trustguard -n neuraltrust \
+  --from-literal=ENROLMENT_TOKEN='<trustguard-enrolment-jwt>'
+```
+
+</Step>
+
+<Step title="Install">
+
+Put the cluster-specific values in their own file:
+
+```yaml values-cluster.yaml
+global:
+  platform: "kubernetes"          # aws | gcp | azure | openshift | kubernetes
+  domain: "platform.example.com"
+```
+
+Then install with the TrustGuard slice, which turns on
+`global.products.trustguard` and wires the two Secrets:
+
+```bash
+helm upgrade --install neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust \
+  -f values-cluster.yaml \
+  -f values-trustguard.yaml.example
+```
+
+</Step>
+
+</Steps>
+
+Then [verify](/neuraltrust/deployment/hybrid#verify). TrustGuard is published at
+`trustguard.<domain>`; it
+needs no inbound rule from NeuralTrust, and only
+`trustguard-configsync.neuraltrust.ai`, `databridge.neuraltrust.ai`, and the
+telemetry host for your region need egress.

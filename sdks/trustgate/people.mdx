@@ -1,0 +1,118 @@
+---
+title: "A person's own Store"
+description: "Run as yourself instead of an application: your Employee portal's tools, called with your own accounts, and your models, with your personal key or a browser sign-in"
+sidebarTitle: "A person's own Store"
+---
+
+Not everything is an application. A person can run an agent as themselves and
+get their own [Employee portal](/trustgate/mcp/store): the servers they
+installed, narrowed to what [Access](/trustgate/access/overview) grants their user
+and groups, called with their own accounts — and their models.
+
+That is `TrustGateUser`. It is the other side of `TrustGate`, which runs as an
+application: no application is involved, and every call is the person's, in
+the audit trail and upstream.
+
+## With a personal key
+
+The simplest way in is the person's **personal key**, from the portal's
+[Personal key](/trustgate/mcp/store#personal-key) button. It needs no browser and
+reaches both their tools and their models.
+
+<CodeGroup>
+  ```python Python
+  from trustgate import TrustGateUser
+
+  me = TrustGateUser()  # reads TRUSTGATE_PERSONAL_KEY
+  store = me.connect(requires=["create_issue"])  # your MCP tools
+  llm = me.llm()  # your models, for the provider's own SDK
+  ```
+
+  ```ts TypeScript
+  import { TrustGateUser } from "@neuraltrust/trustgate"
+
+  const me = new TrustGateUser() // reads TRUSTGATE_PERSONAL_KEY
+  const store = await me.connect({ requires: ["create_issue"] }) // your MCP tools
+  const llm = await me.llm() // your models, for the provider's own SDK
+  ```
+</CodeGroup>
+
+The gateway is found from the key, as an application's is: nothing else to
+configure. The key lasts up to 90 days and is rotated or revoked in the portal.
+
+A personal key and an application key are not interchangeable.
+`TrustGate(api_key=...)` refuses a personal key and says to use `TrustGateUser`,
+and `TrustGateUser` refuses an application's key.
+
+## Signing in through the browser
+
+Without a key, sign in the way an MCP client does. This reaches the person's
+tools only: models take the personal key.
+
+<CodeGroup>
+  ```python Python
+  from trustgate import TrustGate, ToolFormat
+
+  me = TrustGate.login(url="https://acme.mcp.neuraltrust.ai/store/mcp").connect()
+  tools = me.toolkit(ToolFormat.OPENAI_RESPONSES)
+  ```
+
+  ```ts TypeScript
+  import { TrustGate, ToolFormat } from "@neuraltrust/trustgate"
+
+  const me = await (await TrustGate.login({ url: "https://acme.mcp.neuraltrust.ai/store/mcp" })).connect()
+  const { tools, execute } = me.toolkit(ToolFormat.OpenAIResponses)
+  ```
+</CodeGroup>
+
+`url` is the Employee portal's MCP URL, from the gateway's settings
+(`TRUSTGATE_STORE_URL` when unset); its host alone works too.
+
+The first run opens the browser. The session is kept in
+`~/.trustgate/sessions.json`, readable only by you (`TRUSTGATE_HOME` moves it),
+and renewed on its own until the sign-in ends — a day on NeuralTrust's cloud, so
+that what an admin changes in Access reaches you by then. Past that, the next
+call raises [`LoginRequiredError`](/sdks/trustgate/errors), and `login()` signs in
+again. `logout()` forgets the session.
+
+The browser comes back to a port on your machine, so this is for your own
+computer. A service acting for many people is an application with an API key,
+naming its users — see [Acting for end users](/sdks/trustgate/end-users).
+
+A backend that already ran the OAuth flow for its user passes the token instead:
+`TrustGateUser(url=..., access_token=...)` (`TRUSTGATE_ACCESS_TOKEN`).
+
+## Servers waiting for an account
+
+A server whose account the person has not connected yet is not on their tool
+set. `connect()` does not refuse: the person is there to connect it. It names
+those servers, and hands over the page to connect each one.
+
+<CodeGroup>
+  ```python Python
+  for server in me.needs_connect:
+      link = me.connect_link(server)
+      print(f"Connect {server}: {link.connect_url}")
+
+  me.refresh()  # after they connect: the server's tools are on the surface
+  ```
+
+  ```ts TypeScript
+  for (const server of me.needsConnect) {
+    const link = await me.connectLink(server)
+    console.log(`Connect ${server}:`, link?.connectUrl)
+  }
+
+  await me.refresh() // after they connect: the server's tools are on the surface
+  ```
+</CodeGroup>
+
+The link is a page on the person's own gateway, checked as such before it is
+handed over, and it expires: mint it when you are about to show it.
+
+## Using the tools
+
+The handle is the same as an application's: hand `mcp` (the URL and its
+headers) to a framework that brings its own MCP client, or translate the tools
+with `toolkit()` for a model call — see [Tools](/sdks/trustgate/tools). The
+person's models work as an application's do — see [Models](/sdks/trustgate/models).
