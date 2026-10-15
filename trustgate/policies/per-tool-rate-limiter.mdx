@@ -42,10 +42,9 @@ A rule with several windows enforces **all** of them: 60 a minute *and* 500 an
 hour means a burst is stopped by the first and a slow grind by the second.
 
 <Note>
-**The windows are fixed, not sliding**, despite what the catalogue's one-line
-description says. A window opens when the tool's counter is first charged and
-closes exactly its duration later, at which point the counter disappears and the
-whole allowance returns at once.
+**The windows are fixed, not sliding.** A window opens when the tool's counter is
+first charged and closes exactly its duration later, at which point the counter
+disappears and the whole allowance returns at once.
 
 With *10 per hour*, if the counter opened at 10:00 it closes at 11:00. Ten
 executions at 10:59 exhaust it — and ten more at 11:01 are all allowed, because
@@ -214,15 +213,17 @@ policies, not because there is a choice.
 | Over a window, **Inject error**, streaming | Falls back to **Strip tool** on the request |
 | Tool declared but no rule matches | Forwarded untouched, nothing counted |
 | Request body cannot be decoded | Forwarded untouched, nothing counted |
-| Counter store unreachable, LLM leg | **`502`, refused** |
-| Counter store unreachable, MCP leg | Logged, **call allowed** |
+| Counter store unreachable, LLM leg | Allowed through, decision `failed_open` |
+| Counter store unreachable, MCP leg | Allowed through, decision `failed_open` |
 | Counter store not configured at all | Forwarded untouched, nothing counted |
+| Request context already canceled while the store errors | LLM answers `502`. MCP allows the call and records `failed_open`. This is an abandoned request, not a store outage |
 
 <Warning>
-**A counter-store failure refuses the request on the LLM leg and allows it on the
-MCP leg.** Same policy, same failure, opposite directions — and since there is no
-Observe mode, there is no configuration that softens the LLM side. Account for it
-when sizing availability.
+**A counter-store failure allows the request on both the LLM leg and the MCP
+leg.** The event records decision `failed_open`. There is no Observe mode, and no
+setting that refuses traffic because Redis is down. A client that has already
+disconnected is a different case: that error is not recorded as a store outage,
+and on the LLM leg the proxy can still answer `502`.
 </Warning>
 
 ### Limits
@@ -325,8 +326,8 @@ decision records.
 | **Inject error** produced no message, and the tool was missing from the request instead | The request was streaming, so the behaviour fell back to **Strip tool** | Expected. Use a non-streaming request if you need the explanation |
 | The policy will not attach to an MCP application | A rule, or the default, uses a behaviour MCP cannot carry out | Set every behaviour to **Reject** for that policy |
 | No mode selector appears | This policy only supports Enforce | Expected |
-| `502` on every LLM request | The counter store is unreachable | This policy fails closed on the LLM leg, and has no Observe mode to soften it |
-| MCP calls are all allowed while the LLM leg returns `502` | The MCP leg fails open on the same failure | Expected. Healthy MCP traffic is not evidence of a healthy policy |
+| LLM requests and MCP calls are both allowed, and Activity shows `failed_open` | The counter store is unreachable | Expected. Both legs allow the call. Healthy traffic is not evidence the counters are being enforced |
+| `502` on an LLM request whose client has already gone | The request context was already canceled when the store errored | Expected for an abandoned request. A live request with Redis down is allowed through with decision `failed_open` |
 
 ---
 

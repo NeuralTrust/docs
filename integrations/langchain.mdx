@@ -1,6 +1,6 @@
 ---
 title: "LangChain"
-description: "Add TrustGuard middleware to LangChain agents, configure evaluation hooks, handle verdicts, and verify enforcement"
+description: "Add TrustGuard middleware to LangChain agents, or point ChatOpenAI and ChatAnthropic at TrustGate"
 ---
 
 [LangChain](https://python.langchain.com) is an open-source Python framework for
@@ -10,13 +10,15 @@ answer.
 
 The `langchain-neuraltrust` middleware evaluates messages and tool activity
 inside that loop. Because it runs in the application, it can block a tool call
-before execution.
+before execution. To send the model and tool calls through TrustGate instead,
+see [TrustGate](#trustgate).
 
 ## Integration capabilities
 
 | Product | What it does in LangChain | What you can enforce |
 | --- | --- | --- |
 | **[TrustGuard](/trustguard/overview)** | An `AgentMiddleware` in `create_agent` checks the conversation, model response, tool results, and pending tool calls against the assigned [policy](/trustguard/concepts/policies). The agent acts as a [collector](/trustguard/concepts/collectors). | Monitor · Block · Transform |
+| **[TrustGate](/trustgate/overview)** | `ChatOpenAI` and `ChatAnthropic` point at the LLM Gateway. `MultiServerMCPClient` points at the MCP Gateway. | Whatever the application's policies enforce |
 
 Pass the agent's tool list to the middleware to include **tool declarations** in
 the evaluation payload. This allows tool-poisoning rules to inspect tool names,
@@ -426,8 +428,50 @@ parsing the payload. Reconcile a run with the console on `trace_id`.
 | Nothing in **Activity** | No policy assigned to the collector, or `api_base` points at the wrong host |
 | Runs hang | `timeout` is too high for the number of enabled stages. Account for each evaluation round trip |
 
+## TrustGate
+
+LangChain needs no NeuralTrust package to call TrustGate. Point `ChatOpenAI`
+and `ChatAnthropic` at the application's base URL and key. Anthropic's Python
+client takes no `/v1` on that URL. The same snippets are on
+[Frameworks & SDKs](/trustgate/llm/frameworks#langchain).
+
+```python
+from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
+
+ChatOpenAI(
+    model="<model>",
+    base_url="https://<llm-host>/<application-slug>/v1",
+    api_key="ag_…",
+)
+
+# No /v1. This base URL is handed to Anthropic's Python client.
+ChatAnthropic(
+    model="<model>",
+    base_url="https://<llm-host>/<application-slug>",
+    api_key="ag_…",
+)
+```
+
+Tools use `langchain-mcp-adapters`. `MultiServerMCPClient` speaks
+`streamable_http` and sends the application key in `headers`. The dict key is
+the name you give that server.
+
+```python
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
+MultiServerMCPClient({
+    "trustgate": {
+        "transport": "streamable_http",
+        "url": "https://<mcp-host>/<application-slug>/mcp",
+        "headers": {"X-AG-API-Key": "ag_…"},
+    },
+})
+```
+
 ## Related
 
+- [Frameworks & SDKs](/trustgate/llm/frameworks): the same LangChain clients, and the other frameworks
 - [Policies: Gates](/trustguard/concepts/policies#gates): configure Block and Transform actions
 - [Evaluate API](/trustguard/api/evaluate): request and response reference
 - [Agent and MCP security detectors](/trustguard/detectors/agent-mcp-security): indirect prompt injection and tool poisoning
