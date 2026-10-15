@@ -50,7 +50,7 @@ Only **Microsoft Entra ID** **or** **Generic OIDC** can be configured at a time�
 | **Client Secret** | Yes | The client secret (stored encrypted) |
 | **Display Name** | No | Custom name shown on the login button (e.g., "Sign in with Okta") |
 | **Scopes** | No | OAuth scopes to request (default: `openid profile email`) |
-| **Trust Identity Provider** | No | When enabled, users authenticated by the IdP can join the team without DNS email-domain verification. Default: off. |
+| **Trust Identity Provider** | No | Trusts users authenticated by the IdP. Does **not** bypass email-domain verification: users must be on a DNS-verified email domain of the team. Default: off. |
 | **Role Mapping from IdP** | No | When enabled, extracts team role from an OIDC token claim and maps IdP values to NeuralTrust roles. |
 | **Role Claim Name** | When role mapping enabled | Exact claim key in the token (e.g., `role`, `roles`, `groups`). |
 | **Role Mappings** | When role mapping enabled | Map IdP claim values to `Admin` or `Member`. Keys are case-sensitive. |
@@ -125,20 +125,17 @@ After configuring OIDC:
 **UI label:** Trust Identity Provider  
 **Default:** disabled
 
-When **Trust Identity Provider** is enabled:
+Trust Identity Provider does **not** bypass email-domain verification. On or off, every SSO sign-in requires the user's email domain to be a **DNS-verified** domain of the team (see [Email Domain Verification](#email-domain-verification)):
 
-- Any user successfully authenticated by your OIDC IdP can join the team **without** DNS verification of their email domain.
-- New users are provisioned on first SSO login (subject to normal team access rules).
-
-When disabled (default):
-
-- New users must either already be team members **or** belong to a **verified** email domain configured under Email Domains.
+- **Verified** domain: existing members sign in. New users are created on first SSO login only when [User provisioning](/platform/user-sync) is on.
+- **Pending** (added but not verified) domain: sign-in is rejected with `domain_not_verified`, for new users and existing members alike.
+- Domain **not added**: sign-in is rejected with `unauthorized_team_access`.
 
 <Warning>
-Only enable Trust Identity Provider if you fully trust the IdP to authenticate authorized users only. This bypasses domain ownership verification for user provisioning.
+Only enable Trust Identity Provider if you fully trust the IdP to authenticate authorized users only.
 </Warning>
 
-**Interaction with Email Domains:** Domain verification still matters for team discovery and security when Trust IdP is off. With Trust IdP on, unverified domains do not block IdP-authenticated users from joining.
+**Interaction with Email Domains:** verify every email domain your users sign in with before rolling out SSO. A Pending domain blocks sign-in even with Trust IdP on.
 
 ---
 
@@ -342,7 +339,7 @@ A verification token will be displayed. Add a TXT record to your DNS:
 | **Verified** ✓ | Domain ownership confirmed | Domain is active for SSO |
 | **Failed** ✗ | Verification unsuccessful | Check DNS record and retry |
 
-If **Trust Identity Provider** is enabled, new users authenticated by the IdP can join without a verified domain. If Trust IdP is disabled, new users need a verified domain or an existing team membership.
+SSO sign-in only works for users on a **Verified** domain. A **Pending** domain blocks sign-in, even with Trust Identity Provider on.
 
 ---
 
@@ -427,8 +424,8 @@ account for IdP outages. External-domain guests continue to use magic link.
 | Error / Symptom | Cause | Solution |
 |-----------------|-------|----------|
 | `insufficient_role` | **Require IdP role match** is on and no claim value maps to Admin/Member | Verify Role Claim Name, mappings, and IdP groups/roles for the user |
-| `domain_not_verified` | New user; email domain added but DNS not verified | Complete DNS TXT verification or enable Trust IdP (if appropriate) |
-| `unauthorized_team_access` | Email domain not verified and user is not a team member | Add and verify domain, invite user, or enable Trust IdP |
+| `domain_not_verified` | Email domain added but DNS not verified (Trust IdP does not change this) | Complete DNS TXT verification |
+| `unauthorized_team_access` | Email domain not added to the team | Add the domain and complete DNS TXT verification |
 | `User not authorized` | Generic (legacy message) | See rows above |
 | Wrong role on first login | Mapping misconfiguration | Check case-sensitive keys; for array claims verify all group values |
 | Role not updating on later logins | Sync disabled | Enable **Sync organization role from IdP on login** |
