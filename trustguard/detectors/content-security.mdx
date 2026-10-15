@@ -438,11 +438,30 @@ structure — what the document *says*.
 
 Files attached to the message, **Input side only**, before the model reads them.
 It extracts the text first — PDFs, Office documents, plain text, and images
-through OCR — and screens what it extracts.
+through OCR — and screens what it extracts. What happens when that extraction
+produces nothing is in [When a file cannot be read](#when-a-file-cannot-be-read).
 
 OCR is the part that matters: an instruction rendered as a picture, or inside a
 scanned page, is invisible to anything reading the file as text. It is also why
 the same attack in a screenshot is caught here and nowhere else.
+
+### When a file cannot be read
+
+Screening covers the text the extractor returns. When there is nothing to
+screen, the result depends on why. If the extractor isn't available (no
+capacity or not configured), the file is allowed; if parsing the file fails
+or times out, it's treated as uninspectable.
+
+| Case | Result |
+|---|---|
+| Parsing the file fails or times out: corrupt, truncated, or a format the parser rejects, a panic while parsing, no documents returned, or the per-document parse time is exceeded | The detector's action applies: blocked in **Enforce**, reported in **Observe**. Signal type `guard_content_uninspectable`, reason `content_uninspectable`. |
+| The file parses but has no text, including an empty file | Allowed. |
+| The extractor isn't available: no worker slot within its wait, it is not configured or not built in, or an infrastructure failure (a missing dependency or OCR setup) | Allowed. |
+
+A PDF that is blocked and contains nothing harmful could not be parsed: it is
+corrupt, truncated, or a format the extractor rejects, or parsing it timed out.
+An attachment that is too large to inspect is a separate finding, signal type
+`guard_payload_too_large` with reason `payload_too_large`.
 
 ### Configure
 
