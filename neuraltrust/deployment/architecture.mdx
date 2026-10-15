@@ -73,37 +73,77 @@ set as Hybrid but against your own domain, with the central cluster accepting it
 
 ## Capacity
 
-Chart defaults ship as a **sensible starting point** for evaluation and typical
-production traffic. They are not a hard ceiling — right-size CPU, memory,
-replicas, and node pools to match your traffic, latency goals, and budget.
+Kubernetes schedules a pod only onto a node with enough unreserved capacity to
+cover the pod's resource **requests**. Cluster size is therefore set by the
+chart's default requests rather than by traffic: the node counts below are the
+smallest pools on which every component of a new installation can be scheduled.
+Treat them as the minimum of an autoscaling node pool, and let the cluster add
+nodes as load grows.
 
-The shapes below reflect chart defaults with in-cluster PostgreSQL and Redis and
-Firewall CPU workers. They do **not** include the node OS, kube-system, or your
-ingress controller, so leave headroom for those.
-
-| | Hybrid (all products) | External or Central |
+| Scenario | Firewall on CPU | Firewall on GPU |
 | --- | --- | --- |
-| Approximate chart requests | ~10 vCPU / ~28 GiB | ~15 vCPU / ~38 GiB |
-| Comfortable cluster shape | **3–4** workers at **8 vCPU / 16–32 GiB** | **4–5** workers at **8 vCPU / 16–32 GiB** |
-| Example cloud shapes | AWS `m6i.2xlarge` × 3 · Azure `Standard_D8s_v5` × 3 · GCP `e2-standard-8` × 3 | The same SKU class with one extra node |
+| Hybrid, all products | **3** × 8 vCPU / 32 GiB | **2** × 8 vCPU / 16 GiB + **2** × L4 GPU nodes |
+| Hybrid, TrustGuard only | **3** × 8 vCPU / 16 GiB | **2** × 8 vCPU / 16 GiB + **2** × L4 GPU nodes |
+| Hybrid, TrustGate only | **2** × 8 vCPU / 16 GiB | — (no Firewall) |
+| External or Central | **4** × 8 vCPU / 32 GiB | **3** × 8 vCPU / 16 GiB + **2** × L4 GPU nodes |
 
-Hybrid with fewer products — TrustGate only, so no Firewall — needs substantially
-less memory. External and Central add the console, ClickHouse, the collector,
-DataCore, and AlertEngine on top of the data path.
+| Node | AWS | Azure | GCP |
+| --- | --- | --- | --- |
+| 8 vCPU / 32 GiB | `m6i.2xlarge` | `Standard_D8s_v5` | `e2-standard-8` |
+| 8 vCPU / 16 GiB | `c6i.2xlarge` | `Standard_F8s_v2` | `c4-highcpu-8` |
+| L4 GPU node: 8 vCPU / 32 GiB, one NVIDIA L4 | `g6.2xlarge` | No L4 size; not validated | `g2-standard-8` |
 
-| What drives capacity | Notes |
-| --- | --- |
-| Firewall CPU workers | Largest memory footprint whenever TrustGuard is enabled |
-| data-plane API | Significant CPU and memory during evaluation runs |
-| ClickHouse | Keep headroom for analytics queries; scale with retention |
-| PostgreSQL and Redis | Prefer [managed stores](/neuraltrust/deployment/configuration#managed-stores), so datastore capacity is independent of the node pool |
+Each count allows for the cluster's own components — the node's system
+reservation, DaemonSets, and kube-system — and keeps total requests at or below
+85 % of allocatable capacity. The remaining 15 % absorbs the extra pod a rolling
+upgrade creates. With one node fewer, the installation cannot be scheduled.
+Where a single node would be enough, the table specifies two, so that the two
+replicas of the request path run on different nodes.
 
-Common adjustments: scale out busy gateway and TrustGuard replicas, or enable
-horizontal autoscaling once your cluster has metrics; right-size Firewall workers
-if you run a subset of detectors, or move heavy ones to
-[GPU](/neuraltrust/deployment/configuration#gpu-firewall-workers), which needs a
-separate GPU node pool; pin workloads to a dedicated pool when you want isolation
-from other cluster tenants.
+The GPU column assumes the
+[GPU Firewall configuration](/neuraltrust/deployment/configuration#gpu-firewall-workers),
+including CUDA MPS sharing with four clients per GPU.
+
+<Tip>
+**Enable cluster autoscaling.** Set each node pool's minimum to the count above
+and its maximum at least two nodes higher. Capacity for additional replicas,
+upgrades, and node failures is then added when it is needed, rather than
+provisioned in advance.
+</Tip>
+
+### What the chart requests
+
+These totals sum the requests of every replica and sidecar in the default
+render, with the request path at two replicas and PostgreSQL and Redis running in
+the cluster. Values are rounded up to whole vCPU and GiB.
+
+| Scenario | Firewall on CPU | Firewall on GPU: CPU pool | Firewall on GPU: GPU pool |
+| --- | --- | --- | --- |
+| Hybrid, all products | 13 vCPU / 37 GiB | 6 vCPU / 15 GiB | 7 vCPU / 28 GiB, 7 GPU shares |
+| Hybrid, TrustGuard only | 9 vCPU / 25 GiB | 3 vCPU / 6 GiB | 6 vCPU / 24 GiB, 6 GPU shares |
+| Hybrid, TrustGate only | 3 vCPU / 6 GiB | — | — |
+| External | 18 vCPU / 46 GiB | 11 vCPU / 24 GiB | 7 vCPU / 28 GiB, 7 GPU shares |
+| Central | 19 vCPU / 47 GiB | 12 vCPU / 25 GiB | 7 vCPU / 28 GiB, 7 GPU shares |
+
+Using managed PostgreSQL and Redis lowers memory requests by 2 GiB. The totals
+exclude the node's system reservation, DaemonSets, kube-system, and your ingress
+controller or Gateway; the node counts above already allow for them.
+
+Requests describe what the scheduler reserves, not the throughput an
+installation sustains. Measure under your own traffic before tuning.
+
+| What drives capacity | Default request / limit | Notes |
+| --- | --- | --- |
+| Firewall CPU workers | 1 vCPU / 3 GiB each, limit 2 vCPU / 4 GiB | Seven with all products. `prompt-moderation` requests 4 GiB (limit 6 GiB) and `topic-guard` is limited at 5 GiB. Together they are 60 % of Hybrid's memory requests |
+| data-plane API | 1 vCPU / 3 GiB per replica, two replicas | Runs evaluations in-process by default |
+| ClickHouse | 1 vCPU / 4 GiB, limit 4 vCPU / 8 GiB | External and Central; keep headroom for analytics queries |
+| PostgreSQL and Redis | 500m / 2 GiB and 100m / 128 MiB in-cluster | Prefer [managed stores](/neuraltrust/deployment/configuration#managed-stores), so datastore capacity is independent of the node pool |
+
+To adapt capacity to your workload, scale out the gateway and TrustGuard
+replicas that carry the most traffic, or enable horizontal pod autoscaling once
+the cluster exposes metrics. Run only the Firewall detectors you use, and pin
+workloads to a dedicated node pool when they must be isolated from other tenants
+of the cluster.
 
 ### Datastore sizing floors
 

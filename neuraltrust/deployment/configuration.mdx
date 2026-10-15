@@ -154,7 +154,8 @@ workers — `toxicity`, `indirect-prompt-injections`, `prompt-jailbreak`,
 pinned by your chart version.
 
 Default worker requests are 1 CPU and 3 GiB, with 2 CPU and 4 GiB limits;
-`prompt-moderation` overrides memory to 4 GiB requested and 6 GiB limited.
+`prompt-moderation` overrides memory to 4 GiB requested and 6 GiB limited, and
+`topic-guard` raises its memory limit to 5 GiB.
 Official images bundle their models, so `HUGGINGFACE_TOKEN` is optional. This is
 the largest memory consumer in the data path, so it is the first thing to
 right-size if you run a subset of detectors.
@@ -202,10 +203,37 @@ firewall:
           operator: Exists
           effect: NoSchedule
       hostIPC: true
+    # prompt-moderation and topic-guard carry their own resources in the chart
+    # defaults, which replace workerDefaults.resources, so restate the GPU.
+    workers:
+      prompt-moderation:
+        resources:
+          requests:
+            nvidia.com/gpu: "1"
+          limits:
+            memory: 8Gi
+            nvidia.com/gpu: "1"
+      topic-guard:
+        resources:
+          requests:
+            memory: 4Gi
+            nvidia.com/gpu: "1"
+          limits:
+            memory: 8Gi
+            nvidia.com/gpu: "1"
     config:
       cudaMpsActiveThreadPercentage: "25"
       cudaMpsPinnedDeviceMemLimit: "6000M"
 ```
+
+Each of the seven workers requests one GPU. Configure the GPU node pool to share
+every GPU among **four CUDA MPS clients**, so that two L4 nodes can host all
+seven workers. On GKE, set the node pool's GPU sharing strategy to `MPS` with
+`max_shared_clients_per_gpu = 4`; on EKS, enable MPS sharing in the NVIDIA device
+plugin with four replicas. Four is the most an L4 can hold: each client may pin
+up to 6000 MB of device memory, and the L4 has 24 GB. Without sharing, every
+worker needs a GPU of its own. Node counts for each deployment model are in
+[Capacity](/neuraltrust/deployment/architecture#capacity).
 
 This matches
 [`values-dataplane-gpu.yaml.example`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-dataplane-gpu.yaml.example),
