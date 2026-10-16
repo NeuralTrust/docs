@@ -1,6 +1,6 @@
 ---
 title: Configuration
-description: Every chart switch that changes a deployment — products, datastores, ingress, Firewall workers, and cross-cluster endpoints.
+description: Every chart switch that changes a deployment — products, datastores, operational telemetry, ingress, Firewall workers, and cross-cluster endpoints.
 ---
 
 This is the values reference the model guides link into. Start from your model's
@@ -39,6 +39,7 @@ product to `false` to leave it out
 | `global.imageRegistryScope` | `all` | Also moves the OTel collector images onto `global.imageRegistry`. |
 | `global.autoGenerateSecrets` | `true` | Chart owns the credentials it can generate. |
 | `global.preserveExistingSecrets` | `false` | For GitOps: pre-create every Secret and set `true`. |
+| `global.observability.operationalTelemetry` | `false` by default; recommended `true` | TrustGate and TrustGuard export their own health traces and metrics — see [Operational telemetry](#operational-telemetry). |
 
 Leave `watchdog.enabled` off unless NeuralTrust asks you to enable it.
 
@@ -46,7 +47,125 @@ Product telemetry export is **mandatory** in Hybrid and always on — there is n
 `global.clickstack.enabled: false` opt-out. TrustGate and TrustGuard send OTLP to
 a co-located, enrollment-backed egress collector, which is why the enrollment
 tokens are required. For a deployment with no NeuralTrust dependency at all, use
-[External](/neuraltrust/deployment/external).
+[External](/neuraltrust/deployment/external). Operational telemetry, below, is
+separate and off unless you turn it on.
+
+## Operational telemetry
+
+Operational telemetry is TrustGate and TrustGuard reporting on their **own
+health** — how many requests they serve, how many fail, and how long they take —
+rather than on the traffic they inspect. It is **off by default** and controlled
+by one value, `global.observability.operationalTelemetry`.
+
+| | Product telemetry | Operational telemetry |
+| --- | --- | --- |
+| **Describes** | Each request your gateways handle: request metadata, timings, detector verdicts, and counts | The services themselves: server spans, request rate, errors, and latency |
+| **Hybrid** | Always on, exported to NeuralTrust | Off until you set `true`; then exported to NeuralTrust |
+| **External** | Your in-cluster ClickHouse | Your in-cluster collector. TrustGuard's is always on; TrustGate's is off until you set `true` |
+| **Prompt and response payloads** | Not exported | Not exported |
+
+### What it contains
+
+- **TrustGate** exports server spans and HTTP request rate, error, and duration
+  metrics. Health and readiness probe requests are sampled at 1%; every other
+  request is traced at 100%.
+- **TrustGuard** exports traces and metrics for evaluation latency and errors.
+
+The attributes are operational: route templates, status codes, durations, and
+verdict and plugin labels. Neither service exports prompts or responses through
+this path.
+
+### Where it goes
+
+| Model | Destination |
+| --- | --- |
+| **Hybrid** | NeuralTrust, through the same telemetry egress collector that already carries product telemetry, authenticated with the DataAgent enrollment credentials. There are no new hosts to allow, no new Secrets, and no new firewall rules. |
+| **External** | Your in-cluster collector. It does not leave your environment. |
+
+In Hybrid, turning it on means NeuralTrust receives health data about your
+gateway and TrustGuard in addition to product telemetry. That is why it is a
+choice you make, not a default.
+
+### Why turn it on
+
+With operational telemetry on in Hybrid, NeuralTrust support can see the health
+of your TrustGate and TrustGuard — error spikes, latency, saturation — and
+diagnose problems from it directly, often without asking you for logs or a
+support bundle. Turning it on is the recommended practice for faster support.
+
+<Tip>
+**Turn it on while a support case is open.** If you prefer to keep it off day
+to day, enable it when you open a case and disable it once the case is closed.
+Each switch is one upgrade and a rolling restart, so it is cheap to flip both
+ways.
+</Tip>
+
+### Turn it on or off
+
+<Tabs>
+<Tab title="ntctl">
+
+`ntctl install` asks whether to turn it on. To answer up front, for example in a
+script:
+
+```bash
+ntctl install --operational-telemetry=true
+```
+
+On an existing install, switch it with `ntctl upgrade`. Pass the chart version
+you already run, which `ntctl status` prints, so the switch changes nothing
+else. Without `--version`, `ntctl upgrade` also moves you to the latest chart.
+
+```bash
+ntctl upgrade --operational-telemetry=true  --version <installed version>   # turn on
+ntctl upgrade --operational-telemetry=false --version <installed version>   # turn off
+```
+
+An upgrade without the flag keeps the current setting. `ntctl` never turns
+operational telemetry on by itself.
+
+</Tab>
+<Tab title="Helm">
+
+Switch it on a running release, keeping every other value as it is. Pass the
+`--version` you already run, so the switch does not also upgrade the chart:
+
+```bash
+helm upgrade neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust \
+  --reuse-values \
+  --set global.observability.operationalTelemetry=true   # or false
+```
+
+If you upgrade from a values file rather than with `--reuse-values`, set it
+there instead. Otherwise the next upgrade from that file returns it to `false`:
+
+```yaml
+global:
+  observability:
+    operationalTelemetry: true
+```
+
+</Tab>
+</Tabs>
+
+### What happens when you switch it
+
+The TrustGate and TrustGuard pods roll with the new setting in a normal rolling
+update. Their Deployments carry a checksum of the configuration that changes, so
+no manual `rollout restart` is needed. Nothing else is reconfigured: config
+sync, policies, and product telemetry are untouched, and there is no downtime
+beyond the rolling restart. Telemetry starts or stops within a minute or two of
+the new pods becoming Ready.
+
+The single value is the supported switch. For finer control, the chart's
+per-component environment variables can override it through `extraEnv` —
+`OPS_TRACES_ENABLED` and `OPS_METRICS_ENABLED` set to `"false"` in the
+`extraEnv` of a TrustGate component (`agentgateway.dataPlane`,
+`agentgateway.mcp`, or, in External, `agentgateway.controlPlane`), or
+`OPENTELEMETRY_ENABLED` set to `"false"` in `trustguard.dataPlane.extraEnv`.
 
 ## Managed stores
 
