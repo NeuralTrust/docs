@@ -21,7 +21,7 @@ The control plane compiles a configuration snapshot and serves it over gRPC. The
 
 The direction never reverses. Nothing connects into a data plane's network for configuration, which is why it needs egress rules only.
 
-The contract on this connection is versioned with the products, not separately. Recent TrustGate releases changed it — the snapshot layout was reorganised and a second gRPC service, `StoreInstallations`, now lets a DB-less MCP data plane read and write MCP Store installations through the same connection — so a data plane must not run a release older than its control plane. Upgrade the control plane and every data plane together; a lagging data plane may reject the snapshot or fail MCP Store calls.
+The contract on this connection is versioned with the products, not separately. Recent TrustGate releases changed it — the snapshot layout was reorganised and a second gRPC service, `StoreInstallations`, now lets a DB-less MCP data plane read and write MCP Store installations through the same connection — so a data plane must not run a release older than its control plane. Upgrade the control plane and every data plane together; a lagging data plane may reject the snapshot or fail MCP Store calls. Session revocations are published on this snapshot as `session_revocations`; see [Session revocations](#session-revocations).
 
 A [Central control plane](/neuraltrust/deployment/central) is Hybrid's column with a different server. Each data plane still dials outward with a bearer token and caches the snapshot the same way; only the hostname and the console that issued the token change. Because the listener is now dialled from other clusters, the central side must present a certificate those clusters can verify against their system trust store — the chart-generated CA is not enough there.
 
@@ -96,3 +96,9 @@ Everything above describes hybrid. In external mode config sync is **off**, and 
 The chart still generates gRPC TLS material for the product control planes — `agentgateway-admin` and `trustguard-control-plane` — under a deployed `APP_ENV`. Nothing consumes it while config sync is off. It exists so that enabling config sync later needs no certificate work from you.
 
 If you do turn it on with `configSync.enabled: true`, the endpoint defaults to the in-cluster control-plane Service rather than any SaaS host, and the data planes verify against the generated CA. Reach for this only if you have a specific reason; the Postgres-backed default is the supported external path.
+
+A self-hosted data plane follows the same session-revocation rule as a hybrid plane. See [Session revocations](#session-revocations).
+
+## Session revocations
+
+Revoking a subject's Agent Gateway sessions writes a durable revocation into the configuration snapshot as `session_revocations`. Hybrid, self-hosted, and other customer-run data planes apply that revocation only after they run a TrustGate build that reads session revocations from the config sync (post-#1142). A data plane from before that build ignores the new field and keeps serving. The control plane can be upgraded first; the revocation takes effect on a plane when that plane is upgraded, if the upgrade comes within 30 days of the revocation (or MCP_DEFAULT_IDP_SESSION_MAX_AGE, if longer). After that, revoke the subject again once the plane runs the new build. An access token already issued keeps working until it expires.
