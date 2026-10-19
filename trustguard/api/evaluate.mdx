@@ -184,8 +184,8 @@ flowchart TD
   REQ[POST /v1/evaluate] --> AUTH[1 · Authenticate<br/>resolve the collector from the API key]
   AUTH --> POL[2 · Resolve the policy<br/>per-consumer, else collector default]
   POL --> GATES[3 · Gates<br/>match request metadata]
-  GATES -->|Block or Ask<br/>detectors skipped| RED[5 · Reduce to one status]
-  GATES -->|Report or Skip| RULES[4 · Detector rules<br/>matching this direction]
+  GATES -->|Block, Ask, or Skip<br/>detectors skipped| RED[5 · Reduce to one status]
+  GATES -->|Report or no match| RULES[4 · Detector rules<br/>matching this direction]
   RULES --> DETECT[Detect phase<br/>concurrent, read-only]
   DETECT --> XFORM[Transform phase<br/>sequential, may rewrite]
   XFORM --> RED
@@ -213,19 +213,23 @@ enforcement.
 
 ### 3. Run gates
 
-[Gates](/trustguard/concepts/policies#gates) run before detectors. Each gate
-matches request attributes, such as consumer, model, collector, protocol,
-direction, tool, session, or source, and takes an action:
+[Gates](/trustguard/concepts/policies#gates) run before detectors, in saved
+order (position, then `created_at`). Each gate matches request attributes, such
+as consumer, model, collector, protocol, direction, tool, session, or source,
+and takes an action:
 
 | Gate action | Effect |
 | --- | --- |
-| **Block** | Skips detectors and returns `status: "block"`. |
-| **Report** | Records a finding and continues to detection. |
-| **Skip** | Stops remaining gates and proceeds to detection without a gate finding. |
-| **Ask** | Skips detectors and returns `status: "ask"`. Matches input only; an empty `direction` counts as input. Ignored on output. |
+| **Block** | Stops evaluation. Detectors do not run. Returns `status: "block"`. |
+| **Report** | Logs a finding and moves on. |
+| **Skip** | Stops evaluation. Detectors do not run. Returns `status: "skip"` with a `gate_skip` finding. |
+| **Ask** | Stops evaluation. Detectors do not run. Returns `status: "ask"`. Input only; an empty `direction` counts as input. Ignored on output. |
 
-Block, Skip, and Ask end the gate chain. Report continues. In Observe mode,
-Block and Ask verdicts are downgraded to a non-blocking record.
+Disabled gates are ignored. The first matching Block, Skip, or Ask decides and
+stops evaluation. Earlier Report findings are returned together with that
+final Block, Skip, or Ask. Report logs and moves on. In report-only mode
+(**Observe**), a downgraded Block or Ask is recorded as Report and continues
+to later gates and the detectors. Skip still stops evaluation.
 
 ### 4. Run the detector rules
 
@@ -255,8 +259,11 @@ restrictive:
 block → ask → transform → report → allow
 ```
 
+A matching Skip gate returns `skip` instead of a ranked status. No detector
+runs, and any earlier Report gate findings come back with it.
+
 In **Observe**, Block, Ask, and Transform actions are downgraded, so the status
-never exceeds `report`.
+never exceeds `report`. The exception is a Skip gate, which still returns `skip`.
 
 ## Response
 
@@ -287,7 +294,7 @@ A successful evaluation returns `200`, including one whose status is `block`.
 
 | Field | Type | Notes |
 |---|---|---|
-| `status` | enum | The reduced verdict: `allow`, `report`, `transform`, `ask`, or `block`. The most restrictive status wins (`block` > `ask` > `transform` > `report` > `allow`). |
+| `status` | enum | The reduced verdict: `allow`, `report`, `transform`, `ask`, `block`, or `skip`. The most restrictive status wins (`block` > `ask` > `transform` > `report` > `allow`). `skip` is returned only when a Skip gate matches. Detectors don't run, so it never competes with a detector status, and it takes precedence over any earlier Report gate findings returned with it. |
 | `transformed_payload` | object \| null | The rewritten payload; `null`/absent unless a Transform rule (mutable detector) changed it. |
 | `findings[]` | array | One entry per gate or detector that fired. |
 | `trace_id` / `request_id` | string | Correlation IDs (also on logs and telemetry). |
@@ -298,13 +305,14 @@ A successful evaluation returns `200`, including one whose status is `block`.
 |---|---|---|
 | `source.kind` | enum | `gate` or `detector`. |
 | `source.gate_name` | string | Gate findings only. |
+| `source.gate_id` | string (UUID) | Gate findings only. Stable UUID of the gate (`Gate.ID`); survives rename so audits can still tie older events to the same gate. Omitted (`omitempty`) when empty or a zero UUID — never emit a fake id. |
 | `source.plugin` | string | The catalog detector slug for detector findings, such as `prompt_guard`. |
 | `source.detector_id` / `source.detector_name` | string | The detector instance that fired. |
 | `source.policy_id` | string | The policy that produced the finding. |
-| `signal.type` | string | What was detected, such as `jailbreak`, `injection`, `pii`, `secret`, `nt_topic` (Custom Moderation), a toxicity category, `ssrf_probe`, `url_domain_blocked`, `url_limit_exceeded` (URL Analyzer), or `gate_block`, `gate_report`, or `gate_ask`. |
+| `signal.type` | string | What was detected, such as `jailbreak`, `injection`, `pii`, `secret`, `nt_topic` (Custom Moderation), a toxicity category, `ssrf_probe`, `url_domain_blocked`, `url_limit_exceeded` (URL Analyzer), `guard_content_uninspectable` (Document Analyzer, when parsing an attachment fails or times out), or `gate_block`, `gate_report`, `gate_ask`, or `gate_skip`. |
 | `signal.confidence` | number | Detector‑specific score in `[0, 1]` (optional). |
-| `outcome.action` | enum | The action applied by the rule: `report`, `transform`, `ask`, or `block`. Optional on observational runs. |
-| `evidence` | object | Free‑form, detector‑specific context (e.g. matched entities, masked count, matched rule). A URL Analyzer finding always includes `urls_total`, `urls_skipped`, and `url_limit_exceeded` (`0` / `false` when the request is within the 10‑URL cap). |
+| `outcome.action` | enum | The action applied by the rule: `report`, `transform`, `ask`, `skip`, or `block`. Optional on observational runs. |
+| `evidence` | object | Free‑form, detector‑specific context (e.g. matched entities, masked count, matched rule). A URL Analyzer finding always includes `urls_total`, `urls_skipped`, and `url_limit_exceeded` (`0` / `false` when the request is within the 10‑URL cap). A Document Analyzer finding for an attachment whose parsing failed or timed out carries reason `content_uninspectable` (signal type `guard_content_uninspectable`). |
 
 ## Status codes
 
@@ -377,6 +385,7 @@ status == "ask"                      → IDE permission prompt (input only)
 status == "transform"                → forward transformed_payload instead
 status == "report"                   → forward unchanged, record the finding
 status == "allow"                    → forward unchanged
+status == "skip"                     → forward unchanged; a gate skipped the detectors, so the content was not inspected
 ```
 
 When TrustGuard runs behind [TrustGate](/trustgate/overview), the gateway

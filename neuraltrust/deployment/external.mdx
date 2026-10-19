@@ -85,8 +85,9 @@ The chart ships this as `values-external-trustguard-only.yaml.example`. It
 removes TrustGate's workloads, hosts and Secrets, plus what only TrustGate uses:
 the Firewall `complexity` worker, MCP OAuth and the Admin API machine credentials.
 
-Leave `dataPlane` on: the console reads audit logs and activity from the
-data-plane API.
+Leave `dataPlane` on: the console reads runtime activity from the data-plane
+API. The audit trail does not depend on it; audit events are sent as OTLP logs
+and shown under Telemetry → Logs.
 
 ## Prerequisites
 
@@ -187,7 +188,7 @@ global:
     host: "postgres.example.com"
     sslMode: "require"
     passwordSecret:                  # neuraltrust role, from a Secret you created
-      name: "postgres-roles"
+      name: "external-postgresql"
       key: "CONTROL_PLANE"
   redis:
     deploy: false
@@ -196,9 +197,9 @@ global:
     tls: "true"
 ```
 
-Pre-create every PostgreSQL role and database yourself — the bootstrap Job does
-**not** run against a managed instance (`deploy: false`, a named `host`, or IAM
-auth all stop it rendering). Required pairs:
+Every service needs its own role and database. Either create them yourself, or
+let the chart create them — see
+[Let the chart create the roles](#let-the-chart-create-the-roles). The pairs:
 
 | Role | Database | Used by |
 | --- | --- | --- |
@@ -207,6 +208,54 @@ auth all stop it rendering). Required pairs:
 | `trustguard` | `trustguard` | trustguard-control-plane, -data-plane |
 | `alertengine` | `alertengine` | alertengine-api, -worker |
 | `datacore` | `datacore` | datacore |
+
+The `trustguard` database needs the `pgcrypto` extension: TrustGuard's
+migrations create it and fail without it. The control-plane database uses it
+when it is available. The owner of a database may create it, since `pgcrypto` is
+a trusted extension. On Azure Database for PostgreSQL, first allow-list it in the
+`azure.extensions` server parameter.
+
+#### Let the chart create the roles
+
+With `managedBootstrap` on, the chart runs a Job after install and after every
+upgrade that creates any missing role and database in the table above, using
+the passwords the services read, and creates `pgcrypto` in each database. Roles
+and databases that already exist are kept, except that each role's password is
+set to the one in its service's Secret, so the two cannot drift and a password
+rotated in the Secret reaches the database on the next upgrade. Re-running it
+is safe, so leave it on. Application tables stay with each service's own
+migrations.
+
+It logs in with an administrator you name in a Secret. That login needs
+`CREATEROLE` and `CREATEDB`, not superuser:
+
+| Provider | Administrator to use |
+| --- | --- |
+| Amazon RDS / Aurora | The master user (member of `rds_superuser`) |
+| Google Cloud SQL | The `postgres` user, or any user with the `cloudsqlsuperuser` role |
+| Azure Database for PostgreSQL | The server administrator (member of `azure_pg_admin`). Allow-list `pgcrypto` in `azure.extensions` first |
+
+```bash
+kubectl create secret generic postgres-admin -n neuraltrust \
+  --from-literal=username='<admin-user>' \
+  --from-literal=password='<admin-password>'
+```
+
+```yaml
+global:
+  postgresql:
+    managedBootstrap:
+      enabled: true
+      adminSecret:
+        name: "postgres-admin"
+```
+
+The administrator's password stays in that Secret: it never appears in values,
+manifests or the Job's logs. The Job needs password authentication; with
+`authMode: iam` the roles are principals your cloud tooling creates, and the
+chart refuses to render with both set. The Job is a Helm post-install and
+post-upgrade hook, which Argo CD runs as a PostSync hook. Until it finishes,
+the services restart while they wait for their databases.
 
 No datastore password belongs in the values file. Point each service at a Secret
 you created, including the control-plane role through
@@ -399,6 +448,13 @@ global:
 
 Disabling hosted export does not disable the in-cluster ClickStack pipeline; it
 only stops optional egress to NeuralTrust.
+
+TrustGuard exports its own health traces and metrics (evaluation latency and
+errors) to your in-cluster collector by default. TrustGate does the same for
+request rate, errors and latency once you set
+`global.observability.operationalTelemetry: true`, which is off by default.
+In External, both stay in your environment. See
+[Operational telemetry](/neuraltrust/deployment/configuration#operational-telemetry).
 
 ## Public routing
 

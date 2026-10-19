@@ -3,16 +3,17 @@ title: "Content security detectors"
 description: "Jailbreak detection, toxicity, custom topic moderation, and document/URL screening for indirect prompt injection and PII. Configured from the console."
 ---
 
-Content-security detectors are the LLM-aware core of TrustGuard. They score prompts
-and model output for jailbreaks, toxicity, and off-topic content, and they screen
-documents and URLs for **indirect prompt injection** and PII.
+Content-security detectors are the LLM-aware core of TrustGuard. They score
+prompts for jailbreaks, and prompts and model output for toxicity and off-topic
+content, and they screen documents and URLs for **indirect prompt injection**
+and PII.
 
 Create them in the console under **Detectors**, then attach them from a
 [policy](/trustguard/concepts/policies) to decide what happens when they match.
 
 | Console card | Sides | Protocols | Configuration tab shows |
 |---|---|---|---|
-| **Prompt Guard** | Input, Output | All | Protection Sensitivity |
+| **Prompt Guard** | Input | All | Protection Sensitivity |
 | **Toxicity Detection** | Input, Output | All | Protection Sensitivity |
 | **Custom Moderation** | Input, Output | All | Topics you define + Protection Sensitivity |
 | **URL Analyzer** | Input | LLM, MCP | Domains + two linked detectors |
@@ -116,19 +117,15 @@ than you can maintain one.
 
 ### Where it looks
 
-**Input:** every user turn in the request, and assistant turns replayed in that
-request. Each segment is scored on its own and the highest score wins, so an
-injection in an earlier turn still blocks when the latest message is benign.
+**Input only.** Every user turn in the request, and assistant turns replayed in
+that request. Each segment is scored on its own and the highest score wins, so
+an injection in an earlier turn still blocks when the latest message is benign.
 System and developer instructions are not scored, including Responses
 `instructions`, Anthropic `system`, Gemini `systemInstruction`, and Bedrock
 system.
 
-**Output:** the reply, after the model produces it and before it reaches the
-person.
-
-Those are two different questions: on the way in, *is someone
-attacking my agent*; on the way back, *did my agent get talked into something*.
-Both are worth running, and the Output side is the one people forget.
+An Output rule is skipped and has no effect. The console warns: "This detector
+does not run on Output; this rule has no effect."
 
 It does not read tool definitions or tool results. An instruction that arrives
 inside a search result, a ticket, or a tool description is a different problem
@@ -438,11 +435,30 @@ structure — what the document *says*.
 
 Files attached to the message, **Input side only**, before the model reads them.
 It extracts the text first — PDFs, Office documents, plain text, and images
-through OCR — and screens what it extracts.
+through OCR — and screens what it extracts. What happens when that extraction
+produces nothing is in [When a file cannot be read](#when-a-file-cannot-be-read).
 
 OCR is the part that matters: an instruction rendered as a picture, or inside a
 scanned page, is invisible to anything reading the file as text. It is also why
 the same attack in a screenshot is caught here and nowhere else.
+
+### When a file cannot be read
+
+Screening covers the text the extractor returns. When there is nothing to
+screen, the result depends on why. If the extractor isn't available (no
+capacity or not configured), the file is allowed; if parsing the file fails
+or times out, it's treated as uninspectable.
+
+| Case | Result |
+|---|---|
+| Parsing the file fails or times out: corrupt, truncated, or a format the parser rejects, a panic while parsing, no documents returned, or the per-document parse time is exceeded | The detector's action applies: blocked in **Enforce**, reported in **Observe**. Signal type `guard_content_uninspectable`, reason `content_uninspectable`. |
+| The file parses but has no text, including an empty file | Allowed. |
+| The extractor isn't available: no worker slot within its wait, it is not configured or not built in, or an infrastructure failure (a missing dependency or OCR setup) | Allowed. |
+
+A PDF that is blocked and contains nothing harmful could not be parsed: it is
+corrupt, truncated, or a format the extractor rejects, or parsing it timed out.
+An attachment that is too large to inspect is a separate finding, signal type
+`guard_payload_too_large` with reason `payload_too_large`.
 
 ### Configure
 
