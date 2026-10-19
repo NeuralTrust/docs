@@ -1,0 +1,113 @@
+---
+title: Okta SSO
+description: "Configure Okta Single Sign-On for NeuralTrust on the Generic OIDC connection."
+---
+
+# Okta Single Sign-On
+
+Okta sign-in uses the **Generic OIDC** connection. Register an OIDC web application in the Okta Admin Console, then save the issuer, client ID, and client secret on **Platform settings → SSO Configuration → Generic OIDC**.
+
+**Using a different identity provider?** For Microsoft, see [Microsoft Entra ID SSO](/platform/sso). For Google Workspace, see [Google Workspace SSO](/platform/google-workspace-sso). For Auth0, PingIdentity, or another OIDC provider, see [Generic OIDC SSO](/platform/generic-oidc-sso).
+
+<Note>
+**SSO Configuration** and **SCIM** are **Enterprise** plan features. The Free plan hides both screens in Platform Settings. **Plans & Billing** lists them under Enterprise.
+</Note>
+
+## What this page covers
+
+- **Okta app registration** — console labels in [Part 1](#part-1-create-the-okta-app-integration).
+- **NeuralTrust connection** — the same **Generic OIDC** fields as [Configure in NeuralTrust](/platform/generic-oidc-sso#step-3-configure-in-neuraltrust).
+- **Verified domains and Enforce SSO** — [Part 3](#part-3-verified-domains-and-enforce-sso). Guests follow the same rule as on [Generic OIDC SSO](/platform/generic-oidc-sso#enable-sso-enforcement).
+
+Okta directory pull, **Sync now**, deprovision, and enrollment are coming soon.
+
+<!-- TODO(Probe): Okta directory pull — not E2E-verified -->
+<!-- TODO(Probe): Okta directory Sync now — not E2E-verified -->
+<!-- TODO(Probe): Okta deprovision edges — not E2E-verified -->
+<!-- TODO(Probe): Okta enrollment — not E2E-verified -->
+
+This page is organization sign-in. Accepting Okta tokens on TrustGate is a separate setup: [Okta](/trustgate/concepts/authorization/okta).
+
+## Prerequisites
+
+- Owner role in the NeuralTrust organization
+- Okta administrator access to create an application
+- An issuer that serves OIDC Discovery at `{issuer}/.well-known/openid-configuration`
+
+## One provider at a time
+
+<Warning>
+Only one identity provider can be active at a time (Microsoft Entra ID, Google Workspace, or Generic OIDC). Remove the current provider before saving Okta on the **Generic OIDC** tab.
+</Warning>
+
+## Part 1: Create the Okta app integration
+
+In the Okta Admin Console:
+
+1. Go to **Applications** → **Create App Integration**
+2. Select **OIDC - OpenID Connect** and **Web Application**
+3. Set **Sign-in redirect URI** to the callback in the table below
+4. Under **Assignments**, assign the users or groups who should access NeuralTrust
+5. Copy **Client ID** and **Client Secret**
+6. Use your org URL as the **Issuer URL**, for example `https://your-org.okta.com`
+
+Paste the issuer base URL. **Validate** in NeuralTrust checks `/.well-known/openid-configuration` on that host.
+
+### Redirect URI
+
+The path is `/api/auth/callback/oidc` for every Generic OIDC provider, including Okta. The in-app setup guide shows the callback for the current origin.
+
+| Environment | Redirect URI |
+|-------------|--------------|
+| Production (default) | `https://app.neuraltrust.ai/api/auth/callback/oidc` |
+| Custom domain | `https://{your-custom-domain}/api/auth/callback/oidc` |
+| Local dev (`SSO_LOCAL_TEST=true`) | `http://localhost:3000/api/auth/callback/oidc` |
+
+The connection uses the same grant type and scopes as [Generic OIDC SSO](/platform/generic-oidc-sso#step-1-create-an-application-in-your-identity-provider): **Authorization Code**, and `openid`, `profile`, and `email`. An optional sign-out redirect on that page is `https://app.neuraltrust.ai`.
+
+## Part 2: Save the connection in NeuralTrust
+
+1. Open the sidebar gear → **Platform settings → SSO Configuration** → **Generic OIDC**
+2. Click **Edit**
+3. In **Generic OIDC Configuration**, enter:
+   - **Issuer URL** — the Okta org URL from Part 1
+   - Click **Validate** to check the discovery endpoint
+   - **Client ID** and **Client Secret** from the Okta application
+   - **Display Name** (optional) — text on the login button, for example `Sign in with Okta`
+   - **Scopes** (optional) — extra scopes beyond the default `openid profile email`
+4. Trust Identity Provider, role mapping, and session policy are the shared Generic OIDC fields. See [Configuration fields](/platform/generic-oidc-sso#configuration-fields), [Role Mapping from IdP](/platform/generic-oidc-sso#role-mapping-from-idp), and [Session Policy](/platform/generic-oidc-sso#session-policy).
+5. Click **Save**
+
+## Part 3: Verified domains and Enforce SSO
+
+Email domains are shared across SSO providers. Add the domain and complete DNS verification in [Email Domain Verification](/platform/generic-oidc-sso#email-domain-verification).
+
+Saving the connection sends verified-domain members through Okta. **Enforce SSO** is the toggle documented in [Enable SSO Enforcement](/platform/generic-oidc-sso#enable-sso-enforcement). Guests follow the same rule as on that page.
+
+The toggle needs a verified domain and an active [Break the Glass](/platform/break-glass) account.
+
+<Warning>
+Before you save the connection, confirm that members on verified domains can sign in through Okta. Keep a [Break the Glass](/platform/break-glass) account for IdP outages.
+</Warning>
+
+## Troubleshooting
+
+Connection errors match [Generic OIDC troubleshooting](/platform/generic-oidc-sso#troubleshooting). The rows that apply to this setup:
+
+| Error / Symptom | Cause | Solution |
+|-----------------|-------|----------|
+| `Redirect URI mismatch` | Callback not registered in Okta | Register the **Sign-in redirect URI** from Part 1 exactly, including a custom-domain origin when you use one |
+| `Invalid issuer` | Issuer URL wrong, or discovery does not resolve | Use the org base URL and confirm `/.well-known/openid-configuration` loads |
+| `Discovery endpoint not found` | Discovery path was pasted as the issuer | Paste the base issuer URL, without the `/.well-known/openid-configuration` suffix |
+| `Client authentication failed` | Client ID or client secret rejected | Copy **Client ID** and **Client Secret** from the Okta application again |
+| `domain_not_verified` | Email domain added, DNS still pending | Finish TXT verification. Trust Identity Provider does not skip this |
+| `unauthorized_team_access` | Email domain not added to the organization | Add the domain and complete DNS verification |
+
+## Related documentation
+
+- [Generic OIDC SSO](/platform/generic-oidc-sso) — shared connection fields, role mapping, session policy, and domain verification
+- [Microsoft Entra ID SSO](/platform/sso) — Microsoft corporate sign-in
+- [Google Workspace SSO](/platform/google-workspace-sso) — Google Workspace sign-in
+- [Break the Glass](/platform/break-glass) — emergency access when the IdP is unavailable
+- [Role Provisioning](/platform/role-provisioning) — group-to-role mapping
+- [Okta on TrustGate](/trustgate/concepts/authorization/okta) — bearer tokens and MCP login, separate from this console connection
