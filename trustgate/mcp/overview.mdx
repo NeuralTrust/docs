@@ -26,12 +26,44 @@ per person, made of what they installed, bounded by [Access](/trustgate/access/o
 
 ### Tool names
 
-With one server bound, tools keep their upstream names. With several — or on a
-per-instance Employee portal install — names are prefixed with a stable hash of the
-registry, so `search` on two servers does not collide. The readable part is kept
-to 26 characters and the whole name under 64. The name is stable for as long as
-the registry exists; a client that cached names from before a server was added
-should re-list, and the gateway tells it to.
+Every tool is published as `<server>_<tool>`. `<server>` is a short name from the
+catalog code: the reverse-DNS label and a trailing `/mcp` are dropped, so
+`com.notion/mcp` becomes `notion` and `com.google_cloud/developerknowledge` becomes
+`google_cloud_developerknowledge`. Notion's `search` is `notion_search`. A tool
+that already starts with that name and an underscore is not prefixed again, so
+`devexpress_docs_search` stays `devexpress_docs_search`. The prefix is added a
+second time only when leaving it off would publish two tools of that server under
+one name.
+
+A server configured by hand, with no catalog code, is named `s` plus eight hex
+characters. A single instance of a catalog server keeps the plain name. While
+several instances of the same server are installed — a second Snowflake schema, or a
+second [Employee portal](/trustgate/mcp/store) install of the same server — each
+instance that is served gains six hex characters, so `query` is `snowflake_`,
+those six characters, and `_query`. An instance that is turned off still counts,
+so the ones that remain keep that suffix. An instance whose access grant was
+revoked still counts the same way. When two servers would otherwise publish
+the same name, only those names gain a four-character hex suffix. Google's `drive_list`
+and Google Drive's `list` would both be `google_drive_list`, so each is published
+as `google_drive_list_` plus four hex characters, and `google_search` stays
+`google_search`.
+
+A name longer than 64 characters is cut on a character boundary. The server
+prefix and the end of the tool name stay, with an eight-character hash of the
+full name between them. The cut follows the length, so it can stop mid-word. A
+server name too long to leave any of the tool is replaced by an eight-character
+hash of that name. When a name both collides and is too long for the
+four-character suffix to fit on the end, that suffix — four hex characters, not
+eight — sits between the server prefix and what remains of the tool name.
+
+Prompts are published as `<server>_<prompt>` and stay within 64 characters. A
+prompt that already starts with the server still receives the prefix. Call the
+name from the current list.
+
+A name the gateway does not recognize, including a spelling from before this
+release, returns an unknown-tool error (`Unknown tool: <name>`, JSON-RPC
+`-32602`), not a permission denial. A tool the application is not allowed to use
+is refused as not permitted.
 
 ### When an upstream is down
 
