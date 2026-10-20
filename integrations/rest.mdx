@@ -188,9 +188,10 @@ Implement these behaviors in your HTTP client:
   request. The REST API does not define a client-side default.
 - **Timeouts and retries.** Set explicit timeout and retry limits for the call.
 - **Non-2xx is not a verdict.** `401` and `403` are authentication problems, and
-  `400` indicates a malformed body. None means `allow`. A `500` means a
-  detector errored *and* the deployment is fail-closed; the same request returns
-  `200` on a fail-open deployment.
+  `400` indicates a malformed body. None means `allow`. A detector
+  that cannot run is not an error response: the verdict is `block` in Enforce
+  and the request is recorded in report-only mode. See
+  [Failure behavior](/trustguard/api/evaluate#failure-behavior).
 </Step>
 
 <Step title="Verify" titleSize="h2" id="6-verify">
@@ -303,7 +304,7 @@ never persisted.
 | `400` | Invalid body, unknown fields, bad `direction`/`protocol`, or a bad collector reference. |
 | `401` | Missing or invalid API key. |
 | `403` | Key found but inactive or expired. |
-| `500` | A detector errored **and** the deployment is fail-closed. Fail-open returns `200`. |
+| `500` | An internal error. A detector that cannot run is not a `500`: see [Failure behavior](/trustguard/api/evaluate#failure-behavior). |
 
 Error responses carry `{ "error", "trace_id", "request_id" }`.
 
@@ -336,7 +337,7 @@ filtered by service.
 |---|---|
 | `400` on a body that looks correct | An unknown top-level field. `input`, `metadata`, `collector_id`, and `detector_id` do not belong there; content goes inside `payload` |
 | `401` or `403` | Missing, invalid, inactive, or expired API key. These responses are not verdicts and must not be treated as `allow` |
-| `500` on some requests only | A detector errored on a fail-closed deployment. The same request returns `200` where the deployment is fail-open |
+| A `block` with a message that the request could not be evaluated | A detector could not run. Enforce blocks, and report-only records it. See [Failure behavior](/trustguard/api/evaluate#failure-behavior) |
 | Output-phase rules never fire | `direction` omitted or always `input`. It defaults to `input`, so the Output phase never runs |
 | No events in **Activity** | No policy is assigned to the collector, unmatched traffic returns `allow` with no findings, or the runtime cannot reach `{TRUSTGUARD_BASE_URL}` |
 | A `block` status but the request went through anyway | `200` is a verdict, not enforcement. Your code has to act on `status` |
