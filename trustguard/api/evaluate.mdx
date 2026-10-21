@@ -323,7 +323,7 @@ A successful evaluation returns `200`, including one whose status is `block`.
 | `401` | Missing or invalid API key. |
 | `403` | Key found but inactive/expired. |
 | `429` | Plan burst or monthly quota exceeded. See [Limits and quotas](#limits-and-quotas). |
-| `500` | A detector errored **and** the deployment is fail‑closed. With fail‑open you get `200`. |
+| `500` | An internal error. A detector that cannot run is not a `500`: see [Failure behavior](#failure-behavior). |
 | `503` | Rate-limit entitlements could not be loaded, so TrustGuard would not evaluate blind. |
 
 Error responses carry `{ "error", "trace_id", "request_id" }`.
@@ -363,17 +363,18 @@ TrustGuard is slow or unavailable.
 
 ### Failure behavior
 
-Detector infrastructure errors, such as an upstream outage or timeout, follow
-the deployment's fail-open or fail-closed setting:
+When a detector cannot run, such as after an upstream outage or timeout,
+TrustGuard does not skip it and carry on. The request is treated as blocked: in
+**Enforce** the response is a `block` verdict, and in report-only mode the
+request is only recorded. There is no setting to let it through, so a direct
+integration always behaves this way. Calls made through the gateway are
+different: the TrustGuard policy there has its own
+[**If the guardrail cannot evaluate**](/trustgate/policies/trustguard-guardrail#if-the-guardrail-cannot-evaluate)
+field.
 
-- **Fail-open:** TrustGuard drops the failed detector's result and evaluation
-  continues.
-- **Fail-closed:** TrustGuard returns `500`, so the caller can decide whether to
-  hold traffic.
-
-A structured Block decision from a gate or detector rule still applies
-regardless of this setting. The default is configured per deployment; confirm
-it with your NeuralTrust administrator or support contact.
+The request appears in **Activity** with the detector as not executed and the
+action that was applied. It is not listed as a detection. A structured Block
+decision from a gate or detector rule applies as before.
 
 ## Enforcing the verdict
 
