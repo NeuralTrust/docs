@@ -136,7 +136,7 @@ There is no fourth step. Nothing here produces a `403`.
 | A rule matches | Content rewritten, decision `rewritten` | Recorded as `observed`, **original content forwarded**, no decision set |
 | No rule matches | Forwarded untouched, recorded as no match | Forwarded untouched, recorded as no match |
 | The leg does not match **Target** | Forwarded untouched | Forwarded untouched |
-| Streaming response | Forwarded untouched | Forwarded untouched |
+| Streaming response | Rewritten block by block | Recorded, original sent |
 | The body cannot be read or written back | **Forwarded unredacted** | Forwarded unredacted |
 | An invalid pattern | Rejected at save time | Rejected at save time |
 | The policy configuration cannot be parsed | `502`, refused | `502`, refused |
@@ -160,7 +160,13 @@ control over something that must never leave.
   requirement is "this must not reach the model at all", this is the wrong
   policy.
 - **It forwards unredacted when it cannot rewrite.** See the warning above.
-- **Streaming responses pass through untouched**, silently.
+- **A streamed response is rewritten block by block** when **Target** is the
+  response, whatever the stored `streaming` setting says. Text released before a
+  later match cannot be taken back, the same as for the other streaming
+  guardrails. A request-targeted policy never joins the stream. When a block
+  cannot be rewritten, the stream fails closed by default; an explicit
+  `streaming.on_error: fail_open` is honoured. Mixed with other guardrails, it
+  rides on their stream options.
 - **One leg per policy.** **Target** is a single choice; use two policies for
   both legs.
 - **Message content only.** On the request leg, tool call arguments, tool
@@ -266,7 +272,6 @@ need to match on them from an alert.
 | A placeholder from one rule disappeared | A later rule matched the text the earlier rule inserted | Reorder, or choose a placeholder no later pattern matches |
 | Text spanning two messages is never matched | Each message is rewritten separately | Match within a single message |
 | Sensitive text reached the model anyway, with no event | The body could not be read or written back, and was forwarded unredacted | Raise the log level to debug to see it, and do not rely on this policy alone |
-| Streamed responses are never rewritten | Streaming is not supported | Rewrite on the request leg |
 
 ---
 
