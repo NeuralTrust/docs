@@ -77,27 +77,29 @@ and a **Create collector** link that makes one without leaving the panel.
 | **Response** | The completion or tool result, before it reaches the caller. |
 | **Request & Response** | Both. The default. |
 
-### When TrustGuard cannot answer
+### If the guardrail cannot evaluate
 
-What happens when the gateway cannot get a verdict depends on the cause.
+**If the guardrail cannot evaluate** decides what happens when TrustGuard
+cannot judge a request. It defaults to **Allow**.
 
-- **The service is unavailable: fail open.** A network error, an error from
-  TrustGuard itself, rate limiting from the provider, a credential TrustGuard
-  refuses, a gateway with no TrustGuard URL or credentials, unavailable
-  entitlements, a call that does not answer in time, or a policy configuration
-  the gateway cannot parse. The traffic is forwarded uninspected and the policy
-  is recorded as **Failed Open**, with the reason. The caller sees nothing.
-- **The content caused it: blocked in Enforce.** A request or response body the
-  gateway cannot read, content larger than TrustGuard accepts, or a mask the
-  gateway cannot write back over sensitive data TrustGuard found. In Enforce the
-  call is refused with `403` and recorded as **Failed Closed** (or **Blocked**,
-  marked degraded with the reason, for a mask that cannot be applied).
-- **Observe** only records either case and never blocks.
+| Value | When the guardrail cannot evaluate |
+|---|---|
+| **Allow** | The request continues, and the event records that the guardrail could not evaluate it. The default. |
+| **Block** | In **Enforce** the request is rejected. In **Observe** it is only recorded, because Observe never blocks. |
 
-Failing open keeps your application working through a TrustGuard outage, at the
-cost of a window in which nothing is being inspected and nothing in front of the
-caller says so. Watch for `failed_open` in **Activity** and on the failure
-count. Content over the limit is blocked in Enforce.
+"Cannot evaluate" means TrustGuard is unreachable or times out, returns a server
+error, the policy's configuration is invalid or incomplete, or one of
+TrustGuard's detectors fails to run. The caller sees nothing when the request
+continues.
+
+**Allow** keeps your application working through a TrustGuard outage, at the cost
+of a window in which nothing is being inspected and nothing in front of the
+caller says so. Choose **Block** when an uninspected request is worse than a
+refused one, and watch **Activity** for requests that were not evaluated.
+
+Requests that are too large or unreadable for the guardrail are not affected by
+this field. Both values handle them the same way: rejected in **Enforce**,
+recorded in **Observe**.
 
 A failure never relaxes a TrustGuard **block** or a `429` rate limit. Those are
 TrustGuard's answers rather than failures, and they still refuse the request.
@@ -295,20 +297,20 @@ JSON-RPC errors in [What the caller receives](#what-the-caller-receives).
 | TrustGuard returns **Ask** | `403`, refused | Recorded, request continues |
 | A transform verdict | Content rewritten in place | Recorded, **original content sent** |
 | TrustGuard rate limit | `429`, refused | **`429`, refused** |
-| TrustGuard cannot be used | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
+| The guardrail cannot evaluate, **Allow** | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
+| The guardrail cannot evaluate, **Block** | **Refused**, recorded as not evaluated | Recorded as not evaluated, request continues |
 | A transform that cannot be applied | **`403`, refused**, decision `blocked`, marked degraded | Recorded, original content sent |
 | The content caused the failure (unreadable body, content over the limit) | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
-| TrustGuard times out | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
 | The request is on a route that carries no chat (images, audio, files) | Forwarded, recorded as not inspected | Forwarded, recorded as not inspected |
 | The upstream answered with an error (a non-2xx status) | The response is not inspected, recorded as not inspected | Same |
-| The policy configuration cannot be parsed | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
 
-"TrustGuard cannot be used" is any of: unreachable, a `5xx`, a credential it
-refuses (including a `401` that survives a token refresh), unavailable
-entitlements (`503`), a gateway with no TrustGuard URL or credentials, or a
-call that does not answer in time. In every case the policy fails open.
-Failures caused by the content itself are the exception, as described in
-[When TrustGuard cannot answer](#when-trustguard-cannot-answer).
+"The guardrail cannot evaluate" is any of: TrustGuard unreachable or timing out,
+a `5xx`, a credential it refuses (including a `401` that survives a token
+refresh), unavailable entitlements (`503`), a gateway with no TrustGuard URL or
+credentials, a policy configuration that is invalid or incomplete, or a detector
+that fails to run. **If the guardrail cannot evaluate** decides the outcome.
+Failures caused by the content itself are the exception: both values handle them
+as described in [If the guardrail cannot evaluate](#if-the-guardrail-cannot-evaluate).
 
 <Warning>
 **Observe does not mean "never refuses".** A TrustGuard **rate limit** refuses
@@ -318,15 +320,20 @@ never reaches the point where the mode is read.
 </Warning>
 
 <Warning>
-**A TrustGuard outage forwards traffic uninspected.** An outage, a timeout, a
-refused credential or a missing configuration lets the request go through, and
-the policy is recorded as **Failed Open**, with the reason on the event. The
-caller sees nothing. Watch for `failed_open` in **Activity** and on the failure count: silence is not
-evidence of clean traffic.
+**With Allow, a TrustGuard outage forwards traffic uninspected.** An outage, a
+timeout, a refused credential or a missing configuration lets the request go
+through, and the policy is recorded as **Failed Open**, with the reason on the
+event. The caller sees nothing. Watch for `failed_open` in **Activity** and on
+the failure count: silence is not evidence of clean traffic. Set **If the
+guardrail cannot evaluate** to **Block** to refuse those requests in Enforce.
 </Warning>
 
+A request that **Block** rejects shows in **Activity** with the guardrail as not
+evaluated and the action it applied. It is not listed as a detection, because
+nothing was detected.
+
 On a streamed response inspected block by block, a block TrustGuard could not
-inspect because the service was unavailable is let through, the other policies
+inspect because the service was unavailable is let through under **Allow**, the other policies
 in the chain still inspect it, and the stream is recorded as `failed_open` when
 it ends. A mask that cannot be applied ends the stream in Enforce. After three
 failed blocks in a row this policy stops calling TrustGuard for the rest of that stream.
@@ -393,11 +400,12 @@ call is released uninspected and the stream is marked degraded with
 - **Audio is never collected**, on either leg. Image and file attachments are —
   but on the **request** leg only, and an MCP embedded resource carrying a
   binary blob rather than text has nothing to inspect.
-- **An outage fails open; a content-caused failure blocks in Enforce.** An
-  outage, a rejected credential, a missing configuration, a timeout or an
-  unparseable configuration forwards the traffic uninspected, whatever the mode.
-  Content the gateway cannot read or TrustGuard cannot accept is refused in
-  Enforce.
+- **An outage follows the field; a content-caused failure blocks in Enforce.**
+  With **If the guardrail cannot evaluate** on **Allow**, an outage, a rejected
+  credential, a missing configuration, a timeout or an invalid configuration
+  forwards the traffic uninspected, whatever the mode. With **Block**, Enforce
+  refuses it and Observe records it. Content the gateway cannot read or
+  TrustGuard cannot accept is refused in Enforce under both values.
 
 ---
 
@@ -472,8 +480,8 @@ need to match on them from an alert.
 | Nothing is ever blocked although detectors are configured | The TrustGuard policy bound to the collector is in **Observe** | Two mode switches; both have to be **Enforce** |
 | Nothing recorded for the response leg | **Direction** is **Request** | Set it to **Request & Response** |
 | `429` telling the caller to retry later, including in Observe | TrustGuard rate limit for the plan | Expected — this path never consults the mode. Wait for the period the refusal names |
-| Every request passes as `failed_open`, with nothing reaching TrustGuard | The collector was deleted, belongs to another gateway, the credential was refused, or the gateway has no TrustGuard URL or credentials | Re-select the collector and confirm it is bound to this gateway, then check the deployment's TrustGuard configuration. |
-| Traffic passes with no finding at all, decision `failed_open` | TrustGuard could not be used — unreachable, an error, a timeout, a refused credential — and the policy failed open | Check the reason on the event and the failure count — silence is not evidence of clean traffic |
+| Every request passes as `failed_open`, with nothing reaching TrustGuard, while the field is **Allow** | The collector was deleted, belongs to another gateway, the credential was refused, or the gateway has no TrustGuard URL or credentials | Re-select the collector and confirm it is bound to this gateway, then check the deployment's TrustGuard configuration. |
+| Traffic passes with no finding at all, decision `failed_open` | TrustGuard could not be used — unreachable, an error, a timeout, a refused credential — and **If the guardrail cannot evaluate** is **Allow** | Check the reason on the event and the failure count — silence is not evidence of clean traffic. Set the field to **Block** to refuse these in Enforce |
 | A streamed response was cut part-way, and the client kept its start | The finding came after that part was delivered | Expected; text already sent cannot be taken back |
 | A long streamed response is recorded as degraded with `accumulation_cap` | Each check reads only the latest 256 KiB of the answer | Expected; earlier text is not read again |
 | An MCP tool result was not inspected | The result carries no text — image, audio, or a binary resource | Expected; an MCP result is inspected through its text |
