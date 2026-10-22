@@ -298,7 +298,7 @@ JSON-RPC errors in [What the caller receives](#what-the-caller-receives).
 | A transform verdict | Content rewritten in place | Recorded, **original content sent** |
 | TrustGuard rate limit | `429`, refused | **`429`, refused** |
 | The guardrail cannot evaluate, **Allow** | Forwarded uninspected, decision `failed_open` | Forwarded uninspected, decision `failed_open` |
-| The guardrail cannot evaluate, **Block** | **Refused**, recorded as not evaluated | Recorded as not evaluated, request continues |
+| The guardrail cannot evaluate, **Block** | **`403`, refused**, `{"error":{"type":"guardrail_input_uninspectable","message":…}}`, decision `failed_closed`, `failure_mode: closed` | Recorded, decision `failed_open` with `failure_mode: closed`, request continues |
 | A transform that cannot be applied | **`403`, refused**, decision `blocked`, marked degraded | Recorded, original content sent |
 | The content caused the failure (unreadable body, content over the limit) | **`403`, refused**, decision `failed_closed` | Recorded, request continues |
 | The request is on a route that carries no chat (images, audio, files) | Forwarded, recorded as not inspected | Forwarded, recorded as not inspected |
@@ -328,9 +328,11 @@ the failure count: silence is not evidence of clean traffic. Set **If the
 guardrail cannot evaluate** to **Block** to refuse those requests in Enforce.
 </Warning>
 
-A request that **Block** rejects shows in **Activity** with the guardrail as not
-evaluated and the action it applied. It is not listed as a detection, because
-nothing was detected.
+A request that **Block** rejects in Enforce is refused with HTTP `403` and
+`{"error":{"type":"guardrail_input_uninspectable","message":…}}`. The decision
+is `failed_closed`, and the event carries `failure_mode: closed`. It shows in
+**Activity** with the guardrail as not evaluated and the action it applied. It
+is not listed as a detection, because nothing was detected.
 
 On a streamed response inspected block by block, a block TrustGuard could not
 inspect because the service was unavailable is let through under **Allow**, the other policies
@@ -341,7 +343,8 @@ failed blocks in a row this policy stops calling TrustGuard for the rest of that
 Each inspected leg records one decision, and it is the first thing to read on
 the request's **Policies** tab in **Activity**: `allowed`, `reported`, `block`,
 `transformed`, `failed_open` when a failed call was waved through, and
-`failed_closed` when the content itself caused the failure and Enforce refused it. Expect
+`failed_closed` when Enforce refused a leg the guardrail could not evaluate:
+content it could not read, or any failure under **Block**. Expect
 `failed_open` on a first run if something is misconfigured — a collector that was deleted,
 belongs to another gateway, or whose credential was refused looks exactly like
 an outage from here.
