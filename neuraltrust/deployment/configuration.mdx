@@ -285,14 +285,83 @@ right-size if you run a subset of detectors.
 TrustGuard derives `NEURAL_TRUST_FIREWALL_BASE_URL` as
 `http://firewall.<namespace>.svc.cluster.local` and maps
 `firewall-secrets/JWT_SECRET` to its client secret. Both sides are wired by the
-chart, so there is nothing to configure.
+chart, so there is nothing to configure. To use a Firewall that runs elsewhere
+instead, see [External or NeuralTrust-hosted Firewall](#external-or-neuraltrust-hosted-firewall).
 
 <Warning>
 `firewall.enabled`, `firewall.firewall.enabled`, and `trustguard.firewall.enabled`
 have no effect on whether Firewall renders. Setting all three to `false` with
 TrustGuard on still produces the gateway and all five workers. To reduce its
-footprint, size the workers instead.
+footprint, size the workers instead. The one way to leave Firewall out is
+`global.firewall.deploy: false`, described below.
 </Warning>
+
+### External or NeuralTrust-hosted Firewall
+
+`global.firewall.deploy: false` keeps TrustGuard but leaves the Firewall
+subchart out. TrustGuard and TrustGate complexity scoring then call
+`global.firewall.baseURL` and sign their requests with the `JWT_SECRET` read
+from `global.firewall.existingSecret` — a Secret you create in the release
+namespace — or, when that is unset, from `global.platformSecret.existingSecret`.
+No Firewall gateway, workers, `firewall-config` or `firewall-secrets` render.
+
+The render fails if `baseURL` is not an `http(s)` URL or if neither Secret is
+set. The chart never derives `baseURL`, so prompts reach a Firewall outside the
+release only when you configure it.
+
+<Tabs>
+<Tab title="Firewall you already run">
+For example, one GPU-backed Firewall shared by several releases. The Secret must
+carry the same `JWT_SECRET` that Firewall verifies with.
+
+```yaml
+global:
+  firewall:
+    deploy: false
+    baseURL: "http://firewall.<namespace>.svc.cluster.local"
+    existingSecret:
+      name: "<secret holding that firewall's JWT_SECRET>"
+      key: "JWT_SECRET"
+```
+</Tab>
+<Tab title="NeuralTrust-hosted Firewall">
+To skip running the Firewall models yourself, point TrustGuard at the Firewall
+NeuralTrust hosts. It works in Hybrid, External and SaaS modes and needs no
+other values. Store the Firewall key NeuralTrust issues you — not a value you
+generate — in a Secret in the release namespace:
+
+```yaml
+global:
+  firewall:
+    deploy: false
+    baseURL: "https://firewall.neuraltrust.ai"   # https://firewall.us.neuraltrust.ai for the US region
+    existingSecret:
+      name: "neuraltrust-firewall"
+      key: "JWT_SECRET"
+```
+
+| Region | `baseURL` |
+| --- | --- |
+| EU | `https://firewall.neuraltrust.ai` |
+| US | `https://firewall.us.neuraltrust.ai` |
+
+Reach it in one of two ways. The URL is the same in both:
+
+- **Over the internet.** The hostname is served through NeuralTrust's edge.
+  Allow outbound TCP 443 to it — see
+  [Hybrid network](/neuraltrust/deployment/hybrid#network).
+- **Over Google Cloud Private Service Connect.** Create a PSC endpoint to the
+  service attachment NeuralTrust shares with you, then add a private DNS zone in
+  your VPC for that one hostname (for example `firewall.neuraltrust.ai.`) with an
+  `A` record pointing at the endpoint IP. Keep `baseURL` unchanged: TLS and
+  routing depend on the hostname.
+
+<Warning>
+Create the private DNS zone for the Firewall hostname only, never for the parent
+domain, or other NeuralTrust hostnames stop resolving inside your VPC.
+</Warning>
+</Tab>
+</Tabs>
 
 ### GPU Firewall workers
 
