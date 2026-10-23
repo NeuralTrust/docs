@@ -1,6 +1,6 @@
 ---
 title: "Where each detector applies"
-description: "Which part of an LLM or MCP request and response each TrustGuard detector reads — user messages, assistant turns, tool definitions, tool arguments, tool results, and model output — and which parts, including system instructions, are left unscored. Field names for OpenAI, Anthropic, Gemini, and Cohere."
+description: "Which part of an LLM or MCP request and response each TrustGuard detector reads — user messages, assistant turns, tool definitions, tool arguments, tool results, and model output — and which parts, including system instructions, each detector leaves unscored. Field names for OpenAI, Anthropic, Gemini, and Cohere."
 ---
 
 <p className="nt-lead">
@@ -8,7 +8,8 @@ description: "Which part of an LLM or MCP request and response each TrustGuard d
   user's message, earlier turns, tool definitions, tool arguments, and tool
   results — and each of those has a different author and a different risk.
   TrustGuard splits the payload by role and sends each part only to the
-  detectors built for it. System and developer instructions are left unscored.
+  detectors built for it. Data Loss Prevention is the exception: it reads every
+  text value in the payload, system and developer instructions included.
 </p>
 
 This page is the map. Use it to predict which detector will fire on which part of
@@ -22,16 +23,17 @@ rule.
 
 | Phase | Part of the payload | Detectors that read it |
 |---|---|---|
+| Input | **System and developer instructions** | Data Loss Prevention |
 | Input | **User message** | Prompt Guard, Toxicity Detection, Custom Moderation, Data Loss Prevention |
 | Input | **URLs in the user message** | URL Analyzer (on the fetched page) |
 | Input | **Files attached to the user message** | Document Analyzer (on the extracted text) |
-| Input | **Tool definitions** — tool and parameter descriptions | Indirect Prompt Injection |
+| Input | **Tool definitions** — tool and parameter descriptions | Indirect Prompt Injection, Data Loss Prevention |
 | Input | **Tool-call argument values** | Data Loss Prevention |
-| Input | **Tool results** returned to the model | Indirect Prompt Injection |
-| Input | **Assistant turns replayed in history** | Prompt Guard |
+| Input | **Tool results** returned to the model | Indirect Prompt Injection, Data Loss Prevention |
+| Input | **Assistant turns replayed in history** | Prompt Guard, Data Loss Prevention |
 | Output | **Assistant text** | Toxicity Detection, Custom Moderation, Data Loss Prevention |
-| Output | **MCP `tools/list` result** — tool descriptions and schemas | Indirect Prompt Injection |
-| Output | **MCP tool result** | Indirect Prompt Injection |
+| Output | **MCP `tools/list` result** — tool descriptions and schemas | Indirect Prompt Injection, Data Loss Prevention |
+| Output | **MCP tool result** | Indirect Prompt Injection, Data Loss Prevention |
 
 Two consequences are worth knowing before you write rules:
 
@@ -83,14 +85,25 @@ definitions, or tool traffic.
 
 ### Data Loss Prevention
 
-Reads text where personal data and secrets actually leave or enter:
+Reads every text and number value in the payload, in both directions. On Input
+that includes:
 
-- **The user's message** on Input.
-- **Tool-call argument values** on Input — the values your agent is about to
-  send to a tool, such as an email address passed to a CRM lookup.
-- **Assistant text** on Output.
+- **System and developer instructions.** A system prompt is often built from a
+  template filled with user data, such as a customer record or a retrieved
+  document, so it can carry personal data the user never typed.
+- **The user's message**, and earlier turns replayed in history.
+- **Tool-call argument values** — the values your agent is about to send to a
+  tool, such as an email address passed to a CRM lookup.
+- **Tool definitions and tool results.**
+
+On Output it reads the whole response, assistant text included. Encoded media,
+such as an inline base64 image, is not scanned, because masking inside it would
+corrupt it.
 
 It is the only detector that can **Transform**, masking a matched value in place.
+With Transform, a value matched in the system prompt is masked before the model
+sees it. If your system prompt holds details the model must repeat, such as a
+support phone number, turn off the entity that matches them.
 
 ### Indirect Prompt Injection
 
@@ -134,6 +147,9 @@ evaluated separately.
 
 ## What is never scanned
 
+Data Loss Prevention reads all of the content below. The table applies to the
+other detectors.
+
 | Content | Why |
 |---|---|
 | **System and developer instructions** | Prompt Guard does not score them, including OpenAI `developer` messages, Responses `instructions`, Anthropic `system`, Gemini `systemInstruction`, and Bedrock system. Scoring that text produces false positives. |
@@ -145,6 +161,7 @@ evaluated separately.
 When you send a full provider body to [`POST /v1/evaluate`](/trustguard/api/evaluate)
 — or when a gateway sends it for you — TrustGuard extracts the parts above from
 these fields. The system / instructions column is not scored by Prompt Guard.
+Data Loss Prevention reads every column.
 
 | Provider | System / instructions | User text | Tool definitions | Tool result | Assistant text (response) |
 |---|---|---|---|---|---|
@@ -156,8 +173,8 @@ these fields. The system / instructions column is not scored by Prompt Guard.
 
 Tool-call arguments live in `tool_calls[].function.arguments` (OpenAI Chat,
 Cohere), `input[type=function_call].arguments` (OpenAI Responses), `tool_use.input`
-(Anthropic), and `functionCall.args` (Gemini). Those are the values Data Loss
-Prevention reads.
+(Anthropic), and `functionCall.args` (Gemini). Data Loss Prevention reads them,
+along with every other text value in the request.
 
 ### Example: one tool-using turn
 
@@ -184,10 +201,10 @@ request carries a system prompt, the user's message, and one tool:
 
 | Field | Detectors |
 |---|---|
-| `messages[0].content` (system) | Not scored |
+| `messages[0].content` (system) | Data Loss Prevention |
 | `messages[1].content` (user) | Prompt Guard, Toxicity Detection, Custom Moderation, Data Loss Prevention |
 | `https://neuraltrust.ai`, fetched | URL Analyzer |
-| `tools[0].function.description` | Indirect Prompt Injection |
+| `tools[0].function.description` | Indirect Prompt Injection, Data Loss Prevention |
 
 The model answers with a tool call and no text, so Output has nothing to score.
 The agent runs the tool and sends the result back in the next request:
@@ -217,7 +234,7 @@ The agent runs the tool and sends the result back in the next request:
 | Field | Detectors |
 |---|---|
 | `messages[2].tool_calls[0].function.arguments` | Data Loss Prevention |
-| `messages[3].content` (tool result, every string leaf) | Indirect Prompt Injection |
+| `messages[3].content` (tool result, every string leaf) | Indirect Prompt Injection, Data Loss Prevention |
 
 The final response carries the summary in `choices[0].message.content`, which
 Toxicity Detection, Custom Moderation, and Data Loss Prevention read on Output.
