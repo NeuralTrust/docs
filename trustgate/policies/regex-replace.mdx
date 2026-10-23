@@ -136,17 +136,18 @@ There is no fourth step. Nothing here produces a `403`.
 | A rule matches | Content rewritten, decision `rewritten` | Recorded as `observed`, **original content forwarded**, no decision set |
 | No rule matches | Forwarded untouched, recorded as no match | Forwarded untouched, recorded as no match |
 | The leg does not match **Target** | Forwarded untouched | Forwarded untouched |
-| Streaming response | Forwarded untouched | Forwarded untouched |
-| The body cannot be read or written back | **Forwarded unredacted** | Forwarded unredacted |
+| Streaming response | Rewritten block by block | Recorded, original sent |
+| A non-streamed body cannot be read or written back | Forwarded unredacted | Forwarded unredacted |
+| A streamed rewrite cannot reach text already sent | Stream ended, decision `rewrite_unapplied` (default `streaming.on_error: fail_closed`) | Not applicable: Observe never rewrites |
 | An invalid pattern | Rejected at save time | Rejected at save time |
 | The policy configuration cannot be parsed | `502`, refused | `502`, refused |
 
 <Warning>
-**When the rewrite cannot be applied, the content is forwarded unredacted.** If
-the request arrives in a shape the gateway does not recognise, or the body
-cannot be read or written back, this policy passes the original through. It logs
-at debug level and emits no decision — at default log levels there is nothing to
-see.
+**When the rewrite cannot be applied to a non-streamed body, the content is
+forwarded unredacted.** If the request arrives in a shape the gateway does not
+recognise, or the body cannot be read or written back, this policy passes the
+original through. It logs at debug level and emits no decision — at default log
+levels there is nothing to see.
 
 This is the opposite of what the other masking guardrails do: TrustGuard, AWS
 Bedrock and Google Model Armor all refuse a request they cannot mask. Same
@@ -156,11 +157,17 @@ control over something that must never leave.
 
 ### Limits
 
-- **It can never block.** There is no threshold, no action, no refusal. If the
-  requirement is "this must not reach the model at all", this is the wrong
-  policy.
-- **It forwards unredacted when it cannot rewrite.** See the warning above.
-- **Streaming responses pass through untouched**, silently.
+- **It never refuses a request.** There is no threshold, no action, no refusal.
+  If the requirement is "this must not reach the model at all", this is the wrong
+  policy. On a streamed response it can end the stream when a match reaches text
+  already sent.
+- **A non-streamed body it cannot rewrite is forwarded unredacted.** See the
+  warning above.
+- **Matches are found across block boundaries.** A match that reaches text already
+  sent ends the stream by default, with decision `rewrite_unapplied`. An explicit
+  `streaming.on_error: fail_open` lets it continue. When the stream is shared with
+  another guardrail, that guardrail's streaming options apply, including its
+  failure direction.
 - **One leg per policy.** **Target** is a single choice; use two policies for
   both legs.
 - **Message content only.** On the request leg, tool call arguments, tool
@@ -266,7 +273,6 @@ need to match on them from an alert.
 | A placeholder from one rule disappeared | A later rule matched the text the earlier rule inserted | Reorder, or choose a placeholder no later pattern matches |
 | Text spanning two messages is never matched | Each message is rewritten separately | Match within a single message |
 | Sensitive text reached the model anyway, with no event | The body could not be read or written back, and was forwarded unredacted | Raise the log level to debug to see it, and do not rely on this policy alone |
-| Streamed responses are never rewritten | Streaming is not supported | Rewrite on the request leg |
 
 ---
 
