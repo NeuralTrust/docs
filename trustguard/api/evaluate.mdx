@@ -284,7 +284,14 @@ A successful evaluation returns `200`, including one whose status is `block`.
       },
       "signal": { "type": "pii", "confidence": 1.0 },
       "outcome": { "action": "transform" },
-      "evidence": { "masked": 1, "entities": ["email"] }
+      "evidence": {
+        "masked": 1,
+        "entities": ["email"],
+        "masked_spans": 1,
+        "flagged": [
+          { "kind": "masked_span", "path": "input", "entity": "email", "start": 12, "end": 26, "source_chars": 26 }
+        ]
+      }
     }
   ],
   "trace_id": "f1e2…",
@@ -313,6 +320,24 @@ A successful evaluation returns `200`, including one whose status is `block`.
 | `signal.confidence` | number | Detector‑specific score in `[0, 1]` (optional). |
 | `outcome.action` | enum | The action applied by the rule: `report`, `transform`, `ask`, `skip`, or `block`. Optional on observational runs. |
 | `evidence` | object | Free‑form, detector‑specific context (e.g. matched entities, masked count, matched rule). A URL Analyzer finding always includes `urls_total`, `urls_skipped`, and `url_limit_exceeded` (`0` / `false` when the request is within the 10‑URL cap). A Document Analyzer finding for an attachment whose parsing failed or timed out carries reason `content_uninspectable` (signal type `guard_content_uninspectable`). |
+
+### Where Data Loss Prevention masked a value
+
+A `data_loss_prevention` finding locates every value it masked, without
+repeating the value. `evidence.masked` counts the entity types found and
+`evidence.masked_spans` counts the values masked. Each value is a
+`evidence.flagged` item of kind `masked_span`:
+
+| Key | Notes |
+|---|---|
+| `path` | JSON path of the field the value sat in, inside the evaluated payload, such as `messages[1].content[0].text` or `params.arguments.to`. Inside a JSON-encoded string, such as an OpenAI `function.arguments`, the path continues into the decoded value: `messages[2].tool_calls[0].function.arguments.to`. |
+| `entity` | The entity masked, such as `email` or `credit_card`, or `custom_rule` for a custom rule's hit. |
+| `start`, `end` | Code-point range `[start, end)` of the value within that field, untrimmed. Absent for `custom_rule`, which names the field only. |
+| `source_chars` | Length of that field in code points, so you can check the stored field before trusting the range. |
+| `tool`, `arg_key` | For a tool-call argument, the tool and the top-level argument. |
+
+Only the first 64 values are listed; `masked_spans` still counts all of them.
+A masked tool-call argument also keeps its `tool_call_arguments` item.
 
 ## Status codes
 
