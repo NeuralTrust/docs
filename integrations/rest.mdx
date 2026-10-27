@@ -97,7 +97,9 @@ request:
 </CodeGroup>
 
 `payload` accepts the minimal `{ "input": "…" }` shape above or a full OpenAI,
-Anthropic, Gemini, or MCP provider body.
+Anthropic, Gemini, or MCP provider body. `input` is read as the user's message,
+so use it for prompts only; the model's completion takes a different shape, shown
+in [Evaluate the output](#4-evaluate-the-output).
 
 **Set `direction` on every call.** It selects which policy
 [detector](/trustguard/concepts/detectors) phase runs, `Input` or `Output`. It
@@ -123,8 +125,8 @@ monitoring only.
 </Step>
 
 <Step title="Evaluate the output" titleSize="h2" id="4-evaluate-the-output">
-The same endpoint and the same key, with the model's completion in `payload` and
-`direction` flipped:
+The same endpoint and the same key, with `direction` flipped and the model's
+completion sent as an `assistant` message:
 
 <CodeGroup>
   ```python Python
@@ -136,7 +138,9 @@ The same endpoint and the same key, with the model's completion in `payload` and
       json={
           "protocol": "llm",
           "direction": "output",
-          "payload": {"input": "Here is a summary…"},
+          "payload": {
+              "messages": [{"role": "assistant", "content": "Here is a summary…"}]
+          },
           "session_id": "sess-123",
           "consumer_id": "alex@acme.com",
       },
@@ -150,7 +154,9 @@ The same endpoint and the same key, with the model's completion in `payload` and
     body: JSON.stringify({
       protocol: "llm",
       direction: "output",
-      payload: { input: "Here is a summary…" },
+      payload: {
+        messages: [{ role: "assistant", content: "Here is a summary…" }],
+      },
       session_id: "sess-123",
       consumer_id: "alex@acme.com",
     }),
@@ -165,7 +171,9 @@ The same endpoint and the same key, with the model's completion in `payload` and
     -d '{
       "protocol": "llm",
       "direction": "output",
-      "payload": { "input": "Here is a summary…" },
+      "payload": {
+        "messages": [{ "role": "assistant", "content": "Here is a summary…" }]
+      },
       "session_id": "sess-123",
       "consumer_id": "alex@acme.com"
     }'
@@ -175,6 +183,10 @@ The same endpoint and the same key, with the model's completion in `payload` and
 ```text
 { "status": "allow", "findings": [], "transformed_payload": null, "trace_id": "…", "request_id": "…" }
 ```
+
+Do not send the completion as `{ "input": "…" }`. `input` is read as the user's
+message, and Toxicity Detection and Custom Moderation read only
+`assistant` text on Output, so they skip the completion without inspecting it.
 
 Reuse the `session_id` across both halves of a turn so the prompt and the
 completion correlate in **Activity**. `transformed_payload` is `null` or absent
@@ -267,7 +279,7 @@ the body.
 
 | Field | Required | Notes |
 |---|---|---|
-| `payload` | ✅ | The content to inspect. A minimal `{ "input": "…" }` or a full provider body (OpenAI, Anthropic, Gemini, MCP). `payload.attachments` is extracted separately and not sent to text detectors. |
+| `payload` | ✅ | The content to inspect. A minimal `{ "input": "…" }` (read as the user's message) or a full provider body (OpenAI, Anthropic, Gemini, MCP). On `direction: "output"`, send the completion as `{ "messages": [{ "role": "assistant", "content": "…" }] }`. `payload.attachments` is extracted separately and not sent to text detectors. |
 | `direction` | No | `input` (default) or `output`. Selects the policy detector phase. TrustGate sets it automatically; direct API clients should set it on each call, usually twice per turn. |
 | `protocol` | No | `all` (default) · `llm` · `mcp` · `a2a`. |
 | `session_id` | No | Conversation or correlation key. Synthesized if omitted. |
@@ -339,6 +351,7 @@ filtered by service.
 | `401` or `403` | Missing, invalid, inactive, or expired API key. These responses are not verdicts and must not be treated as `allow` |
 | A `block` with a message that the request could not be evaluated | A detector could not run. Enforce blocks, and report-only records it. See [Failure behavior](/trustguard/api/evaluate#failure-behavior) |
 | Output-phase rules never fire | `direction` omitted or always `input`. It defaults to `input`, so the Output phase never runs |
+| Toxicity Detection or Custom Moderation never fire on the completion | The completion was sent as `{ "input": "…" }`, which is read as the user's message. Send it as an `assistant` message in `messages` |
 | No events in **Activity** | No policy is assigned to the collector, unmatched traffic returns `allow` with no findings, or the runtime cannot reach `{TRUSTGUARD_BASE_URL}` |
 | A `block` status but the request went through anyway | `200` is a verdict, not enforcement. Your code has to act on `status` |
 | A masking policy changes nothing | `transformed_payload` ignored. Forward it instead of your original payload |
