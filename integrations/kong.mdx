@@ -67,7 +67,9 @@ plugins:
           protocol: llm
           direction: "$(trustguard_direction)"
           payload:
-            input: "$(content)"
+            messages:
+              - role: "$(trustguard_role)"
+                content: "$(content)"
       response:
         block: "$(check_response.block)"
         block_message: "$(check_response.block_message)"
@@ -75,6 +77,10 @@ plugins:
         trustguard_direction: |
           return function(conf, content, source)
             return source == "INPUT" and "input" or "output"
+          end
+        trustguard_role: |
+          return function(conf, content, source)
+            return source == "INPUT" and "user" or "assistant"
           end
         check_response: |
           return function(resp)
@@ -91,7 +97,11 @@ Request-template functions receive Kong's built-in `conf`, `content`, and
 `source` values in that order. `trustguard_direction` reads the third argument
 and converts `INPUT` or `OUTPUT` to the lowercase value accepted by
 `/v1/evaluate`, so `guarding_mode: BOTH` selects the correct policy phase on each
-pass.
+pass. `trustguard_role` sends the request text as a `user` message and the
+completion as an `assistant` message. Do not send the completion as
+`payload.input`: `input` is read as the user's message, and Toxicity Detection
+and Custom Moderation read only `assistant` text on Output, so they
+skip it without inspecting it.
 
 Add `consumer_id` and `session_id` to the same `body` block. Map `consumer_id`
 from Kong's verified consumer identity and `session_id` from a stable, verified
@@ -152,8 +162,8 @@ evaluated direction adds one round trip to `{TRUSTGUARD_BASE_URL}`.
 
 | Kong pass | TrustGuard | What you can stop | Enforcement |
 | --- | --- | --- | --- |
-| Request pass | `protocol: llm`, `direction: input`; `payload.input` contains the request text flattened by `text_source` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard)); secrets and PII in prompts ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** prevents the provider call |
-| Response pass | `direction: output`; the completion | Unsafe or leaking model output | **Block** |
+| Request pass | `protocol: llm`, `direction: input`; a `user` message in `payload.messages` contains the request text flattened by `text_source` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard)); secrets and PII in prompts ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** prevents the provider call |
+| Response pass | `direction: output`; the completion, as an `assistant` message in `payload.messages` | Unsafe or leaking model output | **Block** |
 | Tool calls and tool results | Not available. The route sees one request body, not the agent loop | Not evaluated | Not evaluated |
 
 Every call is [`POST /v1/evaluate`](/trustguard/api/evaluate) with the collector
@@ -168,10 +178,10 @@ Configure the integration in the plugin's `config` block:
 | Key | Notes |
 |---|---|
 | `guarding_mode` | `BOTH` evaluates both request and response; `INPUT` evaluates the request only. |
-| `text_source` | `concatenate_all_content` flattens the message array into the single string sent as `payload.input`. |
+| `text_source` | `concatenate_all_content` flattens the message array into the single string sent as the message `content`. |
 | `params.api_key` | The collector key. Referenced from the header template as `$(conf.params.api_key)`, so it appears once. |
 | `request.url` | `{TRUSTGUARD_BASE_URL}/v1/evaluate`, including the full endpoint path. |
-| `request.body` | `protocol`, `payload.input`, `direction` from `trustguard_direction`, plus the `consumer_id` and `session_id` you map. |
+| `request.body` | `protocol`, `payload.messages` with the role from `trustguard_role`, `direction` from `trustguard_direction`, plus the `consumer_id` and `session_id` you map. |
 | `response.block` / `response.block_message` | The only two fields the contract carries back. Both are read from `check_response`. |
 | `functions.check_response` | The Lua that turns a TrustGuard status into that boolean. |
 | `functions.trustguard_direction` | Converts Kong's `INPUT` or `OUTPUT` source to TrustGuard's lowercase direction enum. |

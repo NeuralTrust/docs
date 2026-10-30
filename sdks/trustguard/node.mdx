@@ -77,7 +77,7 @@ const prompt = inbound.transformedPayload ?? { input: userInput };
 // … model call …
 
 const outbound = await client.guard({
-  payload: { input: modelCompletion },
+  payload: { messages: [{ role: "assistant", content: modelCompletion }] },
   direction: "output",
   consumerId: user.id,
   sessionId: conversationId,
@@ -154,13 +154,16 @@ use [Node.js middleware](/integrations/node-middleware). The SDK does not send t
 | Call site | What you send | What it catches | Enforcement |
 | --- | --- | --- | --- |
 | Before the model call | `payload: { input }`, `direction: "input"`, `protocol: "llm"` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard)); secrets and PII in the prompt ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** or **Redact**, by your code |
-| After the model call | `payload: { input: modelCompletion }`, `direction: "output"`, `protocol: "llm"` | Sensitive data and off-policy content in the answer | **Block** or **Redact**, by your code |
+| After the model call | `payload: { messages: [{ role: "assistant", content: modelCompletion }] }`, `direction: "output"`, `protocol: "llm"` | Sensitive data and off-policy content in the answer | **Block** or **Redact**, by your code |
 | Around your tool dispatch | The same call with `protocol: "mcp"` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) in tool arguments and tool results | **Block**, by your code |
 
 Every call is [`POST /v1/evaluate`](/trustguard/api/evaluate) with the collector
 `tgk_…` key, and the policy's [detectors](/trustguard/concepts/detectors) decide the
 verdict. `payload` accepts the minimal `{ "input": "…" }` shape above or a full
-OpenAI, Anthropic, Gemini, or MCP provider body.
+OpenAI, Anthropic, Gemini, or MCP provider body. `input` is read as the user's
+message, so the completion goes in an `assistant` message instead: Toxicity
+Detection and Custom Moderation read only `assistant` text on
+Output and skip a completion sent as `input`.
 
 ### Configuration
 
