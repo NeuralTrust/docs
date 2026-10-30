@@ -150,6 +150,7 @@ gateway authenticates and calls this endpoint for you.)
 | `protocol` | enum | Optional | `all` (default), `llm`, `mcp`, or `a2a`. Available as the `protocol` gate or rule condition. |
 | `session_id` | string | Optional | Conversation or correlation key. Synthesized if omitted. |
 | `consumer_id` | string | Optional | Actor identifier for per-consumer policy routing. Gates match it as `consumer.id`. |
+| `gateway_id` / `collector_key` | string | Conditional | Only for callers that authenticate with a service token: send exactly one to select the collector. Not needed with a collector API key. |
 | `attributes` | object | Optional | Extra dimensions for gate and detector conditions: `consumer.{name,tag,type}`, `model.{name,provider}`, `collector.type`, `source.application`, and `tool.{name,command,arguments}`. `user.{id,email}` names the person behind the request; **Activity** shows it in the **User** column. Nested form: `{ "source": { "application": "claude-code-plugin" } }`. For MCP `tools/call`, `tool.name` is read first from **`payload.params.name`** (the last segment of `mcp__server__tool`). |
 
 Unknown top‑level fields are rejected with `400` (strict decoding). Do **not**
@@ -309,10 +310,11 @@ A successful evaluation returns `200`, including one whose status is `block`.
 | `source.plugin` | string | The catalog detector slug for detector findings, such as `prompt_guard`. |
 | `source.detector_id` / `source.detector_name` | string | The detector instance that fired. |
 | `source.policy_id` | string | The policy that produced the finding. |
-| `signal.type` | string | What was detected, such as `jailbreak`, `injection`, `pii`, `secret`, `nt_topic` (Custom Moderation), a toxicity category, `ssrf_probe`, `url_domain_blocked`, `url_limit_exceeded` (URL Analyzer), `guard_content_uninspectable` (Document Analyzer, when parsing an attachment fails or times out), or `gate_block`, `gate_report`, `gate_ask`, or `gate_skip`. |
+| `signal.type` | string | What was detected, such as `jailbreak`, `pii`, `secret`, `nt_topic` (Custom Moderation), a toxicity category, an Indirect Prompt Injection category (or `indirect_prompt_injection`), `ssrf_probe`, `url_domain_blocked`, `url_analysis_incomplete` (URL Analyzer, when some links were not analysed), or `gate_block`, `gate_report`, `gate_ask`, or `gate_skip`. A detector that did not run reports one of the signals in [Failure behavior](#failure-behavior). |
 | `signal.confidence` | number | Detector‑specific score in `[0, 1]` (optional). |
 | `outcome.action` | enum | The action applied by the rule: `report`, `transform`, `ask`, `skip`, or `block`. Optional on observational runs. |
-| `evidence` | object | Free‑form, detector‑specific context (e.g. matched entities, masked count, matched rule). A URL Analyzer finding always includes `urls_total`, `urls_skipped`, and `url_limit_exceeded` (`0` / `false` when the request is within the 10‑URL cap). A Document Analyzer finding for an attachment whose parsing failed or timed out carries reason `content_uninspectable` (signal type `guard_content_uninspectable`). |
+| `not_executed` | boolean | `true` when the finding stands for a detector that was configured but did not run. Omitted otherwise. |
+| `evidence` | object | Free‑form, detector‑specific context (e.g. matched entities, masked count, matched rule). A finding for a detector that did not run carries `reason` and, on a failure, `failure_mode: "closed"`. A URL Analyzer finding always includes `urls_total`, `urls_analyzed`, `urls_unanalyzed`, and `url_analysis_incomplete`. See [URL Analyzer](/trustguard/detectors/content-security#links-it-could-not-analyse). |
 
 ## Status codes
 
@@ -321,10 +323,11 @@ A successful evaluation returns `200`, including one whose status is `block`.
 | `200` | Successful evaluation, **including a `block` status**. The caller enforces. |
 | `400` | Invalid body, unknown fields, bad `direction`/`protocol`, or a bad collector reference. |
 | `401` | Missing or invalid API key. |
+| `402` | The organization's usage is exhausted. The body carries a `reason`. |
 | `403` | Key found but inactive/expired. |
-| `429` | Plan burst or monthly quota exceeded. See [Limits and quotas](#limits-and-quotas). |
+| `429` | Plan burst or monthly quota exceeded. The body carries a `reason`. See [Limits and quotas](#limits-and-quotas). |
 | `500` | An internal error. A detector that cannot run is not a `500`: see [Failure behavior](#failure-behavior). |
-| `503` | Rate-limit entitlements could not be loaded, so TrustGuard would not evaluate blind. |
+| `503` | Rate-limit entitlements could not be loaded, or the usage state could not be resolved, so TrustGuard would not evaluate blind. Retry later. |
 
 Error responses carry `{ "error", "trace_id", "request_id" }`.
 
@@ -336,7 +339,6 @@ Error responses carry `{ "error", "trace_id", "request_id" }`.
 | Persisted body, for findings evidence | **1 MiB** after credential redaction; longer bodies are stored truncated. See [Data handling](/trustguard/data-handling). |
 | Rate limit | A **burst** limit plus a **monthly quota**, both from your plan entitlements. |
 | `url_analyzer` fetch timeout | **20 s** by default, configurable on the detector. |
-| `url_analyzer` URLs per request | **10** unique URLs, after duplicate links are collapsed. URLs past the cap are not fetched. See [URL Analyzer](/trustguard/detectors/content-security#how-many-links-it-fetches). |
 
 ### Rate limiting
 
@@ -363,18 +365,48 @@ TrustGuard is slow or unavailable.
 
 ### Failure behavior
 
-When a detector cannot run, such as after an upstream outage or timeout,
-TrustGuard does not skip it and carry on. The request is treated as blocked: in
-**Enforce** the response is a `block` verdict, and in report-only mode the
-request is only recorded. There is no setting to let it through, so a direct
-integration always behaves this way. Calls made through the gateway are
-different: the TrustGuard policy there has its own
+When a detector cannot run, such as after an upstream outage, a timeout, or a
+misconfigured detector, TrustGuard does not skip it and carry on. A direct
+integration always fails closed, and there is no setting to change that. Calls
+made through the gateway are different: the TrustGuard policy there has its own
 [**If the guardrail cannot evaluate**](/trustgate/policies/trustguard-guardrail#if-the-guardrail-cannot-evaluate)
 field.
 
-The request appears in **Activity** with the detector as not executed and the
-action that was applied. It is not listed as a detection. A structured Block
-decision from a gate or detector rule applies as before.
+The response is still HTTP `200`. The detector appears as a finding:
+
+```json
+{
+  "status": "block",
+  "findings": [
+    {
+      "source": { "kind": "detector", "plugin": "prompt_guard", "detector_name": "…" },
+      "signal": { "type": "guard_failed_closed" },
+      "outcome": { "action": "block" },
+      "not_executed": true,
+      "evidence": { "reason": "execution_failed", "failure_mode": "closed" }
+    }
+  ]
+}
+```
+
+The finding takes the action of the detector's rule, and a detector set to
+report only reports. In **Enforce**, a Block or Transform detector blocks: a
+Transform detector that did not run masked nothing, so the request is not let
+through unmasked.
+
+| `signal.type` | Meaning | `evidence.reason` |
+|---|---|---|
+| `guard_failed_closed` | The detector could not run: an outage, a timeout, or a bad configuration. | `execution_failed`, `plugin_panic`, `unknown_plugin`, `invalid_plugin_config`, `missing_dependency` |
+| `guard_payload_too_large` | The payload was over the detector's size limit. | `payload_too_large` |
+| `guard_content_uninspectable` | The detector could not read an attachment. | `content_uninspectable` |
+| `guard_payload_ambiguous` | The body mixed MCP (JSON-RPC) and chat fields and was refused unread. | `ambiguous_payload` |
+
+The last three are held to the detector's action in the same way, and do not
+carry `failure_mode`.
+
+These are not detections. In **Activity** the request shows the detector as not
+executed and the action that was applied. A structured Block decision from a
+gate or detector rule applies as before.
 
 ## Enforcing the verdict
 
