@@ -96,7 +96,9 @@ make install-hooks
   `~/.config/devin/config.json` for Devin Local and
   `~/.codeium/windsurf/hooks.json` for Cascade. Hooks run from the workspace
   root, so relative paths would break. Hooks already in either file are kept.
-  `make install-hooks HOST=devin` (or `HOST=cascade`) wires only one agent, and
+  `HOST` defaults to `devin` and selects the agent; `HOST=both` makes a Devin
+  Local machine evaluate every event twice, since it reads the Cascade file as
+  well.
   `python3 scripts/install-hooks.py install <hooks-dir> --project <repo>` writes
   a project-level `<repo>/.devin/hooks.v1.json` instead of the user config
 - Leaves the binary to the bootstrap, which downloads it on the first event.
@@ -180,13 +182,21 @@ in the plugin repo. Deploy it as `.devin/hooks.v1.json` in a repository, or
 under the `hooks` key of `~/.config/devin/config.json` per account.
 
 <Warning>
-**Confirm system-level deployment for your Devin Desktop version.** Devin
-documents project-level (`.devin/`) and user-level (`~/.config/devin/`) hook
-paths. If your version does not also read the system-level paths below, the
-hooks must be written into each developer's user config, and they can be
-removed without administrator rights. Verify this before relying on hooks that
-developers cannot disable.
+**Devin Local has no system-level hook deployment.** Hooks load from the
+project (`.devin/`) and from the user's own config
+(`~/.config/devin/config.json`); Devin Local also reads the Cascade
+`~/.codeium/windsurf/hooks.json`. The system paths below are **not** read, so
+on Devin Local a developer can remove the hooks without administrator rights.
+Deploy the user config per account by MDM and monitor coverage from
+**Activity**. Enforcement itself is unaffected: the hooks fire, they block, and
+the reason reaches the agent. The system paths still apply to Cascade.
 </Warning>
+
+<Note>
+**Do not deploy both on one machine.** Devin Local loads the Cascade hooks file
+as well as its own config, so a machine wired for both evaluates every event
+twice. Wire Devin Local alone unless the machine still runs Cascade.
+</Note>
 
 **Cascade hooks.** Each event gets one entry with a bash command and a
 PowerShell command:
@@ -301,11 +311,13 @@ This table describes the TrustGuard hooks, not the TrustGate connection.
 | Surface | Monitor | Block | Redact |
 | --- | :--: | :--: | :--: |
 | LLM input | ✅ | ✅ | ❌ |
-| LLM output | Cascade only | ❌ | ❌ |
+| LLM output | ✅ | ❌ | ❌ |
 | Tool call | ✅ | ✅ | ❌ |
 | Tool result | ✅ | ⚠️ | ❌ |
 
-**Ask.** Neither agent prompts for approval through the hooks today. An `ask` verdict blocks the action
+**Ask.** Cascade has no approval prompt. Devin Local has one, but TrustGuard
+does not yet drive it from a verdict, so on both agents an `ask` verdict blocks
+today. An `ask` verdict blocks the action
 with a message saying approval was required; set `ask_action: "allow"` to let it
 through with a notice instead. A DLP `transform` verdict also blocks, because a
 hook cannot rewrite what Cascade sends; `transform_action: "allow"` lets it
@@ -345,22 +357,24 @@ it:
 | `PreToolUse` | `webfetch` | `protocol: mcp`, `tools/call`, `direction: input` | **Block** |
 | `PreToolUse` | `mcp__<server>__<tool>` | `protocol: mcp`, `tools/call`, `direction: input`. `attributes.mcp.server` names the server | **Block** |
 | `PostToolUse` | any of the above | `protocol: mcp`, tool result, `direction: output` | Warns the agent |
-| `Stop` | — | Not evaluated, see below | — |
+| `Stop` | — | `protocol: llm`, `direction: output`, the assistant response | Monitor |
 
 Shell commands travel as `tools/call` like every other tool. Sent as plain
 input, a command would be scored as a user prompt (jailbreak, toxicity) rather
 than as tool arguments.
 
 <Note>
-**The assistant response is not evaluated on Devin Local.** Cascade's
-`post_cascade_response` carried the response text; the Devin `Stop` event does
-not, so there is no equivalent of the LLM-output row for Devin Local sessions.
-Everything else in the table above is covered.
+**The assistant response is evaluated on Devin Local.** The published event
+reference lists only `stop_hook_active` for `Stop`, but the payload also
+carries the agent's response text, so the coverage Cascade had on
+`post_cascade_response` is kept. It is recorded, never blocked: the turn is
+over by then, and a block on `Stop` tells the agent to keep working.
 </Note>
 
-The tool names above are the ones Devin Local is documented to send. The set
-varies by mode, model and enabled integrations; a tool the binary does not
-recognise is still evaluated, as a tool call.
+`read`, `grep`, `edit`, `exec` and `webfetch` were captured from a live Devin
+Local session. The rest come from the Devin CLI documentation, which notes that
+the set varies by mode, model and enabled integrations. A tool the binary does
+not recognise is still evaluated, as a tool call.
 
 For an MCP tool, `tool.name` in a gate is `payload.params.name`, the name the
 server itself uses; the server name travels separately. The policy's
@@ -415,7 +429,7 @@ but not enforced.
 | --- | --- |
 | An `ask` gate blocked instead of asking | Neither agent prompts for approval. Use **Block** or **Report**, or set `ask_action: "allow"` |
 | Hooks fire on Cascade but not on Devin Local | Only `~/.codeium/windsurf/hooks.json` was written. Run `make install-hooks` again, or `HOST=devin`, to write `~/.config/devin/config.json` |
-| The agent's answers are not evaluated on Devin Local | Expected. The `Stop` event does not carry the response text; prompt and tool coverage are unaffected |
+| Every event appears twice in **Activity** on Devin Local | The machine is wired for both agents, and Devin Local reads the Cascade hooks file too. Re-run `make install-hooks HOST=devin` |
 | Hooks never fire | The window was not reloaded after the install, or `hooks.json` points at a path that does not exist on this machine |
 | Hooks fire but nothing reaches **Activity** | `windsurf.json` has no `tgk_…` key, so the binary allows without calling evaluate, or `data_url` is incorrect |
 | A developer's own hooks disappeared | Another installer overwrote `hooks.json`. `make install-hooks` only adds or replaces TrustGuard entries |
