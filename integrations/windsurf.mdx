@@ -1,21 +1,31 @@
 ---
 title: "Windsurf"
-description: "Evaluate Windsurf (Devin Desktop) Cascade prompts, commands, file access and MCP tool calls with TrustGuard, and connect Cascade to TrustGate over MCP"
+description: "Evaluate Windsurf (Devin Desktop) prompts, commands, file access and MCP tool calls with TrustGuard on both Devin Local and Cascade, and connect the agent to TrustGate over MCP"
 ---
 
-Windsurf is a code editor whose Cascade agent reads repositories, edits files,
-runs shell commands and calls MCP tools on the developer's machine. On
-2 June 2026 Windsurf was renamed **Devin Desktop**; the agent, the hooks and the
-MCP configuration are the same, and this page says Windsurf for both.
+Windsurf is a code editor whose agent reads repositories, edits files, runs
+shell commands and calls MCP tools on the developer's machine. On 2 June 2026
+Windsurf was renamed **Devin Desktop**, and this page says Windsurf for both.
 
-The TrustGuard hooks evaluate Cascade's actions on the machine where it runs.
+Devin Desktop ships two agents:
+
+- **Devin Local**, the current one, which shares the Devin CLI hook contract
+  (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`).
+- **Cascade**, available through July 2026, with its own hook contract
+  (`pre_user_prompt`, `pre_run_command`, …).
+
+The TrustGuard plugin covers both. One binary serves both contracts, so a
+single install protects a fleet part-way through the migration. Install it on
+every machine regardless of which agent your developers use.
+
+The TrustGuard hooks evaluate the agent's actions on the machine where it runs.
 TrustGate provides the MCP tools assigned to an application.
 
 ## NeuralTrust controls
 
 | Product | Scope | Controls |
 | --- | --- | --- |
-| **[TrustGuard](/trustguard/overview)** | Evaluates prompts, shell commands, file reads and writes, MCP tool calls and their results against an organization [policy](/trustguard/concepts/policies) through Cascade hooks on the developer's machine. | Monitor · Block |
+| **[TrustGuard](/trustguard/overview)** | Evaluates prompts, shell commands, file reads and writes, MCP tool calls and their results against an organization [policy](/trustguard/concepts/policies) through Devin Local or Cascade hooks on the developer's machine. | Monitor · Block |
 | **[TrustGate](/trustgate/overview)** | Exposes the MCP registries and tools assigned to an application. MCP (Model Context Protocol) connects Cascade to systems such as trackers, databases and internal APIs. | Tool availability · application authentication · per-tool rate limits |
 
 Cascade's own model calls cannot go through TrustGate: Windsurf has no setting
@@ -54,12 +64,22 @@ Developers do **not** need NeuralTrust accounts for the hooks path.
 
 ## Set up prompt and tool screening (TrustGuard)
 
-Cascade runs a hook command before and after its actions, writes the event as
-JSON on stdin, and reads the verdict from the exit code. Exit code `2` blocks a
-pre-hook and shows the reason from stderr to the agent; `0` lets the action
-through. The TrustGuard bootstrap calls `trustguard-windsurf`, which evaluates
-each event with [`POST /v1/evaluate`](/trustguard/api/evaluate) and answers with
-that exit code.
+Both agents run a hook command before and after their actions and write the
+event as JSON on stdin. The TrustGuard bootstrap calls `trustguard-windsurf`,
+which recognises either contract, evaluates the event with
+[`POST /v1/evaluate`](/trustguard/api/evaluate) and answers in that agent's
+format.
+
+- **Devin Local** reads a JSON answer on stdout. `{"decision": "block",
+  "reason": "…"}` stops the action and shows the reason to the agent; no output
+  lets it through. Exit code `2` also blocks, with the reason on stderr; set
+  `devin_block_mode: "exit2"` to use that route instead.
+- **Cascade** reads the exit code only. `2` blocks a pre-hook and shows the
+  reason from stderr; `0` lets the action through.
+
+Devin Local sends one `PreToolUse` and one `PostToolUse` event for every tool
+and names the tool in `tool_name`; the binary routes each call to the matching
+check. Cascade instead has a separate event per action type.
 
 ### Install from a checkout (pilot)
 
@@ -72,9 +92,13 @@ make install-hooks
 `make install-hooks`:
 
 - Copies the bootstraps to `~/.trustguard/windsurf-hooks/`
-- Merges entries with **absolute** paths into `~/.codeium/windsurf/hooks.json`.
-  Cascade runs hooks from the workspace root, so relative paths would break.
-  Hooks already in the file are kept
+- Merges entries with **absolute** paths into both agents' user-level config:
+  `~/.config/devin/config.json` for Devin Local and
+  `~/.codeium/windsurf/hooks.json` for Cascade. Hooks run from the workspace
+  root, so relative paths would break. Hooks already in either file are kept.
+  `make install-hooks HOST=devin` (or `HOST=cascade`) wires only one agent, and
+  `python3 scripts/install-hooks.py install <hooks-dir> --project <repo>` writes
+  a project-level `<repo>/.devin/hooks.v1.json` instead of the user config
 - Leaves the binary to the bootstrap, which downloads it on the first event.
   `make install-local` builds it from source instead
 
@@ -98,7 +122,7 @@ An MDM deployment consists of three components:
 | --- | --- |
 | **Hook bootstraps** | `trustguard-hook.sh` and `trustguard-hook.ps1` from the repo's `hooks/` directory, under a fixed directory such as `/Library/Application Support/TrustGuard/windsurf-hooks` |
 | **API key config** | MDM-managed `windsurf.json` (paths below) |
-| **System-level hooks** | `hooks.json` in Windsurf's system location, pointing at those scripts |
+| **Hook registration** | The hooks config for the agent in use, pointing at those scripts |
 
 The binary is optional: put `trustguard-windsurf` on `PATH` or in
 `~/.trustguard/bin`, or let the bootstrap download the pinned release.
@@ -114,7 +138,7 @@ The binary is optional: put `trustguard-windsurf` on `PATH` or in
 }
 ```
 
-Cascade does not put the user in the hook payload, so set `consumer_id` per
+Neither agent puts the user in the hook payload, so set `consumer_id` per
 device or per user if you want findings attributed to a person.
 
 | OS | Managed config | System-level `hooks.json` |
@@ -127,7 +151,44 @@ Installs from before the rename read the same file under `Windsurf` instead of
 `Devin`: `/Library/Application Support/Windsurf/`, `/etc/windsurf/` and
 `C:\ProgramData\Windsurf\`. Devin Desktop reads both during the transition.
 
-**System-level hooks.** Each event gets one entry with a bash command and a
+**Devin Local hooks.** The hooks object maps each event to a list of entries.
+`matcher` is a regex on `tool_name`; TrustGuard registers an empty matcher on
+purpose, so that a tool Devin adds later still reaches the binary, which routes
+it by name:
+
+```json
+{
+  "PreToolUse": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "bash \"/Library/Application Support/TrustGuard/windsurf-hooks/trustguard-hook.sh\"",
+          "timeout": 30
+        }
+      ]
+    }
+  ]
+}
+```
+
+Declare the same entry for `UserPromptSubmit`, `PostToolUse` and `Stop`. The
+full file is
+[`docs/enterprise-hooks-devin.json`](https://github.com/NeuralTrust/trustguard-windsurf-plugin/blob/main/docs/enterprise-hooks-devin.json)
+in the plugin repo. Deploy it as `.devin/hooks.v1.json` in a repository, or
+under the `hooks` key of `~/.config/devin/config.json` per account.
+
+<Warning>
+**Confirm system-level deployment for your Devin Desktop version.** Devin
+documents project-level (`.devin/`) and user-level (`~/.config/devin/`) hook
+paths. If your version does not also read the system-level paths below, the
+hooks must be written into each developer's user config, and they can be
+removed without administrator rights. Verify this before relying on hooks that
+developers cannot disable.
+</Warning>
+
+**Cascade hooks.** Each event gets one entry with a bash command and a
 PowerShell command:
 
 ```json
@@ -206,7 +267,16 @@ TrustGate the only way to reach tools.
 2. Confirm the event in TrustGuard **Activity** with
    `source.application = windsurf-plugin`.
 
-Smoke-test the binary (optional):
+Smoke-test the binary (optional). Devin Local:
+
+```bash
+echo '{"hook_event_name":"PreToolUse","tool_name":"exec","tool_input":{"command":"echo hi"}}' \
+  | trustguard-windsurf hook
+```
+
+No output means allow; `{"decision":"block","reason":"…"}` means block.
+
+Cascade:
 
 ```bash
 echo '{"agent_action_name":"pre_run_command","trajectory_id":"t1","tool_info":{"command_line":"echo hi"}}' \
@@ -231,11 +301,11 @@ This table describes the TrustGuard hooks, not the TrustGate connection.
 | Surface | Monitor | Block | Redact |
 | --- | :--: | :--: | :--: |
 | LLM input | ✅ | ✅ | ❌ |
-| LLM output | ✅ | ❌ | ❌ |
+| LLM output | Cascade only | ❌ | ❌ |
 | Tool call | ✅ | ✅ | ❌ |
 | Tool result | ✅ | ⚠️ | ❌ |
 
-**Ask.** Cascade has no approval prompt. An `ask` verdict blocks the action
+**Ask.** Neither agent prompts for approval through the hooks today. An `ask` verdict blocks the action
 with a message saying approval was required; set `ask_action: "allow"` to let it
 through with a notice instead. A DLP `transform` verdict also blocks, because a
 hook cannot rewrite what Cascade sends; `transform_action: "allow"` lets it
@@ -263,6 +333,35 @@ declarations; use TrustGate to control which tools are available.
 | `post_mcp_tool_use` | `protocol: mcp`, tool result, `direction: output` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) in MCP output | Warns the agent |
 | `post_cascade_response` | `protocol: llm`, `direction: output` | Sensitive data in the agent's answer | Monitor |
 
+**Devin Local.** The agent names the tool in `tool_name` and the binary routes
+it:
+
+| Devin Local event | `tool_name` | TrustGuard | Enforcement |
+| --- | --- | --- | --- |
+| `UserPromptSubmit` | — | `protocol: llm`, `direction: input` | **Block** |
+| `PreToolUse` | `exec`, `get_output`, `write_to_process`, `kill_shell` | `protocol: mcp`, `tools/call`, `direction: input`. `tool.command` carries the command line | **Block** |
+| `PreToolUse` | `write`, `edit`, `apply_patch`, `notebook_edit` | `protocol: mcp`, `tools/call`, `direction: input` | **Block** |
+| `PreToolUse` | `read`, `grep`, `glob`, `notebook_read` | `protocol: mcp`, `tools/call`, `direction: input` | **Block** |
+| `PreToolUse` | `webfetch` | `protocol: mcp`, `tools/call`, `direction: input` | **Block** |
+| `PreToolUse` | `mcp__<server>__<tool>` | `protocol: mcp`, `tools/call`, `direction: input`. `attributes.mcp.server` names the server | **Block** |
+| `PostToolUse` | any of the above | `protocol: mcp`, tool result, `direction: output` | Warns the agent |
+| `Stop` | — | Not evaluated, see below | — |
+
+Shell commands travel as `tools/call` like every other tool. Sent as plain
+input, a command would be scored as a user prompt (jailbreak, toxicity) rather
+than as tool arguments.
+
+<Note>
+**The assistant response is not evaluated on Devin Local.** Cascade's
+`post_cascade_response` carried the response text; the Devin `Stop` event does
+not, so there is no equivalent of the LLM-output row for Devin Local sessions.
+Everything else in the table above is covered.
+</Note>
+
+The tool names above are the ones Devin Local is documented to send. The set
+varies by mode, model and enabled integrations; a tool the binary does not
+recognise is still evaluated, as a tool call.
+
 For an MCP tool, `tool.name` in a gate is `payload.params.name`, the name the
 server itself uses; the server name travels separately. The policy's
 [detectors](/trustguard/concepts/detectors) decide the verdict.
@@ -280,7 +379,13 @@ the managed file includes `api_key`:
   `transform_action`, `report_notice`, `events`, `consumer_id`.
 
 `events` turns individual hooks off, for example `{"pre_read_code": false}` on
-machines where every file read would cost a round trip. `fail_mode: open`
+machines where every file read would cost a round trip. The Cascade event names
+keep working on Devin Local — `pre_read_code` disables `PreToolUse` for read
+tools, and so on — so a deployed `events` block needs no migration.
+
+`devin_block_mode` selects how Devin Local is told to block: `json` (the
+default) answers with a `decision` on stdout, `exit2` writes the reason to
+stderr and exits `2`. `fail_mode: open`
 allows an action when TrustGuard cannot be reached; `closed` blocks it.
 
 **Binary discovery.** The bootstrap checks `PATH`, then `~/.trustguard/bin`
@@ -292,9 +397,11 @@ config, bootstraps and binary must exist where Cascade runs.
 
 ### Attributes
 
-The hooks stamp `source.application = windsurf-plugin`, `session_id` from
-Cascade's `trajectory_id`, and `attributes.model.name` from the model Cascade
-used. `consumer_id` is sent only when set in config or through
+The hooks stamp `source.application = windsurf-plugin` on both agents, plus
+`source.agent` (`devin-local`) on Devin Local. `session_id` is Devin's
+`session_id` or Cascade's `trajectory_id`, and `attributes.model.name` is the
+model the agent used. On Devin Local, `attributes.tool` carries the tool name
+and its category, and the rest of the payload travels in `attributes.devin`. `consumer_id` is sent only when set in config or through
 `TRUSTGUARD_CONSUMER_ID`.
 
 To target Windsurf, create a [gate](/trustguard/concepts/policies#gates) with
@@ -306,7 +413,9 @@ but not enforced.
 
 | Symptom | Cause |
 | --- | --- |
-| An `ask` gate blocked instead of asking | Cascade has no approval prompt. Use **Block** or **Report**, or set `ask_action: "allow"` |
+| An `ask` gate blocked instead of asking | Neither agent prompts for approval. Use **Block** or **Report**, or set `ask_action: "allow"` |
+| Hooks fire on Cascade but not on Devin Local | Only `~/.codeium/windsurf/hooks.json` was written. Run `make install-hooks` again, or `HOST=devin`, to write `~/.config/devin/config.json` |
+| The agent's answers are not evaluated on Devin Local | Expected. The `Stop` event does not carry the response text; prompt and tool coverage are unaffected |
 | Hooks never fire | The window was not reloaded after the install, or `hooks.json` points at a path that does not exist on this machine |
 | Hooks fire but nothing reaches **Activity** | `windsurf.json` has no `tgk_…` key, so the binary allows without calling evaluate, or `data_url` is incorrect |
 | A developer's own hooks disappeared | Another installer overwrote `hooks.json`. `make install-hooks` only adds or replaces TrustGuard entries |
