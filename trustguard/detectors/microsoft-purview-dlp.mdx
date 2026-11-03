@@ -1,0 +1,256 @@
+---
+title: "Microsoft Purview DLP"
+description: "Enforce your own Microsoft Purview DLP policies on AI traffic. Everything to set up in your Entra tenant and in Purview: the app, Graph permissions, licensing, pay-as-you-go billing, and the DLP policy."
+---
+
+<p className="nt-lead">
+  The **Microsoft Purview DLP** detector sends each turn to **your** Microsoft Purview
+  tenant and lets your Purview DLP policies decide. TrustGuard says who the end user is
+  and what the turn contains; Purview evaluates it against the policies you already
+  manage. Nothing is configured in TrustGuard about *what* is sensitive — that lives in
+  Purview.
+</p>
+
+| Property | Value |
+|---|---|
+| Catalog type | Microsoft Purview DLP (beta) |
+| Sides | Input (prompts) |
+| Actions | **Monitor**, **Block** — not Transform: Purview does not say what matched |
+| Runs in | Your Microsoft 365 tenant, through Microsoft Graph |
+
+## How it works
+
+TrustGuard calls the Microsoft Graph *Purview APIs for AI* as **one Entra app** in your
+tenant. That app is also the *protected app* your DLP policy targets.
+
+1. TrustGuard asks Purview which policies cover the end user for that app
+   (`protectionScopes/compute`). The answer is cached for an hour.
+2. If a policy covers the user, TrustGuard sends the new turn — never the conversation
+   history — to `processContent` and waits for the verdict.
+3. If Purview returns a block, the detector raises a finding and your TrustGuard policy
+   rule applies its action.
+
+Purview evaluates policies **per Entra user**, so every request must carry an end-user
+identity TrustGuard can vouch for (see [End-user identity](#end-user-identity)).
+
+## Before you start
+
+You need:
+
+- **Global Administrator** (or Privileged Role Administrator) in your Entra tenant, to
+  grant admin consent to Microsoft Graph application permissions.
+- **Owner** or **Contributor** on an Azure subscription in the same tenant, for Purview
+  pay-as-you-go billing. *Reader* is not enough.
+- **Compliance Administrator** (or equivalent) in Purview, to create the DLP policy.
+- The **Exchange Online PowerShell** module, to create the policy (the Purview portal
+  cannot target Entra-registered apps yet).
+
+## 1. Register the app in Entra
+
+<Steps>
+  <Step title="Create the app registration">
+    In the [Microsoft Entra admin center](https://entra.microsoft.com) go to
+    **App registrations → New registration**.
+
+    - **Name**: anything, for example `NeuralTrust DLP`.
+    - **Supported account types**: *Accounts in this organizational directory only*
+      (single tenant).
+    - **Redirect URI**: leave empty.
+
+    Copy the **Application (client) ID** and the **Directory (tenant) ID** from
+    **Overview**.
+  </Step>
+  <Step title="Create a client secret">
+    **Certificates & secrets → New client secret**. Copy the **Value** column right away
+    — Entra shows it only once. The *Secret ID* is not the secret.
+  </Step>
+</Steps>
+
+The app only **calls** Microsoft Graph with its own credentials (client-credentials
+flow). You do not need to configure *Expose an API*, *App roles*, *Authentication*,
+redirect URIs, or token configuration, even if the integration assistant flags them.
+
+## 2. Grant Microsoft Graph permissions
+
+In the app registration open **API permissions → Add a permission → Microsoft Graph →
+Application permissions** and add:
+
+| Permission | Why |
+|---|---|
+| `ProtectionScopes.Compute.All` | Ask Purview which policies cover a user (`protectionScopes/compute`) |
+| `Content.Process.All` | Evaluate a turn against your policies (`processContent`) |
+| `User.ReadBasic.All` | Resolve an end user's email to their Entra object id |
+| `ContentActivity.Write` | Only if you turn on **Audit out-of-scope traffic** |
+
+Then click **Grant admin consent for &lt;your organization&gt;**. Every row must show
+**Type: Application** and a green **Granted** status.
+
+<Warning>
+  Pick **Application permissions**, not *Delegated permissions*. The delegated
+  variants (`ProtectionScopes.Compute.User`, `Content.Process.User`) only work for a
+  signed-in user and are ignored by TrustGuard: the detector reports `not_consented`.
+  Do not grant more than the table above — TrustGuard never needs `User.Read.All` or
+  `User.ReadWrite.All`.
+</Warning>
+
+## 3. Licensing
+
+Purview only processes content for users whose tenant has a Purview data security
+license. The end users whose traffic TrustGuard evaluates need one of:
+
+- **Microsoft 365 E5** (or A5 / G5), or
+- **Microsoft 365 E3** plus the **Microsoft Purview Suite** add-on (formerly *Microsoft
+  365 E5 Compliance*).
+
+Assign the license under **Microsoft 365 admin center → Users → Active users → the user
+→ Licenses and apps**. A newly assigned license can take several hours to reach
+Purview.
+
+Without it, Graph answers `403` with code `InsufficientServicePlans` and the detector
+reports `license_required`. This is not a permissions problem: adding permissions does
+not fix it.
+
+<Note>
+  Microsoft is changing how Purview protections for Entra-registered AI apps are
+  licensed (see the Purview service description, which mentions Microsoft 365 E7 and
+  Agent 365). Check the current requirements with your Microsoft account team.
+</Note>
+
+## 4. Pay-as-you-go billing
+
+Purview protections for AI apps other than Microsoft 365 Copilot are billed
+**pay-as-you-go**, on top of the license.
+
+1. In the [Azure portal](https://portal.azure.com), make sure you are **Owner** or
+   **Contributor** on the subscription (**Subscriptions → your subscription → Access
+   control (IAM) → View my access**) and create a resource group for the billing
+   resource.
+2. In the [Microsoft Purview portal](https://purview.microsoft.com) go to **Settings →
+   Account** and link the Azure subscription and resource group under **Azure resource
+   links** (*pay-as-you-go billing*). The resource must show **Active**.
+
+Without pay-as-you-go billing Graph answers `402` and the detector reports
+`payment_required`.
+
+## 5. Create the DLP policy for the app
+
+The Purview portal cannot target an Entra-registered app yet, so create the policy in
+PowerShell. `Location` is the **Application (client) ID** from step 1.
+
+```powershell
+Install-Module ExchangeOnlineManagement -Scope CurrentUser
+Connect-IPPSSession
+
+$appId = "<Application (client) ID>"
+$locations = "[{`"Workload`":`"Applications`",`"Location`":`"$appId`",`"LocationDisplayName`":`"NeuralTrust TrustGuard`",`"LocationSource`":`"Entra`",`"LocationType`":`"Individual`",`"Inclusions`":[{`"Type`":`"Tenant`",`"Identity`":`"All`"}]}]"
+
+New-DlpCompliancePolicy -Name "NeuralTrust AI DLP" -Mode Enable `
+  -Locations $locations -EnforcementPlanes @("Application")
+
+New-DlpComplianceRule -Name "Block SIT in prompts" -Policy "NeuralTrust AI DLP" `
+  -ContentContainsSensitiveInformation @{Name="Credit Card Number"} `
+  -RestrictAccess @(@{setting="UploadText";value="Block"})
+```
+
+- `-Mode Enable` enforces the policy. A policy in simulation never blocks.
+- Swap `Credit Card Number` for the sensitive information types you care about.
+- Policies you created in the Purview portal for other locations (Exchange, Endpoint,
+  Edge…) **do not apply** to the app. Check a policy targets it with
+  `Get-DlpCompliancePolicy | Format-List Name, Mode, EnforcementPlanes, *Location*`.
+- Wait until the policy shows *Sync completed*. TrustGuard caches policy scopes for an
+  hour, so a change can take up to an hour to show.
+
+Microsoft documents only policies that **block prompts by sensitive information type**
+for Entra-registered apps. Enforcement on model responses is not documented yet.
+
+Optional: in **Purview → DSPM for AI**, turn on **Secure interactions from enterprise
+apps** so prompts and responses reach Purview Audit and eDiscovery.
+
+## 6. Create the detector in TrustGuard
+
+Open **Detectors → Catalog → Microsoft Purview DLP** and fill in the
+**Configuration** tab:
+
+| Field | Value |
+|---|---|
+| **Tenant ID** | Your Directory (tenant) ID |
+| **Application (client) ID** | The app from step 1 |
+| **Client secret** | The secret **Value** from step 1 |
+| **No end-user identity** | `block` (recommended) raises a finding when a request carries no trusted user; `allow` lets it through unchecked |
+| **Purview unavailable** | `allow` fails open if Purview cannot be reached; `block` raises a finding |
+| **Audit out-of-scope traffic** | Records, without content, traffic no Purview policy covers. Needs `ContentActivity.Write` |
+
+When you save, TrustGuard asks Entra for a token with these credentials and refuses the
+save with Entra's error if they are wrong (`AADSTS7000215` wrong secret,
+`AADSTS700016` unknown app). The secret is stored encrypted and never shown again.
+
+Then reference the detector from a [policy](/trustguard/concepts/policies) rule on
+**Input** with **Monitor** or **Block**.
+
+## End-user identity
+
+Purview applies the policies of the user whose identity TrustGuard sends, so TrustGuard
+only uses an identity it can vouch for — never one a caller simply claims.
+
+| Source | Where the identity comes from |
+|---|---|
+| Copilot Studio hook | The Entra user of the verified delivery. Nothing to configure |
+| Claude inference hook | The signed actor email. Nothing to configure |
+| `POST /v1/evaluate` | `attributes.user.id` (Entra object id) or `attributes.user.email` — **only** if the collector's metadata has `trusted_identity: "true"` |
+
+For `/v1/evaluate`, set `trusted_identity: "true"` on the collector only if your
+application authenticates its end users, and send:
+
+```json
+{
+  "attributes": {
+    "user": {
+      "id": "<Entra object id>",
+      "email": "user@contoso.com"
+    }
+  }
+}
+```
+
+The object id takes precedence over the email; an email is resolved through Graph,
+which is why the app needs `User.ReadBasic.All`. Users must belong to the detector's
+tenant.
+
+The console's **Test** tab tests as the user named in **Extra parameters**
+(`attributes.user.id` or `attributes.user.email`) or, if none, as you.
+
+## Check the setup
+
+1. Run a policy **Test** with a prompt containing a test card number such as
+   `4111 1111 1111 1111`.
+2. With the policy from step 5, the finding should come from Purview with a block.
+
+If it does not, the finding's error tells you which step to revisit.
+
+## Troubleshooting
+
+| Finding / error | Cause | Fix |
+|---|---|---|
+| `not_consented` | Graph `401`/`403`: permissions missing, delegated instead of application, or no admin consent | Step 2. A token issued before the consent can be used for up to an hour; saving the detector with a new secret forces a fresh one |
+| `license_required` (`InsufficientServicePlans`) | The tenant or user lacks a Purview license Graph accepts | Step 3. Allow a few hours after assigning a license |
+| `payment_required` | No pay-as-you-go billing | Step 4 |
+| `purview_identity_missing` — `no trusted end-user identity` | The request carries no user TrustGuard can vouch for | [End-user identity](#end-user-identity). The finding's `hint` says what to change |
+| `purview_identity_missing` — `end user not found in tenant` | The user id or email is not a user of the detector's tenant | Send a user from that tenant; check `User.ReadBasic.All` |
+| `purview_tenant_mismatch` (skipped) | The end user belongs to another Entra tenant | Use a detector per tenant |
+| Everything passes, nothing is blocked | No DLP policy targets the app, or it runs in simulation | Step 5 |
+| Save fails with `AADSTS7000215` / `AADSTS700016` | Wrong secret value / wrong client id or tenant | Step 1 |
+
+To confirm what Graph itself answers, call it with the app's credentials: get a token
+from `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token` (client
+credentials, scope `https://graph.microsoft.com/.default`), check that its `roles` claim
+lists the permissions from step 2, and call
+`POST https://graph.microsoft.com/v1.0/users/<object-id>/dataSecurityAndGovernance/protectionScopes/compute`.
+A `200` means Entra, licensing and billing are in place.
+
+## Further reading
+
+- [Use the Microsoft Purview APIs](https://learn.microsoft.com/purview/developer/use-the-api)
+- [Microsoft Purview for Entra-registered AI apps](https://learn.microsoft.com/purview/ai-entra-registered)
+- [`protectionScopes/compute`](https://learn.microsoft.com/graph/api/userprotectionscopecontainer-compute)
+- [`processContent`](https://learn.microsoft.com/graph/api/userdatasecurityandgovernance-processcontent)
+- [Microsoft Purview billing models](https://learn.microsoft.com/purview/purview-billing-models)
