@@ -269,24 +269,21 @@ the console.
 
 ## Firewall
 
-The Firewall holds the ML detectors TrustGuard calls. Where it runs is
-`global.firewall.deploy`, and its default depends on the mode:
+The Firewall holds the ML detectors TrustGuard calls. In every mode it is
+**NeuralTrust-hosted by default** — the inference plane — and
+`global.firewall.deploy: true` runs it in your cluster instead.
 
-| Mode | Default | Opt-in |
-| --- | --- | --- |
-| **Hybrid** | NeuralTrust-hosted Firewall, in your control plane's region | `deploy: true` runs it in your cluster |
-| **External**, **Central** | In your cluster, with TrustGuard | `deploy: false` uses the NeuralTrust-hosted Firewall |
+| Mode | Where the firewall key comes from |
+| --- | --- |
+| **Hybrid** | app.neuraltrust.ai shows it once, when it creates the private TrustGuard |
+| **External**, **Central** | Ask NeuralTrust before you deploy; it is sent to you over a secure channel. Central needs one per cluster that runs TrustGuard, remote clusters included |
 
 **NeuralTrust-hosted Firewall.** TrustGuard authenticates with its own
 `FIREWALL_JWT`: a per-install client that carries the Firewall URL, so no
-signing key is shared with your cluster. In Hybrid the console shows it once
-when it creates a private TrustGuard. For External and Central, ask NeuralTrust
-for a Firewall key before you deploy. Store it in a Secret (key `FIREWALL_JWT`):
+signing key is shared with your cluster, and the client can be revoked on its
+own. Store it in a Secret (key `FIREWALL_JWT`):
 
 ```yaml
-global:
-  firewall:
-    deploy: false      # External and Central only; Hybrid needs no line
 trustguard:
   firewall:
     jwtExistingSecret:
@@ -300,14 +297,15 @@ smart-routing complexity scoring takes its own token the same way, under
 Firewall is stateless: it scores the text it receives and stores none of it.
 
 <Warning>
-**Hybrid installs that run the Firewall in their cluster:** add
+**Installs that run the Firewall in their cluster, in any mode:** add
 `global.firewall.deploy: true` to your values before upgrading to keep it.
 Without it, and without a TrustGuard firewall JWT, the upgrade stops with an
-error that names both options.
+error that names both options. Air-gapped installs, which cannot reach the
+hosted Firewall, keep `deploy: true`.
 </Warning>
 
-A Hybrid install with TrustGuard and neither a firewall JWT nor
-`deploy: true` fails at render time, so the ML detectors never go dark silently.
+An install with TrustGuard and neither a firewall JWT nor `deploy: true` fails
+at render time, so the ML detectors never go dark silently.
 A Firewall you run yourself is also supported: `deploy: false` with
 `global.firewall.baseURL` and its `JWT_SECRET` in `global.firewall.existingSecret`.
 
@@ -342,8 +340,8 @@ To reduce its in-cluster footprint, size the workers instead.
 
 Chart defaults are CPU. GPU mode needs a NeuralTrust-provided `firewall-gpu`
 image plus explicit GPU resources and scheduling, and a separate GPU node pool.
-In Hybrid it also needs `global.firewall.deploy: true`, since the Firewall
-otherwise runs at NeuralTrust. Keep the gateway on the CPU image:
+It also needs `global.firewall.deploy: true`, since the Firewall otherwise runs
+at NeuralTrust. Keep the gateway on the CPU image:
 
 ```yaml
 firewall:

@@ -5,11 +5,15 @@ description: Run the full NeuralTrust platform — control plane, data plane, an
 
 **External** is the fully self-hosted topology. Every plane runs in your
 environment: control planes, data planes, the product console, and the analytics
-stack. Nothing leaves your network unless you explicitly enable hosted export,
-so there are no console-issued tokens and no NeuralTrust endpoints to allow.
+stack. There are no console-issued tokens. The one connection that leaves your
+network by default is TrustGuard's call to the NeuralTrust-hosted Firewall,
+which scores text and stores none of it; run the Firewall in your cluster and
+nothing leaves unless you explicitly enable hosted export.
 
 Choose External for air-gapped environments, strict data-residency mandates, or
-when policy forbids any outbound dependency on NeuralTrust SaaS.
+when policy forbids any outbound dependency on NeuralTrust SaaS. By default its
+ML detectors run on the NeuralTrust-hosted Firewall; for no outbound dependency
+at all, run the Firewall in your cluster with `global.firewall.deploy: true`.
 
 This page is the whole install: architecture, prerequisites, datastores, the
 step-by-step install, and high availability.
@@ -18,12 +22,12 @@ step-by-step install, and high availability.
 
 <img
   src="/images/static/img/external-architecture.svg"
-  alt="External architecture: everything runs in your environment. Clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, TrustGate calls TrustGuard on :8081, and TrustGuard calls the Firewall on :8000. An in-cluster control plane — console and API on :8000, AgentGateway admin on :8080, and the TrustGuard control plane on :8080 — serves configuration to TrustGate and TrustGuard. TrustGate and TrustGuard emit OTLP to a collector on :4317 and :4318 that writes to in-cluster ClickHouse; DataCore and AlertEngine read from it. PostgreSQL and Redis are recommended datastores outside the cluster. There is no DataAgent and no runtime dependency on NeuralTrust SaaS."
+  alt="External architecture: the platform runs in your environment. Clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, and TrustGate calls TrustGuard on :8081. An in-cluster control plane — console and API on :8000, AgentGateway admin on :8080, and the TrustGuard control plane on :8080 — serves configuration to TrustGate and TrustGuard. TrustGate and TrustGuard emit OTLP to a collector on :4317 and :4318 that writes to in-cluster ClickHouse; DataCore and AlertEngine read from it. PostgreSQL and Redis are recommended datastores outside the cluster, and there is no DataAgent. The one connection that leaves your environment by default is TrustGuard calling the NeuralTrust inference plane over outbound 443: a hosted, stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US) that scores text and stores nothing. A note shows the Firewall can run in-cluster instead with global.firewall.deploy: true."
   className="block dark:hidden"
 />
 <img
   src="/images/static/img/external-architecture-dark.svg"
-  alt="External architecture: everything runs in your environment. Clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, TrustGate calls TrustGuard on :8081, and TrustGuard calls the Firewall on :8000. An in-cluster control plane — console and API on :8000, AgentGateway admin on :8080, and the TrustGuard control plane on :8080 — serves configuration to TrustGate and TrustGuard. TrustGate and TrustGuard emit OTLP to a collector on :4317 and :4318 that writes to in-cluster ClickHouse; DataCore and AlertEngine read from it. PostgreSQL and Redis are recommended datastores outside the cluster. There is no DataAgent and no runtime dependency on NeuralTrust SaaS."
+  alt="External architecture: the platform runs in your environment. Clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, and TrustGate calls TrustGuard on :8081. An in-cluster control plane — console and API on :8000, AgentGateway admin on :8080, and the TrustGuard control plane on :8080 — serves configuration to TrustGate and TrustGuard. TrustGate and TrustGuard emit OTLP to a collector on :4317 and :4318 that writes to in-cluster ClickHouse; DataCore and AlertEngine read from it. PostgreSQL and Redis are recommended datastores outside the cluster, and there is no DataAgent. The one connection that leaves your environment by default is TrustGuard calling the NeuralTrust inference plane over outbound 443: a hosted, stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US) that scores text and stores nothing. A note shows the Firewall can run in-cluster instead with global.firewall.deploy: true."
   className="hidden dark:block"
 />
 
@@ -35,6 +39,11 @@ Two properties shape everything else on this page:
 - **DataCore replaces DataAgent.** There is no SaaS pushing queries over an
   outbound stream, so an in-cluster HTTP API serves tenant-scoped queries from
   ClickHouse instead, plus deployment metadata from its own `datacore` database.
+- **The Firewall is NeuralTrust-hosted by default.** TrustGuard sends the text
+  its ML detectors score to the NeuralTrust inference plane and gets a score
+  back; nothing is stored there. Ask NeuralTrust for the install's firewall key
+  before you deploy, or run the Firewall in your cluster with
+  `global.firewall.deploy: true` — see [Firewall](/neuraltrust/deployment/configuration#firewall).
 
 ## What runs
 
@@ -48,7 +57,7 @@ chart in one release.
 | TrustGate proxy `:8081` | LLM/proxy entry point |
 | TrustGate MCP `:8082` | MCP entry point |
 | TrustGuard data plane | Runtime safety evaluation |
-| Firewall (gateway + 5 workers) | Prompt and response classifiers; deploys with TrustGuard and is the largest memory consumer in the data path. To use the NeuralTrust-hosted Firewall instead, ask NeuralTrust for a Firewall key before deploying — see [Firewall](/neuraltrust/deployment/configuration#firewall) |
+| Firewall (gateway + 5 workers) | Prompt and response classifiers. Runs here only with `global.firewall.deploy: true`, and is then the largest memory consumer in the data path; by default TrustGuard calls the NeuralTrust-hosted Firewall — see [Firewall](/neuraltrust/deployment/configuration#firewall) |
 | data-plane-api | Red-teaming and evaluation API |
 
 ### Control plane
@@ -83,7 +92,8 @@ global:
 
 The chart ships this as `values-external-trustguard-only.yaml.example`. It
 removes TrustGate's workloads, hosts and Secrets, plus what only TrustGate uses:
-the Firewall `complexity` worker, MCP OAuth and the Admin API machine credentials.
+the in-cluster Firewall's `complexity` worker, MCP OAuth and the Admin API
+machine credentials.
 
 Leave `dataPlane` on: the console reads runtime activity from the data-plane
 API. The audit trail does not depend on it; audit events are sent as OTLP logs
@@ -92,9 +102,12 @@ and shown under Telemetry → Logs.
 ## Prerequisites
 
 - A Kubernetes cluster with an ingress controller, and Helm 3.8+
-- **4** nodes of 8 vCPU / 32 GiB — the console and analytics stack on top of the
-  data path — as the minimum of an autoscaled node pool; GPU options are in
-  [Capacity](/neuraltrust/deployment/architecture#capacity)
+- **3** nodes of 8 vCPU / 16 GiB with the NeuralTrust-hosted Firewall, or **4** of
+  8 vCPU / 32 GiB with the Firewall in your cluster — the console and analytics
+  stack on top of the data path — as the minimum of an autoscaled node pool;
+  GPU options are in [Capacity](/neuraltrust/deployment/architecture#capacity)
+- The firewall key NeuralTrust issues for this install, unless you run the
+  Firewall in your cluster — ask for it before you start
 - A base domain you can point at the cluster ingress
 - PostgreSQL, Redis, and ClickHouse — see [Datastores](#datastores)
 - The registry key NeuralTrust sends you, or a mirror of the images for an
@@ -122,13 +135,17 @@ IdP rather than copying what the screen displays.
 
 ## Network
 
-External needs **no** outbound connectivity to NeuralTrust. There are no
-hostnames or IPs to allowlist and no inbound source IP to admit.
+External's only outbound connection to NeuralTrust is the hosted Firewall:
+`firewall.neuraltrust.ai` (EU) or `firewall.us.neuraltrust.ai` (US) on 443, or
+the same host over Google Cloud Private Service Connect. With the Firewall in
+your cluster (`global.firewall.deploy: true`) External needs no outbound
+connectivity to NeuralTrust at all. There is no inbound source IP to admit.
 
 What you do need reachable:
 
 | From the cluster to | Port | For |
 | --- | --- | --- |
+| `firewall.neuraltrust.ai` or `firewall.us.neuraltrust.ai` | 443 | The NeuralTrust-hosted Firewall, unless it runs in your cluster |
 | Your container registry, or your mirror | 443 | Image pull |
 | Your LLM upstreams | 443 | The proxied model call |
 | Your PostgreSQL and Redis | 5432 / 6379 | All planes |
@@ -138,9 +155,10 @@ What you do need reachable:
 Inbound, clients reach the TrustGate LLM and MCP hosts, and your operators reach
 the console — see [Public routing](#public-routing).
 
-Air-gapped installs mirror the images into an internal registry and set
-`global.imageRegistry` with `global.imageRegistryScope: all`, so the collector
-images follow — see
+Air-gapped installs cannot reach the hosted Firewall: set
+`global.firewall.deploy: true`, mirror the images into an internal registry and
+set `global.imageRegistry` with `global.imageRegistryScope: all`, so the
+collector and Firewall images follow — see
 [Mirror to your own registry](/neuraltrust/deployment/images#mirror-to-your-own-registry).
 
 ## Datastores
@@ -281,7 +299,17 @@ infrastructure:
 ## Install
 
 External needs no console setup, no config-sync tokens, and no DataAgent
-enrollment. The platform is its own configuration source.
+enrollment. The platform is its own configuration source. The one credential
+you get from NeuralTrust is the firewall key, unless the Firewall runs in your
+cluster.
+
+<Warning>
+**Upgrading an External install that runs the Firewall in your cluster?** The
+Firewall is now NeuralTrust-hosted by default. To keep yours, add
+`global.firewall.deploy: true` to your values before upgrading. Otherwise ask
+NeuralTrust for the firewall key and create `trustguard-firewall` first. With
+neither, `helm upgrade` stops with an error that names both options.
+</Warning>
 
 <Steps>
 
@@ -324,6 +352,23 @@ Create a personal administrator through the UI afterwards.
 
 </Step>
 
+<Step title="Create the firewall key Secret">
+
+TrustGuard calls the NeuralTrust-hosted Firewall with the key NeuralTrust issues
+for this install. Ask NeuralTrust for it before installing; it is sent to you
+over a secure channel. It is a `FIREWALL_JWT`: a per-install client that carries
+the Firewall URL and can be revoked on its own.
+
+```bash
+kubectl create secret generic trustguard-firewall -n neuraltrust \
+  --from-literal=FIREWALL_JWT='<firewall-key-from-neuraltrust>'
+```
+
+To run the Firewall in your cluster instead, skip this step and set
+`global.firewall.deploy: true` in the next one.
+
+</Step>
+
 <Step title="Write your values file">
 
 The chart ships `values-external.yaml.example`. Copy it and set your platform and
@@ -340,10 +385,15 @@ global:
   observability:
     hostedExport:
       enabled: false              # no outbound telemetry to NeuralTrust
+
+trustguard:
+  firewall:
+    jwtExistingSecret:
+      name: "trustguard-firewall"
 ```
 
 With the defaults above, PostgreSQL and Redis stay in-cluster and need no extra
-Secrets beyond the pull secret and `onprem-superadmin`. For the production shape,
+Secrets beyond the pull secret, `onprem-superadmin` and `trustguard-firewall`. For the production shape,
 start from `values-managed-datastores.yaml.example` and follow
 [Managed PostgreSQL and Redis](#managed-postgresql-and-redis-production).
 
@@ -394,8 +444,8 @@ kubectl -n neuraltrust logs deploy/agentgateway-admin | grep -i 'migration\|list
 ```
 
 You should see the full inventory: the request path (`agentgateway-proxy`,
-`agentgateway-mcp`, `trustguard-data-plane`, `firewall` plus its workers,
-`data-plane-api`), the in-cluster control plane (`agentgateway-admin`,
+`agentgateway-mcp`, `trustguard-data-plane`, `data-plane-api`, plus `firewall`
+and its workers with `global.firewall.deploy: true`), the in-cluster control plane (`agentgateway-admin`,
 `trustguard-control-plane`, `control-plane-api`, `control-plane-app`), and the
 analytics stack (`clickstack-collector`, `clickhouse`, `datacore`,
 `alertengine-api`, `alertengine-worker`). No `dataagent` pod appears.
@@ -494,7 +544,7 @@ meet. Each has a workaround in
 - Login lockout after repeated failed password attempts
 - SCIM setup screens display the SaaS host instead of yours
 - Alert evaluation does not currently run
-- Firewall complexity state silently disables itself without a Redis URL
+- An in-cluster Firewall's complexity state silently disables itself without a Redis URL
 - Trace export returns 404 when the OTLP endpoint includes a signal path
 - IAM database auth needs setting per gateway, not only globally
 
@@ -514,8 +564,9 @@ Four things are specific to External.
 
 External keeps its entire configuration state in the database rather than
 pulling it from anywhere, so a second cluster is already looking at the same
-policies the moment it starts. Nothing dials NeuralTrust, and there is no
-last-known-good cache to worry about — the trade is that the database is now the
+policies the moment it starts. Nothing pulls configuration from NeuralTrust (the
+hosted Firewall, if you use it, is stateless and both clusters call it alike),
+and there is no last-known-good cache to worry about — the trade is that the database is now the
 thing that must not be lost.
 
 ### ClickHouse does not follow a promotion
@@ -547,12 +598,12 @@ failed migration blocks that cluster rather than serving a half-migrated schema.
 
 <img
   src="/images/static/img/external-high-availability.svg"
-  alt="External in active/passive across two regions. A traffic manager you operate points the gateway, MCP and console hostnames at the active cluster. Each cluster holds a full copy of every component: the request path, both product control planes, the console and API, its own region-local Redis, and its own in-cluster ClickHouse. Both clusters read and write one shared PostgreSQL primary, which holds configuration, console data, payloads and detections, with a cross-region read replica promoted on failover. Four consequences of a promotion: ClickHouse does not follow it, so each cluster only has the telemetry its own collector received; rate limits are counted per region; console sessions live in the region that issued them; and nothing dials NeuralTrust, because both clusters are self-contained."
+  alt="External in active/passive across two regions. A traffic manager you operate points the gateway, MCP and console hostnames at the active cluster. Each cluster holds a full copy of every component: the request path, both product control planes, the console and API, its own region-local Redis, and its own in-cluster ClickHouse. Both clusters read and write one shared PostgreSQL primary, which holds configuration, console data, payloads and detections, with a cross-region read replica promoted on failover. Four consequences of a promotion: ClickHouse does not follow it, so each cluster only has the telemetry its own collector received; rate limits are counted per region; console sessions live in the region that issued them; and nothing dials NeuralTrust, because both clusters are self-contained. The NeuralTrust-hosted Firewall does not move on a promotion: both clusters call it over 443."
   className="block dark:hidden"
 />
 <img
   src="/images/static/img/external-high-availability-dark.svg"
-  alt="External in active/passive across two regions. A traffic manager you operate points the gateway, MCP and console hostnames at the active cluster. Each cluster holds a full copy of every component: the request path, both product control planes, the console and API, its own region-local Redis, and its own in-cluster ClickHouse. Both clusters read and write one shared PostgreSQL primary, which holds configuration, console data, payloads and detections, with a cross-region read replica promoted on failover. Four consequences of a promotion: ClickHouse does not follow it, so each cluster only has the telemetry its own collector received; rate limits are counted per region; console sessions live in the region that issued them; and nothing dials NeuralTrust, because both clusters are self-contained."
+  alt="External in active/passive across two regions. A traffic manager you operate points the gateway, MCP and console hostnames at the active cluster. Each cluster holds a full copy of every component: the request path, both product control planes, the console and API, its own region-local Redis, and its own in-cluster ClickHouse. Both clusters read and write one shared PostgreSQL primary, which holds configuration, console data, payloads and detections, with a cross-region read replica promoted on failover. Four consequences of a promotion: ClickHouse does not follow it, so each cluster only has the telemetry its own collector received; rate limits are counted per region; console sessions live in the region that issued them; and nothing dials NeuralTrust, because both clusters are self-contained. The NeuralTrust-hosted Firewall does not move on a promotion: both clusters call it over 443."
   className="hidden dark:block"
 />
 
