@@ -232,6 +232,129 @@ across regions, they share **one writable PostgreSQL primary** with a
 cross-region read replica, and each region gets **its own Redis** — see
 [High availability](/neuraltrust/deployment/high-availability).
 
+### IAM database authentication
+
+Against a managed PostgreSQL (`global.postgresql.deploy: false`), set
+`global.postgresql.authMode: iam` to have the services log in with a
+short-lived cloud token instead of a static password. The chart's own
+PostgreSQL has no token login, so `authMode: iam` is ignored there.
+
+Each runtime service's `database.iamAuth` inherits the global setting when you
+leave it unset. Set it explicitly to `true` or `false` only for a mixed-auth
+install where one service keeps a password.
+
+Which cloud mints the token follows the identity block you configure:
+
+| Identity block | `POSTGRES_LOGIN` | Database |
+| --- | --- | --- |
+| None (default) | `aws` | RDS / Aurora with IRSA. Set `global.postgresql.awsRegion` |
+| `global.azureIdentity.method` | `azure` | Azure Database for PostgreSQL with Microsoft Entra ID |
+| `global.gcpIdentity.method` | `gcp` | Cloud SQL or AlloyDB with IAM database auth |
+
+With token auth, `global.postgresql.sslMode` must be `require`, `verify-ca` or
+`verify-full`; the services refuse to start over anything weaker. The bootstrap
+Jobs never run under IAM auth, so you pre-create every role and database
+yourself.
+
+#### Cloud SQL and AlloyDB (GKE)
+
+Works in every deployment mode, with GKE Workload Identity:
+
+```yaml
+global:
+  gcpIdentity:
+    method: workload-identity
+  postgresql:
+    deploy: false
+    host: 10.10.0.5
+    authMode: iam
+    sslMode: require
+    user: "neuraltrust-db@my-project.iam"
+```
+
+Every PostgreSQL client — TrustGate, TrustGuard, DataAgent, DataCore,
+AlertEngine, data-plane-api, and the control-plane API and console — then gets
+`POSTGRES_LOGIN=gcp` and mints a token from Application Default Credentials
+for each new connection.
+
+- **Database users.** Each user is a Google service account's email **without**
+  `.gserviceaccount.com`, for example `trustguard-db@my-project.iam`. The
+  control plane's is `global.postgresql.user` (also every Hybrid client's); the
+  others are `<service>.database.user`. A full email is refused at render.
+- **Identities.** Map each Google service account to its Kubernetes
+  ServiceAccount with `iam.gke.io/gcp-service-account` in
+  `<service>.serviceAccount.annotations`, and in
+  `control-plane-api.controlPlane.serviceAccount.annotations` for the shared
+  `control-plane` ServiceAccount. To use one Google service account for
+  everything instead, set `global.gcpIdentity.serviceAccount` and
+  `global.gcpIdentity.applyGlobally: true`.
+- **Instance setup, once per service account.**
+  1. Enable the `cloudsql.iam_authentication` (Cloud SQL) or
+     `alloydb.iam_authentication` (AlloyDB) flag.
+  2. Create the user with
+     `gcloud sql users create <user> --type=cloud_iam_service_account` or
+     `gcloud alloydb users create <user> --type=IAM_BASED`.
+  3. Grant `roles/cloudsql.instanceUser` and `roles/cloudsql.client` (Cloud SQL),
+     or `roles/alloydb.databaseUser` and
+     `roles/serviceusage.serviceUsageConsumer` (AlloyDB), plus
+     `roles/iam.workloadIdentityUser` for
+     `<project>.svc.id.goog[<namespace>/<serviceaccount>]`.
+  4. As an administrator, create each database owned by its user, and enable
+     `pgcrypto` in the TrustGuard database:
+
+     ```sql
+     CREATE DATABASE trustguard;
+     ALTER DATABASE trustguard OWNER TO "trustguard-db@my-project.iam";
+     -- connected to the trustguard database:
+     CREATE EXTENSION IF NOT EXISTS pgcrypto;
+     ```
+
+<Warning>
+GCP IAM auth needs service images that accept `POSTGRES_LOGIN=gcp`. An older
+pinned image tag stops at boot instead of trying a password against a
+passwordless role. Installs that do not set `global.gcpIdentity` render
+unchanged.
+</Warning>
+
+#### Memorystore for Redis Cluster (GKE)
+
+For Memorystore for Redis Cluster or Valkey with IAM auth, combine
+`global.gcpIdentity` with three opt-in `global.redis` keys:
+
+```yaml
+global:
+  gcpIdentity:
+    method: workload-identity
+  redis:
+    deploy: false
+    host: 10.10.0.20 # the discovery endpoint
+    port: 6379
+    tls: "true"
+    authMode: iam
+    cluster: true
+    caSecret:
+      name: redis-ca
+      key: ca.pem
+```
+
+| Key | Effect |
+| --- | --- |
+| `authMode: iam` | TrustGate, TrustGuard and data-plane-api send a Google access token as the AUTH password (`REDIS_LOGIN=gcp`). No Redis password is needed: leave any `<service>.redis.existingSecret` unset. |
+| `cluster: true` | A cluster client seeded from the discovery endpoint (`REDIS_CLUSTER=true`). A Redis Cluster has database 0 only, so a non-zero `agentgateway.redis.db` or data-plane-api `redis.db` is refused. |
+| `caSecret` | A Secret holding the server CA bundle, mounted at `/etc/neuraltrust/redis-ca/ca.pem` (`REDIS_TLS_CA_FILE`), including in data-plane-api's evaluation Jobs. |
+
+Each service account needs `roles/redis.dbConnectionUser`. For Memorystore,
+put every certificate printed by
+`gcloud redis clusters get-cluster-certificate-authority <cluster>` into one
+file and create the Secret from it:
+
+```bash
+kubectl create secret generic redis-ca -n neuraltrust --from-file=ca.pem=./redis-ca.pem
+```
+
+These keys apply only to a Redis you run (`deploy: false`). Installs that set
+none of them render unchanged.
+
 ## Ingress
 
 ```yaml
