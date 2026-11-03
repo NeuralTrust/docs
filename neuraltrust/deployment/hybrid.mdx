@@ -29,14 +29,16 @@ its own, see [Deploy TrustGate](/neuraltrust/deployment/trustgate) or
 | Plane | Where it runs | What it covers |
 | --- | --- | --- |
 | **Control plane** | NeuralTrust SaaS | Console, configuration, analytics |
-| **Data plane** | Your environment | TrustGate, TrustGuard, Firewall, data-plane API, DataAgent |
+| **Data plane** | Your environment | TrustGate, TrustGuard, data-plane API, DataAgent |
+| **Inference plane** | NeuralTrust SaaS, EU or US (or your environment, opt-in) | Firewall: the ML detectors behind TrustGuard |
 
 ### How the planes connect
 
 | Flow | From | To | Direction | Carries |
 | --- | --- | --- | --- | --- |
 | **Gateway traffic** | Your clients | TrustGate — LLM/proxy `8081`, MCP `8082` | Inbound to your gateway | Prompts and responses |
-| **Request path** | TrustGate | TrustGuard, then Firewall | In-cluster | Evaluation and classification |
+| **Request path** | TrustGate | TrustGuard | In-cluster | Evaluation |
+| **Classification** | TrustGuard | NeuralTrust-hosted Firewall | Outbound `443` | The text to classify; a score comes back. Stateless: nothing is stored |
 | **Storage** | TrustGate, TrustGuard | Your PostgreSQL and Redis | Outbound to your stores | Raw payloads, cache, rate-limit state |
 | **Upstream models** | TrustGate | Your LLM providers | Outbound `443` | The proxied model call |
 | **Config sync** | TrustGate, TrustGuard | NeuralTrust configuration service — **one endpoint per product** | Outbound `443` | Policy and gateway configuration, pulled |
@@ -67,7 +69,7 @@ payloads stay in your PostgreSQL.
 | `agentgateway-proxy` (TrustGate) | 8081 | Terminates LLM traffic, applies policies, routes upstream | LLM API traffic fails |
 | `agentgateway-mcp` (TrustGate) | 8082 | The same, for MCP tool traffic | MCP tool calls fail |
 | `trustguard-data-plane` | 8081 | Evaluates prompts and responses against detectors | Protection checks fail |
-| `firewall` gateway + workers | 8000 | ML classifiers behind a gateway API. Deploys with TrustGuard and is the largest memory consumer in the data path | ML-backed detectors fail |
+| `firewall` gateway + workers | 8000 | ML classifiers behind a gateway API. Runs here only with `global.firewall.deploy: true`; by default TrustGuard calls the NeuralTrust-hosted Firewall. In-cluster, it is the largest memory consumer in the data path | ML-backed detectors fail |
 | `data-plane-api` | 8080 | Red teaming and evaluation API | TrustTest runs fail |
 | `dataagent` (one per product) | 8080 health only | Answers authorized queries from SaaS over an outbound stream, and hosts the telemetry egress collector | Dashboards that read your data go blank |
 
@@ -140,6 +142,8 @@ in your region, trust DNS and ask NeuralTrust support to refresh the list.
 | `databridge.neuraltrust.ai` | `34.62.63.231` | DataAgent DataBridge |
 | `telemetry.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export (EU) |
 | `telemetry.us.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export (US) |
+| `firewall.neuraltrust.ai` | resolve via DNS | NeuralTrust-hosted Firewall (EU) |
+| `firewall.us.neuraltrust.ai` | resolve via DNS | NeuralTrust-hosted Firewall (US) |
 
 Allow the telemetry host matching the region your tenant is provisioned in.
 Product metadata OTLP does not leave the pods directly — the co-located egress
@@ -147,6 +151,12 @@ collector forwards to the ingest endpoint for your region, so that is the host t
 list if your policy enumerates every external destination. Opt-in
 [operational telemetry](/neuraltrust/deployment/configuration#operational-telemetry)
 uses the same collector and host, so turning it on adds no rule.
+
+Allow the Firewall host your TrustGuard's firewall JWT names, which matches
+your control plane's region. It is not needed when the Firewall runs in your
+cluster (`global.firewall.deploy: true`). The hosted Firewall can also be
+reached over Google Cloud Private Service Connect; ask NeuralTrust for the
+service attachment.
 
 Also allow outbound HTTPS to your container registry (or mirror), your LLM
 upstreams, and your PostgreSQL and Redis.
@@ -219,11 +229,15 @@ object with its own credentials.
 by screen.
 
 The wizard produces a `values.yaml` with credentials inline. Treat that file as
-a secret, do not commit it, and take exactly two values out of it per product:
+a secret, do not commit it, and take these values out of it per product:
 
 - **`CONFIG_SYNC_TOKEN`** — proves to the SaaS control plane that this data
   plane is yours
 - **the DataAgent enrollment JWT** — carries your tenant identity
+- **`FIREWALL_JWT`** — the product's own client for the NeuralTrust-hosted
+  Firewall, which carries the Firewall URL. Required for TrustGuard unless you
+  run the Firewall in your cluster; optional for TrustGate (smart-routing
+  complexity scoring). **The console shows it only once.**
 
 Everything else in the wizard output is superseded by the chart's own
 interfaces. One key needs renaming as you transcribe it: older consoles write
@@ -234,9 +248,9 @@ block is `agentgateway:` — see the
 
 </Step>
 
-<Step title="Create the four operator-supplied Secrets">
+<Step title="Create the operator-supplied Secrets">
 
-Those four values are all you supply:
+Those values are all you supply:
 
 ```bash
 # Config sync — pulls runtime configuration from the hosted control plane
@@ -252,12 +266,21 @@ kubectl create secret generic dataagent-enrolment-trustgate -n neuraltrust \
 
 kubectl create secret generic dataagent-enrolment-trustguard -n neuraltrust \
   --from-literal=ENROLMENT_TOKEN='<trustguard-enrolment-jwt>'
+
+# Firewall — TrustGuard's client for the NeuralTrust-hosted Firewall
+kubectl create secret generic trustguard-firewall -n neuraltrust \
+  --from-literal=FIREWALL_JWT='<trustguard-firewall-jwt>'
 ```
+
+TrustGate's firewall JWT is optional. To use it, store it the same way as
+`agentgateway-firewall` and set `agentgateway.firewall.existingSecret.name`.
+To run the Firewall in your cluster instead, skip `trustguard-firewall` and set
+`global.firewall.deploy: true` in the next step.
 
 Everything else — JWT signing secrets on both sides of every internal call,
 database passwords for in-cluster stores, the config-sync cache key, the MCP
 OAuth signing key — is generated on first install and reused on upgrade. Your
-own short list is the registry pull secret, these four tokens, and the
+own short list is the registry pull secret, these tokens, and the
 credentials for any datastore you provide. See
 [Secrets](/neuraltrust/deployment/secrets).
 
@@ -304,6 +327,18 @@ trustguard:
     enrolment:
       existingSecret:
         name: "dataagent-enrolment-trustguard"
+  firewall:
+    jwtExistingSecret:
+      name: "trustguard-firewall"
+```
+
+To keep the Firewall in your cluster instead, replace the `trustguard.firewall`
+block with:
+
+```yaml
+global:
+  firewall:
+    deploy: true
 ```
 
 For a subset of products, drop the flags you do not need and use the matching
@@ -368,8 +403,9 @@ kubectl get ingress -n neuraltrust
 ```
 
 With all three products enabled you should see `agentgateway-proxy`,
-`agentgateway-mcp`, `trustguard-data-plane`, `data-plane-api`, `firewall` and
-its workers, `dataagent`, and `dataagent-trustguard`. In-cluster
+`agentgateway-mcp`, `trustguard-data-plane`, `data-plane-api`, `dataagent`, and
+`dataagent-trustguard`, plus `firewall` and its workers with
+`global.firewall.deploy: true`. In-cluster
 `control-plane-postgresql` and `redis` appear only while `deploy: true`.
 
 A pod that is `Running` but never `Ready` is the signature of config-sync
@@ -411,7 +447,14 @@ never resolve rather than as an error.
 ### What "metadata only" means concretely
 
 Raw prompts and responses are written to **your** PostgreSQL. What leaves your
-cluster is telemetry: request metadata, timings, detector verdicts, and counts.
+cluster as telemetry is request metadata, timings, detector verdicts, and counts.
+
+The one exception is classification. With the NeuralTrust-hosted Firewall, the
+default, TrustGuard sends the text each ML detector must score to the Firewall
+in your control plane's region, over TLS, and gets a score back. The Firewall
+is stateless: the text is evaluated in memory and not stored. If your policy
+does not allow text to leave your environment, run the Firewall in your cluster
+with `global.firewall.deploy: true`.
 
 The egress path is worth knowing. A `clickstack-egress-collector` runs alongside
 your primary DataAgent. It exchanges the DataAgent enrollment JWT for a
@@ -453,6 +496,26 @@ helm upgrade neuraltrust-platform \
 
 Generated credentials are looked up and reused, so an upgrade does not rotate
 secrets or invalidate sessions.
+
+<Warning>
+**Hybrid uses the NeuralTrust-hosted Firewall by default.** If your install
+runs the Firewall in your cluster and you want to keep it, add this to your
+values file **before** upgrading:
+
+```yaml
+global:
+  firewall:
+    deploy: true
+```
+
+The upgrade then renders the same Firewall as before. To move to the hosted
+Firewall instead, supply TrustGuard's firewall JWT
+(`trustguard.firewall.jwtExistingSecret.name`). A TrustGuard created before the
+console issued firewall JWTs has none: keep `deploy: true`, or create a new
+private TrustGuard and use the one it shows. With neither setting, `helm
+upgrade` stops with an error that names both options, so the ML detectors never
+stop silently.
+</Warning>
 
 Keep data planes at least as new as the control plane. The
 [config-sync](/neuraltrust/deployment/config-sync) contract changed in recent TrustGate
