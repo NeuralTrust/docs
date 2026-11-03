@@ -1,29 +1,130 @@
 ---
 title: Deployment
 sidebarTitle: Overview
-description: Compare SaaS, Hybrid, External, and Central control plane deployment models.
+description: How NeuralTrust is deployed — the three planes, who runs each one in SaaS, Hybrid and Self-hosted, the EU and US regions, and how to choose.
 ---
 
 <p className="nt-lead">
-  Choose the model before you install. It decides which components you run,
-  which prerequisites you need, and whether the NeuralTrust console is in the
-  path.
+  Every NeuralTrust deployment is made of the same three planes. A deployment
+  model is only a decision about who runs each one — and that decides where your
+  prompts and responses live, what you install, and what has to cross your
+  network boundary.
 </p>
 
-<CardGroup cols={2}>
-  <Card title="Hybrid" icon="cloud-upload" href="/neuraltrust/deployment/hybrid">
-    You run the data plane. NeuralTrust runs the control plane.
-  </Card>
-  <Card title="External" icon="server" href="/neuraltrust/deployment/external">
-    You run everything, including the console and analytics.
-  </Card>
-  <Card title="Central control plane" icon="network" href="/neuraltrust/deployment/central">
-    One control plane, data planes in other clusters.
-  </Card>
-  <Card title="TrustGate install" icon="door-open" href="/neuraltrust/deployment/overview">
-    SaaS vs Private data plane from the product side.
-  </Card>
-</CardGroup>
+Read this page once to get the concepts straight. Then pick a
+[reference architecture](/neuraltrust/deployment/reference-architectures) and
+follow its install guide from top to bottom; each guide is written to be run
+in order, with a checklist of what to have ready before you start.
+
+## The three planes
+
+| Plane | What it does | What runs there | In the request path? |
+| --- | --- | --- | --- |
+| **Control plane** | Where you author policies, configure gateways, and read dashboards and alerts | The console, the product control planes, analytics | No. Data planes pull configuration from it and keep a last-known-good copy, so traffic keeps flowing if it is unreachable |
+| **Data plane** | Where traffic is governed: it proxies LLM and MCP calls, evaluates prompts and responses, and stores raw payloads | [TrustGate](/neuraltrust/deployment/trustgate), [TrustGuard](/neuraltrust/deployment/trustguard), the data-plane API, DataAgent, plus your PostgreSQL and Redis | Yes |
+| **Inference plane** | Scores text with the ML detectors behind TrustGuard | The Firewall | Yes, for ML-backed detectors. Stateless: it scores the text and stores nothing |
+
+Two properties hold in every model, and most of the install guides follow from
+them:
+
+- **Configuration is pulled, never pushed.** A data plane dials its control
+  plane over outbound TLS and keeps serving its last-known-good configuration
+  if that connection drops.
+- **Raw payloads stay with the data plane.** Prompts and responses are written
+  to the PostgreSQL next to the data plane that handled them. What reaches the
+  control plane is metadata: timings, verdicts, counts.
+
+## Who runs each plane
+
+| | **SaaS** | **Hybrid** | **Self-hosted** | **Central control plane** |
+| --- | --- | --- | --- | --- |
+| Control plane | NeuralTrust, EU or US | NeuralTrust, EU or US | You | You |
+| Data plane | NeuralTrust | You | You | You, in several clusters |
+| Inference plane | NeuralTrust | NeuralTrust, EU or US — or you, opt-in | NeuralTrust, EU or US — or you, opt-in | NeuralTrust, EU or US — or you, opt-in |
+| Raw payloads | NeuralTrust | Your PostgreSQL | Your PostgreSQL | The cluster that produced them |
+| You install | Nothing | One data-plane cluster | One cluster with every plane | One central cluster, plus one per data plane |
+
+- **SaaS** — NeuralTrust runs everything. Nothing to install and nothing in this
+  section to follow.
+- **Hybrid** — you run the data plane, so payloads never leave your cluster;
+  NeuralTrust runs the console and analytics. The most common choice, and the
+  shortest install. → [Hybrid](/neuraltrust/deployment/hybrid)
+- **Self-hosted** — you run every plane in your own cluster, console and
+  analytics included. The chart calls this mode `external`.
+  → [Self-hosted](/neuraltrust/deployment/external)
+- **Central control plane** — a self-hosted control plane that serves data
+  planes in other clusters, for data that has to stay where it was produced.
+  → [Central control plane](/neuraltrust/deployment/central)
+
+The inference plane is the one plane every model shares by default. Running it
+in your own cluster is a single switch, `global.firewall.deploy: true`, and is
+what makes an air-gapped install possible — see
+[Inference plane](/neuraltrust/deployment/inference-plane).
+
+## Regions
+
+NeuralTrust operates its hosted planes in two regions, **EU** and **US**. Your
+tenant is provisioned in one of them, and everything NeuralTrust hosts for you
+follows it:
+
+| | EU | US |
+| --- | --- | --- |
+| Control plane: the endpoints a Hybrid data plane dials | `*.neuraltrust.ai` | `*.us.neuraltrust.ai` |
+| Inference plane: the hosted Firewall | `firewall.neuraltrust.ai` | `firewall.us.neuraltrust.ai` |
+
+Credentials are region-scoped: a token issued in one region does not
+authenticate in the other. A Hybrid data plane selects its region with one
+chart value, covered in [Hybrid → Choose your region](/neuraltrust/deployment/hybrid#choose-your-region).
+A self-hosted install has no control plane to choose; its only regional
+dependency is the inference plane, and the firewall key NeuralTrust issues names
+the region.
+
+## Choose a model
+
+Answer these in order and stop at the first yes.
+
+<Steps>
+
+<Step title="Can NeuralTrust store your prompts and responses?">
+  Use **SaaS**. There is nothing to deploy.
+</Step>
+
+<Step title="Must payloads stay in your environment, but NeuralTrust may run the console?">
+  Use **[Hybrid](/neuraltrust/deployment/hybrid)**. Only configuration requests
+  and metadata reach NeuralTrust, and your cluster opens every one of those
+  connections.
+</Step>
+
+<Step title="Must nothing depend on NeuralTrust SaaS at runtime — or is the cluster air-gapped?">
+  Use **[Self-hosted](/neuraltrust/deployment/external)**. Add the in-cluster
+  Firewall for no outbound dependency on NeuralTrust at all.
+</Step>
+
+<Step title="Do several clusters have to keep their own data, with one console over all of them?">
+  Use the **[Central control plane](/neuraltrust/deployment/central)**.
+</Step>
+
+</Steps>
+
+Then decide the inference plane separately: keep the NeuralTrust-hosted
+Firewall, which is the default and the smallest footprint, unless your policy
+forbids text leaving your environment for scoring.
+
+## How every install goes
+
+The guides differ in detail, but they all run the same six stages, in this
+order:
+
+| Stage | What you do | Where it is covered |
+| --- | --- | --- |
+| 1. Pick the shape | Choose a reference architecture and size the cluster | [Reference architectures](/neuraltrust/deployment/reference-architectures), [Capacity](/neuraltrust/deployment/architecture#capacity) |
+| 2. Prepare the cluster | Ingress, datastores, DNS, and the network rules for your model | Your model's guide, [Requirements](/neuraltrust/deployment/architecture) |
+| 3. Collect credentials | The registry key; console tokens for Hybrid; the firewall key for Self-hosted | [Console setup](/neuraltrust/deployment/console-setup), [Secrets](/neuraltrust/deployment/secrets) |
+| 4. Install the chart | Create the Secrets, write the values file, `helm upgrade --install` | Your model's guide |
+| 5. Prove it works | Pods Ready, DNS and TLS from the caller's network, LLM and MCP traffic, telemetry arriving | [Validation checklist](/neuraltrust/deployment/validation) |
+| 6. Make it resilient | Climb the availability ladder only as far as you need | [High availability](/neuraltrust/deployment/high-availability) |
+
+## One chart for every model
 
 NeuralTrust ships as a **single umbrella Helm chart**,
 [`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform),
@@ -34,13 +135,13 @@ global:
   deploymentMode: hybrid # hybrid | external | saas
 ```
 
-Choose the deployment model before installation. It determines which components
-you install, which prerequisites you need, and whether the deployment uses the
-NeuralTrust console.
+The value `saas` selects the **Central control plane** — a control plane that
+behaves like NeuralTrust's hosted one but runs in your environment. It is the
+opposite of the hosted SaaS model, where there is nothing to install.
 
-## Comparison
+### Compare in detail
 
-| Characteristic | **SaaS** | **Hybrid** | **External** | **Central control plane** |
+| Characteristic | **SaaS** | **Hybrid** | **Self-hosted** | **Central control plane** |
 | --- | --- | --- | --- | --- |
 | Control plane | NeuralTrust | NeuralTrust | Your environment | Your environment |
 | Data plane (TrustGate / TrustGuard) | NeuralTrust | Your environment | Your environment | Your environment, in several clusters |
@@ -50,92 +151,10 @@ NeuralTrust console.
 | SaaS dependency at runtime | Full | Config sync + metadata export + hosted Firewall | Hosted Firewall only (none with an in-cluster Firewall; optional hosted export) | Hosted Firewall only (none with an in-cluster Firewall) |
 | Clusters | None of yours | One | One | One central, plus one per data plane |
 | Console setup first? | Nothing to install | Yes — each product issues tokens you need at install, the firewall JWT included | No; ask NeuralTrust for the firewall key | No, but your console issues tokens to data planes; ask NeuralTrust for the firewall keys |
-| Minimum nodes | — | 2 × 8 vCPU / 16 GiB with the hosted Firewall; 3 × 8 vCPU / 32 GiB with it in-cluster | 3 × 8 vCPU / 16 GiB with the hosted Firewall; 4 × 8 vCPU / 32 GiB with it in-cluster | Central as External, plus a Hybrid-sized cluster per data plane |
+| Minimum nodes | — | 2 × 8 vCPU / 16 GiB with the hosted Firewall; 3 × 8 vCPU / 32 GiB with it in-cluster | 3 × 8 vCPU / 16 GiB with the hosted Firewall; 4 × 8 vCPU / 32 GiB with it in-cluster | Central as Self-hosted, plus a Hybrid-sized cluster per data plane |
 | `global.deploymentMode` | — | `hybrid` | `external` | `saas` |
 
-## SaaS
-
-NeuralTrust operates both planes. There is nothing to install in your cluster
-and nothing on these pages to follow.
-
-## Hybrid
-
-You run the data plane; NeuralTrust runs the control plane. Raw prompts and
-responses stay in your PostgreSQL (`TELEMETRY_EXPORTERS_RAW=postgres`), and
-metadata leaves as OTLP (`TELEMETRY_EXPORTERS_METADATA=otlp`). Your cluster
-opens every connection to NeuralTrust — configuration is pulled, never pushed.
-
-Each product you run is a separate console object with its **own** tokens, so an
-install with both TrustGate and TrustGuard collects two token sets.
-
-<Card title="Hybrid" icon="cloud-upload" href="/neuraltrust/deployment/hybrid">
-  Architecture, network rules, install, and verification.
-</Card>
-
-## External
-
-You run **everything** — control planes, data planes, the product console, and a
-self-hosted analytics stack (ClickStack collector, ClickHouse, DataCore, and
-AlertEngine). No console tokens are issued and DataAgent does not run. The one
-runtime dependency on NeuralTrust is the hosted Firewall, the default for the ML
-detectors; run the Firewall in your cluster with `global.firewall.deploy: true`
-to remove it.
-
-Choose it for air-gapped or strict data-residency environments.
-
-<Card title="External (self-hosted)" icon="server" href="/neuraltrust/deployment/external">
-  The full inventory, datastores, and install.
-</Card>
-
-## Central control plane
-
-You run **one** control plane and enrol data planes into it from **other**
-clusters. Choose it when a single External install cannot work because data has
-to stay where it was produced — separate business units, jurisdictions, or
-environments — but the console, alerting, and cross-cluster reporting have to be
-in one place.
-
-The chart value is `saas` because this control plane behaves like NeuralTrust's
-hosted one — but it is yours, and it runs in your environment. It is the opposite
-of the hosted **SaaS** model above, where there is nothing to install.
-
-<Card title="Central control plane" icon="network" href="/neuraltrust/deployment/central">
-  The central cluster, cross-cluster endpoints, and remote data planes.
-</Card>
-
-## Shared reference
-
-The model guides link into these where they need them. You do not have to read
-them first.
-
-<CardGroup cols={2}>
-  <Card title="High availability" icon="layers" href="/neuraltrust/deployment/high-availability">
-    The availability ladder, the two invariants, and the promotion runbook.
-  </Card>
-  <Card title="Requirements and dependencies" icon="list-check" href="/neuraltrust/deployment/architecture">
-    Every dependency you provide, the ports between components, and capacity.
-  </Card>
-  <Card title="Configuration" icon="sliders-horizontal" href="/neuraltrust/deployment/configuration">
-    Managed stores, ingress, TLS, GPU workers, and every values switch.
-  </Card>
-  <Card title="Container images" icon="box" href="/neuraltrust/deployment/images">
-    The registry key, mirroring for air-gapped clusters, chart sources.
-  </Card>
-  <Card title="Secrets" icon="lock" href="/neuraltrust/deployment/secrets">
-    What the chart generates and what you must supply.
-  </Card>
-  <Card title="Cloud notes" icon="cloud" href="/neuraltrust/deployment/cloud-notes">
-    EKS, AKS, GKE, and vanilla Kubernetes particularities.
-  </Card>
-  <Card title="Validation checklist" icon="clipboard-check" href="/neuraltrust/deployment/validation">
-    The hand-off gate: what to prove before an install counts as done.
-  </Card>
-  <Card title="Troubleshooting" icon="wrench" href="/neuraltrust/deployment/troubleshooting">
-    Install, pod, config-sync, login, and telemetry failures.
-  </Card>
-</CardGroup>
-
-## The chart repository
+### The chart repository
 
 The Helm chart is developed in the open at
 [NeuralTrust/neuraltrust-platform](https://github.com/NeuralTrust/neuraltrust-platform).
@@ -154,3 +173,35 @@ is worth a look if you are the person actually running the platform.
 All of it also ships inside the chart artifact, so `helm pull <chart-ref>
 --version <VERSION> --untar` gives you the copy that matches the version you run
 — see [Get the chart sources](/neuraltrust/deployment/images#get-the-chart-sources).
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Reference architectures" icon="layout-template" href="/neuraltrust/deployment/reference-architectures">
+    The proven shapes, what crosses each boundary, and how big each one is.
+  </Card>
+  <Card title="Inference plane" icon="globe" href="/neuraltrust/deployment/inference-plane">
+    The NeuralTrust-hosted Firewall in EU and US, and running it yourself.
+  </Card>
+  <Card title="Hybrid" icon="cloud-upload" href="/neuraltrust/deployment/hybrid">
+    Install the data plane in your cluster against NeuralTrust SaaS.
+  </Card>
+  <Card title="Self-hosted" icon="server" href="/neuraltrust/deployment/external">
+    Install every plane in your own cluster.
+  </Card>
+  <Card title="TrustGate data plane" icon="door-open" href="/neuraltrust/deployment/trustgate">
+    Install only the gateway.
+  </Card>
+  <Card title="TrustGuard data plane" icon="shield" href="/neuraltrust/deployment/trustguard">
+    Install only the detection engine.
+  </Card>
+</CardGroup>
+
+The model guides link into the shared reference pages —
+[Requirements](/neuraltrust/deployment/architecture),
+[Configuration](/neuraltrust/deployment/configuration),
+[Container images](/neuraltrust/deployment/images),
+[Secrets](/neuraltrust/deployment/secrets),
+[Cloud notes](/neuraltrust/deployment/cloud-notes), and
+[Troubleshooting](/neuraltrust/deployment/troubleshooting) — where they need
+them. You do not have to read those first.

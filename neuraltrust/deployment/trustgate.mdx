@@ -1,17 +1,39 @@
 ---
-title: Deploy TrustGate
-sidebarTitle: TrustGate
-description: Run the TrustGate AI gateway on its own in your cluster, with the control plane on NeuralTrust SaaS.
+title: Install a TrustGate data plane
+sidebarTitle: TrustGate data plane
+description: Install the TrustGate AI gateway on its own as a data plane in your cluster, enrolled into the NeuralTrust control plane in the EU or US, or into a control plane you run.
 ---
 
-**TrustGate** is the NeuralTrust AI gateway: it routes, secures, and observes
-LLM and MCP traffic between your applications, agents, and model providers.
-TrustGate is open source under the Apache 2.0 license.
+<p className="nt-lead">
+  A TrustGate data plane is the gateway in your request path: it routes,
+  secures and observes LLM and MCP traffic between your applications, agents
+  and model providers. It runs in your cluster and enrols into a control plane,
+  which configures it and receives its metadata.
+</p>
 
-This page installs TrustGate on its own as a [Hybrid](/neuraltrust/deployment/hybrid)
-data plane, with the control plane on NeuralTrust SaaS. The Hybrid page covers
-the architecture, [prerequisites](/neuraltrust/deployment/hybrid#prerequisites),
-and [network rules](/neuraltrust/deployment/hybrid#network) that apply here too.
+**TrustGate** is open source under the Apache 2.0 license. This page installs it
+on its own — the [Gateway only](/neuraltrust/deployment/reference-architectures#2-gateway-only)
+reference architecture — enrolled into NeuralTrust SaaS in your tenant's region.
+To enrol it into a control plane you run instead, follow the same steps with the
+change in [Connect to your own control plane](#connect-to-your-own-control-plane).
+To run TrustGate and TrustGuard together, follow [Hybrid](/neuraltrust/deployment/hybrid)
+instead.
+
+## What you are installing
+
+```mermaid
+flowchart LR
+  apps["Your apps and agents"] -->|"LLM :8081 · MCP :8082"| tg["TrustGate data plane"]
+  tg -->|"model calls"| llm["LLM providers"]
+  tg -->|"tool calls"| mcp["MCP servers"]
+  tg --- stores[("Redis · PostgreSQL")]
+  tg -.->|"config sync · metadata · outbound 443"| cp["Control plane · NeuralTrust EU or US, or yours"]
+```
+
+This install runs `agentgateway-proxy` (LLM, port 8081), `agentgateway-mcp`
+(MCP, port 8082), and one `dataagent`. TrustGate pulls its configuration from the
+control plane, and DataAgent ships its metadata out and answers the console's
+authorized queries; raw prompts and responses stay in your PostgreSQL.
 
 | Resource | Where |
 | --- | --- |
@@ -29,8 +51,38 @@ it requires a registry key, which NeuralTrust issues with an enterprise offer �
 [contact NeuralTrust](mailto:support@neuraltrust.ai) to get one.
 </Note>
 
-This install runs `agentgateway-proxy` (LLM, port 8081), `agentgateway-mcp`
-(MCP, port 8082), and one `dataagent`.
+## Before you start
+
+The [Hybrid prerequisites](/neuraltrust/deployment/hybrid#prerequisites) apply
+here. For TrustGate alone, that comes down to:
+
+- [ ] **Your tenant's region**, EU or US — see [Choose your region](/neuraltrust/deployment/hybrid#choose-your-region)
+- [ ] **A cluster** with an ingress controller and Helm 3.8+: **2** nodes of 8 vCPU / 16 GiB as the minimum of an autoscaled node pool
+- [ ] **A base domain** you can point at the cluster ingress, for example `platform.example.com`
+- [ ] **Redis and PostgreSQL** the cluster can reach. TrustGate refuses to start without Redis — see [Check your datastores first](/neuraltrust/deployment/hybrid#check-your-datastores-first)
+- [ ] **The registry key**
+- [ ] **The network rules** below
+- [ ] **Console access** in your region, to create a private gateway
+
+### Network for TrustGate alone
+
+Allow outbound **TCP 443** to the hosts of your region. TrustGate needs no
+TrustGuard config-sync host, and no Firewall host unless you give it a firewall
+JWT for smart routing.
+
+| Purpose | EU | US |
+| --- | --- | --- |
+| TrustGate config sync | `agentgateway-configsync.neuraltrust.ai` | `agentgateway-configsync.us.neuraltrust.ai` |
+| DataAgent DataBridge | `databridge.neuraltrust.ai` | `databridge.us.neuraltrust.ai` |
+| Metadata OTLP export | `telemetry.neuraltrust.ai` | `telemetry.us.neuraltrust.ai` |
+
+Static IPs for the EU hosts are in [Hybrid → Network](/neuraltrust/deployment/hybrid#network).
+
+Inbound, your published `:8081` and `:8082` entry points must accept HTTPS from
+the NeuralTrust source IP in [Hybrid → Inbound](/neuraltrust/deployment/hybrid#inbound).
+Agree it with your network team before install day.
+
+## Install
 
 <Steps>
 
@@ -44,9 +96,9 @@ so `values-trustgate.yaml.example` is on disk.
 
 <Step title="Create the gateway in the console">
 
-Open **TrustGate → New Gateway**, name it, choose **Private**, then
-**Kubernetes**. Take the `CONFIG_SYNC_TOKEN` and the DataAgent enrollment JWT
-from the wizard output — see
+In the console of your tenant's region, open **TrustGate → New Gateway**, name
+it, choose **Private**, then **Kubernetes**. Take the `CONFIG_SYNC_TOKEN` and the
+DataAgent enrollment JWT from the wizard output — see
 [Console setup](/neuraltrust/deployment/console-setup).
 
 </Step>
@@ -73,6 +125,9 @@ global:
   domain: "platform.example.com"
 ```
 
+For a US tenant, also add `saasRegion: "us"` under `global` in that file — see
+[Choose your region](/neuraltrust/deployment/hybrid#choose-your-region).
+
 Then install with the TrustGate slice, which turns on
 `global.products.trustgate` and wires the two Secrets:
 
@@ -87,12 +142,64 @@ helm upgrade --install neuraltrust-platform \
 
 </Step>
 
+<Step title="Verify, expose and register both entry points">
+
+You should see `agentgateway-proxy`, `agentgateway-mcp` and `dataagent`. The
+gateway reports Ready only after it has pulled its configuration, so a pod that
+is `Running` but never `Ready` means config sync is failing — see
+[Hybrid → Verify](/neuraltrust/deployment/hybrid#verify) for the causes.
+
+Then expose the LLM and MCP hostnames and set **both** URLs in the console, as
+described in
+[Expose both entry points](/neuraltrust/deployment/hybrid#expose-both-entry-points).
+A single URL works for LLM traffic and quietly breaks MCP.
+
+</Step>
+
 </Steps>
 
-Then [verify](/neuraltrust/deployment/hybrid#verify) and expose the LLM and MCP
-hostnames as described in
-[Expose both entry points](/neuraltrust/deployment/hybrid#expose-both-entry-points).
-Only the `:8081` and `:8082` entry points need the
-[inbound rule](/neuraltrust/deployment/hybrid#inbound), and only
-`agentgateway-configsync.neuraltrust.ai`, `databridge.neuraltrust.ai`, and the
-telemetry host for your region need egress.
+Before handing the gateway over, work through the
+[validation checklist](/neuraltrust/deployment/validation): DNS and TLS from the
+caller's network, and MCP tested separately from the LLM route.
+
+## Connect to your own control plane
+
+To enrol this data plane into a [central control plane](/neuraltrust/deployment/central)
+you run, rather than into NeuralTrust SaaS, make three changes to the steps
+above:
+
+1. **Point it at your domain.** Set `global.controlPlane.domain` in
+   `values-cluster.yaml` instead of a region; it moves config sync, DataBridge
+   and telemetry together.
+
+   ```yaml
+   global:
+     controlPlane:
+       domain: nt.example.com
+   ```
+
+2. **Take the tokens from your console**, not from NeuralTrust's. Mint one
+   enrolment token per data plane — see
+   [Telling data planes apart](/neuraltrust/deployment/central#telling-data-planes-apart).
+3. **Allow egress to your central cluster** instead of to NeuralTrust:
+   `agentgateway-configsync.<domain>`, `databridge.<domain>` and
+   `telemetry.<domain>` on 443. If the central cluster serves chart-generated
+   certificates, trust its CA as in
+   [Trusting a chart-generated control plane](/neuraltrust/deployment/central#trusting-a-chart-generated-control-plane).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="TrustGuard data plane" icon="shield" href="/neuraltrust/deployment/trustguard">
+    Add runtime detection in its own data plane.
+  </Card>
+  <Card title="High availability" icon="layers" href="/neuraltrust/deployment/high-availability">
+    Replicas across zones, and the ladder beyond one cluster.
+  </Card>
+  <Card title="Configuration" icon="sliders-horizontal" href="/neuraltrust/deployment/configuration">
+    Managed stores, ingress, TLS, and every values switch.
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/neuraltrust/deployment/troubleshooting">
+    Install, pod, config-sync, and telemetry failures.
+  </Card>
+</CardGroup>

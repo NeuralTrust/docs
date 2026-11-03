@@ -1,0 +1,206 @@
+---
+title: Reference architectures
+description: The proven NeuralTrust deployment shapes — Hybrid, single-product data planes, Self-hosted, air-gapped, and multi-cluster — with what runs where, what crosses your boundary, and how big each one is.
+---
+
+<p className="nt-lead">
+  Start from one of these shapes rather than from a blank values file. Each one
+  is a supported combination of the three planes, with a known footprint and an
+  install guide you can follow from top to bottom.
+</p>
+
+If the terms *control plane*, *data plane* and *inference plane* are new, read
+[the three planes](/neuraltrust/deployment/overview#the-three-planes) first.
+Every shape here uses the same chart; what changes is which planes you run and
+which ones NeuralTrust runs for you in the [EU or US region](/neuraltrust/deployment/overview#regions).
+
+## At a glance
+
+| Architecture | Control plane | Data plane | Inference plane | What leaves your environment | Minimum nodes | Install guide |
+| --- | --- | --- | --- | --- | --- | --- |
+| [**1. Hybrid**](#1-hybrid) | NeuralTrust, EU or US | You: TrustGate and TrustGuard | NeuralTrust, same region | Config requests, metadata, text to score | 2 × 8 vCPU / 16 GiB | [Hybrid](/neuraltrust/deployment/hybrid) |
+| [**2. Gateway only**](#2-gateway-only) | NeuralTrust, EU or US | You: TrustGate | — | Config requests, metadata | 2 × 8 vCPU / 16 GiB | [TrustGate data plane](/neuraltrust/deployment/trustgate) |
+| [**3. Detection only**](#3-detection-only) | NeuralTrust, EU or US | You: TrustGuard | NeuralTrust, same region | Config requests, metadata, text to score | 2 × 8 vCPU / 16 GiB | [TrustGuard data plane](/neuraltrust/deployment/trustguard) |
+| [**4. Hybrid, region resilient**](#4-hybrid-region-resilient) | NeuralTrust, EU or US | You, in two regions | NeuralTrust, same region | As Hybrid | Hybrid sizing, per cluster | [Hybrid](/neuraltrust/deployment/hybrid#high-availability) |
+| [**5. Self-hosted**](#5-self-hosted) | You | You | NeuralTrust, EU or US | Text to score | 3 × 8 vCPU / 16 GiB | [Self-hosted](/neuraltrust/deployment/external) |
+| [**6. Self-hosted, air-gapped**](#6-self-hosted-air-gapped) | You | You | You | Nothing | 4 × 8 vCPU / 32 GiB | [Self-hosted](/neuraltrust/deployment/external) |
+| [**7. Multi-cluster, one console**](#7-multi-cluster-one-console) | You, in a central cluster | You, in several clusters | NeuralTrust, EU or US — or you | Text to score, unless every cluster runs its own Firewall | Central as Self-hosted, plus Hybrid sizing per data plane | [Central control plane](/neuraltrust/deployment/central) |
+
+Node counts are the minimum of an autoscaled node pool with the Firewall on CPU.
+Running the Firewall in your cluster adds nodes to any shape; the full table,
+including GPU pools, is in [Capacity](/neuraltrust/deployment/architecture#capacity).
+
+## 1. Hybrid
+
+**The default, and the shortest path to production.** You run TrustGate and
+TrustGuard in one cluster; NeuralTrust runs the console, analytics and the ML
+detectors in your region.
+
+<img
+  src="/images/static/img/platform-architecture.svg"
+  alt="Hybrid architecture: your environment holds one cluster running TrustGate, TrustGuard, data-plane-api and DataAgent, with recommended Redis and PostgreSQL datastores below it. Your apps send requests to TrustGate on :8081 for LLM traffic and :8082 for MCP; TrustGate calls out to LLM providers and asks TrustGuard to evaluate them. TrustGuard sends text to the NeuralTrust inference plane, a NeuralTrust-operated Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US), over outbound 443; the Firewall is stateless and stores nothing, and a note shows it can run in-cluster instead with global.firewall.deploy: true. The cluster also opens outbound 443 connections to NeuralTrust SaaS for AgentGateway and TrustGuard config sync, telemetry ingest and DataBridge retrieval, carrying metadata only; nothing dials in."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/platform-architecture-dark.svg"
+  alt="Hybrid architecture: your environment holds one cluster running TrustGate, TrustGuard, data-plane-api and DataAgent, with recommended Redis and PostgreSQL datastores below it. Your apps send requests to TrustGate on :8081 for LLM traffic and :8082 for MCP; TrustGate calls out to LLM providers and asks TrustGuard to evaluate them. TrustGuard sends text to the NeuralTrust inference plane, a NeuralTrust-operated Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US), over outbound 443; the Firewall is stateless and stores nothing, and a note shows it can run in-cluster instead with global.firewall.deploy: true. The cluster also opens outbound 443 connections to NeuralTrust SaaS for AgentGateway and TrustGuard config sync, telemetry ingest and DataBridge retrieval, carrying metadata only; nothing dials in."
+  className="hidden dark:block"
+/>
+
+| | |
+| --- | --- |
+| **Choose it when** | Prompts and responses must stay in your environment, and NeuralTrust may run the console |
+| **You run** | TrustGate, TrustGuard, the data-plane API and DataAgent, on your PostgreSQL and Redis |
+| **NeuralTrust runs** | The console, configuration, analytics and the Firewall, in your tenant's region |
+| **Crosses your boundary** | Outbound 443 for config sync, metadata, DataBridge and scoring; one inbound rule for the console to reach your published LLM and MCP entry points |
+| **Raw payloads** | Your PostgreSQL. They never leave the cluster |
+
+## 2. Gateway only
+
+**TrustGate on its own**, governing LLM and MCP traffic between your
+applications, agents and model providers, with no TrustGuard in the path.
+
+```mermaid
+flowchart LR
+  apps["Your apps and agents"] -->|"LLM :8081 · MCP :8082"| tg["TrustGate data plane"]
+  tg -->|"model calls"| llm["LLM providers"]
+  tg -->|"tool calls"| mcp["MCP servers"]
+  tg --- stores[("Redis · PostgreSQL")]
+  tg -.->|"config sync · metadata · outbound 443"| cp["NeuralTrust control plane · EU or US"]
+```
+
+| | |
+| --- | --- |
+| **Choose it when** | You need routing, policies, budgets and MCP governance now, and runtime detection later or elsewhere |
+| **You run** | `agentgateway-proxy`, `agentgateway-mcp` and one DataAgent |
+| **Crosses your boundary** | Outbound 443 for config sync, metadata and DataBridge; the inbound rule to the `:8081` and `:8082` entry points |
+| **Grows into** | Hybrid: add TrustGuard to the same release later, with its own console instance and tokens |
+
+## 3. Detection only
+
+**TrustGuard on its own**, as a detection API your applications, your existing
+gateway or your agent hooks call synchronously before they decide how to
+enforce.
+
+```mermaid
+flowchart LR
+  apps["Your apps, gateway or agent hooks"] -->|"evaluate"| tgd["TrustGuard data plane"]
+  tgd -.->|"text to score · outbound 443"| inf["Inference plane · EU or US"]
+  tgd --- stores[("Redis · PostgreSQL")]
+  tgd -.->|"config sync · metadata · outbound 443"| cp["NeuralTrust control plane · EU or US"]
+```
+
+| | |
+| --- | --- |
+| **Choose it when** | You already run a gateway, or you want detection in code paths that never go through one |
+| **You run** | `trustguard-data-plane` and `dataagent-trustguard` |
+| **Crosses your boundary** | Outbound 443 for config sync, metadata, DataBridge and scoring. No inbound rule: nothing outside the cluster needs to reach TrustGuard |
+| **Variant** | Keep scoring in the cluster with the in-cluster Firewall: 3 × 8 vCPU / 16 GiB, or a GPU pool |
+
+## 4. Hybrid, region resilient
+
+**Two Hybrid clusters in two regions, active/passive**, for a request path that
+has to survive losing a whole cloud region.
+
+<img
+  src="/images/static/img/hybrid-high-availability.svg"
+  alt="Two Hybrid data-plane clusters in active/passive across two regions. Clients reach global LLM and MCP URLs that a customer-operated traffic manager points at the active cluster. Both clusters pull the same gateway-scoped configuration from NeuralTrust SaaS over outbound 443 and keep their own last-known-good copy. Both use one shared writable PostgreSQL primary with a cross-region read replica promoted on failover, while each cluster runs its own region-local Redis. Only the active cluster runs DataAgent."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/hybrid-high-availability-dark.svg"
+  alt="Two Hybrid data-plane clusters in active/passive across two regions. Clients reach global LLM and MCP URLs that a customer-operated traffic manager points at the active cluster. Both clusters pull the same gateway-scoped configuration from NeuralTrust SaaS over outbound 443 and keep their own last-known-good copy. Both use one shared writable PostgreSQL primary with a cross-region read replica promoted on failover, while each cluster runs its own region-local Redis. Only the active cluster runs DataAgent."
+  className="hidden dark:block"
+/>
+
+| | |
+| --- | --- |
+| **Choose it when** | A regional requirement says one cluster across three zones is not enough. Most deployments should stop at [tier 1](/neuraltrust/deployment/high-availability#tier-1-one-cluster-across-zones) |
+| **You run** | Two full Hybrid clusters, one PostgreSQL primary with a cross-region replica, and one Redis per region |
+| **Both clusters** | Pull the same configuration from the same NeuralTrust region independently, and call the same regional inference plane |
+| **Only the active cluster** | Runs DataAgent, and receives traffic from your traffic manager |
+
+Your cloud regions and the NeuralTrust region are independent: two clusters in
+two of your regions still enrol into the one NeuralTrust region your tenant
+lives in.
+
+## 5. Self-hosted
+
+**Every plane in your cluster except the ML detectors.** The console, product
+control planes and analytics run next to the data plane; the only connection to
+NeuralTrust is TrustGuard's scoring call to the hosted inference plane.
+
+<img
+  src="/images/static/img/external-architecture.svg"
+  alt="Self-hosted architecture: the platform runs in your environment. Clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, and TrustGate calls TrustGuard on :8081. An in-cluster control plane — console and API on :8000, AgentGateway admin on :8080, and the TrustGuard control plane on :8080 — serves configuration to TrustGate and TrustGuard. TrustGate and TrustGuard emit OTLP to a collector on :4317 and :4318 that writes to in-cluster ClickHouse; DataCore and AlertEngine read from it. PostgreSQL and Redis are recommended datastores outside the cluster, and there is no DataAgent. The one connection that leaves your environment by default is TrustGuard calling the NeuralTrust inference plane over outbound 443: a hosted, stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US) that scores text and stores nothing. A note shows the Firewall can run in-cluster instead with global.firewall.deploy: true."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/external-architecture-dark.svg"
+  alt="Self-hosted architecture: the platform runs in your environment. Clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, and TrustGate calls TrustGuard on :8081. An in-cluster control plane — console and API on :8000, AgentGateway admin on :8080, and the TrustGuard control plane on :8080 — serves configuration to TrustGate and TrustGuard. TrustGate and TrustGuard emit OTLP to a collector on :4317 and :4318 that writes to in-cluster ClickHouse; DataCore and AlertEngine read from it. PostgreSQL and Redis are recommended datastores outside the cluster, and there is no DataAgent. The one connection that leaves your environment by default is TrustGuard calling the NeuralTrust inference plane over outbound 443: a hosted, stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US) that scores text and stores nothing. A note shows the Firewall can run in-cluster instead with global.firewall.deploy: true."
+  className="hidden dark:block"
+/>
+
+| | |
+| --- | --- |
+| **Choose it when** | Policy forbids any dependency on NeuralTrust SaaS for configuration or analytics, but stateless scoring by the hosted Firewall is acceptable |
+| **You run** | Request path, console, both product control planes, ClickHouse, DataCore and AlertEngine, on your PostgreSQL and Redis |
+| **NeuralTrust runs** | The inference plane, in the region your firewall key was issued for |
+| **Crosses your boundary** | Outbound 443 to `firewall.neuraltrust.ai` or `firewall.us.neuraltrust.ai`, or Private Service Connect. No inbound rule from NeuralTrust |
+| **You take on** | Migrations, backups of PostgreSQL and ClickHouse, email deliverability, and a break-glass administrator — see [What you have taken on](/neuraltrust/deployment/external#what-you-have-taken-on) |
+
+## 6. Self-hosted, air-gapped
+
+**Architecture 5 with the Firewall in your cluster and images from your own
+registry.** Nothing connects to NeuralTrust at runtime.
+
+| | |
+| --- | --- |
+| **Choose it when** | The cluster cannot reach the internet, or no text may leave your environment even for stateless scoring |
+| **Differs from 5 in** | The Firewall runs in-cluster (`global.firewall.deploy: true`); images are mirrored to an internal registry; hosted telemetry export is off |
+| **Crosses your boundary** | Nothing to NeuralTrust. Only your own registry, LLM upstreams, datastores, email and SIEM |
+| **Costs you** | The Firewall's capacity — 4 × 8 vCPU / 32 GiB on CPU, or a GPU pool — and operating it yourself |
+
+The steps are the Self-hosted install with the air-gapped settings from its
+[Network](/neuraltrust/deployment/external#network) section and
+[Mirror to your own registry](/neuraltrust/deployment/images#mirror-to-your-own-registry).
+
+## 7. Multi-cluster, one console
+
+**A central control plane you run, with data planes in other clusters enrolled
+into it.** Each data plane keeps its raw payloads; the console, alerting and
+cross-cluster reporting live in one place.
+
+<img
+  src="/images/static/img/central-architecture.svg"
+  alt="Central control plane architecture: remote Hybrid clusters each run the request path — TrustGate on :8081 and :8082 and TrustGuard on :8081 — with their own recommended PostgreSQL and Redis, where raw payloads are stored. Each remote cluster opens four outbound connections on 443 to your central cluster: one config-sync endpoint each for AgentGateway and TrustGuard, the telemetry ingest gateway, and DataBridge. The central cluster runs the console and API on :8000, both product control planes on :8080, a collector on :4317 and :4318, ClickHouse, DataCore, and AlertEngine, plus recommended PostgreSQL and Redis of its own, and never dials into a remote one. TrustGuard calls the NeuralTrust inference plane over outbound 443: a hosted, stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US). It is the only connection that leaves your environments by default, and a note shows the Firewall can run in-cluster instead with global.firewall.deploy: true."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/central-architecture-dark.svg"
+  alt="Central control plane architecture: remote Hybrid clusters each run the request path — TrustGate on :8081 and :8082 and TrustGuard on :8081 — with their own recommended PostgreSQL and Redis, where raw payloads are stored. Each remote cluster opens four outbound connections on 443 to your central cluster: one config-sync endpoint each for AgentGateway and TrustGuard, the telemetry ingest gateway, and DataBridge. The central cluster runs the console and API on :8000, both product control planes on :8080, a collector on :4317 and :4318, ClickHouse, DataCore, and AlertEngine, plus recommended PostgreSQL and Redis of its own, and never dials into a remote one. TrustGuard calls the NeuralTrust inference plane over outbound 443: a hosted, stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US). It is the only connection that leaves your environments by default, and a note shows the Firewall can run in-cluster instead with global.firewall.deploy: true."
+  className="hidden dark:block"
+/>
+
+| | |
+| --- | --- |
+| **Choose it when** | Data has to stay where it was produced — separate business units, jurisdictions or environments — but one console has to see all of it. If everything fits in one cluster, architecture 5 is simpler |
+| **You run** | One central cluster, a Self-hosted install plus DataBridge, an ingest gateway and published config-sync endpoints; and one Hybrid-style data-plane cluster per site |
+| **Data planes connect to** | Your central cluster on four endpoints under your own domain — never to NeuralTrust's control plane |
+| **Crosses your boundary** | Only the scoring call to the inference plane, from every cluster that runs TrustGuard, unless it runs the Firewall itself |
+
+The data planes here are installed exactly like a
+[TrustGate](/neuraltrust/deployment/trustgate) or
+[TrustGuard](/neuraltrust/deployment/trustguard) data plane, pointed at your
+domain instead of at NeuralTrust.
+
+## Make any of them resilient
+
+Every architecture starts at tier 1 of the availability ladder — one cluster,
+replicas across three zones, managed PostgreSQL and Redis — and that is enough
+for most deployments. Climb further only for a failure you actually have to
+survive.
+
+<Card title="High availability" icon="layers" href="/neuraltrust/deployment/high-availability">
+  The four tiers, what each survives, and what changes per deployment model.
+</Card>
