@@ -1,42 +1,70 @@
 ---
 title: Hybrid
-description: Run the request path in your cluster with the control plane on NeuralTrust SaaS — architecture, network, and install.
+description: Install the data plane in your cluster against the NeuralTrust control plane in the EU or US — architecture, region, network, install, and verification, in the order you run them.
 ---
 
-Hybrid runs the **data plane** in your environment and keeps the **control
-plane** on NeuralTrust SaaS. Raw prompts and responses stay in your PostgreSQL;
-only configuration requests and metadata reach NeuralTrust, and your cluster
-opens every one of those connections.
+<p className="nt-lead">
+  In Hybrid you run the data plane; NeuralTrust runs the control plane and the
+  inference plane in your tenant's region, EU or US. Raw prompts and responses
+  stay in your PostgreSQL. Only configuration requests, metadata and the text
+  the ML detectors score reach NeuralTrust, and your cluster opens every one of
+  those connections.
+</p>
 
-This guide covers the architecture, network requirements, installation, and
-high-availability configuration for a Hybrid deployment. To run one product on
-its own, see [Deploy TrustGate](/neuraltrust/deployment/trustgate) or
-[Deploy TrustGuard](/neuraltrust/deployment/trustguard).
+This page is the whole install, written to be followed from top to bottom.
+Read [Architecture](#architecture) once to know what you are installing, tick
+off [Before you start](#before-you-start), then run [Install](#install) step by
+step. To install one product on its own, follow the
+[TrustGate data plane](/neuraltrust/deployment/trustgate) or
+[TrustGuard data plane](/neuraltrust/deployment/trustguard) guide instead; the
+prerequisites and network rules on this page apply to both.
+
+## Before you start
+
+Have each of these ready. The install fails, or half-works, without them.
+
+- [ ] **Your tenant's region**, EU or US — see [Choose your region](#choose-your-region)
+- [ ] **A cluster** with an ingress controller and Helm 3.8+, sized per [Prerequisites](#prerequisites)
+- [ ] **A base domain** you can point at the cluster ingress, for example `platform.example.com`
+- [ ] **PostgreSQL and Redis** the cluster can reach — see [Check your datastores first](#check-your-datastores-first)
+- [ ] **The registry key** NeuralTrust sent when your account was provisioned
+- [ ] **Egress to your region's hosts**, and the **inbound rule** agreed with your network team — see [Network](#network)
+- [ ] **Console access** in your region, to create a private TrustGate and, if you run it, a private TrustGuard
+
+| Stage | Section | You come away with |
+| --- | --- | --- |
+| Understand | [Architecture](#architecture), [What runs](#what-runs) | Which workloads land in your cluster and what they connect to |
+| Prepare | [Choose your region](#choose-your-region), [Prerequisites](#prerequisites), [Network](#network) | A cluster, datastores and firewall rules that will pass the install |
+| Install | [Install](#install), steps 1–5 | A running release with every Secret it needs |
+| Prove | [Verify](#verify) | Pods Ready, both entry points registered, telemetry flowing |
+| Operate | [Upgrades](#upgrades), [High availability](#high-availability) | How to keep it current and resilient |
 
 ## Architecture
 
 <img
   src="/images/static/img/platform-architecture.svg"
-  alt="Hybrid architecture: in your cluster, clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, TrustGate calls TrustGuard on :8081, and TrustGuard calls the Firewall on :8000. TrustGate calls your upstream LLM providers. DataAgent hosts the OTLP egress collector on :4317 and :4318 and serves authorized retrieval. PostgreSQL and Redis are recommended datastores outside the cluster. Four outbound connections on 443 reach NeuralTrust SaaS — a config-sync endpoint for AgentGateway, a second one for TrustGuard, telemetry ingest, and DataBridge — all initiated from your environment."
+  alt="Hybrid architecture: your environment holds one cluster running TrustGate, TrustGuard, data-plane-api and DataAgent, with recommended Redis and PostgreSQL datastores below it. Your apps send requests to TrustGate on :8081 for LLM traffic and :8082 for MCP; TrustGate calls out to LLM providers and asks TrustGuard to evaluate them. TrustGuard sends text to the NeuralTrust inference plane, a NeuralTrust-operated Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US), over outbound 443; the Firewall is stateless and stores nothing, and a note shows it can run in-cluster instead with global.firewall.deploy: true. The cluster also opens outbound 443 connections to NeuralTrust SaaS for AgentGateway and TrustGuard config sync, telemetry ingest and DataBridge retrieval, carrying metadata only; nothing dials in."
   className="block dark:hidden"
 />
 <img
   src="/images/static/img/platform-architecture-dark.svg"
-  alt="Hybrid architecture: in your cluster, clients call TrustGate on :8081 for LLM traffic and :8082 for MCP, TrustGate calls TrustGuard on :8081, and TrustGuard calls the Firewall on :8000. TrustGate calls your upstream LLM providers. DataAgent hosts the OTLP egress collector on :4317 and :4318 and serves authorized retrieval. PostgreSQL and Redis are recommended datastores outside the cluster. Four outbound connections on 443 reach NeuralTrust SaaS — a config-sync endpoint for AgentGateway, a second one for TrustGuard, telemetry ingest, and DataBridge — all initiated from your environment."
+  alt="Hybrid architecture: your environment holds one cluster running TrustGate, TrustGuard, data-plane-api and DataAgent, with recommended Redis and PostgreSQL datastores below it. Your apps send requests to TrustGate on :8081 for LLM traffic and :8082 for MCP; TrustGate calls out to LLM providers and asks TrustGuard to evaluate them. TrustGuard sends text to the NeuralTrust inference plane, a NeuralTrust-operated Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US), over outbound 443; the Firewall is stateless and stores nothing, and a note shows it can run in-cluster instead with global.firewall.deploy: true. The cluster also opens outbound 443 connections to NeuralTrust SaaS for AgentGateway and TrustGuard config sync, telemetry ingest and DataBridge retrieval, carrying metadata only; nothing dials in."
   className="hidden dark:block"
 />
 
 | Plane | Where it runs | What it covers |
 | --- | --- | --- |
-| **Control plane** | NeuralTrust SaaS | Console, configuration, analytics |
-| **Data plane** | Your environment | TrustGate, TrustGuard, Firewall, data-plane API, DataAgent |
+| **Control plane** | NeuralTrust SaaS, in your tenant's region | Console, configuration, analytics |
+| **Data plane** | Your environment | TrustGate, TrustGuard, data-plane API, DataAgent |
+| **Inference plane** | NeuralTrust SaaS, EU or US (or your environment, opt-in) | Firewall: the ML detectors behind TrustGuard — see [Inference plane](/neuraltrust/deployment/inference-plane) |
 
 ### How the planes connect
 
 | Flow | From | To | Direction | Carries |
 | --- | --- | --- | --- | --- |
 | **Gateway traffic** | Your clients | TrustGate — LLM/proxy `8081`, MCP `8082` | Inbound to your gateway | Prompts and responses |
-| **Request path** | TrustGate | TrustGuard, then Firewall | In-cluster | Evaluation and classification |
+| **Request path** | TrustGate | TrustGuard | In-cluster | Evaluation |
+| **Classification** | TrustGuard | NeuralTrust-hosted Firewall | Outbound `443` | The text to classify; a score comes back. Stateless: nothing is stored |
 | **Storage** | TrustGate, TrustGuard | Your PostgreSQL and Redis | Outbound to your stores | Raw payloads, cache, rate-limit state |
 | **Upstream models** | TrustGate | Your LLM providers | Outbound `443` | The proxied model call |
 | **Config sync** | TrustGate, TrustGuard | NeuralTrust configuration service — **one endpoint per product** | Outbound `443` | Policy and gateway configuration, pulled |
@@ -67,7 +95,7 @@ payloads stay in your PostgreSQL.
 | `agentgateway-proxy` (TrustGate) | 8081 | Terminates LLM traffic, applies policies, routes upstream | LLM API traffic fails |
 | `agentgateway-mcp` (TrustGate) | 8082 | The same, for MCP tool traffic | MCP tool calls fail |
 | `trustguard-data-plane` | 8081 | Evaluates prompts and responses against detectors | Protection checks fail |
-| `firewall` gateway + workers | 8000 | ML classifiers behind a gateway API. Deploys with TrustGuard and is the largest memory consumer in the data path | ML-backed detectors fail |
+| `firewall` gateway + workers | 8000 | ML classifiers behind a gateway API. Runs here only with `global.firewall.deploy: true`; by default TrustGuard calls the NeuralTrust-hosted Firewall. In-cluster, it is the largest memory consumer in the data path | ML-backed detectors fail |
 | `data-plane-api` | 8080 | Red teaming and evaluation API | TrustTest runs fail |
 | `dataagent` (one per product) | 8080 health only | Answers authorized queries from SaaS over an outbound stream, and hosts the telemetry egress collector | Dashboards that read your data go blank |
 
@@ -85,11 +113,42 @@ red-teaming-only install (`global.products.dataPlane` alone) runs without one.
 TrustGate admin, the console, and analytics are **not** deployed in Hybrid —
 they run on SaaS. There is no in-cluster ClickHouse.
 
+## Choose your region
+
+Your tenant lives in one NeuralTrust region, and a Hybrid data plane dials that
+region for everything: config sync, DataBridge, telemetry and — through the
+firewall JWT the same console issues — the inference plane. One value selects
+it:
+
+```yaml
+global:
+  saasRegion: "eu"   # default; "us" for Americas
+```
+
+| `global.saasRegion` | Control-plane endpoints | Inference plane |
+| --- | --- | --- |
+| `eu` (default) | `*.neuraltrust.ai` | `firewall.neuraltrust.ai` |
+| `us` | `*.us.neuraltrust.ai` | `firewall.us.neuraltrust.ai` |
+
+- **It moves every control-plane connection together.** Config sync, DataBridge
+  and telemetry all derive from it, so there are no per-endpoint hosts to set.
+- **Credentials are region-scoped.** A config-sync token or DataAgent
+  enrollment token issued by the EU control plane does not authenticate against
+  the US one. Create the console objects in [step 2](#install) in the same
+  region you set here.
+- **Anything other than `eu` or `us` is rejected at render time**, so a typo
+  cannot quietly send a data plane to the wrong region.
+
+Leave it unset for an EU tenant. For a US tenant, add `saasRegion: "us"` under
+`global` in the values file you write in [step 4](#install), and allow the US
+hosts in [Network](#network).
+
 ## Prerequisites
 
 - A Kubernetes cluster with an ingress controller, and Helm 3.8+
-- **3** nodes of 8 vCPU / 32 GiB with all products, as the minimum of an
-  autoscaled node pool; GPU and single-product options are in
+- **2** nodes of 8 vCPU / 16 GiB with all products and the NeuralTrust-hosted
+  Firewall, or **3** of 8 vCPU / 32 GiB with the Firewall in your cluster, as
+  the minimum of an autoscaled node pool; GPU and single-product options are in
   [Capacity](/neuraltrust/deployment/architecture#capacity)
 - A base domain you can point at the cluster ingress, for example
   `platform.example.com`
@@ -129,24 +188,53 @@ until you use the feature that needs it. Set every host explicitly.
 ## Network
 
 Allow **TCP 443** from your cluster egress — and from any NAT or proxy in front
-of it — to these hosts. Prefer **hostname** rules where your firewall supports
-DNS-based allowlists; the IPs are for static ACLs. If DNS resolves differently
-in your region, trust DNS and ask NeuralTrust support to refresh the list.
+of it — to the hosts of **your region only**. Prefer **hostname** rules where
+your firewall supports DNS-based allowlists; the IPs are for static ACLs. If DNS
+resolves differently in your region, trust DNS and ask NeuralTrust support to
+refresh the list.
+
+<Tabs>
+<Tab title="EU (saasRegion: eu)">
 
 | Hostname | IP | Purpose |
 | --- | --- | --- |
 | `agentgateway-configsync.neuraltrust.ai` | `34.22.134.169` | TrustGate (AgentGateway) config-sync |
 | `trustguard-configsync.neuraltrust.ai` | `34.62.69.111` | TrustGuard config-sync |
 | `databridge.neuraltrust.ai` | `34.62.63.231` | DataAgent DataBridge |
-| `telemetry.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export (EU) |
-| `telemetry.us.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export (US) |
+| `telemetry.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export |
+| `firewall.neuraltrust.ai` | resolve via DNS | NeuralTrust-hosted Firewall |
 
-Allow the telemetry host matching the region your tenant is provisioned in.
+</Tab>
+<Tab title="US (saasRegion: us)">
+
+| Hostname | IP | Purpose |
+| --- | --- | --- |
+| `agentgateway-configsync.us.neuraltrust.ai` | resolve via DNS | TrustGate (AgentGateway) config-sync |
+| `trustguard-configsync.us.neuraltrust.ai` | resolve via DNS | TrustGuard config-sync |
+| `databridge.us.neuraltrust.ai` | resolve via DNS | DataAgent DataBridge |
+| `telemetry.us.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export |
+| `firewall.us.neuraltrust.ai` | resolve via DNS | NeuralTrust-hosted Firewall |
+
+The US hosts are published by DNS only. Use hostname rules, and ask NeuralTrust
+support for static IPs if your firewall cannot resolve names.
+
+</Tab>
+</Tabs>
+
+Only list the rows for the products you run: a TrustGate-only data plane needs
+no `trustguard-configsync` host, and the Firewall host is needed by TrustGuard,
+and by TrustGate only when you give it a firewall JWT for smart routing.
 Product metadata OTLP does not leave the pods directly — the co-located egress
 collector forwards to the ingest endpoint for your region, so that is the host to
 list if your policy enumerates every external destination. Opt-in
 [operational telemetry](/neuraltrust/deployment/configuration#operational-telemetry)
 uses the same collector and host, so turning it on adds no rule.
+
+Allow the Firewall host your TrustGuard's firewall JWT names, which matches
+your control plane's region. It is not needed when the Firewall runs in your
+cluster (`global.firewall.deploy: true`). The hosted Firewall can also be
+reached over Google Cloud Private Service Connect; ask NeuralTrust for the
+service attachment.
 
 Also allow outbound HTTPS to your container registry (or mirror), your LLM
 upstreams, and your PostgreSQL and Redis.
@@ -211,19 +299,25 @@ Both paths are in [Container images](/neuraltrust/deployment/images).
 
 <Step title="Create the gateway in the console">
 
-Open **TrustGate → New Gateway**, name it, choose **Private**, then
-**Kubernetes**. If you are also running TrustGuard, create a private TrustGuard
+Sign in to the console of your tenant's region — the tokens it issues only work
+against that region's control plane. Open **TrustGate → New Gateway**, name it,
+choose **Private**, then **Kubernetes**. If you are also running TrustGuard,
+create a private TrustGuard
 in **TrustGuard → Agent Security** as well — each product is a separate console
 object with its own credentials.
 [Console setup](/neuraltrust/deployment/console-setup) covers the wizard screen
 by screen.
 
 The wizard produces a `values.yaml` with credentials inline. Treat that file as
-a secret, do not commit it, and take exactly two values out of it per product:
+a secret, do not commit it, and take these values out of it per product:
 
 - **`CONFIG_SYNC_TOKEN`** — proves to the SaaS control plane that this data
   plane is yours
 - **the DataAgent enrollment JWT** — carries your tenant identity
+- **`FIREWALL_JWT`** — the product's own client for the NeuralTrust-hosted
+  Firewall, which carries the Firewall URL. Required for TrustGuard unless you
+  run the Firewall in your cluster; optional for TrustGate (smart-routing
+  complexity scoring). **The console shows it only once.**
 
 Everything else in the wizard output is superseded by the chart's own
 interfaces. One key needs renaming as you transcribe it: older consoles write
@@ -234,9 +328,9 @@ block is `agentgateway:` — see the
 
 </Step>
 
-<Step title="Create the four operator-supplied Secrets">
+<Step title="Create the operator-supplied Secrets">
 
-Those four values are all you supply:
+Those values are all you supply:
 
 ```bash
 # Config sync — pulls runtime configuration from the hosted control plane
@@ -252,12 +346,21 @@ kubectl create secret generic dataagent-enrolment-trustgate -n neuraltrust \
 
 kubectl create secret generic dataagent-enrolment-trustguard -n neuraltrust \
   --from-literal=ENROLMENT_TOKEN='<trustguard-enrolment-jwt>'
+
+# Firewall — TrustGuard's client for the NeuralTrust-hosted Firewall
+kubectl create secret generic trustguard-firewall -n neuraltrust \
+  --from-literal=FIREWALL_JWT='<trustguard-firewall-jwt>'
 ```
+
+TrustGate's firewall JWT is optional. To use it, store it the same way as
+`agentgateway-firewall` and set `agentgateway.firewall.existingSecret.name`.
+To run the Firewall in your cluster instead, skip `trustguard-firewall` and set
+`global.firewall.deploy: true` in the next step.
 
 Everything else — JWT signing secrets on both sides of every internal call,
 database passwords for in-cluster stores, the config-sync cache key, the MCP
 OAuth signing key — is generated on first install and reused on upgrade. Your
-own short list is the registry pull secret, these four tokens, and the
+own short list is the registry pull secret, these tokens, and the
 credentials for any datastore you provide. See
 [Secrets](/neuraltrust/deployment/secrets).
 
@@ -304,6 +407,21 @@ trustguard:
     enrolment:
       existingSecret:
         name: "dataagent-enrolment-trustguard"
+  firewall:
+    jwtExistingSecret:
+      name: "trustguard-firewall"
+```
+
+For a US tenant, also add `saasRegion: "us"` under `global` — see
+[Choose your region](#choose-your-region). An EU tenant needs nothing more.
+
+To keep the Firewall in your cluster instead, replace the `trustguard.firewall`
+block with:
+
+```yaml
+global:
+  firewall:
+    deploy: true
 ```
 
 For a subset of products, drop the flags you do not need and use the matching
@@ -311,8 +429,8 @@ tracked slice — `values-trustgate.yaml.example`,
 `values-trustguard.yaml.example`, or `values-red-teaming.yaml.example`
 (data-plane API only, which needs no DataAgent and no config-sync). The
 single-product installs are walked through in
-[Deploy TrustGate](/neuraltrust/deployment/trustgate) and
-[Deploy TrustGuard](/neuraltrust/deployment/trustguard). Every switch is in
+[TrustGate data plane](/neuraltrust/deployment/trustgate) and
+[TrustGuard data plane](/neuraltrust/deployment/trustguard). Every switch is in
 [Values cheat sheet](/neuraltrust/deployment/configuration#values-cheat-sheet).
 
 Do **not** set `configSync.enabled: true`. Hybrid derives it from the deployment
@@ -368,15 +486,19 @@ kubectl get ingress -n neuraltrust
 ```
 
 With all three products enabled you should see `agentgateway-proxy`,
-`agentgateway-mcp`, `trustguard-data-plane`, `data-plane-api`, `firewall` and
-its workers, `dataagent`, and `dataagent-trustguard`. In-cluster
+`agentgateway-mcp`, `trustguard-data-plane`, `data-plane-api`, `dataagent`, and
+`dataagent-trustguard`, plus `firewall` and its workers with
+`global.firewall.deploy: true`. In-cluster
 `control-plane-postgresql` and `redis` appear only while `deploy: true`.
 
 A pod that is `Running` but never `Ready` is the signature of config-sync
 failing. Three causes, in order of likelihood:
 
 1. The token is wrong, or was pasted with trailing whitespace
-2. Egress to `*.neuraltrust.ai:443` is blocked — see [Network](#network)
+2. Egress to your region's hosts on 443 — `*.neuraltrust.ai` or
+   `*.us.neuraltrust.ai` — is blocked, or `global.saasRegion` does not match the
+   region that issued the token — see [Network](#network) and
+   [Choose your region](#choose-your-region)
 3. A TLS-intercepting proxy is present and its CA is not trusted
 
 For the last case set `configSync.tlsCa`. Do not reach for
@@ -411,7 +533,14 @@ never resolve rather than as an error.
 ### What "metadata only" means concretely
 
 Raw prompts and responses are written to **your** PostgreSQL. What leaves your
-cluster is telemetry: request metadata, timings, detector verdicts, and counts.
+cluster as telemetry is request metadata, timings, detector verdicts, and counts.
+
+The one exception is classification. With the NeuralTrust-hosted Firewall, the
+default, TrustGuard sends the text each ML detector must score to the Firewall
+in your control plane's region, over TLS, and gets a score back. The Firewall
+is stateless: the text is evaluated in memory and not stored. If your policy
+does not allow text to leave your environment, run the Firewall in your cluster
+with `global.firewall.deploy: true`.
 
 The egress path is worth knowing. A `clickstack-egress-collector` runs alongside
 your primary DataAgent. It exchanges the DataAgent enrollment JWT for a
@@ -453,6 +582,26 @@ helm upgrade neuraltrust-platform \
 
 Generated credentials are looked up and reused, so an upgrade does not rotate
 secrets or invalidate sessions.
+
+<Warning>
+**Hybrid uses the NeuralTrust-hosted Firewall by default.** If your install
+runs the Firewall in your cluster and you want to keep it, add this to your
+values file **before** upgrading:
+
+```yaml
+global:
+  firewall:
+    deploy: true
+```
+
+The upgrade then renders the same Firewall as before. To move to the hosted
+Firewall instead, supply TrustGuard's firewall JWT
+(`trustguard.firewall.jwtExistingSecret.name`). A TrustGuard created before the
+console issued firewall JWTs has none: keep `deploy: true`, or create a new
+private TrustGuard and use the one it shows. With neither setting, `helm
+upgrade` stops with an error that names both options, so the ML detectors never
+stop silently.
+</Warning>
 
 Keep data planes at least as new as the control plane. The
 [config-sync](/neuraltrust/deployment/config-sync) contract changed in recent TrustGate

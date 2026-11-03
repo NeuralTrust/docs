@@ -5,7 +5,7 @@ description: Every chart switch that changes a deployment — products, datastor
 
 This is the values reference the model guides link into. Start from your model's
 page — [Hybrid](/neuraltrust/deployment/hybrid),
-[External](/neuraltrust/deployment/external), or
+[Self-hosted](/neuraltrust/deployment/external), or
 [Central](/neuraltrust/deployment/central) — and come here for the individual
 settings.
 
@@ -25,7 +25,7 @@ product to `false` to leave it out
 | `global.deploymentMode` | `hybrid` \| `external` \| `saas` | Selects the topology. `saas` is a [Central control plane](/neuraltrust/deployment/central) that you run. |
 | `global.controlPlane.domain` | Empty for NeuralTrust SaaS | A bare DNS suffix enrols this data plane into your own central control plane instead. |
 | `global.products.trustgate` | `true` to run TrustGate | Renders the TrustGate proxy and MCP data plane. Hybrid needs at least one product. |
-| `global.products.trustguard` | `true` to run TrustGuard | Renders the TrustGuard data plane. Firewall follows. |
+| `global.products.trustguard` | `true` to run TrustGuard | Renders the TrustGuard data plane. In Hybrid it calls the NeuralTrust-hosted Firewall unless `global.firewall.deploy: true`; see [Firewall](#firewall). |
 | `global.products.dataPlane` | `true` for the red-teaming shim | Renders the data-plane API. Needs no DataAgent and no config sync. |
 | `global.postgresql.deploy` | **`false` in production** | `true` runs an in-cluster store, which is the proof-of-concept default. |
 | `global.redis.deploy` | **`false` in production** | Same for Redis. |
@@ -47,7 +47,7 @@ Product telemetry export is **mandatory** in Hybrid and always on — there is n
 `global.clickstack.enabled: false` opt-out. TrustGate and TrustGuard send OTLP to
 a co-located, enrollment-backed egress collector, which is why the enrollment
 tokens are required. For a deployment with no NeuralTrust dependency at all, use
-[External](/neuraltrust/deployment/external). Operational telemetry, below, is
+[Self-hosted](/neuraltrust/deployment/external). Operational telemetry, below, is
 separate and off unless you turn it on.
 
 ## Operational telemetry
@@ -267,9 +267,51 @@ With two clusters active/passive, put one global LLM URL and one global MCP URL
 in front of both clusters' Ingress resources and configure those stable URLs in
 the console.
 
-## Firewall workers
+## Firewall
 
-Firewall deploys with TrustGuard: no values are needed to get it. The chart
+The Firewall holds the ML detectors TrustGuard calls. In every mode it is
+**NeuralTrust-hosted by default** — the inference plane — and
+`global.firewall.deploy: true` runs it in your cluster instead.
+
+| Mode | Where the firewall key comes from |
+| --- | --- |
+| **Hybrid** | app.neuraltrust.ai shows it once, when it creates the private TrustGuard |
+| **External**, **Central** | Ask NeuralTrust before you deploy; it is sent to you over a secure channel. Central needs one per cluster that runs TrustGuard, remote clusters included |
+
+**NeuralTrust-hosted Firewall.** TrustGuard authenticates with its own
+`FIREWALL_JWT`: a per-install client that carries the Firewall URL, so no
+signing key is shared with your cluster, and the client can be revoked on its
+own. Store it in a Secret (key `FIREWALL_JWT`):
+
+```yaml
+trustguard:
+  firewall:
+    jwtExistingSecret:
+      name: "trustguard-firewall"
+```
+
+`trustguard.firewall.jwt` takes the token inline instead. TrustGate's
+smart-routing complexity scoring takes its own token the same way, under
+`agentgateway.firewall`. The hosts are `firewall.neuraltrust.ai` (EU) and
+`firewall.us.neuraltrust.ai` (US), on 443 or over Private Service Connect. The
+Firewall is stateless: it scores the text it receives and stores none of it.
+
+<Warning>
+**Installs that run the Firewall in their cluster, in any mode:** add
+`global.firewall.deploy: true` to your values before upgrading to keep it.
+Without it, and without a TrustGuard firewall JWT, the upgrade stops with an
+error that names both options. Air-gapped installs, which cannot reach the
+hosted Firewall, keep `deploy: true`.
+</Warning>
+
+An install with TrustGuard and neither a firewall JWT nor `deploy: true` fails
+at render time, so the ML detectors never go dark silently.
+A Firewall you run yourself is also supported: `deploy: false` with
+`global.firewall.baseURL` and its `JWT_SECRET` in `global.firewall.existingSecret`.
+
+### In-cluster Firewall workers
+
+With the Firewall in your cluster, no further values are needed. The chart
 renders two gateway replicas and one replica for each of the five default
 workers — `toxicity`, `indirect-prompt-injections`, `prompt-jailbreak`,
 `prompt-moderation`, and `response-jailbreak` — all on the `firewall-cpu` image
@@ -282,23 +324,24 @@ Official images bundle their models, so `HUGGINGFACE_TOKEN` is optional. This is
 the largest memory consumer in the data path, so it is the first thing to
 right-size if you run a subset of detectors.
 
-TrustGuard derives `NEURAL_TRUST_FIREWALL_BASE_URL` as
+TrustGuard then derives `NEURAL_TRUST_FIREWALL_BASE_URL` as
 `http://firewall.<namespace>.svc.cluster.local` and maps
 `firewall-secrets/JWT_SECRET` to its client secret. Both sides are wired by the
-chart, so there is nothing to configure.
+chart, so there is nothing to configure, and a `trustguard.firewall.jwt` is
+ignored.
 
 <Warning>
 `firewall.enabled`, `firewall.firewall.enabled`, and `trustguard.firewall.enabled`
-have no effect on whether Firewall renders. Setting all three to `false` with
-TrustGuard on still produces the gateway and all five workers. To reduce its
-footprint, size the workers instead.
+have no effect on whether Firewall renders; only `global.firewall.deploy` does.
+To reduce its in-cluster footprint, size the workers instead.
 </Warning>
 
 ### GPU Firewall workers
 
 Chart defaults are CPU. GPU mode needs a NeuralTrust-provided `firewall-gpu`
 image plus explicit GPU resources and scheduling, and a separate GPU node pool.
-Keep the gateway on the CPU image:
+It also needs `global.firewall.deploy: true`, since the Firewall otherwise runs
+at NeuralTrust. Keep the gateway on the CPU image:
 
 ```yaml
 firewall:
@@ -429,7 +472,9 @@ That path starts TrustGate's LLM/proxy process on `8081` and does **not** start
 or expose MCP on `8082`. Use Kubernetes for production MCP support.
 
 **Manual** returns `CONTROL_PLANE_JWT` and `DATA_AGENT_JWT` for fully custom
-manifests, and no deployment command.
+manifests, plus `FIREWALL_JWT` for the NeuralTrust-hosted Firewall, and no
+deployment command. Pass `FIREWALL_JWT` to the TrustGuard data plane under that
+name.
 
 TrustGate listens on these ports by default:
 

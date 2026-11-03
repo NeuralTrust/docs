@@ -14,39 +14,43 @@ both planes and there is nothing to install. Here the chart renders a control
 plane that behaves like the hosted one, but it is yours and it runs in your
 environment.
 
-Choose it when a single [External](/neuraltrust/deployment/external) install
+Choose it when a single [Self-hosted](/neuraltrust/deployment/external) install
 cannot work because data has to stay where it was produced — separate business
 units, jurisdictions, or environments — but the console, alerting, and
 cross-cluster reporting have to be in one place. If every workload fits in one
-cluster, External is simpler. If NeuralTrust hosts the control plane, use
+cluster, Self-hosted is simpler. If NeuralTrust hosts the control plane, use
 [Hybrid](/neuraltrust/deployment/hybrid).
 
 ## Architecture
 
 <img
   src="/images/static/img/central-architecture.svg"
-  alt="Central control plane architecture: remote Hybrid clusters each run the request path — TrustGate on :8081 and :8082, TrustGuard on :8081, the Firewall on :8000 — with their own recommended PostgreSQL and Redis; raw payloads stay there. Each remote cluster opens four outbound connections on 443 to your central cluster: one config-sync endpoint each for AgentGateway and TrustGuard, the telemetry ingest gateway, and DataBridge. The central cluster runs the console and API on :8000, both product control planes on :8080, a collector on :4317 and :4318, ClickHouse, DataCore, and AlertEngine, plus recommended PostgreSQL and Redis of its own. The central cluster never dials into a remote one."
+  alt="Central control plane architecture: remote Hybrid clusters each run the request path — TrustGate on :8081 and :8082 and TrustGuard on :8081 — with their own recommended PostgreSQL and Redis, where raw payloads are stored. Each remote cluster opens four outbound connections on 443 to your central cluster: one config-sync endpoint each for AgentGateway and TrustGuard, the telemetry ingest gateway, and DataBridge. The central cluster runs the console and API on :8000, both product control planes on :8080, a collector on :4317 and :4318, ClickHouse, DataCore, and AlertEngine, plus recommended PostgreSQL and Redis of its own, and never dials into a remote one. TrustGuard calls the NeuralTrust inference plane over outbound 443: a hosted, stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US). It is the only connection that leaves your environments by default, and a note shows the Firewall can run in-cluster instead with global.firewall.deploy: true."
   className="block dark:hidden"
 />
 <img
   src="/images/static/img/central-architecture-dark.svg"
-  alt="Central control plane architecture: remote Hybrid clusters each run the request path — TrustGate on :8081 and :8082, TrustGuard on :8081, the Firewall on :8000 — with their own recommended PostgreSQL and Redis; raw payloads stay there. Each remote cluster opens four outbound connections on 443 to your central cluster: one config-sync endpoint each for AgentGateway and TrustGuard, the telemetry ingest gateway, and DataBridge. The central cluster runs the console and API on :8000, both product control planes on :8080, a collector on :4317 and :4318, ClickHouse, DataCore, and AlertEngine, plus recommended PostgreSQL and Redis of its own. The central cluster never dials into a remote one."
+  alt="Central control plane architecture: remote Hybrid clusters each run the request path — TrustGate on :8081 and :8082 and TrustGuard on :8081 — with their own recommended PostgreSQL and Redis, where raw payloads are stored. Each remote cluster opens four outbound connections on 443 to your central cluster: one config-sync endpoint each for AgentGateway and TrustGuard, the telemetry ingest gateway, and DataBridge. The central cluster runs the console and API on :8000, both product control planes on :8080, a collector on :4317 and :4318, ClickHouse, DataCore, and AlertEngine, plus recommended PostgreSQL and Redis of its own, and never dials into a remote one. TrustGuard calls the NeuralTrust inference plane over outbound 443: a hosted, stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US). It is the only connection that leaves your environments by default, and a note shows the Firewall can run in-cluster instead with global.firewall.deploy: true."
   className="hidden dark:block"
 />
 
 ## What runs in your central cluster
 
-This mode is a superset of External: everything External deploys, plus three
+This mode is a superset of Self-hosted (chart mode `external`): everything a
+self-hosted install deploys, plus three
 components and one behaviour change. PostgreSQL and Redis are **recommended
 managed, outside the cluster**; ClickHouse stays in-cluster on the **central**
 side only. Each remote cluster has its own recommended PostgreSQL and Redis —
-raw payloads never leave the cluster that produced them.
+raw payloads are stored only in the cluster that produced them. The Firewall is
+NeuralTrust-hosted by default: TrustGuard sends it the text to score, and it
+stores nothing.
 
 ### External baseline (also here)
 
 | Component | Purpose |
 | --- | --- |
-| TrustGate proxy + MCP, TrustGuard data plane, Firewall | Request path (also on every remote cluster) |
+| TrustGate proxy + MCP, TrustGuard data plane | Request path (also on every remote cluster) |
+| Firewall | NeuralTrust-hosted by default; in-cluster only with `global.firewall.deploy: true` |
 | AgentGateway admin, TrustGuard control plane | In-cluster product control planes |
 | control-plane-app + control-plane-api | Console |
 | ClickStack collector + ClickHouse | In-cluster analytics |
@@ -69,7 +73,7 @@ out through DataBridge to the cluster that holds the data.
 
 The console, ClickHouse, AlertEngine, the bootstrap administrator, and the
 datastore split all behave exactly as in
-[External](/neuraltrust/deployment/external) — this page covers only what a
+[Self-hosted](/neuraltrust/deployment/external) — this page covers only what a
 control plane for other clusters adds on top.
 
 ## Select the topology
@@ -114,7 +118,10 @@ NeuralTrust inbound source IP — you own both ends.
 
 **From each remote cluster (egress):** allow TCP 443 to all four endpoints above
 on your own domain, plus the container registry (or mirror), the LLM upstreams,
-and that cluster's own PostgreSQL and Redis.
+and that cluster's own PostgreSQL and Redis. Every cluster running TrustGuard,
+the central one included, also needs 443 to the NeuralTrust-hosted Firewall
+(`firewall.neuraltrust.ai` or `firewall.us.neuraltrust.ai`, or Private Service
+Connect) unless it runs the Firewall itself.
 
 Remote planes keep raw payloads in that cluster's PostgreSQL and export
 metadata over OTLP to `https://telemetry.<domain>`
@@ -154,13 +161,14 @@ Have these ready before installing. Everything else the chart does for you.
 | 4 | An ingress controller in the central cluster | Only the telemetry endpoint uses one. The other three are layer-4 Services. |
 | 5 | One enrolment token per remote data plane, issued from your console | See [Telling data planes apart](#telling-data-planes-apart). |
 
-The central cluster is also a full External install, so the External
-prerequisites apply to it: **4** nodes of 8 vCPU / 32 GiB as the minimum of
-an autoscaled node pool, the `gcr-secret` image pull
+The central cluster is also a full self-hosted install, so the Self-hosted
+prerequisites apply to it: **3** nodes of 8 vCPU / 16 GiB with the
+NeuralTrust-hosted Firewall, or **4** of 8 vCPU / 32 GiB with the Firewall in
+your cluster, as the minimum of an autoscaled node pool, the `gcr-secret` image pull
 Secret, an `onprem-superadmin` Secret for
 the first console administrator, and a decision on the console hostname before
 install. Each is covered in
-[External → Prerequisites](/neuraltrust/deployment/external#prerequisites).
+[Self-hosted → Prerequisites](/neuraltrust/deployment/external#prerequisites).
 
 ### Images
 
@@ -328,6 +336,13 @@ Taking the platform Secret out of play in this mode is rejected at render time
 rather than at runtime, so a mistake here surfaces during `helm upgrade` instead
 of on first traffic.
 
+**The firewall key** is the one credential that comes from NeuralTrust. Your
+console does not issue firewall keys, so ask NeuralTrust for one per cluster
+that runs TrustGuard — the central cluster and each remote one. NeuralTrust sends
+each over a secure channel; store it as `trustguard-firewall` (key
+`FIREWALL_JWT`) and set `trustguard.firewall.jwtExistingSecret.name`. A cluster
+that runs the Firewall itself (`global.firewall.deploy: true`) needs none.
+
 See [Secrets](/neuraltrust/deployment/secrets) for how the shared platform Secret
 works generally.
 
@@ -346,12 +361,21 @@ global:
     trustguard: true
 ```
 
+`global.controlPlane.domain` takes the place of `global.saasRegion` for every
+connection to the control plane, so leave the region unset. To install a single
+product per remote cluster, follow the
+[TrustGate data plane](/neuraltrust/deployment/trustgate#connect-to-your-own-control-plane)
+or [TrustGuard data plane](/neuraltrust/deployment/trustguard#connect-to-your-own-control-plane)
+guide with this change.
+
 Its enrolment and config-sync tokens are issued by **your** console, not by
-[app.neuraltrust.ai](https://app.neuraltrust.ai/en/login). Everything else — the
-four operator-supplied Secrets, the values file, verification, exposing both
-TrustGate entry points — is the ordinary
+[app.neuraltrust.ai](https://app.neuraltrust.ai/en/login). Its firewall key, if it
+runs TrustGuard, comes from NeuralTrust (see [Secrets](#secrets)). Everything
+else — the operator-supplied Secrets, the values file, verification, exposing
+both TrustGate entry points — is the ordinary
 [Hybrid install](/neuraltrust/deployment/hybrid#install), with
-`global.controlPlane.domain` set and no NeuralTrust hostnames to allow.
+`global.controlPlane.domain` set and only the Firewall host to allow among the
+NeuralTrust hostnames.
 
 ### Trusting a chart-generated control plane
 
@@ -467,6 +491,14 @@ helm upgrade --install neuraltrust-platform \
 Install and verify the central cluster first, then bring up one remote cluster as
 a canary before the rest.
 
+<Warning>
+**Upgrading a central or remote cluster that runs the Firewall itself?** The
+Firewall is now NeuralTrust-hosted by default. To keep yours, add
+`global.firewall.deploy: true` before upgrading; otherwise create
+`trustguard-firewall` with the key NeuralTrust sends you. With neither, `helm
+upgrade` stops with an error that names both options.
+</Warning>
+
 ## Verify
 
 Verify the central cluster on its own before any remote cluster dials it. A
@@ -506,7 +538,7 @@ DataBridge retry, the symptom is a remote data plane that stays `Running` but
 never becomes `Ready`, with nothing wrong on the central side.
 
 Sign in to the console and create the organisation exactly as in
-[External → Verify](/neuraltrust/deployment/external#verify); the console is the
+[Self-hosted → Verify](/neuraltrust/deployment/external#verify); the console is the
 same install here.
 
 ### Then enrol one remote cluster
@@ -562,7 +594,7 @@ with managed stores. It is not on the request path, so a promotion runbook is
 rarely worth its own operational cost.
 
 If a regional requirement forces tier 3, run it as an
-[External active/passive pair](/neuraltrust/deployment/external#high-availability)
+[Self-hosted active/passive pair](/neuraltrust/deployment/external#high-availability)
 — same shape, same ClickHouse caveat, same promotion steps. Two things are
 specific to a central cluster.
 
@@ -603,7 +635,7 @@ see [Secrets](#secrets).
   <Card title="Hybrid" icon="cloud-upload" href="/neuraltrust/deployment/hybrid">
     The install every remote data-plane cluster runs.
   </Card>
-  <Card title="External" icon="server" href="/neuraltrust/deployment/external">
+  <Card title="Self-hosted" icon="server" href="/neuraltrust/deployment/external">
     The baseline your central cluster is built on.
   </Card>
   <Card title="Config sync" icon="refresh-cw" href="/neuraltrust/deployment/config-sync">
