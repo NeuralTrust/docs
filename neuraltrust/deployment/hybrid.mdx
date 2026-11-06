@@ -1,17 +1,43 @@
 ---
 title: Hybrid
-description: Run the request path in your cluster with the control plane on NeuralTrust SaaS — architecture, network, and install.
+description: Install the data plane in your cluster against the NeuralTrust control plane in the EU or US — architecture, region, network, install, and verification, in the order you run them.
 ---
 
-Hybrid runs the **data plane** in your environment and keeps the **control
-plane** on NeuralTrust SaaS. Raw prompts and responses stay in your PostgreSQL;
-only configuration requests and metadata reach NeuralTrust, and your cluster
-opens every one of those connections.
+<p className="nt-lead">
+  In Hybrid you run the data plane; NeuralTrust runs the control plane and the
+  inference plane in your tenant's region, EU or US. Raw prompts and responses
+  stay in your PostgreSQL. Only configuration requests, metadata and the text
+  the ML detectors score reach NeuralTrust, and your cluster opens every one of
+  those connections.
+</p>
 
-This guide covers the architecture, network requirements, installation, and
-high-availability configuration for a Hybrid deployment. To run one product on
-its own, see [Deploy TrustGate](/neuraltrust/deployment/trustgate) or
-[Deploy TrustGuard](/neuraltrust/deployment/trustguard).
+This page is the whole install, written to be followed from top to bottom.
+Read [Architecture](#architecture) once to know what you are installing, tick
+off [Before you start](#before-you-start), then run [Install](#install) step by
+step. To install one product on its own, follow the
+[TrustGate data plane](/neuraltrust/deployment/trustgate) or
+[TrustGuard data plane](/neuraltrust/deployment/trustguard) guide instead; the
+prerequisites and network rules on this page apply to both.
+
+## Before you start
+
+Have each of these ready. The install fails, or half-works, without them.
+
+- [ ] **Your tenant's region**, EU or US — see [Choose your region](#choose-your-region)
+- [ ] **A cluster** with an ingress controller and Helm 3.8+, sized per [Prerequisites](#prerequisites)
+- [ ] **A base domain** you can point at the cluster ingress, for example `platform.example.com`
+- [ ] **PostgreSQL and Redis** the cluster can reach — see [Check your datastores first](#check-your-datastores-first)
+- [ ] **The registry key** NeuralTrust sent when your account was provisioned
+- [ ] **Egress to your region's hosts**, and the **inbound rule** agreed with your network team — see [Network](#network)
+- [ ] **Console access** in your region, to create a private TrustGate and, if you run it, a private TrustGuard
+
+| Stage | Section | You come away with |
+| --- | --- | --- |
+| Understand | [Architecture](#architecture), [What runs](#what-runs) | Which workloads land in your cluster and what they connect to |
+| Prepare | [Choose your region](#choose-your-region), [Prerequisites](#prerequisites), [Network](#network) | A cluster, datastores and firewall rules that will pass the install |
+| Install | [Install](#install), steps 1–5 | A running release with every Secret it needs |
+| Prove | [Verify](#verify) | Pods Ready, both entry points registered, telemetry flowing |
+| Operate | [Upgrades](#upgrades), [High availability](#high-availability) | How to keep it current and resilient |
 
 ## Architecture
 
@@ -28,9 +54,9 @@ its own, see [Deploy TrustGate](/neuraltrust/deployment/trustgate) or
 
 | Plane | Where it runs | What it covers |
 | --- | --- | --- |
-| **Control plane** | NeuralTrust SaaS | Console, configuration, analytics |
+| **Control plane** | NeuralTrust SaaS, in your tenant's region | Console, configuration, analytics |
 | **Data plane** | Your environment | TrustGate, TrustGuard, data-plane API, DataAgent |
-| **Inference plane** | NeuralTrust SaaS, EU or US (or your environment, opt-in) | Firewall: the ML detectors behind TrustGuard |
+| **Inference plane** | NeuralTrust SaaS, EU or US (or your environment, opt-in) | Firewall: the ML detectors behind TrustGuard — see [Inference plane](/neuraltrust/deployment/inference-plane) |
 
 ### How the planes connect
 
@@ -87,11 +113,42 @@ red-teaming-only install (`global.products.dataPlane` alone) runs without one.
 TrustGate admin, the console, and analytics are **not** deployed in Hybrid —
 they run on SaaS. There is no in-cluster ClickHouse.
 
+## Choose your region
+
+Your tenant lives in one NeuralTrust region, and a Hybrid data plane dials that
+region for everything: config sync, DataBridge, telemetry and — through the
+firewall JWT the same console issues — the inference plane. One value selects
+it:
+
+```yaml
+global:
+  saasRegion: "eu"   # default; "us" for Americas
+```
+
+| `global.saasRegion` | Control-plane endpoints | Inference plane |
+| --- | --- | --- |
+| `eu` (default) | `*.neuraltrust.ai` | `firewall.neuraltrust.ai` |
+| `us` | `*.us.neuraltrust.ai` | `firewall.us.neuraltrust.ai` |
+
+- **It moves every control-plane connection together.** Config sync, DataBridge
+  and telemetry all derive from it, so there are no per-endpoint hosts to set.
+- **Credentials are region-scoped.** A config-sync token or DataAgent
+  enrollment token issued by the EU control plane does not authenticate against
+  the US one. Create the console objects in [step 2](#install) in the same
+  region you set here.
+- **Anything other than `eu` or `us` is rejected at render time**, so a typo
+  cannot quietly send a data plane to the wrong region.
+
+Leave it unset for an EU tenant. For a US tenant, add `saasRegion: "us"` under
+`global` in the values file you write in [step 4](#install), and allow the US
+hosts in [Network](#network).
+
 ## Prerequisites
 
 - A Kubernetes cluster with an ingress controller, and Helm 3.8+
-- **3** nodes of 8 vCPU / 32 GiB with all products, as the minimum of an
-  autoscaled node pool; GPU and single-product options are in
+- **2** nodes of 8 vCPU / 16 GiB with all products and the NeuralTrust-hosted
+  Firewall, or **3** of 8 vCPU / 32 GiB with the Firewall in your cluster, as
+  the minimum of an autoscaled node pool; GPU and single-product options are in
   [Capacity](/neuraltrust/deployment/architecture#capacity)
 - A base domain you can point at the cluster ingress, for example
   `platform.example.com`
@@ -131,21 +188,42 @@ until you use the feature that needs it. Set every host explicitly.
 ## Network
 
 Allow **TCP 443** from your cluster egress — and from any NAT or proxy in front
-of it — to these hosts. Prefer **hostname** rules where your firewall supports
-DNS-based allowlists; the IPs are for static ACLs. If DNS resolves differently
-in your region, trust DNS and ask NeuralTrust support to refresh the list.
+of it — to the hosts of **your region only**. Prefer **hostname** rules where
+your firewall supports DNS-based allowlists; the IPs are for static ACLs. If DNS
+resolves differently in your region, trust DNS and ask NeuralTrust support to
+refresh the list.
+
+<Tabs>
+<Tab title="EU (saasRegion: eu)">
 
 | Hostname | IP | Purpose |
 | --- | --- | --- |
 | `agentgateway-configsync.neuraltrust.ai` | `34.22.134.169` | TrustGate (AgentGateway) config-sync |
 | `trustguard-configsync.neuraltrust.ai` | `34.62.69.111` | TrustGuard config-sync |
 | `databridge.neuraltrust.ai` | `34.62.63.231` | DataAgent DataBridge |
-| `telemetry.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export (EU) |
-| `telemetry.us.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export (US) |
-| `firewall.neuraltrust.ai` | resolve via DNS | NeuralTrust-hosted Firewall (EU) |
-| `firewall.us.neuraltrust.ai` | resolve via DNS | NeuralTrust-hosted Firewall (US) |
+| `telemetry.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export |
+| `firewall.neuraltrust.ai` | resolve via DNS | NeuralTrust-hosted Firewall |
 
-Allow the telemetry host matching the region your tenant is provisioned in.
+</Tab>
+<Tab title="US (saasRegion: us)">
+
+| Hostname | IP | Purpose |
+| --- | --- | --- |
+| `agentgateway-configsync.us.neuraltrust.ai` | resolve via DNS | TrustGate (AgentGateway) config-sync |
+| `trustguard-configsync.us.neuraltrust.ai` | resolve via DNS | TrustGuard config-sync |
+| `databridge.us.neuraltrust.ai` | resolve via DNS | DataAgent DataBridge |
+| `telemetry.us.neuraltrust.ai` | resolve via DNS | Product metadata OTLP export |
+| `firewall.us.neuraltrust.ai` | resolve via DNS | NeuralTrust-hosted Firewall |
+
+The US hosts are published by DNS only. Use hostname rules, and ask NeuralTrust
+support for static IPs if your firewall cannot resolve names.
+
+</Tab>
+</Tabs>
+
+Only list the rows for the products you run: a TrustGate-only data plane needs
+no `trustguard-configsync` host, and the Firewall host is needed by TrustGuard,
+and by TrustGate only when you give it a firewall JWT for smart routing.
 Product metadata OTLP does not leave the pods directly — the co-located egress
 collector forwards to the ingest endpoint for your region, so that is the host to
 list if your policy enumerates every external destination. Opt-in
@@ -221,8 +299,10 @@ Both paths are in [Container images](/neuraltrust/deployment/images).
 
 <Step title="Create the gateway in the console">
 
-Open **TrustGate → New Gateway**, name it, choose **Private**, then
-**Kubernetes**. If you are also running TrustGuard, create a private TrustGuard
+Sign in to the console of your tenant's region — the tokens it issues only work
+against that region's control plane. Open **TrustGate → New Gateway**, name it,
+choose **Private**, then **Kubernetes**. If you are also running TrustGuard,
+create a private TrustGuard
 in **TrustGuard → Agent Security** as well — each product is a separate console
 object with its own credentials.
 [Console setup](/neuraltrust/deployment/console-setup) covers the wizard screen
@@ -332,6 +412,9 @@ trustguard:
       name: "trustguard-firewall"
 ```
 
+For a US tenant, also add `saasRegion: "us"` under `global` — see
+[Choose your region](#choose-your-region). An EU tenant needs nothing more.
+
 To keep the Firewall in your cluster instead, replace the `trustguard.firewall`
 block with:
 
@@ -346,8 +429,8 @@ tracked slice — `values-trustgate.yaml.example`,
 `values-trustguard.yaml.example`, or `values-red-teaming.yaml.example`
 (data-plane API only, which needs no DataAgent and no config-sync). The
 single-product installs are walked through in
-[Deploy TrustGate](/neuraltrust/deployment/trustgate) and
-[Deploy TrustGuard](/neuraltrust/deployment/trustguard). Every switch is in
+[TrustGate data plane](/neuraltrust/deployment/trustgate) and
+[TrustGuard data plane](/neuraltrust/deployment/trustguard). Every switch is in
 [Values cheat sheet](/neuraltrust/deployment/configuration#values-cheat-sheet).
 
 Do **not** set `configSync.enabled: true`. Hybrid derives it from the deployment
@@ -412,7 +495,10 @@ A pod that is `Running` but never `Ready` is the signature of config-sync
 failing. Three causes, in order of likelihood:
 
 1. The token is wrong, or was pasted with trailing whitespace
-2. Egress to `*.neuraltrust.ai:443` is blocked — see [Network](#network)
+2. Egress to your region's hosts on 443 — `*.neuraltrust.ai` or
+   `*.us.neuraltrust.ai` — is blocked, or `global.saasRegion` does not match the
+   region that issued the token — see [Network](#network) and
+   [Choose your region](#choose-your-region)
 3. A TLS-intercepting proxy is present and its CA is not trusted
 
 For the last case set `configSync.tlsCa`. Do not reach for
