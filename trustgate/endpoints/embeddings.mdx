@@ -1,10 +1,11 @@
 ---
 title: "Embeddings"
-description: "The OpenAI embeddings body, routed only to registries that can embed. A mixed pool is fine; a pinned registry that cannot embed is a 400."
+description: "The OpenAI embeddings body, or the Gemini and Vertex AI embeddings calls Google's SDKs send, routed only to registries that can embed. A mixed pool is fine; a pinned registry that cannot embed is a 400."
 ---
 
 Clients send the OpenAI embeddings body to `/v1/embeddings` on the application
-URL, with the same key they use for chat.
+URL, with the same key they use for chat. Google's SDKs can keep their own
+embeddings calls instead: see [Gemini and Vertex AI shapes](#gemini-and-vertex-ai-shapes).
 
 <CodeGroup>
   ```python Python
@@ -37,7 +38,7 @@ URL, with the same key they use for chat.
 |---|---|
 | **OpenAI**, **Azure OpenAI**, **Mistral**, **OpenAI-compatible** | Native embeddings endpoints. |
 | **Cohere** | Same body, adapted to Cohere's embed API. |
-| **Vertex AI** | Gemini embed — one input or a batch. |
+| **Vertex AI** | Gemini embed — one input or a batch, sent upstream as `:predict`. Reports token usage, so embeddings count toward cost and token limits. |
 | **Amazon Bedrock** | **Titan embed** models only; a non-Titan model is a 400 from Bedrock. |
 
 Anthropic, Gemini AI Studio, and Bedrock's chat models do not embed and are left
@@ -55,3 +56,40 @@ then [routing](/trustgate/llm/routing) runs on that pool as usual. Two edges:
 A pool that mixes chat and embeddings providers is the normal case. Chat uses
 every chat-capable member; embeddings skip the rest. Use the **Capability** filter
 in Registry to see which providers qualify.
+
+## Gemini and Vertex AI shapes
+
+The Gemini and Vertex AI model paths that serve [chat](/trustgate/endpoints/chat#shapes-the-gateway-accepts)
+also take the embeddings actions Google's SDKs send:
+
+| Path after the application slug | Actions |
+|---|---|
+| `/v1beta/models/{model}` | `:embedContent` · `:batchEmbedContents` |
+| `/{v1\|v1beta1}/projects/{project}/locations/{location}/publishers/google/models/{model}` | `:embedContent` · `:batchEmbedContents` · `:predict` |
+| `/{v1\|v1beta1}/publishers/google/models/{model}` (express mode) | `:embedContent` · `:batchEmbedContents` · `:predict` |
+
+```bash curl
+curl -X POST "https://<llm-host>/<application-slug>/v1beta/models/gemini-embedding-001:embedContent" \
+  -H "x-goog-api-key: <application key>" \
+  -H "Content-Type: application/json" \
+  -d '{"content": {"parts": [{"text": "Hello from TrustGate"}]}}'
+```
+
+The model comes from the path, and project and location are ignored, as for
+chat. These calls route like `/v1/embeddings`: any registry that can embed
+serves them, not only Vertex AI, and the gateway translates in both directions.
+
+- **The response follows the action called.** `:embedContent` returns
+  `{"embedding": …}`. `:batchEmbedContents` returns `{"embeddings": [...]}`,
+  even for a single request. `:predict` returns `predictions[].embeddings.values`.
+- **`:predict` is for embedding models only**: `gemini-embedding-*`,
+  `text-embedding-*` and `text-multilingual-embedding-*`. Any other `:predict`,
+  and `:predict` on `/v1beta/models/…`, is a `404`, as are `:countTokens`,
+  `:rawPredict` and unknown actions.
+- **One `content` is one vector.** Its text parts are joined. A request with
+  non-text parts or no text, or a batch that mixes `taskType` or
+  `outputDimensionality` values, is a `400` in the Gemini error format.
+- **Options are carried where the provider has them.** `taskType` and `title`
+  reach Vertex AI, and `taskType` becomes Cohere's `input_type`.
+  `outputDimensionality` becomes `dimensions` on OpenAI and Azure OpenAI and is
+  dropped for Mistral, OpenAI-compatible, Titan and Cohere.
