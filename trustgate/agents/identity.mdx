@@ -1,0 +1,72 @@
+---
+title: "Verify TrustGate's token"
+description: "With As the user, signed by TrustGate, every call carries a short-lived JWT the gateway signs. The agent checks it against the gateway's keys and reads who the call is for and which application acts."
+---
+
+With **As the user, signed by TrustGate (recommended)**, the gateway signs a token
+for every call and sends it as `Authorization: Bearer`. The agent verifies it to
+know that the call came through the gateway, for whom, and which application is
+acting. The agent never sees the caller's own credential.
+
+The agent's panel in Registry → **Agents** shows what the agent needs under
+**Verify TrustGate's token**: the **JWKS URL**, the **Issuer (iss)** and the
+**Audience (aud)**, with a Python and a Node.js snippet that uses them.
+
+## The token
+
+| Claim | Value |
+|---|---|
+| `iss` | The gateway's agent token issuer: `agent_token_issuer` on `GET /v1/gateways/{id}`. |
+| `aud` | The audience set on the agent (`auth.audience`, through the API), otherwise the agent endpoint the gateway calls. |
+| `sub` | Who the call is for: the person's subject at their identity provider, `app:<consumer_id>:<user>` for an end user the application named, or `app:<consumer_id>` for the application itself. |
+| `act` | `{"sub": "app:<consumer_id>"}`, the application acting, when `sub` is a user. Absent when `sub` is the application. |
+| `orig_iss` | The identity provider's issuer, only when one signed the caller in. |
+| `scope` | The caller's scopes, when it has any. |
+| `iat`, `exp`, `jti` | A lifetime of 5 minutes. |
+
+It is signed with RS256. Its `kid` names a key in
+`https://<agent-host>/.well-known/jwks.json`, where `<agent-host>` is `hosts.agent`
+on the gateway.
+
+## Verify it
+
+Check the signature against the JWKS, and `iss`, `aud` and `exp`. Then read `sub`
+for the user and `act.sub` for the application.
+
+<CodeGroup>
+  ```python Python
+  # pip install "pyjwt[crypto]"
+  import jwt
+
+  jwks = jwt.PyJWKClient("https://<agent-host>/.well-known/jwks.json")
+
+
+  def verify(authorization: str) -> dict:
+      token = authorization.removeprefix("Bearer ")
+      key = jwks.get_signing_key_from_jwt(token).key
+      return jwt.decode(token, key, algorithms=["RS256"], audience="<audience>", issuer="<issuer>")
+  ```
+
+  ```js Node.js
+  // npm install jose
+  import { createRemoteJWKSet, jwtVerify } from 'jose'
+
+  const jwks = createRemoteJWKSet(new URL('https://<agent-host>/.well-known/jwks.json'))
+
+  export async function verify(authorization) {
+    const token = authorization.replace(/^Bearer /, '')
+    const { payload } = await jwtVerify(token, jwks, { audience: '<audience>', issuer: '<issuer>', algorithms: ['RS256'] })
+    return payload
+  }
+  ```
+</CodeGroup>
+
+## When the gateway cannot sign
+
+Tokens are signed with the data plane's `STS_SIGNING_KEY`
+([data-plane secrets](/neuraltrust/deployment/secrets#data-plane-secrets)). When
+the gateway has no signing key that all its processes share, the call is refused
+with `-32092` (`signing_key_unavailable`) and nothing reaches the agent.
+
+Hosted agents do not take this option: AgentCore, Foundry and Vertex AI accept
+only their own cloud's credentials. See [Hosted agents](/trustgate/agents/hosted).
