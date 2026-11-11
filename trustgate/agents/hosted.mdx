@@ -1,0 +1,197 @@
+---
+title: "Hosted agents"
+description: "Agents on Amazon Bedrock AgentCore, Microsoft Foundry and Vertex AI Agent Engine, named by their cloud's identifiers and signed in to with a cloud credential. What each cloud must allow, and what each one does not support."
+---
+
+The three clouds serve A2A themselves, so the gateway still forwards A2A. What
+changes per cloud is how the agent is named, how TrustGate signs in to it, and a
+few transport differences. You never build an agent URL by hand: the gateway
+derives the card URL and the endpoint from the identifiers you give.
+
+| | Amazon Bedrock AgentCore | Microsoft Foundry | Google Vertex AI Agent Engine |
+|---|---|---|---|
+| **Named by** | **Agent runtime ARN**, **Endpoint qualifier** | **Project endpoint**, **Agent name** | **Project**, **Location**, **Agent Engine ID** |
+| **Sign-in** | AWS IAM (SigV4), OAuth client credentials, or as the user through your identity provider | Microsoft Entra ID, or as the user through Entra (on-behalf-of) | A Google service account |
+| **A2A version** | What the runtime's card offers | 1.0 (default) or 0.3 | 0.3 |
+| **Streaming** | When the card declares it | No | No |
+
+<Note>
+The card of a hosted agent can be read only with a credential, so **Add agent**
+asks for the sign-in before it reads the card.
+</Note>
+
+## Sign-in
+
+A hosted agent accepts only its own cloud's credential. **AWS IAM (SigV4)**,
+**Microsoft Entra ID** and **Google service account** each offer these
+credentials:
+
+| Cloud | **Credential** |
+|---|---|
+| AWS | **Access keys** (with an optional session token), **Assume a role** with an **External ID**, or **Use the gateway's AWS identity**: the credentials of the pods that run the gateway (IRSA or Pod Identity). |
+| Azure | **Service principal** (tenant, client id and secret), or **Use the gateway's managed identity**: the managed or workload identity of the pods that run the gateway. |
+| Google | **Service account JSON**, **Impersonate a service account** by its email, or **Use the gateway's Google identity**: the Application Default Credentials of the pods that run the gateway. |
+
+On a SaaS gateway, **Assume a role** requires the **External ID** that the role's
+trust policy requires. Without one, anyone who knew another organisation's role
+ARN could have the gateway assume it. **Use the gateway's AWS identity** is not
+offered there. On a gateway served by your own data plane the external id is
+optional.
+
+A cloud credential is sent only over HTTPS, and only to the host derived for the
+agent. Secrets are encrypted at rest and masked when read back.
+
+### When calls go as the user
+
+With *as the user* sign-in there is no user when the agent is added, yet its card
+still needs a credential. **Reading the card** asks for an application credential,
+used only to read the card:
+
+- AgentCore: OAuth client credentials (`card_auth: "client_credentials"`).
+- Foundry: a Microsoft Entra ID credential (`card_auth: "cloud"` with
+  `cloud_auth.azure`).
+
+Calls then need a caller that the identity provider signed in. An API key gets
+`-32093`.
+
+## Amazon Bedrock AgentCore
+
+**On AWS:**
+
+- Deploy the agent to an AgentCore runtime with the A2A protocol.
+- Set the runtime's inbound authorization to match the sign-in: **IAM** for
+  **AWS IAM (SigV4)**, or a **JWT authorizer** that accepts the tokens of the
+  OAuth client or the identity provider you choose in TrustGate.
+- For SigV4, allow the AWS identity TrustGate uses to invoke the runtime. For an
+  assumed role, put the external id in its trust policy.
+
+**In TrustGate:** the **Agent runtime ARN**
+(`arn:aws:bedrock-agentcore:{region}:{account}:runtime/{id}`) and an optional
+**Endpoint qualifier** (default `DEFAULT`). The region comes from the ARN.
+
+| Sign-in | The runtime receives |
+|---|---|
+| **AWS IAM (SigV4)** | The request signed with SigV4 for `bedrock-agentcore` in the ARN's region, over the exact body sent. |
+| **OAuth client credentials** | `Authorization: Bearer` with a token from the token URL. |
+| **As the user, through your identity provider** | `Authorization: Bearer` with the user's token, by **Microsoft Entra (on-behalf-of)** or **Token exchange (RFC 8693)**. |
+
+**As the user, signed by TrustGate** is not offered: AgentCore cannot validate a
+token TrustGate signs yet. **No sign-in** and **API key in a header** are refused
+too.
+
+**Sessions.** Every call carries
+`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`. Messages of one A2A context reuse the
+session the gateway recorded with that context; a new conversation gets a new
+one. A caller cannot choose the session.
+
+**Errors.** AgentCore answers JSON-RPC errors with their real HTTP status. The
+gateway relays the agent's error over HTTP `200`, and:
+
+- a `401` that asks for authentication is `-32093`;
+- a `403` with no JSON-RPC error (the signature refused) is `-32092`
+  `upstream_auth_failed`;
+- `-32054` *Session operation in progress* is retried twice, after 100 ms and
+  400 ms, on calls that are not streams. AgentCore did not process the call, so a
+  retry does not repeat work.
+
+## Microsoft Foundry
+
+**On Azure:**
+
+- Enable the `a2a` protocol on the agent's endpoint.
+- Give the identity TrustGate uses the **Foundry Agent Consumer** role on the
+  project. For on-behalf-of, the users need it.
+
+Foundry accepts only Microsoft Entra ID tokens, for the scope
+`https://ai.azure.com/.default`, even to read the card.
+
+**In TrustGate:** the **Project endpoint**
+(`https://{account}.services.ai.azure.com/api/projects/{project}`) and the
+**Agent name**.
+
+| Sign-in | Foundry receives |
+|---|---|
+| **Microsoft Entra ID** | `Authorization: Bearer` with an Entra token for the service principal or managed identity, cached until 5 minutes before it expires. |
+| **As the user, through Microsoft Entra (on-behalf-of)** | The user's Entra token, exchanged on-behalf-of. The scope defaults to `https://ai.azure.com/.default`. |
+
+**Versions.** Foundry serves 1.0 and 0.3 on the same endpoint; 0.3 is in preview
+on Foundry. The default is 1.0. Every call carries `A2A-Version` with the pinned
+version, because Foundry answers 0.3 to a request that names none.
+
+**Limits.** Foundry's A2A endpoint takes text only and does not stream: streaming
+and subscribe methods answer `-32004` without reaching it.
+
+## Google Vertex AI Agent Engine
+
+<Warning>
+**Preview.** Vertex AI support follows Google's documentation and has not yet
+been verified against a deployed Agent Engine.
+</Warning>
+
+**On Google Cloud:**
+
+- Deploy the agent to Agent Engine as an `A2aAgent`.
+- Give the service account TrustGate uses an IAM role on the project that allows
+  it to query the Agent Engine.
+
+**In TrustGate:** the **Project**, the **Location** (a region such as
+`us-central1`) and the **Agent Engine ID**, the number at the end of the resource
+name. The gateway calls
+`https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}/reasoningEngines/{id}/a2a`
+and reads the card at `/v1/card` under it.
+
+| Sign-in | Vertex AI receives |
+|---|---|
+| **Google service account** | `Authorization: Bearer` with a Google token for `https://www.googleapis.com/auth/cloud-platform`. |
+
+There is no *as the user* option: the token is always the service account's.
+
+**HTTP+JSON.** Vertex AI serves A2A 0.3 over HTTP+JSON only. Callers still speak
+JSON-RPC 0.3 to the gateway, which sends each method as its REST request and wraps
+the answer as the JSON-RPC `result`. The card a caller gets names JSON-RPC at the
+gateway's URL.
+
+| Method | Sent to Vertex AI as |
+|---|---|
+| `message/send` | `POST /v1/message:send` |
+| `tasks/get` | `GET /v1/tasks/{id}`, with `historyLength` as a query parameter |
+| `tasks/cancel` | `POST /v1/tasks/{id}:cancel` |
+| `message/stream`, `tasks/resubscribe` | Refused with `-32004`, without calling Vertex AI |
+
+| Vertex AI answers | The caller gets |
+|---|---|
+| `400` | `-32602` |
+| `401` | `-32093` |
+| `403` | `-32092` `upstream_auth_failed` |
+| `404` on a task | `-32001` |
+| `429`, `5xx` | `-32092` |
+
+## From the API
+
+Set `provider` and the object named after it instead of `card_url` and `url`, and
+`auth.mode: "cloud"` with `cloud_auth`:
+
+```http
+POST /v1/gateways/{gateway_id}/registries
+{
+  "name": "Travel planner",
+  "type": "A2A",
+  "a2a_target": {
+    "provider": "bedrock_agentcore",
+    "bedrock_agentcore": {"runtime_arn": "arn:aws:bedrock-agentcore:eu-west-1:123456789012:runtime/travel-abc"},
+    "auth": {"mode": "cloud"},
+    "cloud_auth": {"aws": {"use_role": true, "role": "arn:aws:iam::123456789012:role/tg-agents", "external_id": "nt-7f3a"}}
+  }
+}
+```
+
+| `provider` | Object | `cloud_auth` |
+|---|---|---|
+| `bedrock_agentcore` | `bedrock_agentcore`: `runtime_arn`, `qualifier` | `aws`: `access_key_id`, `secret_access_key`, `session_token`; or `use_role`, `role`, `external_id`; or empty for the pods' credentials |
+| `azure_foundry` | `azure_foundry`: `project_endpoint`, `agent_name` | `azure`: `tenant_id`, `client_id`, `client_secret`; or `use_managed_identity` |
+| `vertex_agent_engine` | `vertex_agent_engine`: `project`, `location`, `reasoning_engine_id` | `gcp`: `service_account_json`; or `impersonate_service_account`; or empty for Application Default Credentials |
+
+`preview-agent-card` takes the same fields and uses the credentials for that read
+only. A sign-in another cloud's agent would need, or a `card_url` on a hosted
+agent, is refused with `422` and a message naming what the agent accepts. The
+response carries the derived `endpoint` and `cloud_auth` with secrets masked.

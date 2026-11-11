@@ -1,0 +1,124 @@
+---
+title: "Connect to an agent"
+description: "An application calls its agents with any A2A client: the agent's card on the gateway, and the application's key in a header. Who the call runs as, and what each error means."
+---
+
+An application reaches an agent once the agent is in the registry and the
+application lists it: Applications → the application → **General** → **Agents** →
+**Add agent**. An application with no agents has no agent plane.
+
+## The Connect tab
+
+**Connect** → **Agents** lists each agent the application calls, with its A2A
+version and a button that copies its card URL. **Agent in the examples** picks the
+agent the cURL and Python snippets call.
+
+Any A2A client works: point it at the agent's card on the gateway and send the
+application's key, from the **Auth** tab, in `X-AG-API-Key`.
+
+<CodeGroup>
+  ```bash cURL (1.0)
+  curl https://<agent-host>/<application-slug>/agents/<agent-id>/.well-known/agent-card.json \
+    -H "X-AG-API-Key: $TRUSTGATE_API_KEY"
+
+  curl https://<agent-host>/<application-slug>/agents/<agent-id> \
+    -H "X-AG-API-Key: $TRUSTGATE_API_KEY" \
+    -H "A2A-Version: 1.0" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"role":"ROLE_USER","messageId":"1","parts":[{"text":"Hello"}]}}}'
+  ```
+
+  ```python Python
+  # pip install "a2a-sdk>=1,<2" httpx
+  import asyncio
+
+  import httpx
+  from a2a.client import ClientConfig, create_client
+  from a2a.helpers import get_stream_response_text, new_text_message
+  from a2a.types import Role, SendMessageRequest
+
+
+  async def main():
+      async with httpx.AsyncClient(headers={"X-AG-API-Key": "<api-key>"}) as http:
+          client = await create_client("https://<agent-host>/<application-slug>/agents/<agent-id>", ClientConfig(httpx_client=http))
+          request = SendMessageRequest(message=new_text_message("Hello", role=Role.ROLE_USER))
+          async for response in client.send_message(request):
+              print(get_stream_response_text(response))
+
+
+  asyncio.run(main())
+  ```
+</CodeGroup>
+
+On a 0.3 agent the method is `message/send` and the message is written the 0.3
+way (`"role": "user"`, `"kind": "text"` parts). Requests must be `Content-Type:
+application/json` and carry one JSON-RPC 2.0 request with an `id`.
+
+Your own code can find the addresses from the key instead: `GET /whoami` on the
+MCP host lists each of the key's agent applications with its agents, their card
+URLs and versions, and the [TrustGate SDK](/sdks/trustgate/agents) hands them to
+an A2A client.
+
+## Who a call runs as
+
+The plane authenticates callers as the MCP plane does:
+
+- the application's key in `X-AG-API-Key`, or `Authorization: Bearer ag_…`;
+- a client certificate;
+- a token from an identity provider the gateway trusts.
+
+A bearer token without the `ag_` prefix is validated as a token, even when an
+`X-AG-API-Key` is also sent. MCP session tokens are not accepted.
+
+| The call carries | It runs as |
+|---|---|
+| The key or certificate, nothing else | The application |
+| The key or certificate **and** `X-NeuralTrust-End-User: <user>` | That end user, within the application |
+| An identity provider's token | That person |
+
+Who the call runs as decides who owns its [tasks](/trustgate/agents/overview#tasks-belong-to-their-caller)
+and what the agent receives when it signs in as the user (see
+[sign-in](/trustgate/registry/agents#how-trustgate-signs-in)).
+
+## Errors
+
+These three come back as HTTP statuses, before the body is read and before any
+call to the agent:
+
+| Status | When |
+|---|---|
+| `401` | No valid credential. |
+| `403` | The credential is not attached to the application, or the application accepts only listed client ids or certificate subjects and this caller is not one of them. |
+| `404` | Unknown application or agent, an application with no agent plane, or a disabled agent. |
+
+`413` answers a body over 8 MiB, and `402` (`-32092`, `plan_unavailable`) a
+gateway whose usage plan is exhausted. Everything else is a JSON-RPC error over
+HTTP `200`:
+
+| Code | Meaning | `error.data` |
+|---|---|---|
+| `-32700` | The body is not JSON. | |
+| `-32600` | Not a single JSON-RPC 2.0 request with an `id`, or `Content-Type` is not `application/json`. | |
+| `-32601` | Method not of the agent's version, unknown, or outside **Allowed methods**. | |
+| `-32602` | The params lack the message or the task `id`. | |
+| `-32001` | Task or context not found, or not the caller's. | 1.0: `ErrorInfo` with `TASK_NOT_FOUND` |
+| `-32003` | Push notifications are refused. | |
+| `-32004` | `ListTasks`, or streaming on an agent that does not stream. | |
+| `-32007` | The extended card is refused. | |
+| `-32090` | Blocked by a policy. | `{"reason": "policy_blocked" \| "mask_unsupported", "plugin": "<slug>"}` |
+| `-32091` | Rate limited. | `{"retry_after": <seconds>}` |
+| `-32092` | The gateway could not complete the call. | `{"reason": "<reason>"}` |
+| `-32093` | The agent signs in as the user, and the caller is not a person an identity provider signed in. | `{"reason": "identity_required"}` |
+
+`-32092` reasons:
+
+| Reason | |
+|---|---|
+| `upstream_unreachable`, `upstream_timeout`, `upstream_error`, `invalid_upstream_response`, `response_too_large` | The agent did not answer, or answered something the gateway cannot relay. |
+| `upstream_auth_failed` | A hosted agent refused the gateway's own credential. |
+| `stream_idle`, `stream_max_duration` | A stream hit a [limit](/trustgate/agents/overview#limits). |
+| `ownership_unavailable`, `ownership_conflict` | Task ownership could not be read, or the answer names another caller's task. |
+| `client_credentials_failed`, `identity_exchange_failed`, `signing_key_unavailable` | The gateway could not get or sign the credential for the agent. |
+| `plan_unavailable` | The gateway's usage plan is exhausted. |
+
+An error the agent itself answers is relayed as it came.

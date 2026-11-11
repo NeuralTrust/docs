@@ -1,0 +1,172 @@
+---
+title: "Agents"
+description: "An agent entry is where an A2A agent runs, how TrustGate signs in to it, and the card pinned for it. A new card reaches callers only after someone approves it."
+---
+
+An agent entry makes an A2A agent reachable through the
+[Agent Gateway](/trustgate/agents/overview). Registry → **Agents** lists them, each
+with its A2A version, its skill count, and **No streaming** when calls to it cannot
+stream: its card does not declare streaming, or it runs on Foundry or Vertex AI.
+
+## Add an agent
+
+**Add agent** asks, in order:
+
+1. **Where does this agent run?** **Any A2A URL**, or a hosted agent on
+   **Amazon Bedrock AgentCore**, **Microsoft Foundry** or **Google Vertex AI
+   Agent Engine**. For any URL, the **Agent URL** is the agent's base URL or its
+   card URL. A hosted agent is named by its cloud's own identifiers instead: see
+   [Hosted agents](/trustgate/agents/hosted).
+2. **How TrustGate signs in to this agent**, for a hosted agent, whose card can be
+   read only with a credential.
+3. **The card.** TrustGate reads it (**Reading the card…**) and shows its provider,
+   card URL, the versions it offers, what it asks for, and its skills. An agent
+   that offers neither JSON-RPC 0.3 nor 1.0 cannot be added.
+4. **Settings.** **Name**, **A2A version** (1.0 when the card offers it, otherwise
+   0.3), the sign-in for an agent at any URL, and **Advanced**.
+
+**Pin and add** pins the card and creates the entry. To let an application call
+it, add it on the application: Applications → **General** → **Agents** → **Add
+agent**.
+
+### Advanced
+
+| Field | |
+|---|---|
+| **Headers** | Sent to the agent on every call. `Authorization`, `Cookie`, `Host`, `Content-Length`, `A2A-Version` and `X-AG-*` are refused. Values are encrypted at rest and masked when read back. |
+| **Allowed methods** | The methods of the agent's version that are forwarded. Empty allows every method. Any other answers `-32601`. |
+| **Send sign-in credentials when reading the card** | Any A2A URL only, with **API key in a header** or **OAuth client credentials**. Off, the card is read without a credential. On, the credential goes only to the agent's own host, over HTTPS. |
+
+## How TrustGate signs in
+
+What the agent receives on every call. A caller's own credential never reaches an
+agent.
+
+| Option | The agent receives |
+|---|---|
+| **No sign-in** | No credential. |
+| **API key in a header** | The header and value you set. |
+| **OAuth client credentials** | `Authorization: Bearer` with a token from the token URL, cached until shortly before it expires. |
+| **As the user, signed by TrustGate (recommended)** | `Authorization: Bearer` with a short-lived JWT the gateway signs, naming the user, or the application when there is none. The agent [verifies it](/trustgate/agents/identity). The default for an agent at any URL. |
+| **As the user, through your identity provider** | A token for the user from an identity provider configured on the gateway: **Microsoft Entra (on-behalf-of)**, for the **Scope** you set, or **Token exchange (RFC 8693)**. |
+
+The two *as the user* options through an identity provider need a caller that
+identity provider signed in. A call with an API key, with or without an end user
+named, gets `-32093`. A refused exchange answers `-32092`
+(`identity_exchange_failed`).
+
+Hosted agents have their own options: AWS IAM, Microsoft Entra ID or a Google
+service account. See [Hosted agents](/trustgate/agents/hosted#sign-in).
+
+## Card pinning
+
+For an **Agent URL** whose path ends in `.json` or `/agentCard/v1.0`, TrustGate
+reads that URL. Otherwise it tries `/.well-known/agent-card.json`,
+`/.well-known/agent.json` and `/agentCard/v1.0` under it, in that order, and keeps
+the first JSON object. Reads go through the gateway's outbound network guard, with
+10 seconds in total and 1 MiB per response. The URL must be `https`; `http` is
+accepted only where the gateway allows outbound calls to private networks.
+
+The card must have a `name` and offer the chosen version over JSON-RPC:
+
+- **0.3**: `url` with a `protocolVersion` starting with `0.3` (or none), or an
+  `additionalInterfaces` entry with `transport: "JSONRPC"`.
+- **1.0**: a `supportedInterfaces` entry with `protocolBinding: "JSONRPC"` and a
+  `protocolVersion` starting with `1.0`.
+
+The pinned card is what callers get, [rewritten](/trustgate/agents/overview#the-card-is-pinned).
+Its digest is `sha256:` over the card without `signatures`, with keys sorted.
+
+### Check for changes
+
+Editing an agent re-reads its card only when **Change URL** (or **Change
+location**) or the A2A version changes. To take a new card from the same place,
+open the agent and choose **Check for changes**. Either the card has not changed
+since it was pinned, or the panel lists what did: skills added and removed, the
+endpoint, security, and other fields.
+
+**Clients keep seeing the pinned card until you approve.** **Approve new card**
+pins the card you reviewed. **Keep current** leaves the pinned one.
+
+| Approve answers | When |
+|---|---|
+| Pinned | The live card still has the digest you reviewed, or it is already pinned. |
+| **The agent changed its card again** | The live card has another digest. Check again. |
+| The new card no longer offers the agent's version | Keep the current card, or change the agent's URL. |
+
+An agent cannot move to another provider. To run it somewhere else, add a new
+agent.
+
+## From the API
+
+The [Admin API](/trustgate/api/credentials) does the same in four calls.
+
+<Steps>
+<Step title="Preview the card">
+Nothing is written. Credentials in the body are used for this read only.
+
+```http
+POST /v1/gateways/{gateway_id}/registries/preview-agent-card
+{"card_url": "https://travel.example.com"}
+```
+
+```json
+{
+  "resolved_card_url": "https://travel.example.com/.well-known/agent-card.json",
+  "card": {"name": "Travel planner"},
+  "card_digest": "sha256:…",
+  "versions": ["0.3", "1.0"],
+  "default_version": "1.0"
+}
+```
+</Step>
+<Step title="Register the agent">
+```http
+POST /v1/gateways/{gateway_id}/registries
+{
+  "name": "Travel planner",
+  "type": "A2A",
+  "a2a_target": {
+    "card_url": "https://travel.example.com",
+    "auth": {"mode": "exchange", "pattern": "delegation"}
+  }
+}
+```
+
+| `a2a_target` | |
+|---|---|
+| `provider` | `generic` (default), `bedrock_agentcore`, `azure_foundry` or `vertex_agent_engine`. Cannot change after creation. |
+| `card_url` | The agent's base URL or card URL. Any URL only. |
+| `protocol_version` | `"0.3"` or `"1.0"`. Default: `1.0` when offered, otherwise `0.3`. |
+| `url` | An `https` endpoint that replaces the one the card names. Any URL only. |
+| `headers` | Static headers. |
+| `auth` | `mode`: `none` (default), `static`, `client_credentials`, `exchange` with `pattern` `delegation`, `obo` or `token_exchange`, or `cloud` for a hosted agent. `passthrough`, `forwarded` and `exchange`/`impersonation` are refused. |
+| `cloud_auth`, `card_auth` | See [Hosted agents](/trustgate/agents/hosted). `card_auth: "same"` is **Send sign-in credentials when reading the card**. |
+| `allowed_methods` | **Allowed methods**. |
+
+The response adds the read-only `resolved_card_url`, `protocol_version`,
+`endpoint`, `card`, `card_digest` and `card_pinned_at`. Secrets are encrypted at
+rest and masked in responses.
+</Step>
+<Step title="Bind it to an application">
+Create a consumer of type `A2A` with the agent among its registries, and attach a
+key. An `A2A` consumer takes only agents, and an agent binds only to an `A2A`
+consumer.
+
+```http
+POST /v1/gateways/{gateway_id}/consumers
+{"name": "Research bot", "type": "A2A", "registries": [{"id": "{registry_id}"}]}
+```
+</Step>
+<Step title="Check for changes, then approve">
+`refresh` writes nothing. `approve` pins the card only if the live card still has
+the digest you send: `200` pinned, `409` the live card has another digest, `422`
+the entry is not an agent or the new card no longer offers the pinned version.
+
+```http
+POST /v1/gateways/{gateway_id}/registries/{id}/agent-card/refresh
+POST /v1/gateways/{gateway_id}/registries/{id}/agent-card/approve
+{"digest": "sha256:…"}
+```
+</Step>
+</Steps>

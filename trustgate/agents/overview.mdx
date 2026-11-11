@@ -1,0 +1,167 @@
+---
+title: "Agent Gateway"
+description: "A2A agents behind the gateway. An application calls an agent with its own key; the gateway pins the agent's card, runs the application's policies, keeps each task with the caller that started it, and signs in to the agent with the registry's credential."
+---
+
+The agent plane puts [A2A](https://a2a-protocol.org) agents behind a gateway. An
+application calls an agent through the gateway with its own credential. The
+gateway checks the call, runs the application's policies, binds tasks to their
+caller, and forwards the JSON-RPC call with the credential set on the agent's
+registry entry. The caller never learns the agent's address or holds its
+credential.
+
+The plane speaks the JSON-RPC binding of A2A, versions **0.3** and **1.0**. Each
+agent is pinned to one version, and the gateway never translates between them.
+
+## Where it is served
+
+A gateway's agent plane has its own host, next to the LLM and MCP ones:
+
+| Address | |
+|---|---|
+| `https://<agent-host>/<application-slug>/agents/<agent>` | JSON-RPC |
+| `https://<agent-host>/<application-slug>/agents/<agent>/.well-known/agent-card.json` | The agent's card, as the gateway serves it |
+| `https://<agent-host>/.well-known/jwks.json` | The keys that verify [TrustGate's token](/trustgate/agents/identity) |
+
+`<agent>` is the agent's registry id, or its name when exactly one enabled agent
+of the application has that name. Anything else is `404`.
+
+`GET /v1/gateways/{id}` returns the host as `hosts.agent`, with
+`agent_token_issuer` beside it. Both are absent when the environment publishes no
+agent host; the gateway then serves no agents.
+
+## The pieces
+
+| | Where | |
+|---|---|---|
+| **Agent** | Registry → **Agents** | Where the agent runs, how TrustGate signs in to it, and the card pinned for it. See [Agents](/trustgate/registry/agents). |
+| **Application** | Applications → **General** → **Agents** | Which agents an application may call, and its key. See [Connect to an agent](/trustgate/agents/connect). |
+| **Policies** | Policies | Rate limits, size limits and TrustGuard on the calls. See [below](#policies). |
+
+Agents are a plane of their own on an application, next to its models and MCP
+servers. The application's one key opens all of its planes.
+
+## The card is pinned
+
+The gateway reads the agent's card once, when the agent is added, and serves
+that copy. A change on the agent's side reaches callers only after someone
+reviews and approves it (**Check for changes** in the console). See
+[Card pinning](/trustgate/registry/agents#card-pinning).
+
+The card a caller gets is rewritten:
+
+- the gateway's URL is its only JSON-RPC interface;
+- the gateway API key (`X-AG-API-Key`) is its only security scheme, with no
+  per-skill security;
+- push notifications and the extended card are off;
+- `signatures` is removed, along with the other version's interface and security
+  fields.
+
+Everything else on the card is kept. Reading the card needs the same credential
+as a call.
+
+## Methods
+
+| 0.3 | 1.0 | |
+|---|---|---|
+| `message/send` | `SendMessage` | Forwarded |
+| `message/stream` | `SendStreamingMessage` | Forwarded as server-sent events. `-32004` when the card does not declare `capabilities.streaming`. |
+| `tasks/get` | `GetTask` | Forwarded |
+| `tasks/cancel` | `CancelTask` | Forwarded |
+| `tasks/resubscribe` | `SubscribeToTask` | Forwarded as server-sent events. `-32004` when the card does not declare `capabilities.streaming`. |
+| `tasks/pushNotificationConfig/{set,get,list,delete}` | `{Create,Get,Delete}TaskPushNotificationConfig`, `ListTaskPushNotificationConfigs` | Refused, `-32003` |
+| `agent/getAuthenticatedExtendedCard` | `GetExtendedAgentCard` | Refused, `-32007` |
+| — | `ListTasks` | Refused, `-32004` |
+
+A method of the other version, an unknown one, or one outside the agent's
+**Allowed methods** answers `-32601`. Refused calls never reach the agent.
+
+## Tasks belong to their caller
+
+A task or context belongs to the application and subject that first received it
+from the agent: the application itself, the end user it named, or the person an
+identity provider signed in. Two keys of one application share their tasks; two
+end users of one application do not.
+
+- Before `tasks/get`, `tasks/cancel`, `tasks/resubscribe` (and the 1.0 names), and
+  before a message that names a `taskId` or `contextId`, the gateway checks the
+  owner. Another owner, or none, answers `TaskNotFoundError` (`-32001`) without
+  calling the agent. A new conversation sends no `contextId`; the agent assigns
+  it.
+- Every task and context id an answer names is recorded for the caller for 7 days,
+  renewed each time an answer names it again.
+- An answer that names an id another caller owns is not delivered (`-32092`,
+  `ownership_conflict`).
+
+Ownership is kept in the gateway's Redis. If it cannot be read, the call is
+refused (`-32092`, `ownership_unavailable`) and nothing is sent.
+
+## What reaches the agent
+
+The caller's JSON-RPC body, unchanged, at the agent's endpoint, with:
+
+- the agent's sign-in credential and its static headers;
+- `Content-Type` and `Accept`;
+- `A2A-Version: 1.0` on 1.0 agents;
+- `X-AG-Trace-Id`;
+- the caller's `X-A2A-Extensions` (0.3) or `A2A-Extensions` (1.0).
+
+No other caller header is forwarded: not `Authorization`, not `Cookie`, not any
+`X-AG-*`. The answer keeps the caller's JSON-RPC `id`.
+
+## Policies
+
+Three policies apply to agent calls: [Rate Limiter](/trustgate/policies/rate-limiter),
+[Request Size Limiter](/trustgate/policies/request-size-limiter) and
+[TrustGuard](/trustgate/policies/trustguard-guardrail). Global policies of any
+other kind are left out of agent calls.
+
+Policies see the message parts, the same for both versions: text, data and
+files. On the request they see the message sent; on the response, the parts of a
+message answer, or of a task's status message, artifacts and agent messages.
+
+A block answers `-32090` instead of calling the agent, or instead of its answer.
+The gateway does not rewrite parts, so a **mask** verdict also blocks. In a
+stream, each event with content is checked before it is relayed; a blocked event
+is replaced by a `-32090` event, the stream is closed, and the gateway cancels the
+task at the agent. Artifact chunks sent with `append` are checked one by one, so
+content split across two chunks can pass.
+
+## Limits
+
+| Limit | Value | On breach |
+|---|---|---|
+| Request body | 8 MiB | `413` |
+| Buffered answer | 8 MiB | `-32092` `response_too_large` |
+| Buffered call | 300 s | `-32092` `upstream_timeout` |
+| One stream event | 1 MiB | `-32092` `response_too_large`, stream closed |
+| Agent opens no stream | 120 s | `-32092` `upstream_timeout` |
+| Silence between stream events | 120 s | `-32092` `stream_idle`, stream closed |
+| Stream duration | 55 min | `-32092` `stream_max_duration`, stream closed. Continue with `tasks/resubscribe` or `SubscribeToTask`. |
+| Task ownership | 7 days after an answer last named the id | `-32001` |
+
+These values are fixed.
+
+## Traces
+
+Each call is a trace of kind `a2a` in **Activity**: the agent, method, version,
+task and context ids, task state, the agent's HTTP status, the outcome, the
+blocking policy, and the sign-in mode and subject kind (`user` or `app`). Never
+the token.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Agents" icon="bot" href="/trustgate/registry/agents">
+    Add an agent, pin its card, choose how TrustGate signs in to it.
+  </Card>
+  <Card title="Connect to an agent" icon="plug" href="/trustgate/agents/connect">
+    Call an agent from an application, and what each error means.
+  </Card>
+  <Card title="Hosted agents" icon="cloud" href="/trustgate/agents/hosted">
+    Agents on Amazon Bedrock AgentCore, Microsoft Foundry and Vertex AI.
+  </Card>
+  <Card title="Verify TrustGate's token" icon="key-round" href="/trustgate/agents/identity">
+    How an agent checks that a call came through the gateway, and for whom.
+  </Card>
+</CardGroup>

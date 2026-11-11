@@ -1,0 +1,135 @@
+---
+title: "Agents"
+description: "Find the application's A2A agents from its key and hand each one's address and headers to the A2A client you already use"
+---
+
+If the application calls A2A agents, the same key finds them. The SDK does not
+speak A2A: like `agent.mcp`, it hands over an address and the headers that
+authenticate it, and an A2A client ([`a2a-sdk`](https://pypi.org/project/a2a-sdk/),
+[`@a2a-js/sdk`](https://www.npmjs.com/package/@a2a-js/sdk)) reads the card and
+sends the calls, both through the gateway.
+
+<CodeGroup>
+  ```python Python
+  from trustgate import TrustGate
+
+  tg = TrustGate()
+  tg.agents()                                    # every agent the key reaches
+  planner = tg.agent("Travel planner")           # one, by name or id
+  ```
+
+  ```ts TypeScript
+  import { TrustGate } from "@neuraltrust/trustgate"
+
+  const tg = new TrustGate()
+  await tg.agents()                              // every agent the key reaches
+  const planner = await tg.agent("Travel planner") // one, by name or id
+  ```
+</CodeGroup>
+
+## What an agent carries
+
+| Field | Python | TypeScript | |
+|---|---|---|---|
+| Id | `id` | `id` | The agent's registry id. |
+| Name | `name` | `name` | |
+| Card URL | `card_url` | `cardUrl` | The agent's card on the gateway, under `url`. |
+| Version | `protocol_version` | `protocolVersion` | `0.3` or `1.0`. |
+| Endpoint | `url` | `url` | The agent's JSON-RPC endpoint on the gateway. |
+| Headers | `headers` | `headers` | `X-AG-API-Key`, and `X-NeuralTrust-End-User` when an end user was named. Not printed. |
+| Application | `consumer` | `consumer` | The slug of the application behind it, for logs. |
+
+## With an A2A client
+
+<CodeGroup>
+  ```python Python
+  # pip install "a2a-sdk>=1,<2" httpx
+  import asyncio
+
+  import httpx
+  from a2a.client import ClientConfig, create_client
+  from a2a.helpers import get_stream_response_text, new_text_message
+  from a2a.types import Role, SendMessageRequest
+
+
+  async def main() -> None:
+      agent = TrustGate().agent("Travel planner")
+      async with httpx.AsyncClient(headers=agent.headers, timeout=120) as http:
+          client = await create_client(agent.url, client_config=ClientConfig(httpx_client=http))
+          request = SendMessageRequest(message=new_text_message("plan a weekend in Lisbon", role=Role.ROLE_USER))
+          async for event in client.send_message(request):
+              print(get_stream_response_text(event))
+
+
+  asyncio.run(main())
+  ```
+
+  ```ts TypeScript
+  // npm install @a2a-js/sdk
+  import { SendMessageRequest } from "@a2a-js/sdk"
+  import {
+    ClientFactory,
+    ClientFactoryOptions,
+    DefaultAgentCardResolver,
+    JsonRpcTransportFactory,
+    createAuthenticatingFetchWithRetry,
+  } from "@a2a-js/sdk/client"
+
+  const agent = await new TrustGate().agent("Travel planner")
+
+  const fetchImpl = createAuthenticatingFetchWithRetry(fetch, {
+    headers: async () => agent.headers,
+    shouldRetryWithHeaders: async () => undefined,
+  })
+  const factory = new ClientFactory(
+    ClientFactoryOptions.createFrom(ClientFactoryOptions.default, {
+      transports: [new JsonRpcTransportFactory({ fetchImpl })],
+      cardResolver: new DefaultAgentCardResolver({ fetchImpl }),
+    })
+  )
+  // The whole card URL and an empty path: given the agent's URL, the resolver
+  // would replace its last segment instead of appending to it.
+  const client = await factory.createFromUrl(agent.cardUrl, "")
+
+  const reply = await client.sendMessage(
+    SendMessageRequest.fromJSON({
+      message: { messageId: crypto.randomUUID(), role: "ROLE_USER", parts: [{ text: "plan a weekend in Lisbon" }] },
+    })
+  )
+  ```
+</CodeGroup>
+
+The `a2a_agent.py` and `a2a-agent.ts` examples in the
+[SDK repository](https://github.com/NeuralTrust/trustgate-sdk/tree/main/examples)
+run as they are.
+
+## For an end user
+
+Name the person the calls are for, as with
+[`for_end_user()`](/sdks/trustgate/end-users). The headers then carry
+`X-NeuralTrust-End-User`, and the call runs as that user: their tasks are theirs,
+and an agent that verifies [TrustGate's token](/trustgate/agents/identity) sees
+them as `sub`.
+
+<CodeGroup>
+  ```python Python
+  planner = tg.agent("Travel planner", end_user="user_123")
+  ```
+
+  ```ts TypeScript
+  const planner = await tg.agent("Travel planner", { endUser: "user_123" })
+  ```
+</CodeGroup>
+
+## When it fails
+
+| Error | When |
+|---|---|
+| `PlaneUnavailableError` | The key reaches no agent application, or the gateway publishes no agent host. |
+| `TrustGateError`, `code` `ambiguous_agent` | Two agents have that name. The message lists their ids; pass one. |
+| `TrustGateError`, `code` `agent_not_found` | No agent has that name or id. The message lists the agents the key reaches. |
+| `TrustGateError` | A personal key. Agents are an application's; a personal key runs as its owner. |
+| `InvalidRequestError` | An empty end-user id. |
+
+Errors from the agent and from the gateway's agent plane reach the A2A client, not
+the SDK: see [Connect to an agent](/trustgate/agents/connect#errors).
