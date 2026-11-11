@@ -475,6 +475,42 @@ Central datastores — managed PostgreSQL, Redis, and ClickHouse — follow the 
 
 ## Install
 
+<Tabs>
+<Tab title="ntctl">
+
+Install the central cluster with `--mode saas`, layering your ingress, TLS and
+datastore choices with `-f`:
+
+```bash
+ntctl install --mode saas --domain nt.example.com -f your-values.yaml
+```
+
+It asks for the console's first administrator and email provider as a
+[Self-hosted install](/neuraltrust/deployment/external#install) does, and after
+installing it prints the DNS records data planes dial (`databridge.`,
+`agentgateway-configsync.`, `trustguard-configsync.`) and the steps to connect
+one.
+
+Then install each remote data plane as a Hybrid install pointed at this
+control plane, with tokens from **this** console:
+
+```bash
+ntctl login --app-url https://app.nt.example.com    # this install's console
+ntctl install --control-plane nt.example.com -f remote-values.yaml
+```
+
+`remote-values.yaml` carries the settings from
+[Remote data planes](#remote-data-planes), and the CA bundle from
+[Trusting a chart-generated control plane](#trusting-a-chart-generated-control-plane)
+when the central cluster serves chart-generated certificates. Signed in to
+this console, ntctl creates the private instances there and points the data
+plane at this control plane for you. When the console does not offer CLI
+sign-in, `ntctl login` says so: pass the tokens from this console in
+`NT_TRUSTGATE_*` / `NT_TRUSTGUARD_*` instead.
+
+</Tab>
+<Tab title="Helm">
+
 Start from the maintained
 [`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform)
 chart, then layer your platform, domain, ingress, TLS, and datastore choices:
@@ -489,13 +525,17 @@ helm upgrade --install neuraltrust-platform \
   -f your-values.yaml
 ```
 
+</Tab>
+</Tabs>
+
 Install and verify the central cluster first, then bring up one remote cluster as
 a canary before the rest.
 
 <Warning>
 **Upgrading a central or remote cluster that runs the Firewall itself?** The
-Firewall is now NeuralTrust-hosted by default. To keep yours, add
-`global.firewall.deploy: true` before upgrading; otherwise create
+Firewall is NeuralTrust-hosted by default. `ntctl upgrade` keeps yours in the
+cluster and says so. With Helm, add `global.firewall.deploy: true` before
+upgrading; otherwise create
 `trustguard-firewall` with the key NeuralTrust sends you. With neither, `helm
 upgrade` stops with an error that names both options.
 </Warning>

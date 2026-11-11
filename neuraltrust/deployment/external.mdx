@@ -338,11 +338,56 @@ cluster.
 
 <Warning>
 **Upgrading a self-hosted install that runs the Firewall in your cluster?** The
-Firewall is now NeuralTrust-hosted by default. To keep yours, add
-`global.firewall.deploy: true` to your values before upgrading. Otherwise ask
+Firewall is NeuralTrust-hosted by default. `ntctl upgrade` keeps yours in the
+cluster and says so. With Helm, add `global.firewall.deploy: true` to your
+values before upgrading. Otherwise ask
 NeuralTrust for the firewall key and create `trustguard-firewall` first. With
 neither, `helm upgrade` stops with an error that names both options.
 </Warning>
+
+<Tabs>
+<Tab title="ntctl">
+
+[Install ntctl](/neuraltrust/deployment/ntctl#install-ntctl) and run:
+
+```bash
+ntctl install --mode external
+```
+
+A Self-hosted install runs every product, so ntctl does not ask which ones, and
+it needs no console sign-in and no tokens. It asks for the base domain, the
+platform (detected from the cluster), where images come from, the console's
+first administrator, how the console sends email (`none` by default, or Resend,
+SMTP or Amazon SES), and whether the Firewall runs in your cluster or at
+NeuralTrust with the firewall key NeuralTrust sends you. It keeps the
+administrator in the `onprem-superadmin` Secret, out of the Helm release
+history.
+
+It then checks the cluster, shows what it is about to apply, creates the
+Secrets, installs, waits until every workload is Ready, prints the DNS records,
+and writes the values it used, without credentials, to
+`neuraltrust-values.yaml`. The ordering described in the Helm path's last step
+still applies: the console serves once its migrations have run.
+
+Without questions, for a pipeline:
+
+```bash
+export ONPREM_SUPERADMIN_EMAIL=admin@example.com ONPREM_SUPERADMIN_PASSWORD=...
+export NT_FIREWALL_JWT=...        # unset: the Firewall runs in your cluster
+export NT_REGISTRY_KEY_FILE=./neuraltrust-registry-key.json
+
+ntctl install --yes --mode external --domain platform.example.com
+```
+
+PostgreSQL and Redis run in the cluster by default. In Self-hosted every
+service has its own database role, so for managed stores pass `-f` with the
+values from [Managed PostgreSQL and Redis](#managed-postgresql-and-redis-production)
+instead of a connection string. `--gateway <namespace>/<name>` exposes the
+endpoints as HTTPRoutes on an existing Gateway API Gateway instead of
+Ingresses.
+
+</Tab>
+<Tab title="Helm">
 
 <Steps>
 
@@ -464,6 +509,9 @@ pass `--version` so the release is reproducible.
 </Step>
 
 </Steps>
+
+</Tab>
+</Tabs>
 
 On OpenShift the install is the same but the chart renders native Routes instead
 of Ingress — see [OpenShift](/neuraltrust/deployment/openshift/overview).

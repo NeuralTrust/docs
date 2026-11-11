@@ -1,0 +1,199 @@
+---
+title: Upgrades
+description: Upgrade, roll back, adopt and uninstall a NeuralTrust install — with ntctl, which checks every change first, or with plain Helm.
+---
+
+An upgrade moves an install to a newer chart while keeping the values you set.
+[`ntctl`](/neuraltrust/deployment/ntctl) is the recommended way: it shows what
+will change before it changes anything, refuses changes Kubernetes cannot make
+in place, and restores the last working revision if the upgrade does not
+become ready. Plain Helm works too, and the two can be mixed on one release.
+
+## Upgrade
+
+<Tabs>
+<Tab title="ntctl">
+
+```bash
+ntctl upgrade --dry-run     # show what would change, then stop
+ntctl upgrade               # the latest chart
+ntctl upgrade --version <chart version>
+```
+
+`upgrade` keeps the values you installed with and takes everything else,
+image tags included, from the new chart's defaults. `-f` files and flags are
+layered on top. Before it changes anything it:
+
+1. Runs the [preflight checks](/neuraltrust/deployment/validation#preflight)
+   against the upgrade.
+2. Shows the chart's release notes between your version and the target, and
+   flags the releases to read before upgrading. `--release-notes` prints every
+   release in full.
+3. Has the cluster render the upgrade in a dry run, then lists every image
+   version that changes and every resource that is added, changed or removed.
+   `--show-diff` prints the full diff. Secret values are compared but never
+   shown.
+4. In Hybrid, names the control plane the data plane connects to, and warns
+   when the console you are signed in to belongs to a different one.
+
+It then asks for confirmation (`--yes` skips it) and applies. If the upgrade
+does not become ready, ntctl rolls back to the last working revision and
+prints what [`ntctl doctor`](/neuraltrust/deployment/troubleshooting#start-with-ntctl-doctor)
+finds wrong.
+
+</Tab>
+<Tab title="Helm">
+
+Pass your values file and an explicit `--version`:
+
+```bash
+helm upgrade neuraltrust-platform \
+  oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
+  --version <VERSION> \
+  --namespace neuraltrust -f values.yaml
+```
+
+Read the chart's
+[CHANGELOG](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/CHANGELOG.md)
+between your version and the target first. Helm does not stop on the changes
+listed below, and it does not roll back unless you pass `--rollback-on-failure`
+(`--atomic` in Helm 3).
+
+</Tab>
+</Tabs>
+
+Generated credentials are looked up and reused on every upgrade, so an upgrade
+does not rotate keys or invalidate sessions. See
+[Secrets](/neuraltrust/deployment/secrets).
+
+### What stops an upgrade
+
+`ntctl upgrade` stops, changing nothing, when the upgrade needs something
+Kubernetes cannot do in place:
+
+- a new selector on a Deployment, DaemonSet or StatefulSet;
+- a new StatefulSet service name or volume template;
+- a new storage class or access mode on a volume;
+- removing a Secret, a volume or a StatefulSet, unless it carries
+  `helm.sh/resource-policy: keep`. Helm leaves those in the cluster, and the
+  diff lists them as kept but no longer managed;
+- removing a key from a Secret that a workload of the new release still reads.
+
+Pass `--allow-breaking` only when you accept that those resources are deleted
+and recreated.
+
+### Upgrade order
+
+Keep data planes at least as new as the control plane they connect to. In
+Hybrid, upgrade promptly when NeuralTrust announces a control-plane release.
+With a [Central](/neuraltrust/deployment/central) control plane, upgrade it and
+its data planes together, and with two clusters,
+[one at a time](/neuraltrust/deployment/external#upgrades-and-migrations-with-two-clusters).
+The reasons are in [Hybrid → Upgrades](/neuraltrust/deployment/hybrid#upgrades).
+
+## Change a setting without upgrading the chart
+
+Pass the version you already run, which `ntctl status` prints, so only the
+setting changes:
+
+```bash
+ntctl upgrade --operational-telemetry=true --version <installed version>
+ntctl upgrade -f values.yaml --version <installed version>
+```
+
+`--domain`, `--platform` and `--gateway` change the install the same way. The
+deployment mode (`--mode`) cannot change in place.
+
+## Add or remove a product
+
+```bash
+ntctl install --products trustguard           # or run ntctl install and pick
+ntctl upgrade --remove-products trustgate --version <installed version>
+```
+
+On an existing install, `ntctl install` asks only which products to add and
+their console tokens, keeps every other setting and the installed chart, and
+shows what changes before it applies. Running it again when the product is
+already there changes nothing. `ntctl upgrade --products` does the same without
+questions.
+
+`--remove-products` deletes the product's workloads after listing them and
+asking. Naming a product in `--products` never removes another.
+
+## Roll back
+
+```bash
+ntctl history
+ntctl rollback              # the newest earlier revision that worked
+ntctl rollback --to 3
+```
+
+A rollback shows what changes and asks first. It re-applies what that
+revision ran and runs none of the chart's hooks, the secrets generator among
+them, so it stops when the revision reads a Secret that is no longer in the
+cluster.
+
+With Helm, `helm history` and `helm rollback` do the same, without those
+checks.
+
+## A failed or interrupted upgrade
+
+`ntctl doctor` reports both as `NT-DR-001`.
+
+- **The upgrade did not become ready.** `ntctl doctor` says why. Fix the cause,
+  then run `ntctl upgrade` again: it re-applies the failed revision even when
+  the values did not change.
+- **It was interrupted** (Ctrl+C, a lost connection). The release stays locked.
+  `ntctl rollback` clears an interrupted upgrade, and `ntctl uninstall` an
+  interrupted install.
+
+## Secrets left by earlier charts
+
+Upgrades keep Secrets that earlier chart versions created and nothing reads any
+more, on purpose. `ntctl doctor` lists them as `NT-DR-024`, with the command
+that deletes them. Deleting them is optional. If you delete one, a rollback to
+a revision that still reads it stops until it is restored.
+
+When the install's chart still renders its generated credentials itself,
+`ntctl upgrade` says that the target chart can keep them with the secrets
+generator instead. `--secrets-generator` makes that move and copies every value
+in use, so nothing rotates. ntctl never makes it unasked.
+
+## Manage a Helm install with ntctl
+
+An install made with plain Helm needs no migration:
+
+```bash
+ntctl adopt
+```
+
+`adopt` re-renders the release's own chart with the values it was installed
+with, in a dry run, and compares the result with what is deployed. When they
+match, it writes those values, without anything that looks like a secret, to
+`neuraltrust-values.yaml`. It changes nothing in the cluster and adds no
+Secrets. From then on `ntctl upgrade` keeps the release's own values and
+Secret names. For a cluster without access to the chart registry, pass the
+release's chart with `--chart`.
+
+`status`, `doctor` and `support-bundle` work on a Helm install without
+adopting it.
+
+## Uninstall
+
+```bash
+ntctl uninstall                                  # asks you to type the namespace
+ntctl uninstall --yes --delete-data --delete-secrets
+```
+
+`uninstall` removes the release and every resource it manages. It works on a
+release that failed or whose install was interrupted. By default it keeps:
+
+| Kept | Deleted with |
+| --- | --- |
+| Volumes (PostgreSQL, ClickHouse and others) and the Secrets of the generated credentials (`platform-secrets`, its TLS Secrets, and those the chart keeps on purpose) | `--delete-data`. They go together, because those keys decrypt what the volumes hold |
+| Secrets ntctl created: tokens, registry key, datastore and admin credentials | `--delete-secrets` |
+| The namespace | Delete it yourself |
+| Private TrustGate and TrustGuard instances in the console | Delete them in the console |
+
+With Helm, `helm uninstall` removes the release and leaves the same kept
+resources in place.

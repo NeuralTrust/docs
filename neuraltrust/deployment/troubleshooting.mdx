@@ -5,15 +5,65 @@ description: Symptoms you will actually see, and what causes them.
 
 Organised by what you observe, not by component. Most entries come from real first-install failures.
 
+## Start with ntctl doctor
+
+```bash
+ntctl doctor
+ntctl doctor --output json      # for a ticket or a pipeline; exit code 3 on failure
+```
+
+[`ntctl doctor`](/neuraltrust/deployment/ntctl) works on any install, including
+one made with plain Helm, and changes nothing. It runs the
+[preflight checks](/neuraltrust/deployment/validation#preflight) against what is
+deployed, then looks at what fails at runtime, and gives a code and a fix for
+each finding. Pass `--namespace` and `--release` if yours are not the defaults.
+
+| Code | Finding | More |
+| --- | --- | --- |
+| `NT-DR-001` | The release failed, or an install or upgrade was interrupted | [A failed or interrupted upgrade](/neuraltrust/deployment/upgrades#a-failed-or-interrupted-upgrade) |
+| `NT-DR-010` | Images do not pull, grouped by cause: credentials refused, image or tag missing, registry unreachable | [ImagePullBackOff](#imagepullbackoff-despite-setting-a-pull-secret) |
+| `NT-DR-011` | A container cannot start because a Secret or ConfigMap is missing. For one the secrets generator writes, it says why the generator did not run | [CreateContainerConfigError](#createcontainerconfigerror) |
+| `NT-DR-012` | A container keeps crashing; its last log lines are shown | [CrashLoopBackOff](#crashloopbackoff-with-a-config-validation-message) |
+| `NT-DR-013` | Pods cannot be scheduled, with the scheduler's reason | [Pods stay Pending](#pods-stay-pending) |
+| `NT-DR-014` | A container was killed for exceeding its memory limit | [OOMKilled](#oomkilled) |
+| `NT-DR-015` | A container runs but never becomes ready. It shows the probe's failures and the last errors, with a fix for the causes it recognises: a config-sync token from another control plane, refused database credentials, an untrusted certificate | [Running but never Ready](#running-but-never-ready-data-planes) |
+| `NT-DR-020` | A volume is not bound | [A volume is not bound](#a-volume-is-not-bound) |
+| `NT-DR-021` | A Job failed, such as a database bootstrap hook; its last log lines are shown | [A hook Job failed](#a-hook-job-failed) |
+| `NT-DR-022` | Ingresses have no address yet | [No address on the endpoints](#no-address-on-the-endpoints) |
+| `NT-DR-023` | HTTPRoutes are not accepted by their Gateway, with the controller's reason | [No address on the endpoints](#no-address-on-the-endpoints) |
+| `NT-DR-024` | Information: Secrets from earlier chart versions that nothing reads any more, with the command that deletes them | [Secrets left by earlier charts](/neuraltrust/deployment/upgrades#secrets-left-by-earlier-charts) |
+| `NT-DR-025` | `platform-secrets` is rendered by the chart and applied by Argo CD, or another tool that renders without reading the cluster, so every hard refresh generates new signing and encryption keys | [Keys change on every sync](#keys-change-on-every-sync) |
+| `NT-PF-*` | A preflight check failed against what is deployed | [Preflight](/neuraltrust/deployment/validation#preflight) |
+
+When an install or upgrade made with ntctl does not become ready, ntctl prints
+the same findings itself.
+
+## Send a support bundle
+
+When you open a support case, attach a bundle:
+
+```bash
+ntctl support-bundle
+tar -tzf ntctl-support-*.tar.gz      # look through it before sending
+```
+
+The bundle is a `.tar.gz` with the doctor report, versions, the release's
+values, manifest and history, the namespace's resources and events, node
+capacity, and the last 500 lines of each container's log (`--log-lines`). It
+never includes a Secret's value, only Secret and key names. Passwords, tokens,
+keys, connection strings and JWTs are replaced with `[REDACTED]` in values,
+ConfigMaps, environment variables and logs, and any text equal to a credential
+stored in the namespace is masked wherever it appears. The `README.md` inside
+lists every rule. Like `doctor`, it works on installs made with plain Helm.
+
 <Tip>
 **Opening a support case on a Hybrid deployment?** Turn on
 [operational telemetry](/neuraltrust/deployment/configuration#operational-telemetry)
-first: `ntctl upgrade --operational-telemetry=true --version <installed version>`, or
+too: `ntctl upgrade --operational-telemetry=true --version <installed version>`, or
 `--set global.observability.operationalTelemetry=true` with Helm. NeuralTrust
 support can then see your gateway's and TrustGuard's error rates and latency
-directly, often without asking for logs or a support bundle. It carries no
-prompt or response payloads, and you can turn it off again when the case is
-closed.
+directly, often without asking for logs. It carries no prompt or response
+payloads, and you can turn it off again when the case is closed.
 </Tip>
 
 ## Install fails before anything reaches the cluster
@@ -42,8 +92,8 @@ Product telemetry is mandatory in Hybrid and there is no opt-out. For a deployme
 
 A clean render still cannot see your cluster. A missing `gcr-secret`, a Secret you
 referenced but never created, or an absent ingress class only surfaces as pod
-failures after install — check `kubectl get pods -n neuraltrust` and the pod
-events.
+failures after install. `ntctl preflight` checks all three before you install,
+and `ntctl doctor` names them afterwards.
 
 ## Pods
 
@@ -77,9 +127,51 @@ The Go services validate their whole configuration at boot and exit rather than 
 | `REDIS_HOST` | Redis is not configured. Required even on DB-less data planes |
 | `DB_HOST` empty, or Postgres connection refused on a managed instance | A Secret supplied through `global.postgresql.existingSecret` holds `POSTGRES_*` keys. It is consumed with `envFrom` and never renamed, so it must use `DB_*` — see [Bringing your own Postgres Secret](/neuraltrust/deployment/secrets#bringing-your-own-postgres-secret) |
 
+### Pods stay Pending
+
+The scheduler found no node with enough unreserved CPU and memory, or none that
+matches the pod's `nodeSelector` and tolerates the node's taints. `ntctl doctor`
+shows the scheduler's reason. Size the node pools from
+[Capacity](/neuraltrust/deployment/architecture#capacity), which counts the
+chart's requests rather than traffic. For the in-cluster Firewall, see
+[Firewall or its workers do not come up](#firewall-or-its-workers-do-not-come-up).
+
+### OOMKilled
+
+A container exceeded its memory limit. The Firewall workers are the largest
+memory consumers; raise a worker's limit under its own `resources`, which merge
+over `workerDefaults.resources`, or run fewer detectors. See
+[In-cluster Firewall workers](/neuraltrust/deployment/configuration#in-cluster-firewall-workers).
+
 ### ImagePullBackOff despite setting a pull secret
 
 Every workload reads its own `imagePullSecrets`, then `global.imagePullSecrets`, then `gcr-secret`. Check that the Secret exists in the release namespace and that no component key overrides the global list: `helm template … | grep -A2 imagePullSecrets`.
+
+### A volume is not bound
+
+The PersistentVolumeClaim names a StorageClass that does not exist, or the
+cluster has no default one, or its provisioner is not running. A
+`WaitForFirstConsumer` class binds only once its pod is scheduled, so check
+[Pods stay Pending](#pods-stay-pending) first. Set the chart's `storageClass`
+values to a class the cluster has; `ntctl preflight` lists them.
+
+### A hook Job failed
+
+The chart runs Jobs before an install or upgrade: the secrets generator and,
+with managed datastores, the database bootstrap. `ntctl doctor` shows the Job's
+last log lines. Fix the cause they name, then run the upgrade again, which runs
+the Job again.
+
+## Endpoints
+
+### No address on the endpoints
+
+An Ingress gets its address from the ingress controller's load balancer, so
+check that the controller is installed and that its LoadBalancer Service has an
+address. With `--gateway` or `global.ingress.provider: gateway-api`, the
+HTTPRoutes attach to an existing Gateway: `ntctl doctor` shows the Gateway
+controller's reason when it does not accept them, usually a listener that does
+not admit the namespace or a hostname outside the listener's.
 
 ## Config sync
 
@@ -173,7 +265,12 @@ the pod.
 
 ### Firewall or its workers do not come up
 
-With the Firewall in your cluster, it runs as a gateway plus five workers. Check all of them together:
+With the Firewall in your cluster, it runs as a gateway plus one Deployment per
+worker: `toxicity`, `indirect-prompt-injections`, `prompt-jailbreak` and
+`topic-guard`, plus `complexity` when TrustGate is installed, since it serves
+TrustGate's smart routing. That is four or five worker Deployments, and six or
+seven worker pods, because `prompt-jailbreak` and `topic-guard` run two
+replicas. Check all of them together:
 
 ```bash
 kubectl get pods -n neuraltrust -l app.kubernetes.io/name=firewall
@@ -182,7 +279,7 @@ kubectl logs -n neuraltrust \
   -l app.kubernetes.io/name=firewall,app.kubernetes.io/component=gateway
 ```
 
-Pending workers usually mean insufficient memory — it is the largest consumer in the data path. With [GPU workers](/neuraltrust/deployment/configuration#gpu-firewall-workers), inspect resource availability, taints, node labels, and the NVIDIA device plugin with `kubectl describe pod`.
+Pending workers usually mean insufficient memory — it is the largest consumer in the data path. With [GPU workers](/neuraltrust/deployment/configuration#gpu-firewall-workers), every worker pod needs one GPU slot, so the GPU pool needs at least as many slots as worker pods; check the MPS sharing, taints, node labels, and the NVIDIA device plugin. A GPU node that goes into `DiskPressure` while pulling the `firewall-gpu` image has too small a boot disk — see [GPU nodes](/neuraltrust/deployment/cloud-notes#gpu-nodes).
 
 ### AlertEngine fails every 45 seconds
 
@@ -192,7 +289,32 @@ worker pass failed ... Unknown table expression identifier 'trustguard_events'
 
 AlertEngine is pointed at the `otel` database, but its event tables live elsewhere, so alert evaluation does not currently run. This is a known defect and a fix is in progress; the failing worker is contained and does not affect request handling.
 
+## GitOps
+
+### Keys change on every sync
+
+`ntctl doctor` reports this as `NT-DR-025`. Argo CD, and any tool that renders
+the chart without reading the cluster, cannot see the credentials already in
+`platform-secrets`, so every hard refresh renders new signing and encryption
+keys. Tokens issued with the old keys stop verifying, and data encrypted with
+them can no longer be read.
+
+Set `global.secrets.generator.enabled: true` and keep it. Hybrid installs need
+this under Argo CD, because the generator is off there by default; External and
+Central installs have it on, except one installed before the chart had it,
+which opts in the same way (`ntctl upgrade --secrets-generator` does it for a
+release Helm applies). The secrets generator then runs as a hook Job, a PreSync
+hook under Argo CD, takes the live values over once, and never renders them
+again. It runs in the control-plane app image, so a registry mirror must carry
+that image too. Credentials issued before the last rotation have to be
+issued again; the chart's
+[SECRETS.md](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/SECRETS.md#recovering-an-install-whose-credentials-rotated)
+has the recovery steps.
+
 ## Upgrades
+
+How to upgrade, roll back and recover a failed upgrade is in
+[Upgrades](/neuraltrust/deployment/upgrades).
 
 ### A values change had no effect
 

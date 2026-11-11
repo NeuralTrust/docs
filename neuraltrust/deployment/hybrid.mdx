@@ -24,7 +24,7 @@ prerequisites and network rules on this page apply to both.
 Have each of these ready. The install fails, or half-works, without them.
 
 - [ ] **Your tenant's region**, EU or US — see [Choose your region](#choose-your-region)
-- [ ] **A cluster** with an ingress controller and Helm 3.8+, sized per [Prerequisites](#prerequisites)
+- [ ] **A cluster** with an ingress controller, sized per [Prerequisites](#prerequisites), and either [ntctl](/neuraltrust/deployment/ntctl) or Helm 3.8+
 - [ ] **A base domain** you can point at the cluster ingress, for example `platform.example.com`
 - [ ] **PostgreSQL and Redis** the cluster can reach — see [Check your datastores first](#check-your-datastores-first)
 - [ ] **The registry key** NeuralTrust sent when your account was provisioned
@@ -145,7 +145,7 @@ hosts in [Network](#network).
 
 ## Prerequisites
 
-- A Kubernetes cluster with an ingress controller, and Helm 3.8+
+- A Kubernetes cluster with an ingress controller, and either [ntctl](/neuraltrust/deployment/ntctl) or Helm 3.8+
 - **2** nodes of 8 vCPU / 16 GiB with all products and the NeuralTrust-hosted
   Firewall, or **3** of 8 vCPU / 32 GiB with the Firewall in your cluster, as
   the minimum of an autoscaled node pool; GPU and single-product options are in
@@ -268,6 +268,82 @@ verification unless its CA reaches the client: put it in the bundle you point
 system roots rather than adding to them.
 
 ## Install
+
+<Tabs>
+<Tab title="ntctl">
+
+[Install ntctl](/neuraltrust/deployment/ntctl#install-ntctl), sign in to the
+console of your tenant's region, and run the install:
+
+```bash
+ntctl login                 # --region us for a US tenant
+ntctl install
+```
+
+`ntctl install` asks only for what it cannot work out, and each question has a
+default: the base domain, the platform (detected from the cluster), the
+products, [operational telemetry](#operational-telemetry-is-opt-in), where
+images come from (the registry key file NeuralTrust sent you, or your own
+registry), your PostgreSQL and Redis (or in-cluster ones), and, with TrustGuard,
+whether the Firewall runs in your cluster or at NeuralTrust.
+
+Signed in, it creates a private TrustGate and TrustGuard in the console, or
+reuses the ones you name with `--trustgate-instance` / `--trustguard-instance`,
+and fetches their tokens itself. That replaces the console steps of the Helm
+path. It also sets `global.saasRegion` from the region you signed in to. Without
+`ntctl login`, it asks for each token with input hidden.
+
+Then it:
+
+1. Checks the cluster: storage, ingress, capacity on the nodes each workload
+   can run on, every Secret the install reads, and that the control plane
+   resolves. A check that fails stops the install with a fix; see
+   [Preflight](/neuraltrust/deployment/validation#preflight).
+2. Shows the cluster and the choices it is about to apply, and asks for
+   confirmation.
+3. Creates the Secrets, installs the chart, waits until every workload is
+   Ready, and prints the DNS records to create. If the install does not become
+   ready, it prints what [`ntctl doctor`](/neuraltrust/deployment/troubleshooting#start-with-ntctl-doctor)
+   finds wrong.
+4. Writes the values it used, without credentials, to `neuraltrust-values.yaml`.
+   Keep that file: it is what you pass to `helm` or a GitOps tool if you move
+   off ntctl.
+
+**Without questions**, for a pipeline, put the credentials in the environment
+and everything else in flags or `-f`. `--yes` takes the defaults for the rest:
+
+```bash
+export NT_TRUSTGATE_CONFIG_SYNC_TOKEN=...   NT_TRUSTGATE_ENROLMENT_TOKEN=...
+export NT_TRUSTGUARD_CONFIG_SYNC_TOKEN=...  NT_TRUSTGUARD_ENROLMENT_TOKEN=...
+export NT_FIREWALL_JWT=...        # unset: the Firewall runs in your cluster
+export NT_REGISTRY_KEY_FILE=./neuraltrust-registry-key.json
+export NT_POSTGRES_URL='postgres://user:password@db.example.com:5432/neuraltrust?sslmode=require'
+export NT_REDIS_URL='rediss://:password@cache.example.com:6380'
+
+ntctl install --yes --domain platform.example.com \
+  --products trustgate,trustguard,dataPlane
+```
+
+Leave out `NT_POSTGRES_URL` and `NT_REDIS_URL` to run both in the cluster. For a
+US tenant without `ntctl login`, pass `-f` with `global.saasRegion: "us"`.
+
+**Behind a Gateway API Gateway** instead of an ingress controller, add
+`--gateway <namespace>/<name>`. The endpoints are exposed as HTTPRoutes on that
+existing Gateway, which terminates TLS, so its certificate and DNS must cover
+every name under the domain, including `*.llm.` and `*.mcp.`.
+
+**When only your platform team may create Secrets**, `--secrets-mode print`
+checks the cluster and saves the values, then prints the `kubectl` commands that
+create the Secrets, with a placeholder for every credential, and changes
+nothing. Run those commands, then install with
+`ntctl install -f neuraltrust-values.yaml`.
+
+**To add a product later**, run `ntctl install` again. On an existing install it
+asks only which products to add; see
+[Add or remove a product](/neuraltrust/deployment/upgrades#add-or-remove-a-product).
+
+</Tab>
+<Tab title="Helm">
 
 Step 3 is where most installs fail. Those four Secrets are **never** generated by
 the chart. If your values file does not reference them, the install stops at
@@ -469,6 +545,9 @@ helm template neuraltrust-platform \
 
 </Steps>
 
+</Tab>
+</Tabs>
+
 On OpenShift the install is the same but the chart renders native Routes instead
 of Ingress — see [OpenShift](/neuraltrust/deployment/openshift/overview).
 Provider-specific ingress, certificate, and managed-store choices are in
@@ -481,9 +560,13 @@ includes a snapshot check, so it reports Ready only after it has pulled
 configuration from SaaS.
 
 ```bash
-kubectl get pods -n neuraltrust
-kubectl get ingress -n neuraltrust
+ntctl status            # or: kubectl get pods,ingress -n neuraltrust
 ```
+
+`ntctl status` shows each workload's readiness, the pods that need attention,
+and the DNS records to create. When something is not Ready,
+[`ntctl doctor`](/neuraltrust/deployment/troubleshooting#start-with-ntctl-doctor)
+says why.
 
 With all three products enabled you should see `agentgateway-proxy`,
 `agentgateway-mcp`, `trustguard-data-plane`, `data-plane-api`, `dataagent`, and
@@ -573,12 +656,32 @@ arriving.
 
 ## Upgrades
 
+<Tabs>
+<Tab title="ntctl">
+
+```bash
+ntctl upgrade --dry-run
+ntctl upgrade
+```
+
+ntctl keeps your values, shows the release notes and every change first, stops
+on changes Kubernetes cannot make in place, and rolls back if the upgrade does
+not become ready. It also keeps an in-cluster Firewall in your cluster, as the
+warning below describes, and says so before you confirm. See
+[Upgrades](/neuraltrust/deployment/upgrades).
+
+</Tab>
+<Tab title="Helm">
+
 ```bash
 helm upgrade neuraltrust-platform \
   oci://europe-west1-docker.pkg.dev/neuraltrust-app-prod/helm-charts/neuraltrust-platform \
   --version <VERSION> \
   --namespace neuraltrust -f values-required.yaml
 ```
+
+</Tab>
+</Tabs>
 
 Generated credentials are looked up and reused, so an upgrade does not rotate
 secrets or invalidate sessions.
