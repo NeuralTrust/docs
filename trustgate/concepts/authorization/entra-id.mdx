@@ -1,11 +1,11 @@
 ---
 title: "Entra ID"
-description: "End-to-end manual for wiring Microsoft Entra ID (Azure AD) to TrustGate: an app registration with an exposed API scope, validating Entra bearer tokens on an application, and OAuth2 login for MCP."
+description: "Wire Microsoft Entra ID to TrustGate: validate bearer tokens, broker MCP login, and exchange a user's token on-behalf-of so an MCP server is called as that user."
 ---
 
 This manual sets up **Microsoft Entra ID** (formerly Azure AD) as the identity provider for
-two TrustGate patterns in TrustGate (the trust anchor under **Settings → Machine identity**, then the
-application's **Authentication**):
+three TrustGate patterns (the trust anchor under **Settings → Machine identity**, the
+application's **Authentication**, and a custom MCP server):
 
 1. **Validate bearer tokens** — an LLM or MCP application whose callers already hold an Entra
    access token (a service using client credentials, or an app forwarding a user token).
@@ -13,6 +13,9 @@ application's **Authentication**):
 2. **OAuth2 · MCP login** — an MCP application gated by an exposed API scope. Interactive
    agents (Cursor, etc.) use TrustGate's authorization-code broker; optional
    client-credentials tokens are only for curl checks.
+3. **On-behalf-of (OBO)** — TrustGate exchanges that user's Entra token for a token a
+   downstream MCP server accepts, and calls the server as the signed-in user. See
+   [§6](#6-call-an-mcp-server-as-the-signed-in-user).
 
 Entra ID issues **v2.0** tokens when the app registration uses the v2 endpoint. TrustGate
 treats an `api://` resource URI and its bare identifier as the same audience, and prefers
@@ -262,6 +265,75 @@ Decode the `access_token` and confirm:
 - `azp` = the calling application's client ID (what **Allowed client IDs** matches)
 - `roles` (app permissions) or `scp` (delegated) contains your scope/role
 
+## 6. Call an MCP server as the signed-in user
+
+TrustGate exchanges the caller's Entra access token for a token a downstream MCP server
+accepts, using Microsoft's
+[on-behalf-of flow](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-on-behalf-of-flow).
+The server authorizes the signed-in user. The call is not made with the gateway's own
+application identity.
+
+In the console this is **On-behalf-of (OBO)** when you register your own MCP server.
+See [Authentication modes](/trustgate/registry/mcp#authentication-modes).
+
+OBO applies to an MCP server URL. An OpenAPI document uses one service credential for
+every call. **OAuth (forwarded)** is a different mode: the user signs in to that
+upstream once and TrustGate stores the grant. OBO needs no second login. It reuses the
+Entra token the caller already presented.
+
+<Steps>
+  <Step title="Prepare the Entra apps">
+    - **TrustGate's app** is a confidential client. Create a client secret. Entra records
+      this app as the one performing the exchange.
+    - **The downstream API** exposes a delegated scope, for example
+      `api://{downstream-app-id}/.default`.
+    - Grant TrustGate's app that delegated permission, and admin-consent it when the
+      tenant requires consent.
+
+    The token TrustGate exchanges must be a **user** token from this tenant (a delegated
+    `scp` claim). An application-only token, an API key, or a client certificate has no
+    user to exchange, and the tool call fails.
+  </Step>
+  <Step title="Give the identity a client that signs the exchange">
+    Open **Settings → Machine identity** and edit the Entra identity the application
+    already uses ([§3](#3-validate-entra-bearer-tokens-llm-or-mcp) or
+    [§4](#4-oauth2-for-mcp)), or create one whose issuer is
+    `https://login.microsoftonline.com/{tenant_id}/v2.0`.
+
+    Under **Client credentials**, set **Client ID** and **Client secret** to TrustGate's
+    app. That client signs the exchange. Callers' tokens must be issued by this
+    identity's issuer.
+
+    **Let people sign in with this app** can stay off when callers already present an
+    Entra token. Turn it on when an MCP client should sign in through TrustGate; the
+    same client is then used for that login. Leave session mode off. A session-mode
+    identity issues TrustGate session tokens, which Entra cannot exchange, and it does
+    not appear in the OBO identity list.
+  </Step>
+  <Step title="Set the MCP server to On-behalf-of">
+    Register the server (see [Registering your own server](/trustgate/registry/mcp#registering-your-own-server)).
+
+    - **Source**: MCP server URL
+    - **Authentication**: **On-behalf-of (OBO)**
+    - **Identity**: the Entra identity from the previous step
+    - **Delegated scopes**: space-separated scopes for one API, for example
+      `api://{downstream-app-id}/.default`
+
+    Save, then bind the server to the MCP application.
+  </Step>
+</Steps>
+
+On each tool call TrustGate presents the caller's token to Entra
+(`requested_token_use=on_behalf_of`, scope as configured) and calls the MCP server with
+the access token Entra returns.
+
+An application called with an API key or a client certificate runs as itself and has
+no user token, so OBO fails. Give the server a **Static header**, or call the
+application with an Entra user token.
+
+The same exchange is `mcp_target.auth` with `"mode": "exchange"`, `"pattern": "obo"`,
+`"scope"`, and `"identity_id"` set to the identity's id.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -272,5 +344,7 @@ Decode the `access_token` and confirm:
 | Redirect URI mismatch on login | Add `{mcp_base_url}/oauth/callback` under **Authentication → Web** on the app registration. |
 | Wrong issuer | App is emitting v1.0 tokens (`sts.windows.net`) — switch to v2 or set the v1 issuer/JWKS. |
 | Config rejected | **Required scopes** contains `openid`/`profile`/`email`/`offline_access` — remove them. |
+| OBO identity list is empty | The identity is not an Entra issuer, has no client ID and secret, is disabled, or has session mode on. |
+| An OBO tool call asks for a user token | The caller used an API key, a client certificate, or an application-only token. Send a delegated Entra user token from the identity's issuer. |
 
 Back to [Authentication](/trustgate/concepts/auth).
