@@ -5,25 +5,25 @@ description: "An agent entry is where an A2A agent runs, how TrustGate signs in 
 
 An agent entry makes an A2A agent reachable through the
 [Agent Gateway](/trustgate/agents/overview). Registry → **Agents** lists them, each
-with its A2A version, its skill count, and **No streaming** when calls to it cannot
-stream: its card does not declare streaming, or it runs on Foundry or Vertex AI.
+with its cloud's logo when it is hosted.
 
 ## Add an agent
 
-**Add agent** asks, in order:
+**Add agent** has three tabs, walked with **Next**:
 
-1. **Where does this agent run?** **Any A2A URL**, or a hosted agent on
-   **Amazon Bedrock AgentCore**, **Microsoft Foundry** or **Google Vertex AI
-   Agent Engine**. For any URL, the **Agent URL** is the agent's base URL or its
-   card URL. A hosted agent is named by its cloud's own identifiers instead: see
-   [Hosted agents](/trustgate/agents/hosted).
-2. **How TrustGate signs in to this agent**, for a hosted agent, whose card can be
-   read only with a credential.
-3. **The card.** TrustGate reads it (**Reading the card…**) and shows its provider,
-   card URL, the versions it offers, what it asks for, and its skills. An agent
-   that offers neither JSON-RPC 0.3 nor 1.0 cannot be added.
-4. **Settings.** **Name**, **A2A version** (1.0 when the card offers it, otherwise
-   0.3), the sign-in for an agent at any URL, and **Advanced**.
+1. **General.**
+   - **Where does this agent run?** **Any A2A URL**, or a hosted agent on
+     **Amazon Bedrock AgentCore**, **Microsoft Foundry** or **Google Vertex AI
+     Agent Engine**. For any URL, the **Agent URL** is the agent's base URL or its
+     card URL. A hosted agent is named by its cloud's own identifiers instead: see
+     [Hosted agents](/trustgate/agents/hosted).
+   - **How TrustGate signs in to this agent** (below). For any URL, TrustGate reads
+     the card as soon as the URL is valid and starts from what it asks for.
+2. **Card.** The card's provider, card URL, the versions it offers, what it asks
+   for, and its skills; select a skill to read it in full. An agent that offers
+   neither JSON-RPC 0.3 nor 1.0 cannot be added.
+3. **Settings.** **Name**, **A2A version** (1.0 when the card offers it,
+   otherwise 0.3), and **Advanced**.
 
 **Pin and add** pins the card and creates the entry. To let an application call
 it, add it on the application: Applications → **General** → **Agents** → **Add
@@ -47,13 +47,24 @@ agent.
 | **No sign-in** | No credential. |
 | **API key in a header** | The header and value you set. |
 | **OAuth client credentials** | `Authorization: Bearer` with a token from the token URL, cached until shortly before it expires. |
-| **As the user, signed by TrustGate (recommended)** | `Authorization: Bearer` with a short-lived JWT the gateway signs, naming the user, or the application when there is none. The agent [verifies it](/trustgate/agents/identity). The default for an agent at any URL. |
-| **As the user, through your identity provider** | A token for the user from an identity provider configured on the gateway: **Microsoft Entra (on-behalf-of)**, for the **Scope** you set, or **Token exchange (RFC 8693)**. |
 
-The two *as the user* options through an identity provider need a caller that
-identity provider signed in. A call with an API key, with or without an end user
-named, gets `-32093`. A refused exchange answers `-32092`
-(`identity_exchange_failed`).
+For an agent at any URL, the option starts from what the card asks for:
+
+| The card asks for | Starts at |
+|---|---|
+| Nothing | **No sign-in** |
+| An API key in a header | **API key in a header**, with the card's header name |
+| HTTP bearer or basic auth | **API key in a header**, with `Authorization` |
+| OAuth 2.0 | **OAuth client credentials**, with the card's token URL |
+| Anything else | **No sign-in** |
+
+The card says what the agent asks for; TrustGate does not test it. An agent that
+needs a credential its card does not declare answers the first call with its own
+error.
+
+Signing in as the user (a token the gateway signs for the user, or one from your
+identity provider) is not offered in the console yet. It can be set through the
+API: see [Verify TrustGate's token](/trustgate/agents/identity).
 
 Hosted agents have their own options: AWS IAM, Microsoft Entra ID or a Google
 service account. See [Hosted agents](/trustgate/agents/hosted#sign-in).
@@ -128,7 +139,7 @@ POST /v1/gateways/{gateway_id}/registries
   "type": "A2A",
   "a2a_target": {
     "card_url": "https://travel.example.com",
-    "auth": {"mode": "exchange", "pattern": "delegation"}
+    "auth": {"mode": "static", "header": "X-Api-Key", "value": "<key>"}
   }
 }
 ```
@@ -140,7 +151,7 @@ POST /v1/gateways/{gateway_id}/registries
 | `protocol_version` | `"0.3"` or `"1.0"`. Default: `1.0` when offered, otherwise `0.3`. |
 | `url` | An `https` endpoint that replaces the one the card names. Any URL only. |
 | `headers` | Static headers. |
-| `auth` | `mode`: `none` (default), `static`, `client_credentials`, `exchange` with `pattern` `delegation`, `obo` or `token_exchange`, or `cloud` for a hosted agent. `passthrough`, `forwarded` and `exchange`/`impersonation` are refused. |
+| `auth` | `mode`: `none` (default), `static`, `client_credentials`, `cloud` for a hosted agent, or, through the API only, `exchange` with `pattern` `delegation`, `obo` or `token_exchange`. `passthrough`, `forwarded` and `exchange`/`impersonation` are refused. |
 | `cloud_auth`, `card_auth` | See [Hosted agents](/trustgate/agents/hosted). `card_auth: "same"` is **Send sign-in credentials when reading the card**. |
 | `allowed_methods` | **Allowed methods**. |
 

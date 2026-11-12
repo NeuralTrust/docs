@@ -11,13 +11,13 @@ derives the card URL and the endpoint from the identifiers you give.
 | | Amazon Bedrock AgentCore | Microsoft Foundry | Google Vertex AI Agent Engine |
 |---|---|---|---|
 | **Named by** | **Agent runtime ARN**, **Endpoint qualifier** | **Project endpoint**, **Agent name** | **Project**, **Location**, **Agent Engine ID** |
-| **Sign-in** | AWS IAM (SigV4), OAuth client credentials, or as the user through your identity provider | Microsoft Entra ID, or as the user through Entra (on-behalf-of) | A Google service account |
+| **Sign-in** | AWS IAM (SigV4) or OAuth client credentials | Microsoft Entra ID | A Google service account |
 | **A2A version** | What the runtime's card offers | 1.0 (default) or 0.3 | 0.3 |
 | **Streaming** | When the card declares it | No | No |
 
 <Note>
 The card of a hosted agent can be read only with a credential, so **Add agent**
-asks for the sign-in before it reads the card.
+asks for the sign-in on **General**, before it reads the card.
 </Note>
 
 ## Sign-in
@@ -41,18 +41,16 @@ optional.
 A cloud credential is sent only over HTTPS, and only to the host derived for the
 agent. Secrets are encrypted at rest and masked when read back.
 
-### When calls go as the user
+### Signing in as the user
 
-With *as the user* sign-in there is no user when the agent is added, yet its card
-still needs a credential. **Reading the card** asks for an application credential,
-used only to read the card:
-
-- AgentCore: OAuth client credentials (`card_auth: "client_credentials"`).
-- Foundry: a Microsoft Entra ID credential (`card_auth: "cloud"` with
-  `cloud_auth.azure`).
-
-Calls then need a caller that the identity provider signed in. An API key gets
-`-32093`.
+Signing in as the user is not offered in the console yet. Through the API, an
+AgentCore agent takes `exchange` with `obo` or `token_exchange`, and a Foundry
+agent takes `exchange` with `obo` (scope `https://ai.azure.com/.default` by
+default; the users need the **Foundry Agent Consumer** role). With no user when
+the agent is added, its card is read with an application credential:
+`card_auth: "client_credentials"` on AgentCore, `card_auth: "cloud"` with
+`cloud_auth.azure` on Foundry. Calls then need a caller that the identity
+provider signed in; an API key gets `-32093`.
 
 ## Amazon Bedrock AgentCore
 
@@ -61,7 +59,7 @@ Calls then need a caller that the identity provider signed in. An API key gets
 - Deploy the agent to an AgentCore runtime with the A2A protocol.
 - Set the runtime's inbound authorization to match the sign-in: **IAM** for
   **AWS IAM (SigV4)**, or a **JWT authorizer** that accepts the tokens of the
-  OAuth client or the identity provider you choose in TrustGate.
+  OAuth client you configure in TrustGate.
 - For SigV4, allow the AWS identity TrustGate uses to invoke the runtime. For an
   assumed role, put the external id in its trust policy.
 
@@ -73,11 +71,8 @@ Calls then need a caller that the identity provider signed in. An API key gets
 |---|---|
 | **AWS IAM (SigV4)** | The request signed with SigV4 for `bedrock-agentcore` in the ARN's region, over the exact body sent. |
 | **OAuth client credentials** | `Authorization: Bearer` with a token from the token URL. |
-| **As the user, through your identity provider** | `Authorization: Bearer` with the user's token, by **Microsoft Entra (on-behalf-of)** or **Token exchange (RFC 8693)**. |
 
-**As the user, signed by TrustGate** is not offered: AgentCore cannot validate a
-token TrustGate signs yet. **No sign-in** and **API key in a header** are refused
-too.
+**No sign-in** and **API key in a header** are refused.
 
 **Sessions.** Every call carries
 `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id`. Messages of one A2A context reuse the
@@ -100,7 +95,7 @@ gateway relays the agent's error over HTTP `200`, and:
 
 - Enable the `a2a` protocol on the agent's endpoint.
 - Give the identity TrustGate uses the **Foundry Agent Consumer** role on the
-  project. For on-behalf-of, the users need it.
+  project.
 
 Foundry accepts only Microsoft Entra ID tokens, for the scope
 `https://ai.azure.com/.default`, even to read the card.
@@ -112,7 +107,6 @@ Foundry accepts only Microsoft Entra ID tokens, for the scope
 | Sign-in | Foundry receives |
 |---|---|
 | **Microsoft Entra ID** | `Authorization: Bearer` with an Entra token for the service principal or managed identity, cached until 5 minutes before it expires. |
-| **As the user, through Microsoft Entra (on-behalf-of)** | The user's Entra token, exchanged on-behalf-of. The scope defaults to `https://ai.azure.com/.default`. |
 
 **Versions.** Foundry serves 1.0 and 0.3 on the same endpoint; 0.3 is in preview
 on Foundry. The default is 1.0. Every call carries `A2A-Version` with the pinned
