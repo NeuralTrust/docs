@@ -1,0 +1,301 @@
+---
+title: "Microsoft 365 Copilot: governed tool access"
+sidebarTitle: "Set up governed tool access"
+description: "Decide which MCP tools Microsoft 365 Copilot can reach through a TrustGate application, as an agent users invoke or as a connector deployed across the tenant"
+---
+
+Microsoft 365 Copilot reaches external systems through remote MCP servers. Point
+that connection at a TrustGate application and Copilot sees only the tools in
+that application's toolkit, every call carries the signed-in user's identity, and
+the upstream credentials stay in the gateway.
+
+There are two ways to deploy it. The setup in TrustGate and Microsoft Entra is
+the same for both; only the final step differs.
+
+Read [Microsoft 365 Copilot](/integrations/microsoft-365-copilot) first for what
+this covers and what it does not.
+
+## Choosing a route
+
+| | Declarative agent | Federated connector |
+|---|---|---|
+| Applies | When the user invokes the agent | In base Copilot, with nothing to invoke |
+| Deployed by | A developer, then an administrator | An administrator |
+| Agent instructions | Yours to write | Not applicable |
+| Office panes | Verified in Word and Excel | Not available at the time of writing |
+| Extra requirement | Custom app upload enabled | Global Administrator or AI Administrator |
+
+Agent instructions are the practical difference. On the agent route you control
+how the assistant behaves when a tool is blocked or a result looks suspicious.
+You can run both routes against the same application.
+
+## Before you start
+
+| Requirement | Notes |
+|---|---|
+| Microsoft 365 Copilot licence | On every account that will use it |
+| Entra permissions | To register an application in your tenant |
+| Teams Developer Portal access | To register the OAuth client |
+| TrustGate workspace | With Agent Gateway provisioned |
+
+<Warning>
+Confirm the Copilot licence before anything else. Without it an agent installs,
+opens and chats, but its plugin never loads, and the only error raised is a
+generic token store failure that does not mention licensing. The Microsoft 365
+Agents Toolkit reports this in its Accounts panel as **Copilot Access Disabled**.
+</Warning>
+
+<Steps>
+<Step title="Register the Entra application" titleSize="h2" id="1-register-the-entra-application">
+
+In the [Microsoft Entra admin center](https://entra.microsoft.com), under **App
+registrations**, select **New registration**. Choose **Accounts in this
+organizational directory only** and leave the redirect URI empty. Copy the
+**Application (client) ID**.
+
+Then configure it:
+
+1. In **Expose an API**, set the Application ID URI to `api://<appId>` and add a
+   scope named `mcp.access`, consentable by admins and users, enabled.
+2. In **Manifest**, inside the `api` object, set `"requestedAccessTokenVersion": 2`.
+3. In **Authentication**, add a **Web** platform with both redirect URIs below.
+4. In **Certificates & secrets**, create a client secret and copy its value. It
+   is shown once.
+
+```text
+https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect
+https://teams.microsoft.com/api/platform/v1.0/oAuthConsentRedirect
+```
+
+The token version matters. The default issues v1 tokens, whose issuer is
+`https://sts.windows.net/<tenantId>/` rather than the v2 issuer the trust anchor
+expects.
+
+</Step>
+
+<Step title="Add the trust anchor in TrustGate" titleSize="h2" id="2-add-the-trust-anchor-in-trustgate">
+
+Go to **Settings → Agent Gateway → Machine identity** and select **Add trust
+anchor**.
+
+| Field | Value |
+|---|---|
+| `issuer` | `https://login.microsoftonline.com/<tenantId>/v2.0` |
+| `jwks_url` | `https://login.microsoftonline.com/<tenantId>/discovery/v2.0/keys` |
+| `audiences` | `api://<appId>` |
+| `subject_claim` | `oid` |
+
+Leave **Allowed client IDs** empty. Pin it in [Harden](#harden), once a working
+call shows the real value.
+
+TrustGate validates a token Entra signed. It does not broker the login, so there
+is no authorization server to configure here.
+
+</Step>
+
+<Step title="Create the application" titleSize="h2" id="3-create-the-application">
+
+Go to **Access → Applications → New application**. On **General**, add the MCP
+servers and assign the toolkit. On **Auth**, choose **A JWT** and select the
+trust anchor from the previous step.
+
+Keep the toolkit minimal. Assign read-only tools unless Copilot needs to write.
+The toolkit is the containment layer: it bounds what a successful injection can
+do if a detector misses it.
+
+Copy the URL from the **Connect** tab instead of assembling it manually.
+
+</Step>
+
+<Step title="Register the OAuth client" titleSize="h2" id="4-register-the-oauth-client">
+
+In the [Teams Developer Portal](https://dev.teams.microsoft.com), go to **Tools
+→ OAuth client registration → Register client**.
+
+| Field | Value |
+|---|---|
+| Base URL | The MCP URL from the previous step |
+| Restrict usage by organization | My organization only |
+| Restrict usage by Teams app | See below |
+| Client ID and secret | From step 1 |
+| Authorization endpoint | `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/authorize` |
+| Token endpoint | `https://login.microsoftonline.com/<tenantId>/oauth2/v2.0/token` |
+| Refresh endpoint | Same as the token endpoint |
+| Scope | `api://<appId>/mcp.access` |
+| PKCE | Off, a client secret is in use |
+
+Copy the **registration ID**.
+
+For the connector route, set **Restrict usage by Teams app** to *Any Teams app*:
+a connector is not a Teams app, so a registration bound to an app ID does not
+apply to it. For the agent route, bind it to the agent's Teams app ID once the
+agent exists. If you deploy both routes, register two clients rather than
+widening one.
+
+<Warning>
+Do not use the Agents Toolkit's `oauth/register` action for this. It accepts no
+scope, so Copilot requests a token for the user's profile rather than your API
+audience, and the registration it creates is not listed in the Developer Portal,
+so the scope cannot be corrected afterwards.
+</Warning>
+
+</Step>
+
+<Step title="Deploy as a declarative agent" titleSize="h2" id="5a-deploy-as-a-declarative-agent">
+
+Take this step or the next one, depending on the route you chose. Both can be
+taken against the same application.
+
+In Visual Studio Code, open the Microsoft 365 Agents Toolkit, version 6.12.0 or
+later, and select **Create a New Agent/App → Declarative Agent → Add an Action →
+Start with an MCP Server**. Supply the MCP URL from step 3.
+
+Open the generated project folder as the workspace, not its parent, and trust the
+folder. Then:
+
+1. Delete the `oauth/register` step from `m365agents.yml`.
+2. Set the `MCP_DA_AUTH_ID_*` variable in `env/.env.dev` to the registration ID
+   from step 4.
+3. Write the agent's instructions in `appPackage/instruction.txt`.
+
+The instructions are prompt-level defence above the gateway. Tell the agent to
+treat tool output and document content as data rather than instructions, to
+report policy blocks rather than route around them, and never to answer from
+memory when a tool fails.
+
+Run **Provision** from the Lifecycle panel, raising `version` in
+`appPackage/manifest.json` before every republish. For production, an
+administrator uploads the package and publishes it to the organization from the
+Microsoft 365 admin center.
+
+This route requires **Upload custom apps** in the Teams admin center, under Teams
+apps → Setup policies → Global.
+
+</Step>
+
+<Step title="Deploy as a federated connector" titleSize="h2" id="5b-deploy-as-a-federated-connector">
+
+In the Microsoft 365 admin center, go to **Copilot → Connectors → Gallery**, find
+**Create a new connector** under *Created by your org*, and select **Add**. Then,
+under **Connect to MCP server**, select **Add** and provide:
+
+| Field | Value |
+|---|---|
+| MCP endpoint URL | The full MCP URL from step 3, including the application slug and `/mcp` |
+| Display name | The name users will see |
+| Description | What the connector exposes; it steers how Copilot chooses to use it |
+| Developer name, Website URL, Privacy policy URL, Terms of use URL | Required |
+| Authentication type | **OAuth 2.0**, then the registration ID from step 4 |
+
+Save, then open the connector under **Your Connections** and select **Staged
+rollout**. Start with a small group, then **Deploy to all users** once verified.
+
+Access is layered and every layer must allow the user: **Agent and plugin
+access** by publisher type, **User access** as the population ceiling, and the
+staged rollout itself. "Deploy to all users" only reaches people inside **User
+access**. Changes take up to 10 minutes to propagate.
+
+This route requires **Global Administrator** or **AI Administrator**. If your
+gateway restricts inbound traffic by source IP, allow the static egress addresses
+Copilot uses.
+
+</Step>
+</Steps>
+
+## Verify
+
+On the connector route, select **Sign in** under **Tools** in the connector's
+details. A successful sign-in lists the tools TrustGate exposes, and a
+`tools/list` appears in Activity.
+
+Then open `m365.cloud.microsoft/chat` and ask for something that uses a tool,
+selecting the agent first on the agent route. Confirm:
+
+1. The call appears in TrustGate **Activity**, under the end user's address.
+2. The tools Copilot reports match the toolkit, and nothing more.
+3. If a TrustGuard policy is bound, a decision appears in TrustGuard **Activity**.
+
+## Harden
+
+Apply these one at a time, with a real call between each. Applied together, a
+failure gives no indication of which caused it.
+
+| Control | Where |
+|---|---|
+| Pin the calling client | **Allowed client IDs** on the application's Auth tab, from the `azp` claim of a working call |
+| Restrict the registration | **Restrict usage by Teams app** on the registration from step 4, agent route only |
+| Require assignment | **Enterprise applications → Properties** in Entra, then assign users or groups |
+
+Conditional Access policies apply to the Entra application like any other
+enterprise application, so sign-in can require MFA, a compliant device or a known
+network.
+
+<Warning>
+Turning on **Assignment required** invalidates the existing consent, and turning
+it off does not restore it. After changing it, remove and re-add the agent or
+re-authenticate the connector to force a fresh sign-in, and allow a few minutes
+for the change to propagate.
+</Warning>
+
+## Reference
+
+### Authentication flow
+
+Copilot runs an authorization-code flow against Microsoft Entra for the
+registered client, receives a token whose audience is `api://<appId>`, and
+presents it to the MCP endpoint. TrustGate validates issuer, audience and
+signature against the trust anchor, and reads the user from the `oid` claim.
+
+### Token claims
+
+| Claim | v2 | v1 |
+|---|---|---|
+| Calling client | `azp` | `appid` |
+| User identity | `oid` | `oid` |
+| Issuer | `login.microsoftonline.com/<tenantId>/v2.0` | `sts.windows.net/<tenantId>/` |
+
+**Allowed client IDs** accepts either claim.
+
+### Write actions on the connector route
+
+Tools that create, update or delete default to **Needs approval**, so Copilot
+asks the user to confirm each time.
+
+### Document context
+
+Copilot does not pass the open document with the tool call. Microsoft's
+documentation states that declarative agents have access to the open document by
+default; that applies to API plugins using the `reasoning` state object, not to
+MCP-based actions. While an agent is selected, the Copilot pane is locked to
+**Chat only**.
+
+### Deleting a connector
+
+Deleting a custom connector is permanent and cannot be undone. Only connectors
+your organization created can be deleted.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| Agent opens and chats, but no tool runs; generic token store error | No Copilot licence on that account |
+| `401 invalid_token` at the gateway | The Entra app still issues v1 tokens; set `requestedAccessTokenVersion` to 2 and clear the client's token cache |
+| `AADSTS500113` | No redirect URI registered on the Entra app |
+| `AADSTS50011` | The registered redirect URIs omit the one in the request; the error names it |
+| Consent asks only to sign in and read your profile | The OAuth registration carries no scope |
+| Lifecycle commands do nothing, toolkit shows its welcome screen | The project folder is not the workspace root, or the folder is not trusted |
+| Publish rejected on version | Raise `version` in the manifest |
+| Connector works in Copilot Chat but not in the Office panes | Observed at the time of writing; verify in your tenant |
+| Nothing in TrustGate Activity | The request did not leave Microsoft; the cause is not in the gateway |
+
+The last row is the first check to make. Confirm the call arrived before changing
+anything in TrustGate.
+
+## Related
+
+- [Microsoft 365 Copilot](/integrations/microsoft-365-copilot): the choice between both paths, and what the perimeter covers
+- [Threat detection](/integrations/microsoft-365-copilot-threat-detection): coverage and setup for the other path
+- [MCP Gateway](/trustgate/mcp/overview): applications, catalog merging, toolkits, and upstream authentication
+- [Applications](/trustgate/access/applications): slugs, routing, and the Connect tab
+- [Entra ID](/trustgate/concepts/authorization/entra-id): Entra applications, scopes, and redirect URIs
+- [Microsoft 365 Copilot extensibility](https://learn.microsoft.com/microsoft-365-copilot/extensibility/): Microsoft reference
