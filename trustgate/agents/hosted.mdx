@@ -1,12 +1,17 @@
 ---
 title: "Hosted agents"
-description: "Agents on Amazon Bedrock AgentCore, Microsoft Foundry and Vertex AI Agent Engine, named by their cloud's identifiers and signed in to with a cloud credential. What each cloud must allow, and what each one does not support."
+description: "Agents on Amazon Bedrock AgentCore, Microsoft Foundry, Vertex AI Agent Engine and Databricks, and AgentCore harnesses, named by their platform's identifiers. What each platform must allow, and what each one does not support."
 ---
 
-The three clouds serve A2A themselves, so the gateway still forwards A2A. What
-changes per cloud is how the agent is named, how TrustGate signs in to it, and a
-few transport differences. You never build an agent URL by hand: the gateway
-derives the card URL and the endpoint from the identifiers you give.
+AgentCore runtimes, Foundry and Vertex AI serve A2A themselves, so the gateway
+still forwards A2A. What changes per cloud is how the agent is named, how
+TrustGate signs in to it, and a few transport differences. You never build an
+agent URL by hand: the gateway derives the card URL and the endpoint from the
+identifiers you give.
+
+An [AgentCore harness](#amazon-bedrock-agentcore-harness) and a
+[Databricks agent](#databricks) do not speak A2A: the gateway
+[translates](#translated-agents) A2A to their own API.
 
 | | Amazon Bedrock AgentCore | Microsoft Foundry | Google Vertex AI Agent Engine |
 |---|---|---|---|
@@ -160,6 +165,89 @@ gateway's URL.
 | `404` on a task | `-32001` |
 | `429`, `5xx` | `-32092` |
 
+## Translated agents
+
+An AgentCore harness and a Databricks agent publish no card and answer their own
+API, not A2A. Callers still speak A2A 0.3 to the gateway, which turns each call
+into the platform's request and its answer into an A2A message.
+
+- **The card is built by the gateway**: the agent's name, one `chat` skill, A2A
+  0.3 and streaming. It is pinned like any other card, so **Card** shows it and
+  **Check for changes** compares it.
+- **Methods.** `message/send` answers a message with the agent's text.
+  `message/stream` answers a task: `working`, the text as one artifact appended
+  chunk by chunk as the agent writes it, then `completed`. The task lives only
+  for that stream, so `tasks/get`, `tasks/cancel` and `tasks/resubscribe` answer
+  `-32004`.
+- **What is sent.** The message's text parts, and its data parts as JSON, go as
+  one text. A file part answers `-32005`.
+- **The conversation** is the call's `contextId`, or a new one the reply
+  carries. It is bound to its caller like any
+  [context](/trustgate/agents/overview#tasks-belong-to-their-caller).
+- **Tokens.** The tokens the agent reports are recorded on the request, as an LLM
+  call's, and shown in Activity.
+- **Errors.** An error the agent answers is `-32603` with the agent's message. A
+  refused credential is `-32092` `upstream_auth_failed`.
+
+<Note>
+Agents added before streaming was supported have a card that does not declare
+it. Open the agent, choose **Check for changes** and approve the new card.
+</Note>
+
+## Amazon Bedrock AgentCore harness
+
+A harness is an AgentCore agent configured in the console (model, tools,
+instructions) and called with `InvokeHarness`. It does not serve A2A, unlike a
+runtime.
+
+**On AWS:** allow the AWS identity TrustGate uses
+`bedrock-agentcore:InvokeHarness` on the harness. For an assumed role, put the
+external id in its trust policy.
+
+**In TrustGate:** **Amazon Bedrock AgentCore harness**, the **Harness ARN**
+(`arn:aws:bedrock-agentcore:{region}:{account}:harness/{name}-{id}`) and an
+optional **Endpoint qualifier** (default `DEFAULT`). Sign-in is **AWS IAM
+(SigV4)**, with the same credentials as a [runtime](#sign-in).
+
+The gateway calls `POST /harnesses/invoke` in the ARN's region, signed for
+`bedrock-agentcore`, and reads the text the harness streams back. The
+conversation's `contextId` is the harness session, so the harness keeps the
+history.
+
+## Databricks
+
+A Databricks agent answers the OpenAI Responses API: one deployed to Model
+Serving (Mosaic AI Agent Framework) or a Databricks App.
+
+**On Databricks:** give the service principal or the token TrustGate uses
+**Can Query** on the serving endpoint, or **Can Use** on the App.
+
+**In TrustGate:** **Databricks**, the **Workspace URL** and either the
+**Serving endpoint** or the **App URL** (`https://….databricksapps.com`).
+
+| Sign-in | Databricks receives |
+|---|---|
+| **OAuth client credentials** | `Authorization: Bearer` with a token for the service principal. The token URL defaults to `{workspace}/oidc/v1/token` and the scope to `all-apis`. |
+| **API key in a header** | The header you set, `Authorization` by default: `Bearer dapi…`, a personal access token. |
+
+| Locator | The gateway calls |
+|---|---|
+| Serving endpoint | `POST {workspace}/serving-endpoints/{endpoint}/invocations` |
+| App URL | `POST {app}/responses` |
+
+The conversation's `contextId` goes as `context.conversation_id`; the agent keeps
+the history only if it stores it under that id.
+
+**Custom inputs.** `custom_inputs` and `databricks_options`, JSON objects in the
+message's `metadata` (or the call's `params.metadata`), go to the agent as they
+are:
+
+```json
+{"message": {"kind": "message", "role": "user", "messageId": "1",
+  "parts": [{"kind": "text", "text": "Hello"}],
+  "metadata": {"custom_inputs": {"user_tier": "gold"}}}}
+```
+
 ## From the API
 
 Set `provider` and the object named after it instead of `card_url` and `url`, and
@@ -184,6 +272,8 @@ POST /v1/gateways/{gateway_id}/registries
 | `bedrock_agentcore` | `bedrock_agentcore`: `runtime_arn`, `qualifier` | `aws`: `access_key_id`, `secret_access_key`, `session_token`; or `use_role`, `role`, `external_id`; or empty for the pods' credentials |
 | `azure_foundry` | `azure_foundry`: `project_endpoint`, `agent_name` | `azure`: `tenant_id`, `client_id`, `client_secret`; or `use_managed_identity` |
 | `vertex_agent_engine` | `vertex_agent_engine`: `project`, `location`, `reasoning_engine_id` | `gcp`: `service_account_json`; or `impersonate_service_account`; or empty for Application Default Credentials |
+| `agentcore_harness` | `agentcore_harness`: `harness_arn`, `qualifier` | `aws`, as `bedrock_agentcore` |
+| `databricks_agent` | `databricks_agent`: `workspace_url`, and `serving_endpoint` or `app_url` | None: `auth.mode` is `client_credentials` or `static` |
 
 `preview-agent-card` takes the same fields and uses the credentials for that read
 only. A sign-in another cloud's agent would need, or a `card_url` on a hosted

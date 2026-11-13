@@ -11,7 +11,7 @@ application lists it: Applications → the application → **General** → **Age
 
 **Connect** → **Agents** lists each agent the application calls, with its A2A
 version and a button that copies its card URL. **Agent in the examples** picks the
-agent the cURL and Python snippets call.
+agent the cURL, Python and OpenAI snippets call.
 
 Any A2A client works: point it at the agent's card on the gateway and send the
 application's key, from the **Auth** tab, in `X-AG-API-Key`.
@@ -58,6 +58,37 @@ Your own code can find the addresses from the key instead: `GET /whoami` on the
 MCP host lists each of the key's agent applications with its agents, their card
 URLs and versions, and the [TrustGate SDK](/sdks/trustgate/agents) hands them to
 an A2A client.
+
+## Call an agent as an OpenAI model
+
+An application that speaks the OpenAI API can call an agent as a model, with the
+same credentials, policies and task ownership as an A2A call:
+
+```python
+# pip install openai
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<agent-host>/<application-slug>/agents/<agent-id>/v1",
+    api_key="unused",
+    default_headers={"X-AG-API-Key": "<api-key>"},
+)
+reply = client.chat.completions.create(model="agent", messages=[{"role": "user", "content": "Hello"}])
+print(reply.choices[0].message.content)
+```
+
+- **Only the last user message is sent**, as one A2A message. Earlier messages
+  and `model` are ignored: the agent keeps the conversation.
+- **The conversation** comes back in the `X-AG-A2A-Context-Id` header and as
+  `a2a_context_id` on the completion and on every chunk. Send the header to
+  continue it.
+- **The answer** is the agent's message, else its task's artifacts, else its
+  status message. `usage` is set when the agent reports tokens.
+- **`"stream": true`** streams the agent's text as `chat.completion.chunk`s when
+  the agent streams, and as one chunk when it does not.
+- **Errors** are OpenAI errors: `403` `policy_blocked`, `429` rate limited, `401`
+  a user identity required, `404` a conversation that is not the caller's, `502`
+  `upstream_error`. In a stream the error is the last event before `[DONE]`.
 
 ## Who a call runs as
 
@@ -107,7 +138,7 @@ HTTP `200`:
 | `-32007` | The extended card is refused. | |
 | `-32090` | Blocked by a policy. | `{"reason": "policy_blocked" \| "mask_unsupported", "plugin": "<slug>"}` |
 | `-32091` | Rate limited. | `{"retry_after": <seconds>}` |
-| `-32092` | The gateway could not complete the call. | `{"reason": "<reason>"}` |
+| `-32092` | The gateway could not complete the call. | `{"reason": "<reason>"}`, and `upstream_status` when the agent answered an HTTP status that was not a JSON-RPC response |
 | `-32093` | The agent signs in as the user, and the caller is not a person an identity provider signed in. | `{"reason": "identity_required"}` |
 
 `-32092` reasons:
@@ -121,4 +152,6 @@ HTTP `200`:
 | `client_credentials_failed`, `identity_exchange_failed`, `signing_key_unavailable` | The gateway could not get or sign the credential for the agent. |
 | `plan_unavailable` | The gateway's usage plan is exhausted. |
 
-An error the agent itself answers is relayed as it came.
+An error the agent itself answers is relayed as it came. A
+[translated agent](/trustgate/agents/hosted#translated-agents)'s error is
+`-32603` with the agent's message.
