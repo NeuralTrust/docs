@@ -39,6 +39,7 @@ product to `false` to leave it out
 | `global.imageRegistryScope` | `all` | Also moves the OTel collector images onto `global.imageRegistry`. |
 | `global.autoGenerateSecrets` | `true` | Chart owns the credentials it can generate. |
 | `global.preserveExistingSecrets` | `false` | For GitOps: pre-create every Secret and set `true`. |
+| `global.proxy` | Only when egress goes through a proxy | Sends outbound calls through your corporate proxy — see [Corporate egress proxy](#corporate-egress-proxy). |
 | `global.observability.operationalTelemetry` | `false` by default; recommended `true` | TrustGate and TrustGuard export their own health traces and metrics — see [Operational telemetry](#operational-telemetry). |
 
 Leave `watchdog.enabled` off unless NeuralTrust asks you to enable it.
@@ -549,6 +550,53 @@ labels first. CUDA MPS and `hostIPC` may require extra security approval,
 especially on [OpenShift](/neuraltrust/deployment/openshift/overview). If GPU pods
 stay Pending, `ntctl doctor` shows the scheduler's reason; check the GPU slots,
 taints, node labels, and the NVIDIA device plugin.
+
+## Corporate egress proxy
+
+If the cluster reaches the internet only through an HTTP(S) proxy, set
+`global.proxy`. The chart passes the proxy to every workload that calls out:
+console sign-in with your identity provider, LLM providers, the NeuralTrust-hosted
+Firewall, and telemetry to NeuralTrust.
+
+```yaml
+global:
+  proxy:
+    enabled: true
+    httpProxy: "http://proxy.corp.example:8080"
+    httpsProxy: "http://proxy.corp.example:8080"
+    noProxy: ".corp.example"
+```
+
+- **`noProxy` adds to the chart's list rather than replacing it.** The chart
+  always sends these direct:
+  - `localhost`, `.svc` and `.cluster.local`;
+  - the Kubernetes API server;
+  - the cloud metadata endpoints that workload identity gets its tokens from;
+  - every Service the chart creates. This one matters because its components
+    call each other by short Service name.
+- **List your internal destinations in `noProxy` by domain suffix,** for example
+  `.corp.example`. The proxy decision is made on the host name before DNS lookup,
+  so an IP range doesn't cover a name that resolves into it. The console's
+  Node.js runtime also ignores CIDR entries entirely.
+- **Node.js needs no extra setting.** The console runs on Node.js, and the chart
+  enables Node's proxy support for you.
+- **The proxy must allow your identity provider's sign-in hosts.** For Microsoft
+  Entra ID that is `login.microsoftonline.com` and `graph.microsoft.com`.
+
+If the proxy inspects TLS by re-signing traffic with a corporate CA, put that CA
+in a Secret under the key `ca.crt` and set `global.customCaCert`:
+
+```yaml
+global:
+  customCaCert:
+    enabled: true
+    secretName: corp-proxy-ca
+```
+
+Config sync, DataBridge and the telemetry collector each have their own CA
+setting, described in [Trusting a private control plane](#trusting-a-private-control-plane).
+Each of those settings replaces the system roots on its connection, so the bundle
+you give it must include the proxy's CA.
 
 ## Central control plane values
 
