@@ -20,7 +20,33 @@ healthy in `kubectl get pods`.
 
 ## Preflight
 
-Before the first `helm upgrade --install`.
+Before the first install. `ntctl install` and `ntctl upgrade` run these checks
+themselves and stop on a failure. To run them on their own, changing nothing:
+
+```bash
+ntctl preflight -f values.yaml --domain platform.example.com
+ntctl preflight --for upgrade                  # against an existing install
+ntctl preflight --output json                  # for a pipeline; exit code 3 on failure
+```
+
+It renders the chart with your values and checks the cluster against what that
+release needs. Each result has a code, a severity (`OK`, `WARN` or `FAIL`) and,
+when it is not OK, a fix:
+
+| Code | Checks |
+| --- | --- |
+| `NT-PF-002` | An install finds no release of that name already there; an upgrade finds one |
+| `NT-PF-003` | `global.platform` matches what the cluster looks like |
+| `NT-PF-004` | Every storage class the values name exists, and there is a default one when a volume names none |
+| `NT-PF-005` | The ingress class exists; with `--gateway`, the Gateway exists and admits the namespace; on OpenShift, the Routes API is there |
+| `NT-PF-006` | Every Secret and key the release reads exists, or ntctl is about to create it |
+| `NT-PF-008` | The requests fit on the nodes each workload can run on, counting what already runs there. A GPU pool or a tainted system pool does not count for general workloads, and GPU workers need a node that matches their selector. It warns above 85 % of free capacity, which leaves room for a rolling upgrade, and fails above 100 %. With a cluster autoscaler it only warns |
+| `NT-PF-009` | Warns when a LoadBalancer Service gets a public address on AWS, Azure or GCP. Expected when data planes reach a central cluster over the internet |
+| `NT-PF-010` | **Hybrid ·** The control plane's names resolve, and not only to a VPN client's address on your machine |
+| `NT-PF-011` | Warns when `global.superadmin.password` is in the values, where Helm keeps it in the release history |
+
+The checks cannot see your network from inside the cluster or your intent, so
+work through the list below as well.
 
 - [ ] The chosen mode matches your data-residency, ownership, and multi-cluster
       requirements — see [Choose a model](/neuraltrust/deployment/overview#choose-a-model)
@@ -80,8 +106,15 @@ The most common cause of an install that never finishes converging.
 
 ## Installation health
 
-- [ ] `helm list -n <namespace>` shows the release `deployed` at the intended
-      chart version.
+Start with `ntctl status`, which shows each workload's readiness and the pods
+that need attention, and `ntctl doctor`, which runs the preflight checks against
+what is deployed and then reports what fails at runtime, each with a code and a
+fix. Both work on installs made with plain Helm. See
+[Troubleshooting](/neuraltrust/deployment/troubleshooting#start-with-ntctl-doctor).
+
+- [ ] `ntctl doctor` reports no failures.
+- [ ] `ntctl status` or `helm list -n <namespace>` shows the release `deployed`
+      at the intended chart version.
 - [ ] Every pod is `Ready`, and still `Ready` after
       `kubectl rollout restart` — this is what catches a dependency that only
       resolved because of start-up ordering.
@@ -155,6 +188,10 @@ TrustGate serves two protocols on two ports, and they need separate hostnames.
       and object storage, and a restore has actually been rehearsed.
 - [ ] The final chart version, values files, Secret inventory, endpoints, and
       the results of this checklist are archived with the escalation path.
+      `neuraltrust-values.yaml` from `ntctl install` or `ntctl adopt` holds the
+      values without credentials.
+- [ ] Whoever escalates knows to attach an `ntctl support-bundle` to a support
+      case — see [Troubleshooting](/neuraltrust/deployment/troubleshooting#send-a-support-bundle).
 
 Re-run the DNS, TLS, traffic, and telemetry sections after every upgrade that
 changes hostnames, certificates, or exporter configuration. Those four are where

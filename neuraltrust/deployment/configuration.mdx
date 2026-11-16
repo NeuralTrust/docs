@@ -435,17 +435,27 @@ A Firewall you run yourself is also supported: `deploy: false` with
 ### In-cluster Firewall workers
 
 With the Firewall in your cluster, no further values are needed. The chart
-renders two gateway replicas and one replica for each of the five default
-workers — `toxicity`, `indirect-prompt-injections`, `prompt-jailbreak`,
-`prompt-moderation`, and `response-jailbreak` — all on the `firewall-cpu` image
-pinned by your chart version.
+renders two gateway replicas and one Deployment per worker, all on the
+`firewall-cpu` image pinned by your chart version:
 
-Default worker requests are 1 CPU and 3 GiB, with 2 CPU and 4 GiB limits;
-`prompt-moderation` overrides memory to 4 GiB requested and 6 GiB limited, and
-`topic-guard` raises its memory limit to 5 GiB.
-Official images bundle their models, so `HUGGINGFACE_TOKEN` is optional. This is
-the largest memory consumer in the data path, so it is the first thing to
-right-size if you run a subset of detectors.
+| Worker | Replicas | Serves |
+| --- | --- | --- |
+| `prompt-jailbreak` | 2 | TrustGuard's prompt guard, on every request |
+| `topic-guard` | 2 | TrustGuard topic policies |
+| `toxicity` | 1 | Toxicity detection |
+| `indirect-prompt-injections` | 1 | Indirect prompt injection detection |
+| `complexity` | 1 | TrustGate's smart-routing scorer. Rendered only when TrustGate is installed |
+
+That is seven worker pods with all products, and six with TrustGuard only.
+Default worker requests are 1 CPU and 3 GiB, with 2 CPU and 4 GiB limits, and
+`topic-guard` raises its memory limit to 5 GiB. A worker's own `resources`
+merge over `firewall.firewall.workerDefaults.resources`: the keys it sets win,
+and the rest are inherited. The images ship every model, so no Hugging Face
+token or model download is involved. The workers are the largest memory
+consumer in the data path, so they are the first thing to right-size: turn off
+the detectors you do not use with
+`firewall.firewall.workers.<name>.enabled: false` before
+lowering any memory request.
 
 TrustGuard then derives `NEURAL_TRUST_FIREWALL_BASE_URL` as
 `http://firewall.<namespace>.svc.cluster.local` and maps
@@ -467,6 +477,10 @@ It also needs `global.firewall.deploy: true`, since the Firewall otherwise runs
 at NeuralTrust. Keep the gateway on the CPU image:
 
 ```yaml
+global:
+  firewall:
+    deploy: true
+
 firewall:
   firewall:
     gateway:
@@ -491,45 +505,50 @@ firewall:
           operator: Exists
           effect: NoSchedule
       hostIPC: true
-    # prompt-moderation and topic-guard carry their own resources in the chart
-    # defaults, which replace workerDefaults.resources, so restate the GPU.
+    # A worker's own resources merge over workerDefaults.resources, so every
+    # worker inherits the GPU request. topic-guard sets its own memory in the
+    # chart defaults; raise it for the GPU image.
     workers:
-      prompt-moderation:
-        resources:
-          requests:
-            nvidia.com/gpu: "1"
-          limits:
-            memory: 8Gi
-            nvidia.com/gpu: "1"
       topic-guard:
         resources:
           requests:
             memory: 4Gi
-            nvidia.com/gpu: "1"
           limits:
             memory: 8Gi
-            nvidia.com/gpu: "1"
     config:
       cudaMpsActiveThreadPercentage: "25"
       cudaMpsPinnedDeviceMemLimit: "6000M"
 ```
 
-Each of the seven workers requests one GPU. Configure the GPU node pool to share
-every GPU among **four CUDA MPS clients**, so that two L4 nodes can host all
-seven workers. On GKE, set the node pool's GPU sharing strategy to `MPS` with
-`max_shared_clients_per_gpu = 4`; on EKS, enable MPS sharing in the NVIDIA device
-plugin with four replicas. Four is the most an L4 can hold: each client may pin
-up to 6000 MB of device memory, and the L4 has 24 GB. Without sharing, every
-worker needs a GPU of its own. Node counts for each deployment model are in
-[Capacity](/neuraltrust/deployment/architecture#capacity).
+Every worker pod requests one GPU (`nvidia.com/gpu: 1`): seven with all
+products, six with TrustGuard only. Without sharing, each one needs a GPU of its
+own. Share every GPU among several **CUDA MPS clients** instead, and size the
+pool so it has at least as many GPU slots as worker pods.
+
+How many clients a GPU holds is set by the device memory each client may pin,
+`firewall.firewall.config.cudaMpsPinnedDeviceMemLimit`:
+
+> clients per GPU × `cudaMpsPinnedDeviceMemLimit` ≤ the GPU's memory
+
+| `cudaMpsPinnedDeviceMemLimit` | Clients per NVIDIA L4 (24 GB) | Fits |
+| --- | --- | --- |
+| `3500M`, the chart default | 6 | TrustGuard only on **one** L4 node; all products on two |
+| `6000M`, as in the example above | 4 | All products on **two** L4 nodes |
+
+Set the node pool's MPS client count to match: on GKE, the GPU sharing strategy
+`MPS` with `max_shared_clients_per_gpu`; on EKS, MPS sharing in the NVIDIA device
+plugin with that many replicas. GKE accepts the sharing settings only when the
+node pool is created, so decide the count first. Node counts for each
+deployment model are in [Capacity](/neuraltrust/deployment/architecture#capacity),
+and image size and boot disk in [GPU nodes](/neuraltrust/deployment/cloud-notes#gpu-nodes).
 
 This matches
 [`values-dataplane-gpu.yaml.example`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-dataplane-gpu.yaml.example),
 which ships with the chart. Install the vendor device plugin and validate node
 labels first. CUDA MPS and `hostIPC` may require extra security approval,
 especially on [OpenShift](/neuraltrust/deployment/openshift/overview). If GPU pods
-stay Pending, inspect resource availability, taints, node labels, and the NVIDIA
-device plugin with `kubectl describe pod`.
+stay Pending, `ntctl doctor` shows the scheduler's reason; check the GPU slots,
+taints, node labels, and the NVIDIA device plugin.
 
 ## Central control plane values
 
