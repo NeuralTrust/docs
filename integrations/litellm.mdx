@@ -36,7 +36,7 @@ machine. For those, use a client integration such as
 | Egress from the proxy to `{TRUSTGUARD_BASE_URL}` | The console shows the [base URL](/trustguard/api/evaluate#base-url) for your workspace. |
 | Control of the proxy `config.yaml` and a restart | Required to load the guardrail. |
 | A way to place `trustguard_guardrail.py` next to `config.yaml` | Use a read-only volume, a ConfigMap with `subPath`, or include it in your image. |
-| A current LiteLLM proxy | The file uses `apply_guardrail` and `get_session_id_from_request_data` (tested with LiteLLM **1.102.0**). |
+| A current LiteLLM proxy | The file uses `apply_guardrail` and `get_session_id_from_request_data` (tested with LiteLLM **1.102.0** and **1.108.0**). |
 
 Create the policy in **Observe** mode. Observe records decisions in **Activity**
 without enforcing them. Review the results, then switch the policy to **Enforce**.
@@ -203,7 +203,13 @@ class TrustGuard(CustomGuardrail):
                 timeout=self.timeout,
             )
         except Exception as exc:
-            return self._unavailable(f"{type(exc).__name__}: {exc}")
+            # Only a transport failure means TrustGuard is unreachable. Any other
+            # exception is a defect on our side and is reported as one: otherwise a
+            # bug disguises itself as a network problem and traffic leaves
+            # uninspected without anyone noticing.
+            if isinstance(exc, (httpx.HTTPError, OSError, TimeoutError)):
+                return self._unavailable(f"{type(exc).__name__}: {exc}")
+            return self._internal_error(f"{type(exc).__name__}: {exc}")
 
         if response.status_code != 200:
             return self._unavailable(
@@ -223,11 +229,43 @@ class TrustGuard(CustomGuardrail):
             detail={"error": "TrustGuard unavailable", "guardrail": self.guardrail_name},
         )
 
+    def _internal_error(self, reason: str) -> dict:
+        """A defect on our side: the payload never left the process."""
+        if self.fail_open:
+            verbose_proxy_logger.error(
+                "TrustGuard evaluation failed before the request was sent "
+                "(traffic NOT inspected): %s",
+                reason,
+            )
+            return {"status": "allow"}
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "TrustGuard evaluation failed", "guardrail": self.guardrail_name},
+        )
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """Make what LiteLLM hands over JSON-serializable.
+
+        Tool calls reach the guardrail as plain dicts on the OpenAI chat path but
+        as raw pydantic objects on others (Anthropic streaming, Responses API),
+        so both shapes are normalized here before they go into the request body.
+        """
+        if isinstance(value, (list, tuple)):
+            return [TrustGuard._json_safe(item) for item in value]
+        if isinstance(value, dict):
+            return {key: TrustGuard._json_safe(item) for key, item in value.items()}
+        if hasattr(value, "model_dump"):
+            return value.model_dump(mode="json", exclude_none=True)
+        if hasattr(value, "dict"):
+            return value.dict(exclude_none=True)
+        return value
+
     @staticmethod
     def _messages(inputs: dict, input_type: str) -> list:
         structured: Final = inputs.get("structured_messages")
         if input_type == "request" and isinstance(structured, list) and structured:
-            return structured
+            return TrustGuard._json_safe(structured)
         texts: Final = inputs.get("texts") or [None]
         role: Final = "user" if input_type == "request" else "assistant"
         return [
@@ -235,7 +273,7 @@ class TrustGuard(CustomGuardrail):
                 "role": role,
                 "content": text,
                 **(
-                    {"tool_calls": inputs["tool_calls"]}
+                    {"tool_calls": TrustGuard._json_safe(inputs["tool_calls"])}
                     if inputs.get("tool_calls") and index == len(texts) - 1 else {}
                 ),
             }
