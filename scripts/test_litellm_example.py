@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from litellm import ModelResponse, ModelResponseStream
 from litellm.integrations.custom_guardrail import CustomGuardrail
 from litellm.llms.openai.chat.guardrail_translation.handler import OpenAIChatCompletionsHandler
+from litellm.types.utils import ChatCompletionMessageToolCall, Function
 from litellm.proxy._types import UserAPIKeyAuth
 
 DOC: Final = Path(__file__).resolve().parents[1] / 'integrations' / 'litellm.mdx'
@@ -176,6 +177,30 @@ class DocumentedGuardrailTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as error:
             module.TrustGuard._apply_transform(inputs, {'messages': [{'role': 'assistant', 'content': None}]}, 'response')
         self.assertEqual(error.exception.status_code, 400)
+
+
+    async def test_object_tool_calls_are_inspected_not_failed_open(self) -> None:
+        """Tool calls reach the guardrail as plain dicts on the OpenAI chat path
+        but as pydantic objects on others (Anthropic streaming, Responses API).
+        The body must still serialize: otherwise the request never leaves and the
+        response goes out uninspected behind a misleading "unreachable" warning."""
+        sent: Final = []
+
+        def allow(request: httpx.Request) -> httpx.Response:
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json={'status': 'allow'})
+
+        tool: Final = ChatCompletionMessageToolCall(
+            id='call_test', type='function',
+            function=Function(name='contact', arguments='{"email":"' + EMAIL + '"}'),
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(allow)) as client:
+            await guard(client).apply_guardrail({'texts': [None], 'tool_calls': [tool]}, {}, 'response')
+
+        self.assertEqual(len(sent), 1, 'the guardrail failed open instead of sending the request')
+        call: Final = sent[0]['payload']['messages'][0]['tool_calls'][0]
+        self.assertEqual(call['id'], 'call_test')
+        self.assertEqual(json.loads(call['function']['arguments']), {'email': EMAIL})
 
 
 class EndUserAttributionTests(unittest.IsolatedAsyncioTestCase):
