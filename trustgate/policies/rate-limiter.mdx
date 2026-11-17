@@ -1,7 +1,7 @@
 ---
 title: "Rate Limiter"
 sidebarTitle: "Rate Limiter"
-description: "Cap how many requests an application, or each end user behind it, may make in a rolling window — and know exactly what the counter counts, and what it does not."
+description: "Cap how many requests an application, or each caller behind it, may make in a rolling window — and know exactly what the counter counts, and what it does not."
 ---
 
 Applies to **LLM and MCP** — the Model Context Protocol your agents call tools
@@ -45,27 +45,45 @@ which is worth reading before you save. **Max requests** exactly: with a limit o
 | Field | What to enter |
 |---|---|
 | **Retry after** | How long a refused client is told to wait before trying again. The console pre-fills the **window you just entered**, so a refusal points at the moment the allowance comes back; change it if you want refused clients to wait longer or come back sooner. You may pick a unit, and whatever you choose is converted to seconds on save. |
-| **Group by header** | Optional. A request header whose value splits the counter — `X-User-Id`, say — so each distinct value gets its own allowance inside the policy's scope. |
+| **Limit per** | Who shares one allowance. See [Limit per](#limit-per). Defaults to **Shared bucket**. |
+
+### Limit per
+
+Without it, everyone the policy covers shares one counter: one noisy agent
+spends the allowance and every other caller of the application gets `429`.
+**Limit per** gives each caller a counter of its own, inside the policy's scope.
+
+| Option | One counter per | Setting |
+|---|---|---|
+| **Shared bucket** | Application, or the whole gateway for **All traffic**. | none |
+| **Caller identity** | Verified caller — see the table below. | `group_by: subject` |
+| **Token claim** | Value of one claim of the verified token, such as `oid` or a tenant claim. | `group_by: claim`, `group_by_claim` |
+| **Request header** | Value of a header you name, such as `X-User-Id`. | `group_by: header`, `group_by_header` |
+
+**Caller identity** reads who the gateway authenticated, never something the
+caller can rewrite:
+
+| The request carries | It counts as |
+|---|---|
+| A token from your identity provider | Its subject (`sub`, or the claim the provider is set to read). Headers cannot change it. |
+| A personal key | Its owner. `X-NeuralTrust-End-User` is ignored. |
+| The application's key or certificate **and** `X-NeuralTrust-End-User` | That end user, within the application. The header needs the application's credential, so only the application can name someone. |
+| The application's key alone | That key. Two keys of one application have separate allowances. |
+| A client certificate alone | Its subject: the common name, else its first DNS name. |
 
 <Warning>
-**Group by header is a partition, not an exemption.** A request that does not
-carry the named header is not skipped and is not exempt: it falls back to the
-policy's own counter, shared with every other request that omits it. Ten clients
-that forget the header do not get ten allowances — they get one between them,
-and one of them will start seeing `429`s caused by the other nine.
-
-It is also a **raw header read**. It is not the end-user attribution pipeline,
-which [never reaches policy decisions](/trustgate/observability/end-user-attribution).
-A client that identifies its end user inside the request body rather than in a
-header is invisible to this setting.
+**Request header is set by the client.** A caller can send a new value with
+every request and get a fresh allowance each time. Use it only when something
+you trust sets the header — a backend in front of the gateway. To limit people
+or agents, use **Caller identity** or **Token claim**.
 </Warning>
 
-<Note>
-**Group by header never partitions MCP traffic.** An MCP tool call reaches the
-policy without any HTTP headers attached, so the value is always empty and every
-MCP request lands on the shared counter. Configure it if you like; on MCP it does
-nothing.
-</Note>
+A request with no value for the option you chose — no `oid` in the token, no
+header — is not exempt: it shares the policy's own counter with every other such
+request. A claim that holds a list or an object is treated the same way.
+
+The options work on LLM and MCP traffic alike. `group_by_header` on its own,
+from before **Limit per** existed, still means **Request header**.
 
 ### Scope
 
@@ -73,7 +91,7 @@ nothing.
 |---|---|
 | **All traffic** | One counter for all the traffic in scope. An organisation-level ceiling nobody can opt out of. |
 | **Applications** or **Groups** | One counter per application. Two applications sharing one policy keep independent allowances. |
-| *(plus **Group by header**)* | One counter per header value, inside whichever of the two above applies. |
+| *(plus **Limit per**)* | One counter per caller, claim value or header value, inside whichever of the two above applies. |
 
 ### Mode
 
@@ -104,7 +122,7 @@ hold a slow limit.
 <Steps>
 <Step title="The counter for this request is read">
 The key is the policy, its scope subject (the gateway, or the application), and
-the **Group by header** value if there is one. The value read is how many
+the caller, claim value or header value **Limit per** names, if any. The value read is how many
 requests that key has recorded in the last window.
 </Step>
 
@@ -175,7 +193,6 @@ whichever kind you actually run.
   tools, opening the session, and every other kind of MCP message pass without
   touching the counter. A client that only lists tools is invisible to this
   policy.
-- **Group by header does not work on MCP at all.** See the note above.
 - **Reading the counter and incrementing it are two steps, not one.** A burst of
   genuinely simultaneous requests can all read the same under-limit value and all
   be admitted, so a limit can be overshot slightly under concurrency. It is a
@@ -236,13 +253,14 @@ have made on that same **Policies** tab instead. In **Throttle** you will see no
 `429` either; you will see the request take visibly longer and then succeed.
 </Step>
 
-<Step title="The partition holds (only if you set Group by header)">
-Send a request with a different value in the header you named. It must be
-allowed, on its own fresh allowance, while the exhausted value is still being
-refused.
+<Step title="The partition holds (only if you set Limit per)">
+Send a request as a different caller — another token, another key, another
+`X-NeuralTrust-End-User`, or another value of the claim or header you chose. It
+must be allowed, on its own fresh allowance, while the exhausted caller is still
+being refused.
 
-Then send one with the header **omitted**. It is *not* exempt — it joins the
-shared counter, which is the point of the warning above.
+Then send one that carries no value for the option. It is *not* exempt — it
+joins the shared counter.
 </Step>
 </Steps>
 
@@ -261,8 +279,9 @@ decision records.
 | Nothing is ever refused | The policy is in **Observe** or **Throttle** | Only **Enforce** returns `429` |
 | Nothing is ever refused, and the mode is Enforce | The traffic is not in scope | Check **Coverage** on the policy — a number smaller than you expected means the scope is not what you think. A Scope reading **Matches nothing** means it reaches no traffic at all |
 | One application's traffic exhausts another's allowance | **Requests from** is *All traffic*, so there is one counter for everybody | Set **Requests from** to Applications, which gives each its own counter |
-| Everyone shares one allowance although **Group by header** is set | The clients are not sending that header, so they all fall back to the shared counter | Make the header mandatory in the client, or accept the shared counter |
-| **Group by header** does nothing on MCP | MCP requests carry no headers into the policy | Expected. Use a targeted policy per MCP application instead |
+| One agent's burst gets every caller of the application `429` | **Limit per** is **Shared bucket** | Set it to **Caller identity** |
+| Everyone shares one allowance although **Limit per** is set | The requests carry no value for it: no such claim in the token, or no header | Pick an option every request carries, such as **Caller identity** |
+| A client escapes the limit | **Limit per** is **Request header**, and the client changes the header | Use **Caller identity** or **Token claim** |
 | Clients wait longer than they had to | `Retry-After` is one fixed number — the whole window — while a rolling counter frees its oldest slot earlier | Expected. Lower **Retry after** if you want refused clients back sooner |
 | Slightly more requests get through than the limit allows | The read and the increment are not atomic under concurrency | Expected. Lower the limit if you need a hard ceiling |
 | Throttle lets far more through than the configured rate | The per-request delay is capped at two seconds | Expected for limits slower than about 30 per minute. Use **Enforce** if you need a ceiling |
@@ -278,5 +297,6 @@ decision records.
 - [LLM Budget](/trustgate/policies/llm-budget) — the same shape of control, for spend rather than volume
 - [Per-Tool Rate Limiter](/trustgate/policies/per-tool-rate-limiter) — a ceiling on tool executions rather than requests
 - [Policies overview](/trustgate/policies/overview) — scope, modes and policy chains
-- [End-user attribution](/trustgate/observability/end-user-attribution) — why the header you group by is not the same thing as the user on the trace
+- [Authentication](/trustgate/concepts/auth) — which credential a caller presents, and so what **Caller identity** counts
+- [End-user attribution](/trustgate/observability/end-user-attribution) — the declared user on the trace, which no limit reads
 - [Event schema](/platform/event-schema) — the fields each decision records

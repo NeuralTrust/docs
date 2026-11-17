@@ -674,6 +674,23 @@ TrustGate listens on these ports by default:
 | LLM/proxy | `8081` |
 | MCP | `8082` |
 
+### TrustGate admin listener
+
+The admin API listens on every interface, over plain HTTP, unless you say
+otherwise. Behind an ingress or a mesh that terminates TLS that is fine; on its
+own it exposes the management API, and the admin tokens sent to it, on the
+network.
+
+| Variable | Effect |
+| --- | --- |
+| `SERVER_ADMIN_HOST` | Address the admin API binds to. Unset: every interface. `127.0.0.1` keeps it to the host or a sidecar. An IP or a host name, without a port. |
+| `SERVER_ADMIN_TLS_CERT_FILE` | PEM certificate chain the admin API serves HTTPS with (TLS 1.2 or later). |
+| `SERVER_ADMIN_TLS_KEY_FILE` | The matching PEM private key. Set both or neither: one without the other stops the admin at boot. |
+
+With TLS on, plain HTTP on the same port gets no answer from the API, and the
+console's `AGENTGATEWAY_URL` must use `https://`. Point liveness and readiness
+probes at HTTPS too.
+
 ### TrustGate data-plane environment
 
 Optional variables you may set on the TrustGate proxy and MCP pods, beyond what the
@@ -685,7 +702,25 @@ chart and the wizard generate.
 | `PLAYGROUND_TOKEN_PUBLIC_KEYS` | Usually empty in Hybrid | RS256 public keys that verify playground and diagnostics tokens minted by the control plane; a bare PEM or a JSON array of `{kid, pem}`. Falls back to `ADMIN_M2M_PUBLIC_KEYS` when unset. Config-sync data planes also receive these keys in the snapshot. |
 | `PROXY_SERVE_HYBRID_GATEWAYS` | Leave the default | Whether this proxy serves gateways entitled as `data_plane=hybrid`. Defaults to the value of `CONFIG_SYNC_DATA_PLANE_ENABLED`, so a config-sync data plane serves them and a hosted proxy answers **421** for them instead. Set `true` only on a customer-run data plane that is not DB-less. |
 | `PROVIDER_ALLOW_PRIVATE_NETWORKS` | Leave unset on your own install | Whether gateways may reach model providers and guardrail services such as Azure Content Safety on private, loopback or link-local addresses. Defaults to `true`, because a self-run gateway normally reaches your private model hosts and private endpoints. Set `false` if people you do not fully trust can configure gateways, so they cannot aim TrustGate at your internal network. |
+| `PROVIDER_MAX_RETRIES` | Leave the default | How many more times a failed provider call is sent to the same registry. Defaults to `0`: each retry is a request the provider may bill, and client SDKs already retry on their own. When raised, it applies to transport errors, `5xx`, `429` and `408`; a call that timed out on the gateway's side is never retried on the same registry. Moving on to another registry is the application's [fallback](/trustgate/llm/routing#fallback). |
 | `MODEL_ARMOR_ALLOW_AMBIENT_IDENTITY` | Leave unset on your own install | Whether Model Armor policies may authenticate as the gateway's own cloud identity (Workload Identity, application default credentials or service-account impersonation) instead of a service-account key. Defaults to `true`. Set `false` under the same condition as above, so nobody who configures a gateway can borrow its identity. |
+
+### Access log
+
+At the default `LOG_LEVEL` (`INFO`) every TrustGate plane writes one `http access` line per
+request: method, path, status, duration, client IP and request id, and — on
+the proxy, MCP and agent planes — who sent it:
+
+| Field | Contents |
+| --- | --- |
+| `gateway_id`, `consumer_id` | The gateway and the application the request entered. |
+| `auth_id`, `auth_method` | The credential that authenticated it, and how: `api_key`, `oauth2`, `oidc`, `mtls`. |
+| `principal_subject`, `principal_method` | Who it runs as: a token's subject, a personal key's owner, or the application key's name. |
+| `client_id` | For a token, the client it was issued to (`azp`, else `client_id`). |
+
+Every value comes from the verified credential, never from a header. Emails are
+not logged; telemetry carries them. Use `LOG_FORMAT=json` to ship the lines to a
+log pipeline.
 
 ## Related
 

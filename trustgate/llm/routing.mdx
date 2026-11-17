@@ -123,12 +123,33 @@ A **budget** caps how hard it tries — a maximum number of attempts including t
 first, and a maximum total latency across all of them. When either runs out the
 client gets the last error, not a synthesised one.
 
+<Warning>
+**A fallback after a timeout is a new, billable request.** The first provider
+may still be generating, and will charge for its answer, while the next one
+answers the client. Add the **Timeout** trigger when availability is worth
+paying twice for.
+</Warning>
+
 Two things about the chain worth knowing before you build one. The same model
 name has to exist on each registry you want it to reach, or the fallback stops
 there. And a chain that spans providers — OpenAI, then Azure OpenAI, then
 Bedrock — is resilience; a chain that goes from a flagship to a cheaper model is
 a degrade path, and those two intentions want different triggers. Rate-limit
 triggers suit the first; policy-rejection triggers usually do not.
+
+## Retries
+
+By default a failed call is not sent to the same registry again — moving on to
+another registry is what fallback and load balancing are for. Every retry is a
+request the provider may bill, and OpenAI's and Anthropic's SDKs already retry
+twice on their own, so a gateway retry multiplies theirs.
+
+A self-hosted gateway can turn same-registry retries on with
+`PROVIDER_MAX_RETRIES` (default `0`). They apply to transport errors, `5xx`,
+`429` and a provider's `408`. A call that timed out on the gateway's side is
+never retried on the same registry, whatever the setting: the provider may
+still be generating the first answer. See
+[Configuration](/neuraltrust/deployment/configuration#trustgate-data-plane-environment).
 
 ## Load balancing
 
@@ -181,6 +202,11 @@ overrides the registry's, and a pinned model on a member decides outright.
 This restriction is not a policy. It costs no policy evaluation and fails closed
 at resolution, which is why it is the right place for "this service may only call
 these two models".
+
+Every model is the default, and it means exactly that: any model name the client
+sends is passed to the provider, including one you never reviewed or a far more
+expensive one. The console says so under a route that has no model list. Pick
+the models to close it.
 
 ## Order of resolution
 

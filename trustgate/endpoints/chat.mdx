@@ -111,9 +111,18 @@ Set `"stream": true` on OpenAI, Anthropic, Cohere and Responses; on Gemini call
 `:streamGenerateContent` or add `?alt=sse`. Events are re-encoded to the client's
 format.
 
-If an upstream stream dies after the response has started, the HTTP status is
-already `200` and cannot change. The gateway emits a final error event in the
-client's format instead — `upstream_error` for OpenAI-shaped clients, an
-`event: error` for Anthropic, an error object for Gemini — so a client that
-handles errors mid-stream sees one, and one that does not sees a truncated
-response rather than a hang.
+A stream ends the way the client's format says it does: `data: [DONE]` followed
+by its blank line for OpenAI-shaped clients, `message_stop` for Anthropic,
+`response.completed` for Responses, the last candidate's `finishReason` for
+Gemini, `message-end` for Cohere. A strict SSE parser sees every event.
+
+If the upstream fails after the response has started, the HTTP status is
+already `200` and cannot change. The gateway ends the stream with an error event
+in the client's format instead — `upstream_error` for OpenAI-shaped clients, an
+`event: error` for Anthropic, an error object for Gemini — and no end marker, so
+a truncated answer never looks finished. That covers a connection the provider
+resets halfway and a stream it closes before its own end marker. An error the
+provider sent in the stream reaches the client once, as the provider wrote it.
+
+Native Bedrock streams end with Bedrock's own exception frame. Bedrock Converse
+and watsonx streams are not checked for an end marker.

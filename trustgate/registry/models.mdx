@@ -22,6 +22,7 @@ Some providers do not authenticate with a single key:
 | **Vertex AI** | A GCP service-account JSON, uploaded or pasted. Project ID is read from the file. |
 | **IBM watsonx.ai** | An IBM Cloud API key, the region of the watsonx.ai Runtime and a project ID. The gateway trades the key for IAM tokens and renews them itself. See [Setting up IBM watsonx.ai](#setting-up-ibm-watsonx-ai). |
 | **Custom Model** | A base URL, and whatever that endpoint expects, including nothing. **Custom header** takes a Header Name and a Value. |
+| **Anthropic** | An API key. An optional **Base URL** sends Messages and Files to an Anthropic-compatible proxy or a test double instead of `api.anthropic.com`; the gateway calls `{base_url}/messages`. |
 
 <Note>
 **Azure Foundry routes through one of four API surfaces**, chosen per instance:
@@ -166,6 +167,32 @@ the first call.
 Not supported yet: deployment spaces (`space_id`), the IBM Cloud private IAM
 endpoint, and the Mumbai region, which runs on AWS with its own sign-in.
 
+## Forward client headers
+
+The gateway builds every provider request itself, so nothing the client sent
+besides the body reaches the provider. **Forward client headers**, under
+**Advanced** on an instance, lists the headers that do: the gateway copies them
+from the client's request onto the provider request.
+
+The usual ones are `traceparent` and `tracestate`, so the provider's spans join
+the caller's own trace. A request id the provider logs is another.
+
+- Header names are matched without regard to case, and stored capitalised.
+- Credentials and connection headers can never be listed — `Authorization`,
+  `x-api-key`, `api-key`, `Cookie`, `Host`, `Content-Type`, `Content-Length`,
+  `Accept-Encoding` and the like — nor the gateway's own `X-AG-*` and `X-TG-*`.
+  The caller's credential is for the gateway, not the provider.
+- A header the gateway sets itself for this provider wins: its credential, a
+  **Custom header**, `anthropic-version`.
+- Up to 32 headers. Nothing is forwarded by default.
+
+In the Admin API the list is `provider_options.forward_client_headers`, for
+example `["traceparent", "tracestate"]`.
+
+`anthropic-beta` does not need listing: on an Anthropic client calling an
+Anthropic entry the gateway already passes the client's beta flags through,
+because the request body may use them.
+
 ## Contract pricing
 
 Cost in Analytics, on every trace, and in any budget policy is only as true as
@@ -216,7 +243,7 @@ routing change and nothing else.
 | **Custom Model** | `openai_compatible` | openai | Base URL. TrustGate calls `{base_url}/chat/completions` (Chat Completions), plus a **Custom header** when the endpoint expects one. A client `/v1/responses` request is translated into that call. The endpoint is not sent `/v1/responses`. |
 | <img src="/images/registry/providers/gemini.svg" alt="" width="18" height="18" /> **Google AI Studio** | `google` | google | API key. |
 | <img src="/images/registry/providers/google_cloud.svg" alt="" width="18" height="18" /> **Google Vertex AI** | `vertex` | google | A GCP service-account JSON, uploaded or pasted, and a location. Project ID is read from the file. |
-| <img src="/images/registry/providers/anthropic.svg" alt="" width="18" height="18" /> **Anthropic** | `anthropic` | anthropic | API key. |
+| <img src="/images/registry/providers/anthropic.svg" alt="" width="18" height="18" /> **Anthropic** | `anthropic` | anthropic | API key. Optional base URL for an Anthropic-compatible proxy. |
 | <img src="/images/registry/providers/aws.svg" alt="" width="18" height="18" /> **AWS Bedrock** | `bedrock` | anthropic | **Access key** (access key ID, secret access key and region; a session token for temporary credentials) or **Assume role** with a role ARN. |
 | <img src="/images/registry/providers/azure_openai.svg" alt="" width="18" height="18" /> **Azure Foundry** | `azure` | openai | Azure endpoint, an API surface (deployments by default, or one of three Foundry surfaces), then an API key, a service principal (tenant, client ID, client secret), or **Managed identity**. See [What a provider needs](#what-a-provider-needs). |
 | <img src="/images/registry/providers/mistral.png" alt="" width="18" height="18" /> **Mistral** | `mistral` | openai | API key. |
