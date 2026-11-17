@@ -39,6 +39,34 @@ The pattern this enables: one Okta tenant trusted at the gateway, and per
 application, the two or three client ids that may enter. The alternative — one
 anchor per application — multiplies configuration without adding security.
 
+### Caller rules
+
+A binding can also check the token's claims, after the client id:
+
+| Rule | A token is refused when |
+|---|---|
+| **Forbidden claims** | It carries any of the listed claims with a value. |
+| **Required claims** | It lacks a listed claim, or the claim holds none of the listed values. A claim listed with no values only has to be present. |
+
+The case they exist for: an application meant for agents, behind an IdP that also
+issues tokens to people. Client ids alone cannot tell the two apart when a person
+signs in through the agent's own app registration. **Only machine tokens** in the
+console forbids `email`, `upn`, `name` and `preferred_username` — claims only a
+person's token carries — so a token minted for someone at a keyboard is refused
+even when it was issued to an allowed client. On Entra ID, also require `idtyp`
+= `app`, which only app-only tokens carry.
+
+- A refused token gets `403`, on the LLM, MCP and agent endpoints alike.
+- An array claim passes when any element is listed. Booleans and numbers compare
+  as written in JSON: `true`, `2`.
+- Rules apply to tokens only. An API key or a client certificate carries no
+  claims to check.
+- Up to 32 rules of each kind. A claim cannot be both required and forbidden.
+
+In the Admin API they are `auth_binding.required_claims` (for example
+`{"idtyp": ["app"]}`) and `auth_binding.forbidden_claims`, next to
+`allowed_client_ids`.
+
 Token claims decide **whether** a caller gets in. They never decide **where** it
 goes: registries and models come from the application's routing, not from
 anything in the token.
@@ -51,7 +79,8 @@ register on the IdP side.
 **Validate a token the caller already holds.** The service obtained a token from
 your IdP on its own — client credentials, or a user token your app acquired — and
 sends it. The gateway checks signature, issuer, expiry, audience and required
-scopes, then the application's allowed client ids. No browser, no redirect. On
+scopes, then the application's allowed client ids and caller rules. No browser,
+no redirect. On
 the IdP this needs an issuer and an audience, nothing more.
 
 **Broker the login.** An MCP agent — Cursor, Claude Desktop — has no token and a

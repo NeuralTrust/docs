@@ -122,15 +122,15 @@ a catch-all.
 
 | Field | What to enter |
 |---|---|
-| **Group by header** | Optional. A request header whose value splits the budget — `X-User-Id`, say — so each distinct value gets its own allowance inside the policy's scope. |
+| **Limit per** | Who shares one budget: **Shared bucket** (default), **Caller identity**, **Token claim** or **Request header**. Each caller gets the whole budget for itself. The options and what each counts are explained on the [Rate Limiter](/trustgate/policies/rate-limiter#limit-per). Not offered on a per-key budget, which already counts each key on its own. |
 | **Counting** | *Total (input+output)*, *Input only* or *Output only*. Defaults to total. |
 
 <Warning>
-**Group by header is a partition, not an exemption.** A request that does not
-carry the named header is not skipped: it falls back to the policy's own counter,
-shared with every other request that omits it. It is also a raw header read, not
-the [end-user attribution](/trustgate/observability/end-user-attribution)
-pipeline, which never reaches policy decisions.
+**Limit per is a partition, not an exemption.** A request with no value for the
+option — no such claim, no header — is not skipped: it shares the policy's own
+budget with every other such request. **Request header** is set by the client,
+which can change it to get a fresh budget; for spend per person or per agent use
+**Caller identity**.
 </Warning>
 
 ### Scope
@@ -139,7 +139,7 @@ pipeline, which never reaches policy decisions.
 |---|---|
 | **All traffic** | An organisation-level ceiling nobody can opt out of. |
 | **Applications** or **Groups** | Per-tenant or per-application quotas. |
-| *(plus **Group by header**)* | Per end user inside one application, without a policy per user. |
+| *(plus **Limit per**)* | Per person or agent inside one application, without a policy per caller. |
 
 ### Mode
 
@@ -174,7 +174,7 @@ pricing**, or use a **token** budget for that traffic.
 <Step title="The counters for this request are read">
 The overall budget's counter, and the counter of the most specific per-model rule
 matching the request's model. Both keyed by the policy, its scope subject, and
-the **Group by header** value if there is one.
+the caller, claim value or header value **Limit per** names, if any.
 
 **Nothing about this request is measured.** No prompt is tokenised, no cost is
 estimated, nothing is reserved.
@@ -358,10 +358,11 @@ for this request; an error from the provider about an unknown model means the
 target was applied but that provider does not serve it.
 </Step>
 
-<Step title="The partition holds (only if you set Group by header)">
-Send a request with a different value in the header you named. It must be allowed
-on its own fresh budget while the exhausted value is still refused. Then send one
-with the header omitted: it is not exempt — it joins the shared counter.
+<Step title="The partition holds (only if you set Limit per)">
+Send a request as a different caller, or with a different claim or header value.
+It must be allowed on its own fresh budget while the exhausted one is still
+refused. Then send one with no value for the option: it is not exempt — it joins
+the shared counter.
 </Step>
 </Steps>
 
@@ -390,7 +391,7 @@ decision records.
 | The window reset earlier than expected | The window is fixed and opened when the counter was first charged, not on the hour | Expected |
 | A 30-second window behaves like a minute | Anything under 60 seconds is raised to 60 | Use a window of a minute or more |
 | An agent that cancels streams runs past its budget | Abandoned streams are never charged | Expected. Do not rely on this policy for clients that disconnect routinely |
-| Everyone shares one budget although **Group by header** is set | The clients are not sending that header | Make the header mandatory in the client |
+| Everyone shares one budget although **Limit per** is set | The requests carry no value for it | Pick an option every request carries, such as **Caller identity** |
 | A model with no per-model rule is unlimited | The policy carries per-model rules and no overall budget, which this form would not have allowed | Add an overall budget, or a catch-all rule |
 | `502` on every request, including harmless ones | The counter store is unreachable | This policy fails closed regardless of mode. Fix the store |
 | The budget disappeared after a deployment | The counters are operational state in a shared store | Expected. Use **Analytics** for what was actually spent |
