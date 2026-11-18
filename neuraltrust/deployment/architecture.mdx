@@ -7,9 +7,11 @@ This is the page to hand to a platform or infrastructure team before an install.
 It covers what the platform depends on, what talks to what, and how much capacity
 to plan for — independent of which model you deploy.
 
-For the topology itself, including its diagram and component inventory, go to your
+To choose a shape first, see
+[Reference architectures](/neuraltrust/deployment/reference-architectures). For
+the topology itself, including its diagram and component inventory, go to your
 model's guide: [Hybrid](/neuraltrust/deployment/hybrid),
-[External](/neuraltrust/deployment/external), or
+[Self-hosted](/neuraltrust/deployment/external), or
 [Central](/neuraltrust/deployment/central). Everything ships as a **single
 umbrella Helm chart**,
 [`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform),
@@ -56,7 +58,7 @@ In-cluster hops are plain Services; there is no service mesh requirement.
 | TrustGate MCP | 8082 | Your MCP clients, through Ingress |
 | TrustGate admin | 8080 | Console (External and Central only) |
 | TrustGuard data plane | 8081 | TrustGate |
-| Firewall gateway | 8000 | TrustGuard |
+| Firewall gateway | 8000 | TrustGuard (in-cluster Firewall only) |
 | data-plane API | 8000 | Console and TrustTest |
 | DataAgent | 8080 | Health probes only — it has no inbound service |
 | ClickStack collector | 4317 / 4318 | TrustGate, TrustGuard (OTLP) |
@@ -67,7 +69,9 @@ In-cluster hops are plain Services; there is no service mesh requirement.
 What has to cross a network boundary depends on the model, and each model page
 carries its own rules: [Hybrid](/neuraltrust/deployment/hybrid#network) needs
 outbound HTTPS to NeuralTrust plus one inbound source IP,
-[External](/neuraltrust/deployment/external#network) needs neither, and
+[Self-hosted](/neuraltrust/deployment/external#network) needs only the
+[inference plane](/neuraltrust/deployment/inference-plane) host — or nothing
+with the Firewall in-cluster — and
 [Central](/neuraltrust/deployment/central#network-rules) needs the same outbound
 set as Hybrid but against your own domain, with the central cluster accepting it.
 
@@ -82,10 +86,12 @@ nodes as load grows.
 
 | Scenario | Firewall on CPU | Firewall on GPU |
 | --- | --- | --- |
-| Hybrid, all products | **3** × 8 vCPU / 32 GiB | **2** × 8 vCPU / 16 GiB + **2** × L4 GPU nodes |
-| Hybrid, TrustGuard only | **3** × 8 vCPU / 16 GiB | **2** × 8 vCPU / 16 GiB + **2** × L4 GPU nodes |
+| Hybrid, all products or TrustGuard only, hosted Firewall (default) | **2** × 8 vCPU / 16 GiB | — (no Firewall here) |
+| Hybrid, all products, in-cluster Firewall | **3** × 8 vCPU / 32 GiB | **2** × 8 vCPU / 16 GiB + **2** × L4 GPU nodes |
+| Hybrid, TrustGuard only, in-cluster Firewall | **3** × 8 vCPU / 16 GiB | **2** × 8 vCPU / 16 GiB + **2** × L4 GPU nodes |
 | Hybrid, TrustGate only | **2** × 8 vCPU / 16 GiB | — (no Firewall) |
-| External or Central | **4** × 8 vCPU / 32 GiB | **3** × 8 vCPU / 16 GiB + **2** × L4 GPU nodes |
+| External or Central, hosted Firewall (default) | **3** × 8 vCPU / 16 GiB | — (no Firewall here) |
+| External or Central, in-cluster Firewall | **4** × 8 vCPU / 32 GiB | **3** × 8 vCPU / 16 GiB + **2** × L4 GPU nodes |
 
 | Node | AWS | Azure | GCP |
 | --- | --- | --- | --- |
@@ -101,8 +107,10 @@ Where a single node would be enough, the table specifies two, so that the two
 replicas of the request path run on different nodes.
 
 The GPU column assumes the
-[GPU Firewall configuration](/neuraltrust/deployment/configuration#gpu-firewall-workers),
-including CUDA MPS sharing with four clients per GPU.
+[GPU Firewall configuration](/neuraltrust/deployment/configuration#gpu-firewall-workers)
+as the chart's example ships it, with CUDA MPS sharing at four clients per GPU.
+With the chart's default pinned memory an L4 holds six clients, so TrustGuard
+only, at six worker pods, fits on one L4 node.
 
 <Tip>
 **Enable cluster autoscaling.** Set each node pool's minimum to the count above
@@ -119,11 +127,15 @@ the cluster. Values are rounded up to whole vCPU and GiB.
 
 | Scenario | Firewall on CPU | Firewall on GPU: CPU pool | Firewall on GPU: GPU pool |
 | --- | --- | --- | --- |
-| Hybrid, all products | 13 vCPU / 37 GiB | 6 vCPU / 15 GiB | 7 vCPU / 28 GiB, 7 GPU shares |
-| Hybrid, TrustGuard only | 9 vCPU / 25 GiB | 3 vCPU / 6 GiB | 6 vCPU / 24 GiB, 6 GPU shares |
+| Hybrid, all products, hosted Firewall (default) | 6 vCPU / 14 GiB | — | — |
+| Hybrid, all products, in-cluster Firewall | 13 vCPU / 36 GiB | 6 vCPU / 15 GiB | 7 vCPU / 28 GiB, 7 GPU shares |
+| Hybrid, TrustGuard only, hosted Firewall (default) | 2 vCPU / 5 GiB | — | — |
+| Hybrid, TrustGuard only, in-cluster Firewall | 9 vCPU / 24 GiB | 3 vCPU / 6 GiB | 6 vCPU / 24 GiB, 6 GPU shares |
 | Hybrid, TrustGate only | 3 vCPU / 6 GiB | — | — |
-| External | 18 vCPU / 46 GiB | 11 vCPU / 24 GiB | 7 vCPU / 28 GiB, 7 GPU shares |
-| Central | 19 vCPU / 47 GiB | 12 vCPU / 25 GiB | 7 vCPU / 28 GiB, 7 GPU shares |
+| External, hosted Firewall (default) | 11 vCPU / 23 GiB | — | — |
+| External, in-cluster Firewall | 18 vCPU / 45 GiB | 11 vCPU / 24 GiB | 7 vCPU / 28 GiB, 7 GPU shares |
+| Central, hosted Firewall (default) | 11 vCPU / 24 GiB | — | — |
+| Central, in-cluster Firewall | 19 vCPU / 46 GiB | 12 vCPU / 25 GiB | 7 vCPU / 28 GiB, 7 GPU shares |
 
 Using managed PostgreSQL and Redis lowers memory requests by 2 GiB. The totals
 exclude the node's system reservation, DaemonSets, kube-system, and your ingress
@@ -134,7 +146,7 @@ installation sustains. Measure under your own traffic before tuning.
 
 | What drives capacity | Default request / limit | Notes |
 | --- | --- | --- |
-| Firewall CPU workers | 1 vCPU / 3 GiB each, limit 2 vCPU / 4 GiB | Seven with all products. `prompt-moderation` requests 4 GiB (limit 6 GiB) and `topic-guard` is limited at 5 GiB. Together they are 60 % of Hybrid's memory requests |
+| Firewall CPU workers (in-cluster Firewall only) | 1 vCPU / 3 GiB each, limit 2 vCPU / 4 GiB | Five Deployments and seven pods with all products (`topic-guard` and `prompt-jailbreak` run two replicas each); four and six with TrustGuard only, which drops `complexity`. `topic-guard` is limited at 5 GiB |
 | data-plane API | 1 vCPU / 3 GiB per replica, two replicas | Runs evaluations in-process by default |
 | ClickHouse | 1 vCPU / 4 GiB, limit 4 vCPU / 8 GiB | External and Central; keep headroom for analytics queries |
 | PostgreSQL and Redis | 500m / 2 GiB and 100m / 128 MiB in-cluster | Prefer [managed stores](/neuraltrust/deployment/configuration#managed-stores), so datastore capacity is independent of the node pool |

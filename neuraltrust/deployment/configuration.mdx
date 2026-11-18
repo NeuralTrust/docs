@@ -5,7 +5,7 @@ description: Every chart switch that changes a deployment — products, datastor
 
 This is the values reference the model guides link into. Start from your model's
 page — [Hybrid](/neuraltrust/deployment/hybrid),
-[External](/neuraltrust/deployment/external), or
+[Self-hosted](/neuraltrust/deployment/external), or
 [Central](/neuraltrust/deployment/central) — and come here for the individual
 settings.
 
@@ -25,7 +25,7 @@ product to `false` to leave it out
 | `global.deploymentMode` | `hybrid` \| `external` \| `saas` | Selects the topology. `saas` is a [Central control plane](/neuraltrust/deployment/central) that you run. |
 | `global.controlPlane.domain` | Empty for NeuralTrust SaaS | A bare DNS suffix enrols this data plane into your own central control plane instead. |
 | `global.products.trustgate` | `true` to run TrustGate | Renders the TrustGate proxy and MCP data plane. Hybrid needs at least one product. |
-| `global.products.trustguard` | `true` to run TrustGuard | Renders the TrustGuard data plane. Firewall follows. |
+| `global.products.trustguard` | `true` to run TrustGuard | Renders the TrustGuard data plane. In Hybrid it calls the NeuralTrust-hosted Firewall unless `global.firewall.deploy: true`; see [Firewall](#firewall). |
 | `global.products.dataPlane` | `true` for the red-teaming shim | Renders the data-plane API. Needs no DataAgent and no config sync. |
 | `global.postgresql.deploy` | **`false` in production** | `true` runs an in-cluster store, which is the proof-of-concept default. |
 | `global.redis.deploy` | **`false` in production** | Same for Redis. |
@@ -47,7 +47,7 @@ Product telemetry export is **mandatory** in Hybrid and always on — there is n
 `global.clickstack.enabled: false` opt-out. TrustGate and TrustGuard send OTLP to
 a co-located, enrollment-backed egress collector, which is why the enrollment
 tokens are required. For a deployment with no NeuralTrust dependency at all, use
-[External](/neuraltrust/deployment/external). Operational telemetry, below, is
+[Self-hosted](/neuraltrust/deployment/external). Operational telemetry, below, is
 separate and off unless you turn it on.
 
 ## Operational telemetry
@@ -232,6 +232,129 @@ across regions, they share **one writable PostgreSQL primary** with a
 cross-region read replica, and each region gets **its own Redis** — see
 [High availability](/neuraltrust/deployment/high-availability).
 
+### IAM database authentication
+
+Against a managed PostgreSQL (`global.postgresql.deploy: false`), set
+`global.postgresql.authMode: iam` to have the services log in with a
+short-lived cloud token instead of a static password. The chart's own
+PostgreSQL has no token login, so `authMode: iam` is ignored there.
+
+Each runtime service's `database.iamAuth` inherits the global setting when you
+leave it unset. Set it explicitly to `true` or `false` only for a mixed-auth
+install where one service keeps a password.
+
+Which cloud mints the token follows the identity block you configure:
+
+| Identity block | `POSTGRES_LOGIN` | Database |
+| --- | --- | --- |
+| None (default) | `aws` | RDS / Aurora with IRSA. Set `global.postgresql.awsRegion` |
+| `global.azureIdentity.method` | `azure` | Azure Database for PostgreSQL with Microsoft Entra ID |
+| `global.gcpIdentity.method` | `gcp` | Cloud SQL or AlloyDB with IAM database auth |
+
+With token auth, `global.postgresql.sslMode` must be `require`, `verify-ca` or
+`verify-full`; the services refuse to start over anything weaker. The bootstrap
+Jobs never run under IAM auth, so you pre-create every role and database
+yourself.
+
+#### Cloud SQL and AlloyDB (GKE)
+
+Works in every deployment mode, with GKE Workload Identity:
+
+```yaml
+global:
+  gcpIdentity:
+    method: workload-identity
+  postgresql:
+    deploy: false
+    host: 10.10.0.5
+    authMode: iam
+    sslMode: require
+    user: "neuraltrust-db@my-project.iam"
+```
+
+Every PostgreSQL client — TrustGate, TrustGuard, DataAgent, DataCore,
+AlertEngine, data-plane-api, and the control-plane API and console — then gets
+`POSTGRES_LOGIN=gcp` and mints a token from Application Default Credentials
+for each new connection.
+
+- **Database users.** Each user is a Google service account's email **without**
+  `.gserviceaccount.com`, for example `trustguard-db@my-project.iam`. The
+  control plane's is `global.postgresql.user` (also every Hybrid client's); the
+  others are `<service>.database.user`. A full email is refused at render.
+- **Identities.** Map each Google service account to its Kubernetes
+  ServiceAccount with `iam.gke.io/gcp-service-account` in
+  `<service>.serviceAccount.annotations`, and in
+  `control-plane-api.controlPlane.serviceAccount.annotations` for the shared
+  `control-plane` ServiceAccount. To use one Google service account for
+  everything instead, set `global.gcpIdentity.serviceAccount` and
+  `global.gcpIdentity.applyGlobally: true`.
+- **Instance setup, once per service account.**
+  1. Enable the `cloudsql.iam_authentication` (Cloud SQL) or
+     `alloydb.iam_authentication` (AlloyDB) flag.
+  2. Create the user with
+     `gcloud sql users create <user> --type=cloud_iam_service_account` or
+     `gcloud alloydb users create <user> --type=IAM_BASED`.
+  3. Grant `roles/cloudsql.instanceUser` and `roles/cloudsql.client` (Cloud SQL),
+     or `roles/alloydb.databaseUser` and
+     `roles/serviceusage.serviceUsageConsumer` (AlloyDB), plus
+     `roles/iam.workloadIdentityUser` for
+     `<project>.svc.id.goog[<namespace>/<serviceaccount>]`.
+  4. As an administrator, create each database owned by its user, and enable
+     `pgcrypto` in the TrustGuard database:
+
+     ```sql
+     CREATE DATABASE trustguard;
+     ALTER DATABASE trustguard OWNER TO "trustguard-db@my-project.iam";
+     -- connected to the trustguard database:
+     CREATE EXTENSION IF NOT EXISTS pgcrypto;
+     ```
+
+<Warning>
+GCP IAM auth needs service images that accept `POSTGRES_LOGIN=gcp`. An older
+pinned image tag stops at boot instead of trying a password against a
+passwordless role. Installs that do not set `global.gcpIdentity` render
+unchanged.
+</Warning>
+
+#### Memorystore for Redis Cluster (GKE)
+
+For Memorystore for Redis Cluster or Valkey with IAM auth, combine
+`global.gcpIdentity` with three opt-in `global.redis` keys:
+
+```yaml
+global:
+  gcpIdentity:
+    method: workload-identity
+  redis:
+    deploy: false
+    host: 10.10.0.20 # the discovery endpoint
+    port: 6379
+    tls: "true"
+    authMode: iam
+    cluster: true
+    caSecret:
+      name: redis-ca
+      key: ca.pem
+```
+
+| Key | Effect |
+| --- | --- |
+| `authMode: iam` | TrustGate, TrustGuard and data-plane-api send a Google access token as the AUTH password (`REDIS_LOGIN=gcp`). No Redis password is needed: leave any `<service>.redis.existingSecret` unset. |
+| `cluster: true` | A cluster client seeded from the discovery endpoint (`REDIS_CLUSTER=true`). A Redis Cluster has database 0 only, so a non-zero `agentgateway.redis.db` or data-plane-api `redis.db` is refused. |
+| `caSecret` | A Secret holding the server CA bundle, mounted at `/etc/neuraltrust/redis-ca/ca.pem` (`REDIS_TLS_CA_FILE`), including in data-plane-api's evaluation Jobs. |
+
+Each service account needs `roles/redis.dbConnectionUser`. For Memorystore,
+put every certificate printed by
+`gcloud redis clusters get-cluster-certificate-authority <cluster>` into one
+file and create the Secret from it:
+
+```bash
+kubectl create secret generic redis-ca -n neuraltrust --from-file=ca.pem=./redis-ca.pem
+```
+
+These keys apply only to a Redis you run (`deploy: false`). Installs that set
+none of them render unchanged.
+
 ## Ingress
 
 ```yaml
@@ -267,40 +390,97 @@ With two clusters active/passive, put one global LLM URL and one global MCP URL
 in front of both clusters' Ingress resources and configure those stable URLs in
 the console.
 
-## Firewall workers
+## Firewall
 
-Firewall deploys with TrustGuard: no values are needed to get it. The chart
-renders two gateway replicas and one replica for each of the five default
-workers — `toxicity`, `indirect-prompt-injections`, `prompt-jailbreak`,
-`prompt-moderation`, and `response-jailbreak` — all on the `firewall-cpu` image
-pinned by your chart version.
+The Firewall holds the ML detectors TrustGuard calls. In every mode it is
+**NeuralTrust-hosted by default** — the inference plane — and
+`global.firewall.deploy: true` runs it in your cluster instead.
 
-Default worker requests are 1 CPU and 3 GiB, with 2 CPU and 4 GiB limits;
-`prompt-moderation` overrides memory to 4 GiB requested and 6 GiB limited, and
-`topic-guard` raises its memory limit to 5 GiB.
-Official images bundle their models, so `HUGGINGFACE_TOKEN` is optional. This is
-the largest memory consumer in the data path, so it is the first thing to
-right-size if you run a subset of detectors.
+| Mode | Where the firewall key comes from |
+| --- | --- |
+| **Hybrid** | app.neuraltrust.ai shows it once, when it creates the private TrustGuard |
+| **External**, **Central** | Ask NeuralTrust before you deploy; it is sent to you over a secure channel. Central needs one per cluster that runs TrustGuard, remote clusters included |
 
-TrustGuard derives `NEURAL_TRUST_FIREWALL_BASE_URL` as
+**NeuralTrust-hosted Firewall.** TrustGuard authenticates with its own
+`FIREWALL_JWT`: a per-install client that carries the Firewall URL, so no
+signing key is shared with your cluster, and the client can be revoked on its
+own. Store it in a Secret (key `FIREWALL_JWT`):
+
+```yaml
+trustguard:
+  firewall:
+    jwtExistingSecret:
+      name: "trustguard-firewall"
+```
+
+`trustguard.firewall.jwt` takes the token inline instead. TrustGate's
+smart-routing complexity scoring takes its own token the same way, under
+`agentgateway.firewall`. The hosts are `firewall.neuraltrust.ai` (EU) and
+`firewall.us.neuraltrust.ai` (US), on 443 or over Private Service Connect. The
+Firewall is stateless: it scores the text it receives and stores none of it.
+
+<Warning>
+**Installs that run the Firewall in their cluster, in any mode:** add
+`global.firewall.deploy: true` to your values before upgrading to keep it.
+Without it, and without a TrustGuard firewall JWT, the upgrade stops with an
+error that names both options. Air-gapped installs, which cannot reach the
+hosted Firewall, keep `deploy: true`.
+</Warning>
+
+An install with TrustGuard and neither a firewall JWT nor `deploy: true` fails
+at render time, so the ML detectors never go dark silently.
+A Firewall you run yourself is also supported: `deploy: false` with
+`global.firewall.baseURL` and its `JWT_SECRET` in `global.firewall.existingSecret`.
+
+### In-cluster Firewall workers
+
+With the Firewall in your cluster, no further values are needed. The chart
+renders two gateway replicas and one Deployment per worker, all on the
+`firewall-cpu` image pinned by your chart version:
+
+| Worker | Replicas | Serves |
+| --- | --- | --- |
+| `prompt-jailbreak` | 2 | TrustGuard's prompt guard, on every request |
+| `topic-guard` | 2 | TrustGuard topic policies |
+| `toxicity` | 1 | Toxicity detection |
+| `indirect-prompt-injections` | 1 | Indirect prompt injection detection |
+| `complexity` | 1 | TrustGate's smart-routing scorer. Rendered only when TrustGate is installed |
+
+That is seven worker pods with all products, and six with TrustGuard only.
+Default worker requests are 1 CPU and 3 GiB, with 2 CPU and 4 GiB limits, and
+`topic-guard` raises its memory limit to 5 GiB. A worker's own `resources`
+merge over `firewall.firewall.workerDefaults.resources`: the keys it sets win,
+and the rest are inherited. The images ship every model, so no Hugging Face
+token or model download is involved. The workers are the largest memory
+consumer in the data path, so they are the first thing to right-size: turn off
+the detectors you do not use with
+`firewall.firewall.workers.<name>.enabled: false` before
+lowering any memory request.
+
+TrustGuard then derives `NEURAL_TRUST_FIREWALL_BASE_URL` as
 `http://firewall.<namespace>.svc.cluster.local` and maps
 `firewall-secrets/JWT_SECRET` to its client secret. Both sides are wired by the
-chart, so there is nothing to configure.
+chart, so there is nothing to configure, and a `trustguard.firewall.jwt` is
+ignored.
 
 <Warning>
 `firewall.enabled`, `firewall.firewall.enabled`, and `trustguard.firewall.enabled`
-have no effect on whether Firewall renders. Setting all three to `false` with
-TrustGuard on still produces the gateway and all five workers. To reduce its
-footprint, size the workers instead.
+have no effect on whether Firewall renders; only `global.firewall.deploy` does.
+To reduce its in-cluster footprint, size the workers instead.
 </Warning>
 
 ### GPU Firewall workers
 
 Chart defaults are CPU. GPU mode needs a NeuralTrust-provided `firewall-gpu`
 image plus explicit GPU resources and scheduling, and a separate GPU node pool.
-Keep the gateway on the CPU image:
+It also needs `global.firewall.deploy: true`, since the Firewall otherwise runs
+at NeuralTrust. Keep the gateway on the CPU image:
 
 ```yaml
+global:
+  firewall:
+    deploy: true
+
 firewall:
   firewall:
     gateway:
@@ -325,45 +505,50 @@ firewall:
           operator: Exists
           effect: NoSchedule
       hostIPC: true
-    # prompt-moderation and topic-guard carry their own resources in the chart
-    # defaults, which replace workerDefaults.resources, so restate the GPU.
+    # A worker's own resources merge over workerDefaults.resources, so every
+    # worker inherits the GPU request. topic-guard sets its own memory in the
+    # chart defaults; raise it for the GPU image.
     workers:
-      prompt-moderation:
-        resources:
-          requests:
-            nvidia.com/gpu: "1"
-          limits:
-            memory: 8Gi
-            nvidia.com/gpu: "1"
       topic-guard:
         resources:
           requests:
             memory: 4Gi
-            nvidia.com/gpu: "1"
           limits:
             memory: 8Gi
-            nvidia.com/gpu: "1"
     config:
       cudaMpsActiveThreadPercentage: "25"
       cudaMpsPinnedDeviceMemLimit: "6000M"
 ```
 
-Each of the seven workers requests one GPU. Configure the GPU node pool to share
-every GPU among **four CUDA MPS clients**, so that two L4 nodes can host all
-seven workers. On GKE, set the node pool's GPU sharing strategy to `MPS` with
-`max_shared_clients_per_gpu = 4`; on EKS, enable MPS sharing in the NVIDIA device
-plugin with four replicas. Four is the most an L4 can hold: each client may pin
-up to 6000 MB of device memory, and the L4 has 24 GB. Without sharing, every
-worker needs a GPU of its own. Node counts for each deployment model are in
-[Capacity](/neuraltrust/deployment/architecture#capacity).
+Every worker pod requests one GPU (`nvidia.com/gpu: 1`): seven with all
+products, six with TrustGuard only. Without sharing, each one needs a GPU of its
+own. Share every GPU among several **CUDA MPS clients** instead, and size the
+pool so it has at least as many GPU slots as worker pods.
+
+How many clients a GPU holds is set by the device memory each client may pin,
+`firewall.firewall.config.cudaMpsPinnedDeviceMemLimit`:
+
+> clients per GPU × `cudaMpsPinnedDeviceMemLimit` ≤ the GPU's memory
+
+| `cudaMpsPinnedDeviceMemLimit` | Clients per NVIDIA L4 (24 GB) | Fits |
+| --- | --- | --- |
+| `3500M`, the chart default | 6 | TrustGuard only on **one** L4 node; all products on two |
+| `6000M`, as in the example above | 4 | All products on **two** L4 nodes |
+
+Set the node pool's MPS client count to match: on GKE, the GPU sharing strategy
+`MPS` with `max_shared_clients_per_gpu`; on EKS, MPS sharing in the NVIDIA device
+plugin with that many replicas. GKE accepts the sharing settings only when the
+node pool is created, so decide the count first. Node counts for each
+deployment model are in [Capacity](/neuraltrust/deployment/architecture#capacity),
+and image size and boot disk in [GPU nodes](/neuraltrust/deployment/cloud-notes#gpu-nodes).
 
 This matches
 [`values-dataplane-gpu.yaml.example`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-dataplane-gpu.yaml.example),
 which ships with the chart. Install the vendor device plugin and validate node
 labels first. CUDA MPS and `hostIPC` may require extra security approval,
 especially on [OpenShift](/neuraltrust/deployment/openshift/overview). If GPU pods
-stay Pending, inspect resource availability, taints, node labels, and the NVIDIA
-device plugin with `kubectl describe pod`.
+stay Pending, `ntctl doctor` shows the scheduler's reason; check the GPU slots,
+taints, node labels, and the NVIDIA device plugin.
 
 ## Central control plane values
 
@@ -429,7 +614,9 @@ That path starts TrustGate's LLM/proxy process on `8081` and does **not** start
 or expose MCP on `8082`. Use Kubernetes for production MCP support.
 
 **Manual** returns `CONTROL_PLANE_JWT` and `DATA_AGENT_JWT` for fully custom
-manifests, and no deployment command.
+manifests, plus `FIREWALL_JWT` for the NeuralTrust-hosted Firewall, and no
+deployment command. Pass `FIREWALL_JWT` to the TrustGuard data plane under that
+name.
 
 TrustGate listens on these ports by default:
 

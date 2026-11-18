@@ -28,8 +28,9 @@ policy, but its routing and budget controls do not inspect payload content.
 
 The native collector supports input and output evaluation for LLM and MCP
 traffic. It can block or redact before non-streaming content is forwarded.
-Streamed responses are evaluated after delivery and therefore provide monitoring
-only.
+On a streamed completion it holds each stretch of text, checks it, and can
+stop the stream when a rule blocks. Tokens already sent stay sent. See
+[Streamed responses](/trustgate/policies/guardrails#streamed-responses).
 
 ## Before you start
 
@@ -129,10 +130,13 @@ not use a gateway, see the [application SDK](/sdks/trustguard/python).
 interactive approval flow. In **Observe** mode, it is recorded and traffic
 continues. Ask gates match input only.
 
-**Streaming.** TrustGate evaluates a streamed response in the `post_response`
-stage after the client has drained the stream. The resulting finding is recorded
-but cannot affect bytes already delivered. Put rules that require preventive
-enforcement on the request direction or use non-streaming completions.
+**Streaming.** TrustGate does not wait until the client has drained the stream.
+It holds each stretch of the answer, evaluates it, and only then releases it.
+A block before anything is sent is a `403`. A block later closes the stream;
+the prefix already sent stays. **Observe** records the finding and does not
+close the stream. The hold and what the caller receives are on
+[Guardrails](/trustgate/policies/guardrails#streamed-responses) and
+[TrustGuard](/trustgate/policies/trustguard-guardrail#limits).
 
 **Limits.** Redaction applies only to
 [data-loss](/trustguard/detectors/data-loss-prevention) outcomes in Enforce mode.
@@ -149,7 +153,7 @@ apply to a tool *listing*: a poisoned tool description is blocked, not rewritten
 | `pre_request`, MCP `tools/call` | `protocol: mcp`, `direction: input` | Risky or out-of-policy tool calls | **Block** or **Redact** |
 | `pre_response`, tool result | `direction: output` | [Indirect prompt injection](/trustguard/detectors/agent-mcp-security) riding back in tool output | **Block** or **Redact** |
 | `pre_response`, non-streaming completion | `protocol: llm`, `direction: output` | Sensitive data or policy-breaking content in the model's answer | **Block** or **Redact** |
-| `post_response`, streamed completion | `direction: output` | The stream has already drained | **Monitor** |
+| `pre_response`, streamed completion | `direction: output` | The same, on each held block of the stream | **Block** closes the stream. **Redact** rewrites text not yet sent. Text already sent stays. |
 
 Tool declarations are the names, descriptions, and parameter schemas in LLM
 `tools[]` or MCP `tools/list`. TrustGate can inspect them before an agent chooses
@@ -233,7 +237,7 @@ available to gates and detector rules include `consumer.{name,tag,type}`,
 | A masking policy logs but does not mask | The guardrail is in **Observe**. See [Verdict behavior](#verdict-behavior). Redaction also applies to DLP outcomes only |
 | A `transform` refused with `403`, decision `blocked` | The rewrite could not be applied over sensitive data, so Enforce refused rather than send it unmasked. In Observe the original goes on. See [Verdict behavior](#verdict-behavior) |
 | Responses are never inspected | `direction` is set to `request`. Set it to `request_response` |
-| A streamed response was recorded but not stopped | `post_response` evaluates the stream after the client drains it. Enforce required rules on the request direction |
+| A streamed response was recorded but not stopped | The policy is in **Observe**, or the guardrail failed open. In **Enforce**, a block before any text is sent is a `403`; a later block closes the stream and the client keeps the prefix already sent |
 | An `ask` gate blocked instead of prompting | TrustGate has no interactive approval flow, so **Enforce** handles `ask` as a block. Use **Observe** to record it without stopping traffic |
 | Traffic continued during a TrustGuard outage or credential problem | With **If the guardrail cannot evaluate** on **Allow**, a TrustGuard outage lets traffic through; content-caused failures block in Enforce. Watch for `failed_open` in **Activity**, or set the field to **Block** |
 | The collector has no **Auth** tab | TrustGate is native and does not use a collector API key |

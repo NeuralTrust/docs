@@ -1,0 +1,142 @@
+---
+title: Inference plane
+description: The NeuralTrust-operated Firewall that scores text for TrustGuard, served from the EU and US regions — what it receives, what it keeps, how to reach it, and how to run it in your cluster instead.
+---
+
+<p className="nt-lead">
+  The inference plane is where NeuralTrust's ML detectors run. TrustGuard sends
+  it the text a detector has to score, and it answers with a score. It keeps
+  nothing. NeuralTrust operates it in two regions, EU and US, and every
+  deployment model uses it by default.
+</p>
+
+It is the third plane next to the control plane and the data plane — see
+[the three planes](/neuraltrust/deployment/overview#the-three-planes). ML
+classification is the heaviest workload in the request path, and keeping it
+hosted is what lets a Hybrid data plane run on two 8 vCPU / 16 GiB nodes.
+
+<img
+  src="/images/static/img/neuraltrust-regions.svg"
+  alt="NeuralTrust operates two regions, EU and US. Each region holds a control plane — console, config sync, telemetry and DataBridge, on *.neuraltrust.ai in the EU and *.us.neuraltrust.ai in the US — and an inference plane, a stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US) that stores nothing. Below, your environments. A Hybrid data plane with global.saasRegion set to eu dials the EU control plane for config sync and metadata and sends text to score to the EU inference plane. A self-hosted install runs its own console, control and data planes and calls only the inference plane, here the US one its firewall key was issued for. A self-hosted, air-gapped install runs the Firewall in its own cluster with global.firewall.deploy: true and has no connection to NeuralTrust. Every connection is outbound 443, opened from your side."
+  className="block dark:hidden"
+/>
+<img
+  src="/images/static/img/neuraltrust-regions-dark.svg"
+  alt="NeuralTrust operates two regions, EU and US. Each region holds a control plane — console, config sync, telemetry and DataBridge, on *.neuraltrust.ai in the EU and *.us.neuraltrust.ai in the US — and an inference plane, a stateless Firewall of ML detectors at firewall.neuraltrust.ai (EU) or firewall.us.neuraltrust.ai (US) that stores nothing. Below, your environments. A Hybrid data plane with global.saasRegion set to eu dials the EU control plane for config sync and metadata and sends text to score to the EU inference plane. A self-hosted install runs its own console, control and data planes and calls only the inference plane, here the US one its firewall key was issued for. A self-hosted, air-gapped install runs the Firewall in its own cluster with global.firewall.deploy: true and has no connection to NeuralTrust. Every connection is outbound 443, opened from your side."
+  className="hidden dark:block"
+/>
+
+## Regions
+
+| Region | Endpoint | Used by |
+| --- | --- | --- |
+| **EU** | `firewall.neuraltrust.ai` | TrustGuards created in the EU console, and self-hosted installs whose firewall key was issued for the EU |
+| **US** | `firewall.us.neuraltrust.ai` | TrustGuards created in the US console, and self-hosted installs whose firewall key was issued for the US |
+
+You never set the region in values. The **firewall key** — a `FIREWALL_JWT` —
+carries the Firewall URL, so the region is whichever one issued the key:
+
+- **Hybrid** — the console shows the key when it creates the private TrustGuard,
+  so it matches your control plane's region. A Hybrid data plane therefore uses
+  the inference plane in the same region as its control plane.
+- **Self-hosted and Central** — there is no NeuralTrust control plane to follow.
+  NeuralTrust issues the key on request, so say which region you want scoring
+  to happen in when you ask for it.
+
+## What it receives, and what it keeps
+
+| | |
+| --- | --- |
+| **Receives** | The text an ML-backed detector has to score — a prompt, a response, or a tool payload — over TLS on 443 |
+| **Returns** | A score per detector. TrustGuard applies your policy to it in your cluster |
+| **Keeps** | Nothing. The text is evaluated in memory and not stored |
+| **Authenticates with** | The install's own `FIREWALL_JWT`. No signing key is shared with your cluster, and each key can be revoked on its own |
+
+TrustGate can call it too, when smart routing scores request complexity, with a
+firewall key of its own.
+
+<Note>
+This is the one exception to "metadata only" in a Hybrid deployment, and the
+only connection a self-hosted install makes to NeuralTrust. If your policy does
+not allow text to leave your environment, even for stateless scoring, run the
+Firewall in your cluster — see [below](#run-it-in-your-cluster-instead).
+</Note>
+
+## Reach it
+
+Allow **TCP 443** from the cluster egress to the endpoint of your key's region:
+`firewall.neuraltrust.ai` or `firewall.us.neuraltrust.ai`. Prefer hostname
+rules; the endpoints resolve through DNS.
+
+On Google Cloud you can reach the hosted Firewall over **Private Service
+Connect** instead: traffic then goes to a PSC endpoint inside your VPC and needs
+no internet egress rule. Ask NeuralTrust for the service attachment.
+
+Every model's network section lists the Firewall host alongside its other
+rules: [Hybrid](/neuraltrust/deployment/hybrid#network),
+[Self-hosted](/neuraltrust/deployment/external#network), and
+[Central](/neuraltrust/deployment/central#network-rules).
+
+## Get the firewall key
+
+| Mode | Where the firewall key comes from |
+| --- | --- |
+| **Hybrid** | app.neuraltrust.ai shows it once, when it creates the private TrustGuard |
+| **Self-hosted**, **Central** | Ask NeuralTrust before you deploy; it is sent to you over a secure channel. Central needs one per cluster that runs TrustGuard, remote clusters included |
+
+Store it in a Secret under the key `FIREWALL_JWT` and reference it from the
+values file:
+
+```yaml
+trustguard:
+  firewall:
+    jwtExistingSecret:
+      name: "trustguard-firewall"
+```
+
+Each install guide creates that Secret as one of its steps. The full set of
+Firewall settings — the inline `trustguard.firewall.jwt`, TrustGate's
+`agentgateway.firewall` key, and a Firewall you run yourself — is in
+[Configuration → Firewall](/neuraltrust/deployment/configuration#firewall).
+
+<Warning>
+The console shows a Hybrid TrustGuard's firewall key **only once**. Copy it
+when you create the instance. An instance created before the console issued
+firewall keys has none: run the Firewall in your cluster, or create a new
+private TrustGuard.
+</Warning>
+
+## Run it in your cluster instead
+
+Set `global.firewall.deploy: true` and the chart runs the Firewall next to
+TrustGuard — a gateway and its detector workers — and wires TrustGuard to it.
+No firewall key is needed, and no text leaves the cluster.
+
+| | Hosted inference plane (default) | In-cluster Firewall |
+| --- | --- | --- |
+| Text leaves your environment for scoring | Yes, to your region's Firewall; never stored | No |
+| Credential | `FIREWALL_JWT` from the console or from NeuralTrust | None |
+| Egress | 443 to `firewall.neuraltrust.ai` or `firewall.us.neuraltrust.ai` | None for the Firewall |
+| Capacity | Nothing extra | The largest memory consumer in the data path — see [Capacity](/neuraltrust/deployment/architecture#capacity) |
+| Operated by | NeuralTrust | You, including upgrades and right-sizing |
+| Air-gapped clusters | Not possible | Required |
+
+Choose the in-cluster Firewall when the cluster is air-gapped or when policy
+forbids text leaving your environment. Otherwise keep the hosted one: it is the
+default for a reason, and it removes the heaviest workload from your nodes. For
+higher throughput in-cluster, the workers can run on GPUs — see
+[GPU Firewall workers](/neuraltrust/deployment/configuration#gpu-firewall-workers).
+
+## When it is unreachable
+
+TrustGuard's ML-backed detectors fail until the Firewall answers again. That is
+why a missing firewall key is a render-time error rather than a runtime one:
+an install with TrustGuard and neither a firewall key nor
+`global.firewall.deploy: true` does not install, so the ML detectors never go
+dark silently.
+
+The hosted Firewall does not move when you fail over between your own clusters:
+both clusters call the same regional endpoint. See
+[High availability](/neuraltrust/deployment/high-availability) for what does
+move, and [Troubleshooting](/neuraltrust/deployment/troubleshooting#ml-detectors-fail-with-the-hosted-firewall)
+for diagnosing a Firewall connection.

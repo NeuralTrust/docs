@@ -20,7 +20,7 @@ most common install failure:
 | Product | In the console | `global.products` key | Values block | Workloads |
 | --- | --- | --- | --- | --- |
 | **TrustGate** | Agent Gateway | `trustgate` | `agentgateway:` | `agentgateway-proxy`, `agentgateway-mcp` |
-| **TrustGuard** | Agent Security | `trustguard` | `trustguard:` | `trustguard`, `firewall` |
+| **TrustGuard** | Agent Security | `trustguard` | `trustguard:` | `trustguard`, plus `firewall` when it runs in your cluster |
 
 TrustGate is the only one where the two chart keys differ. `global.products`
 is keyed by product id (`trustgate`), while the values block matches the chart's
@@ -28,24 +28,32 @@ dependency name (`agentgateway`).
 
 ## What the console issues
 
-When you create a **Private** TrustGate or TrustGuard, the console generates two
-credentials for that instance:
+When you create a **Private** TrustGate or TrustGuard, the console generates
+these credentials for that instance:
 
-| Token | Purpose | Chart key (`CONFIG_SYNC_TOKEN` / `ENROLMENT_TOKEN`) |
+| Token | Purpose | Secret key |
 | --- | --- | --- |
 | **Config-sync token** | Authenticates the runtime's outbound pull of compiled configuration from SaaS. | `CONFIG_SYNC_TOKEN` |
 | **DataAgent enrollment token** | Authorizes the co-located DataAgent for OTLP metadata egress and DataBridge retrieval. | `ENROLMENT_TOKEN` |
+| **Firewall JWT** | The instance's own client for the NeuralTrust-hosted [Firewall](/neuraltrust/deployment/configuration#firewall). It carries the Firewall URL. TrustGuard needs it unless the Firewall runs in your cluster; TrustGate uses it for smart-routing complexity scoring. | `FIREWALL_JWT` |
 
-Both are JWTs scoped to the specific gateway or TrustGuard instance. The enrollment
-JWT already carries the tenant and instance identifiers — you do not set them
-separately.
+All are JWTs scoped to the specific gateway or TrustGuard instance. The
+enrollment JWT already carries the tenant and instance identifiers — you do not
+set them separately.
+
+<Warning>
+The console shows the **firewall JWT only once**, when it creates the instance.
+Copy it then. An instance created before the console issued firewall JWTs has
+none; run the Firewall in your cluster with `global.firewall.deploy: true`, or
+create a new private instance.
+</Warning>
 
 ## Create a private TrustGate
 
 1. Open [app.neuraltrust.ai](https://app.neuraltrust.ai/en/login) and go to **TrustGate → Agent Gateway → Getting started**.
 2. Choose **New Gateway**, enter a name, and select **Private** (*High stakes* — fixed capacity, no cold starts).
-3. Under **Where do you want to run your gateway?** choose **Kubernetes** (recommended for production). Creating the gateway issues its **config-sync token** and **DataAgent enrollment token**.
-4. Copy the two tokens from the generated `values.yaml`. Treat the whole file as a secret — see [Secrets](/neuraltrust/deployment/secrets).
+3. Under **Where do you want to run your gateway?** choose **Kubernetes** (recommended for production). Creating the gateway issues its **config-sync token**, **DataAgent enrollment token** and **firewall JWT**.
+4. Copy the tokens from the generated `values.yaml`. Treat the whole file as a secret — see [Secrets](/neuraltrust/deployment/secrets).
 5. Leave the wizard open. After the data plane is running you return here to set the **Dataplane URL** — see [Register the URLs](#register-the-urls).
 
 <Warning>
@@ -62,15 +70,15 @@ file is correct and should be left alone — see
 </Warning>
 
 **Docker** and **Manual** are also offered. Docker is for local evaluation of the
-LLM/proxy path only (no MCP). Manual returns `CONTROL_PLANE_JWT` and
-`DATA_AGENT_JWT` for fully custom manifests. Use **Kubernetes** for production.
+LLM/proxy path only (no MCP). Manual returns `CONTROL_PLANE_JWT`,
+`DATA_AGENT_JWT` and `FIREWALL_JWT` for fully custom manifests. Use **Kubernetes** for production.
 
 ## Create a private TrustGuard
 
 1. Go to **TrustGuard → Agent Security → Getting started**.
 2. Choose **New TrustGuard**, enter a name, and select **Private**.
-3. Choose **Kubernetes**. Creating the TrustGuard issues **its own** config-sync token and DataAgent enrollment token — distinct from TrustGate's.
-4. Copy both tokens.
+3. Choose **Kubernetes**. Creating the TrustGuard issues **its own** config-sync token, DataAgent enrollment token and firewall JWT — distinct from TrustGate's.
+4. Copy all three. TrustGuard needs the firewall JWT for the NeuralTrust-hosted Firewall, the default, and the console does not show it again.
 
 The TrustGuard wizard offers **Kubernetes** and **Manual** only (no Docker). In a
 combined install, TrustGate and TrustGuard each keep independent tokens; never
@@ -87,7 +95,7 @@ you expect:
 | In the wizard output | In the maintained chart | Your action |
 | --- | --- | --- |
 | `global.products.agentgateway: true` | `global.products.trustgate: true` | Rename that one key. The `agentgateway:` block below it is correct — see [One product, four names](#one-product-four-names). |
-| Credentials inline in `values.yaml` | `existingSecret` references | Move both tokens per product into the Secrets in [Map tokens to chart Secrets](#map-tokens-to-chart-secrets). Inline values enter Helm release history. |
+| Credentials inline in `values.yaml` | `existingSecret` references | Move the tokens per product into the Secrets in [Map tokens to chart Secrets](#map-tokens-to-chart-secrets). Inline values enter Helm release history. |
 | One bootstrap **Dataplane URL** | Separate **LLM URL** and **MCP URL** | Set both in **Settings → Agent Gateway → General** after install. One URL serves the proxy and quietly breaks MCP — see [Register the URLs](#register-the-urls). |
 | Everything else it emits | The chart's own values interface | Take the tokens and discard the rest; datastores, ingress, TLS, and sizing come from your values file. |
 
@@ -109,6 +117,8 @@ Each Secret holds only what the console issued you.
 | `dataagent-enrolment-trustgate` | `ENROLMENT_TOKEN` | TrustGate enrollment token |
 | `trustguard-config-sync` | `CONFIG_SYNC_TOKEN` | TrustGuard config-sync token |
 | `dataagent-enrolment-trustguard` | `ENROLMENT_TOKEN` | TrustGuard enrollment token |
+| `trustguard-firewall` | `FIREWALL_JWT` | TrustGuard firewall JWT (not needed with `global.firewall.deploy: true`) |
+| `agentgateway-firewall` | `FIREWALL_JWT` | TrustGate firewall JWT (optional) |
 
 The companion `CONFIG_SYNC_LKG_KEY` is **generated by the chart** and does not
 belong in these Secrets. It encrypts a local snapshot cache, so unlike
@@ -118,8 +128,8 @@ the chart generates nothing, and it becomes yours to supply alongside the token 
 see [Secrets](/neuraltrust/deployment/secrets).
 
 Reference them from the maintained `neuraltrust-platform` chart. Select the
-products you run with `global.products`, then point each config-sync and
-enrollment block at its Secret:
+products you run with `global.products`, then point each config-sync,
+enrollment and firewall block at its Secret:
 
 ```yaml
 global:
@@ -136,6 +146,9 @@ agentgateway:
     enrolment:
       existingSecret:
         name: dataagent-enrolment-trustgate
+  firewall:
+    existingSecret:
+      name: agentgateway-firewall
 
 trustguard:
   configSync:
@@ -145,7 +158,14 @@ trustguard:
     enrolment:
       existingSecret:
         name: dataagent-enrolment-trustguard
+  firewall:
+    jwtExistingSecret:
+      name: trustguard-firewall
 ```
+
+The two products name the firewall Secret differently: TrustGuard's
+`trustguard.firewall.existingSecret` is taken by the key of a Firewall you run
+yourself, so its JWT goes under `jwtExistingSecret`.
 
 Config-sync is **on by default** in Hybrid (mode-derived) — set only
 `existingSecret`; do not restate `enabled: true`. For local or evaluation
@@ -171,7 +191,7 @@ wizard once TrustGate is serving traffic.
 | --- | --- | --- |
 | **Kubernetes** | Production-grade deployments | Credential and setup input to map into the maintained chart |
 | **Docker** | Local evaluation of the LLM/proxy path | A Docker Compose command; does not start MCP |
-| **Manual** | Custom or operator-managed deployments | `CONTROL_PLANE_JWT` and `DATA_AGENT_JWT` |
+| **Manual** | Custom or operator-managed deployments | `CONTROL_PLANE_JWT`, `DATA_AGENT_JWT` and `FIREWALL_JWT` |
 
 Both URLs must be reachable by their intended clients, and NeuralTrust calls the
 Dataplane URL from a single source IP that your network controls must allow — see
@@ -184,7 +204,8 @@ later.
 Issue fresh tokens any time from **Settings → Agent Gateway → Deployment** (TrustGate)
 or the equivalent TrustGuard deployment settings. Regenerating invalidates the
 previous install credentials, so update the corresponding Secret and roll the
-runtime pods.
+runtime pods. The firewall JWT is not regenerated there: it is issued only when
+the instance is created.
 
 ## Next steps
 

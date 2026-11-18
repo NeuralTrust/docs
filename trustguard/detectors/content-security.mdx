@@ -378,22 +378,25 @@ cloud-metadata addresses refused, so a link cannot be used to make TrustGuard
 reach into your network. A refused address is reported as `ssrf_probe` and is
 not fetched.
 
-### How many links it fetches
+### Links it could not analyse
 
-URL Analyzer fetches at most **10 unique URLs** per request. Repeated copies of
-the same link are deduplicated first, so they do not count toward that cap, and
-a message that repeats one link never overflows.
+There is no cap on the number of links. Every unique URL in the request is
+fetched and scored, and repeated copies of a link count once.
 
-When a request carries more than 10 unique URLs, the surplus is never fetched
-or scored. The request is a finding with signal type `url_limit_exceeded`, and
-the detector's action applies: blocked in **Enforce**, reported in **Observe**.
+A link whose content was not fully read and scored is a finding with signal type
+`url_analysis_incomplete`, and the detector's action applies: blocked in
+**Enforce**, reported in **Observe**. That covers a fetch window that ran out, a
+page that was cut off at the size limit, a failed or timed-out fetch, and a
+response that is not text. A link that is gone (a 404, a 410, or a domain that
+does not exist) has no content to analyse and does not count.
 
-A detection among the first 10 URLs keeps its own type. Precedence is
+A detection among the analysed URLs keeps its own type. Precedence is
 `jailbreak`, then `pii`, then `ssrf_probe`, then `url_domain_blocked`, then
-`url_limit_exceeded`.
+`url_analysis_incomplete`.
 
-Evidence on the finding always includes `urls_total`, `urls_skipped`, and
-`url_limit_exceeded`. With no overflow those are `0`, `0`, and `false`.
+Evidence on the finding always includes `urls_total`, `urls_analyzed`,
+`urls_unanalyzed`, and `url_analysis_incomplete` (`0` and `false` when every
+link was analysed).
 
 ### Configure
 
@@ -417,9 +420,6 @@ detector and policy pointing at it. The console says as much when you select one
 Optionally restrict **Domains** with an allow list, a block list, or both. An empty
 allow list permits every domain that is not blocked. A domain the lists reject
 is reported as `url_domain_blocked`.
-
-The number of links fetched is fixed at 10 unique URLs per request. See
-[How many links it fetches](#how-many-links-it-fetches).
 
 ## Document Analyzer
 

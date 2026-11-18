@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Check navigation page existence and unambiguous top-level tab ownership.
 
-A page entry is any string inside a "pages" array. Group and tab names are not
-paths, so they are not checked. A group label containing a slash is not a page
-path and must not be passed to the file-existence check.
+A page entry is any string inside a "pages" array, or a group's "root" page.
+Group and tab names are not paths, so they are not checked. A group label
+containing a slash is not a page path and must not be passed to the
+file-existence check.
 
 A local page must belong to only one top-level tab. Cross-tab discovery should
 use links in page content, not duplicate page entries in navigation.
@@ -22,10 +23,15 @@ DOCS_JSON = ROOT / "docs.json"
 
 
 def page_entries(node):
-    """Yield every string that sits inside a "pages" array."""
+    """Yield every string that sits inside a "pages" array, plus group roots.
+
+    A group's "root" is the page its label opens, so it is a page entry too.
+    """
     if isinstance(node, dict):
         for key, value in node.items():
-            if key == "pages" and isinstance(value, list):
+            if key == "root" and isinstance(value, str):
+                yield value
+            elif key == "pages" and isinstance(value, list):
                 for item in value:
                     if isinstance(item, str):
                         yield item

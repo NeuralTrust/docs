@@ -54,6 +54,18 @@ class TabOwnershipTests(unittest.TestCase):
             {"tab": "Integrations", "pages": ["integrations/cursor"]},
         ]), {"integrations/cursor": ["TrustGate", "Integrations"]})
 
+    def test_group_root_pages_are_entries(self):
+        self.assertEqual(sorted(navigation_check.page_entries({"pages": [
+            {"group": "Hybrid", "root": "deployment/hybrid",
+             "pages": ["deployment/trustgate"]},
+        ]})), ["deployment/hybrid", "deployment/trustgate"])
+        self.assertEqual(self.conflicts([
+            {"tab": "Platform", "groups": [
+                {"group": "Hybrid", "root": "deployment/hybrid", "pages": []},
+            ]},
+            {"tab": "Integrations", "pages": ["deployment/hybrid"]},
+        ]), {"deployment/hybrid": ["Platform", "Integrations"]})
+
     def test_repeated_route_in_one_tab_is_allowed(self):
         self.assertEqual(self.conflicts([{
             "tab": "Integrations",
