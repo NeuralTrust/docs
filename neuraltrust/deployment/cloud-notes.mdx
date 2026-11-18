@@ -5,28 +5,31 @@ description: Provider particularities for EKS, AKS, GKE, and conformant Kubernet
 
 The install is the same on every provider. Follow your model's guide —
 [Hybrid](/neuraltrust/deployment/hybrid),
-[External](/neuraltrust/deployment/external), or
+[Self-hosted](/neuraltrust/deployment/external), or
 [Central](/neuraltrust/deployment/central) — and use this page for the choices
 that differ underneath it.
 
 [OpenShift](/neuraltrust/deployment/openshift/overview) has its own page, because
 Routes, wildcard admission, and SCCs change more than a setting.
 
-Capacity is provider-independent: a full Hybrid install fits **3** nodes of
-8 vCPU / 32 GiB, and External or Central **4**, with the Firewall on CPU. Use
+Capacity is provider-independent: with the NeuralTrust-hosted Firewall, the
+default, a full Hybrid install fits **2** nodes of 8 vCPU / 16 GiB and External
+or Central **3**. With the Firewall in your cluster on CPU, Hybrid needs **3**
+nodes of 8 vCPU / 32 GiB and External or Central **4**. Use
 those counts as the minimum of an autoscaled node pool; GPU options and machine
 types per cloud are in
 [Capacity](/neuraltrust/deployment/architecture#capacity). Minimum managed
 datastore sizes are in
 [Managed stores](/neuraltrust/deployment/configuration#managed-stores).
 
-<Warning>
-On RDS with IAM authentication, `global.postgresql.authMode: iam` does **not**
-reach the Go gateways in External or Central mode. Also set
-`agentgateway.database.iamAuth: true` and `trustguard.database.iamAuth: true`, or
-they attempt password authentication against an IAM-only database and fail at
-connection time with nothing pointing at the cause.
-</Warning>
+<Note>
+With a managed PostgreSQL, `global.postgresql.authMode: iam` reaches every
+service: each runtime service's `database.iamAuth` inherits it when unset.
+Set `agentgateway.database.iamAuth` or `trustguard.database.iamAuth` explicitly
+only for a mixed-auth install. The token provider (AWS, Azure, or GCP) and the
+setup for each are in
+[IAM database authentication](/neuraltrust/deployment/configuration#iam-database-authentication).
+</Note>
 
 <AccordionGroup>
 
@@ -111,7 +114,7 @@ gcloud container clusters get-credentials neuraltrust \
 | --- | --- |
 | Ingress and TLS | GKE Ingress with a reserved address, or NGINX / Gateway API; Google-managed certificates or cert-manager |
 | Identity | Workload Identity Federation |
-| Datastores | Cloud SQL on private IP, and Memorystore |
+| Datastores | Cloud SQL or AlloyDB on private IP, and Memorystore — both with optional [IAM auth](/neuraltrust/deployment/configuration#cloud-sql-and-alloydb-gke) through Workload Identity |
 
 For GKE Ingress set `global.platform: gcp`,
 `global.ingress.gcp.staticIpName`, and `managedCertificates`. Google-managed
@@ -161,3 +164,20 @@ global:
 Only needed if you run Firewall on GPU, which is opt-in. It requires a separate
 GPU node pool, the vendor device plugin, and matching labels and taints — see
 [GPU Firewall workers](/neuraltrust/deployment/configuration#gpu-firewall-workers).
+Plan these before creating the pool:
+
+- **GPU slots.** Every Firewall worker pod requests one GPU
+  (`nvidia.com/gpu: 1`), seven with all products and six with TrustGuard only.
+  The pool needs at least as many slots as worker pods: GPUs × MPS clients per
+  GPU. Clients per GPU are bounded by
+  `cudaMpsPinnedDeviceMemLimit`; the rule is in
+  [GPU Firewall workers](/neuraltrust/deployment/configuration#gpu-firewall-workers).
+- **Sharing is set at creation.** On GKE, the GPU sharing strategy and
+  `max_shared_clients_per_gpu` can only be set when the node pool is created.
+  Changing them means a new pool.
+- **Boot disk of 100 GB or more.** The `firewall-gpu` image is about 10 GB
+  compressed and 20–25 GB unpacked. On a smaller disk the node goes into
+  `DiskPressure` during the pull and evicts pods.
+- **First pull time.** Pulling that image through a registry proxy or a
+  pull-through cache can take more than 30 minutes the first time. Mirror it
+  into your registry ahead of the install, or allow for it in `--timeout`.

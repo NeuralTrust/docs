@@ -1,0 +1,186 @@
+---
+title: ntctl CLI
+description: Install, upgrade, diagnose and remove the NeuralTrust platform from one signed binary, without Helm or kubectl.
+---
+
+`ntctl` installs and operates the NeuralTrust platform on Kubernetes. It is a
+single binary with Helm built in, and all it needs is a kubeconfig: no `helm`
+or `kubectl` on your machine.
+
+It installs the same
+[`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform)
+chart that the Helm instructions use, from the same values. A release made
+with one can be managed with the other, so you can switch at any time. The
+install guides show both paths:
+[Hybrid](/neuraltrust/deployment/hybrid#install),
+[Self-hosted](/neuraltrust/deployment/external#install) and
+[Central](/neuraltrust/deployment/central#install).
+
+## Install ntctl
+
+<Tabs>
+<Tab title="macOS and Linux">
+
+```bash
+curl -sSfL https://raw.githubusercontent.com/NeuralTrust/ntctl/main/install.sh | sh
+```
+
+The script downloads the release for your OS and architecture and checks it
+against the release's `checksums.txt`. To read the script before you run it,
+download it first and then run it with `sh`.
+
+| Variable | Effect |
+| --- | --- |
+| `NTCTL_VERSION` | Release tag to install. Default: the latest |
+| `NTCTL_INSTALL_DIR` | Where the binary goes. Default: `/usr/local/bin` when writable, else `~/.local/bin` |
+| `NTCTL_REQUIRE_SIGNATURE=1` | Refuse to install unless the signature is verified |
+
+</Tab>
+<Tab title="Windows">
+
+Download `ntctl_windows_amd64.zip` from
+[Releases](https://github.com/NeuralTrust/ntctl/releases), check it against
+`checksums.txt`, and put `ntctl.exe` on your `PATH`.
+
+</Tab>
+<Tab title="Go">
+
+```bash
+go install github.com/NeuralTrust/ntctl/cmd/ntctl@latest
+```
+
+</Tab>
+</Tabs>
+
+### Verify the release
+
+Every release publishes `checksums.txt`, signed with keyless
+[cosign](https://docs.sigstore.dev/cosign/system_config/installation/) by the
+repository's release workflow, plus an SBOM for each archive. When cosign is
+installed, the install script verifies the signature as well as the checksum.
+Set `NTCTL_REQUIRE_SIGNATURE=1` to make that check mandatory.
+
+To verify a download by hand, fetch `checksums.txt` and
+`checksums.txt.sigstore.json` from the same release:
+
+```bash
+cosign verify-blob checksums.txt \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/NeuralTrust/ntctl/\.github/workflows/release\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --ignore-missing -c checksums.txt
+```
+
+`ntctl version` prints the installed version and the latest chart, and says
+when a newer `ntctl` is out.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `ntctl install` | Asks what it needs, checks the cluster, creates the Secrets, installs, and prints the DNS records. Run again on an existing install, it adds products |
+| `ntctl upgrade` | Upgrades to the latest chart, or `--version`, keeping the install's values. It shows the release notes and every change first, stops on unsafe ones, and rolls back if the upgrade does not become ready |
+| `ntctl rollback` | Returns an install to an earlier revision (`--to N`), showing what changes first |
+| `ntctl history` | Lists the revisions of an install |
+| `ntctl adopt` | Checks that an install made with plain Helm can be managed with ntctl, changing nothing |
+| `ntctl uninstall` | Removes an install. Volumes, generated credentials and the Secrets ntctl created are kept unless you pass `--delete-data` / `--delete-secrets` |
+| `ntctl status` | Workload readiness, pods that need attention, and the DNS records to create |
+| `ntctl doctor` | Says what is wrong with an install and how to fix it |
+| `ntctl support-bundle` | Writes a redacted `.tar.gz` for NeuralTrust support |
+| `ntctl preflight` | Runs the install or upgrade checks without changing anything |
+| `ntctl render` | Prints the manifests an install would apply, as `helm template` does |
+| `ntctl secrets create` / `print` | Creates, or prints with their values, the Secrets the chart's secrets generator would make |
+| `ntctl version` | The ntctl version, the latest chart version, and whether a newer ntctl is out |
+| `ntctl login` / `logout` | Signs in to the NeuralTrust console in the browser, or signs out |
+| `ntctl auth status` | Who is signed in, to which console, and the selected organization |
+| `ntctl orgs list` | The organizations you belong to |
+| `ntctl config get` / `set org` / `set region` | Shows or changes the selected organization and region |
+| `ntctl trustgate list` / `create <name>` | The organization's private TrustGate instances. `trustguard` does the same for TrustGuard |
+
+Run `ntctl <command> -h` for every flag of a command. How to use them is in
+[Upgrades](/neuraltrust/deployment/upgrades),
+[Validation](/neuraltrust/deployment/validation#preflight) and
+[Troubleshooting](/neuraltrust/deployment/troubleshooting#start-with-ntctl-doctor).
+
+## Flags
+
+Every command that reaches the cluster accepts these:
+
+| Flag | Default |
+| --- | --- |
+| `--context` | The kubeconfig's current context |
+| `--kubeconfig` | `$KUBECONFIG`, then `~/.kube/config` |
+| `--namespace` | `neuraltrust` |
+| `--release` | `neuraltrust-platform` |
+
+`install`, `upgrade`, `preflight` and `render` also take the values that shape
+an install. Values are layered as Helm layers them: ntctl's generated defaults,
+then `-f` files, then explicit flags.
+
+| Flag | What it sets |
+| --- | --- |
+| `-f values.yaml` | Any chart value, as with `helm -f`. Repeat it to layer files; later files win |
+| `--domain` | The base domain for the endpoints, `global.domain` |
+| `--platform` | `aws`, `gcp`, `azure`, `openshift` or `kubernetes`. Default: detected from the cluster |
+| `--mode` | Where the control plane runs: `hybrid` (default), `external` or `saas`. An install's mode cannot change in place |
+| `--products` | Hybrid only: comma-separated `trustgate`, `trustguard`, `dataPlane`. On `upgrade` it only turns products on |
+| `--remove-products` | `upgrade` only: turns products off and deletes their workloads |
+| `--gateway <namespace>/<name>[:<listener>]` | Exposes the endpoints as Gateway API HTTPRoutes on that existing Gateway instead of Ingresses |
+| `--control-plane <domain>` | Hybrid only: the control plane the data plane dials (`global.controlPlane.domain`), when it is not NeuralTrust's for the region |
+| `--operational-telemetry=true\|false` | [Operational telemetry](/neuraltrust/deployment/configuration#operational-telemetry). Off on install; an upgrade without it keeps the install's setting |
+| `--version` | The chart version. Default: the latest supported |
+| `--chart` | A local chart directory or `.tgz`, for clusters without access to the chart registry |
+| `--ignore-capacity` | Treats too little capacity as a warning, for test clusters. Pods that do not fit stay Pending |
+
+`install` and `upgrade` add `--yes` (ask nothing, take defaults) and
+`--timeout` (default 15 minutes). `install` also takes `--registry-key`,
+`--image-registry`, `--image-registry-node-auth`, `--firewall in-cluster|hosted`,
+`--secrets-mode print`, `--save-values` and, when signed in,
+`--trustgate-instance` / `--trustguard-instance`.
+
+### Environment variables
+
+Credentials are never flags, so they stay out of shell history. `ntctl install`
+reads them from the environment, or asks for them with input hidden, and writes
+them only to Kubernetes Secrets in the install namespace.
+
+| Variable | What it holds |
+| --- | --- |
+| `NT_TRUSTGATE_CONFIG_SYNC_TOKEN`, `NT_TRUSTGATE_ENROLMENT_TOKEN` | TrustGate's console tokens (Hybrid) |
+| `NT_TRUSTGUARD_CONFIG_SYNC_TOKEN`, `NT_TRUSTGUARD_ENROLMENT_TOKEN` | TrustGuard's console tokens (Hybrid) |
+| `NT_FIREWALL_JWT` | TrustGuard's `FIREWALL_JWT` for the NeuralTrust-hosted Firewall |
+| `NT_REGISTRY_KEY_FILE` | Path to the registry key file NeuralTrust sent you |
+| `NT_REGISTRY_USERNAME`, `NT_REGISTRY_PASSWORD` | Credentials for your own registry (`--image-registry`) |
+| `NT_POSTGRES_URL` | Your own PostgreSQL: `postgres://user:password@host:5432/database?sslmode=require` |
+| `NT_REDIS_URL` | Your own Redis: `redis://:password@host:6379`, or `rediss://` for TLS |
+| `ONPREM_SUPERADMIN_EMAIL`, `ONPREM_SUPERADMIN_PASSWORD` | The console's first admin (Self-hosted and Central) |
+| `NT_EMAIL_PROVIDER` and its settings | How the console sends email (Self-hosted and Central): `none`, `resend`, `smtp` or `ses`. Run `ntctl install -h` for every variable |
+
+## Signing in to the console
+
+`ntctl login` signs you in to the NeuralTrust console in the browser, where you
+also choose the organization. After that, `ntctl install` creates or reuses a
+private TrustGate and TrustGuard instance and fetches their tokens itself, so
+the console's install wizard is not needed.
+
+```bash
+ntctl login                # --region us for app.us.neuraltrust.ai
+ntctl install
+```
+
+The tokens go straight into Kubernetes Secrets. The session is saved in
+`~/.config/ntctl/credentials.json`, readable only by you, and is renewed until
+it expires or you run `ntctl logout`. Tokens in the environment take
+precedence over the session.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Error |
+| 2 | Unknown command |
+| 3 | Checks failed (`preflight` or `doctor`); nothing was changed |
+
+Exit code 3 lets a pipeline gate on `ntctl preflight` or `ntctl doctor` without
+parsing their output. Both also print `--output json`.

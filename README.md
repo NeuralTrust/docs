@@ -24,27 +24,31 @@ and feature flags, shared by every product.
 The same Helm chart covers four topologies, so the security layer follows your
 constraints instead of the other way round.
 
-| Model | Who runs the control plane | Where raw payloads live |
-| --- | --- | --- |
-| **SaaS** | NeuralTrust | NeuralTrust |
-| **Hybrid** | NeuralTrust | Your cluster |
-| **External** | You | Your cluster |
-| **Central** | You, for many clusters | Each cluster keeps its own |
+| Model | Who runs the control plane | Who runs the inference plane | Where raw payloads live |
+| --- | --- | --- | --- |
+| **SaaS** | NeuralTrust | NeuralTrust | NeuralTrust |
+| **Hybrid** | NeuralTrust, EU or US | NeuralTrust, EU or US — or you | Your cluster |
+| **Self-hosted** (`external`) | You | NeuralTrust, EU or US — or you | Your cluster |
+| **Central** | You, for many clusters | NeuralTrust, EU or US — or you | Each cluster keeps its own |
 
-Every cross-boundary connection is outbound TLS on 443, initiated from your
-environment — nothing dials into a data plane. Start at
-[Deployment → Overview](https://docs.neuraltrust.ai/neuraltrust/deployment/overview).
+Connections to NeuralTrust are outbound TLS on 443, initiated from your
+environment. Start at
+[Deployment → Overview](https://docs.neuraltrust.ai/neuraltrust/deployment/overview),
+then pick a
+[reference architecture](https://docs.neuraltrust.ai/neuraltrust/deployment/reference-architectures).
 
 ## Where to start reading
 
 - **New here** — [docs.neuraltrust.ai](https://docs.neuraltrust.ai) has the three
   first journeys: your first gateway, connecting TrustGuard, and your first red team.
-- **Deploying** — `neuraltrust/deployment/` holds one self-contained guide per model,
-  each with its architecture, prerequisites, network rules, install steps and high
-  availability.
+- **Deploying** — `neuraltrust/deployment/` starts with the concepts (overview,
+  reference architectures, inference plane), then holds one self-contained install
+  guide per model and per data plane, each with a "Before you start" checklist,
+  its architecture, network rules, install steps and high availability.
 - **Diagrams** — published SVGs live in `images/static/img/`. Editable `.drawio`
   sources are **not** in this public repo; they live in the private `compliance`
-  repository (`architecture/`). Notion holds PNG previews only.
+  repository (`architecture/`). Notion holds PNG previews only. The one exception
+  is `neuraltrust-regions*.svg`, which is hand-written SVG and edited in place.
 
 ## Contributing
 

@@ -95,6 +95,7 @@ rules do not run. Add a second `send-request` to `<outbound>`, set `direction` t
 | Sits in `<inbound>` | Sits in `<outbound>` |
 | `direction = "input"` | `direction = "output"` |
 | `context.Request.Body` | `context.Response.Body` |
+| Body sent as `payload.input` | Body sent as an `assistant` message in `payload.messages` |
 | `<when>` branches for `block` **and** `transform` | `block` only. A `transform` verdict falls through and the completion is returned without masking |
 
 ```xml
@@ -108,7 +109,7 @@ rules do not run. Add a second `send-request` to `<outbound>`, set `direction` t
     <set-body>@(JsonConvert.SerializeObject(new {
       protocol = "llm",
       direction = "output",
-      payload = new { input = context.Response.Body.As&lt;string&gt;(preserveContent: true) },
+      payload = new { messages = new[] { new { role = "assistant", content = context.Response.Body.As&lt;string&gt;(preserveContent: true) } } },
       consumer_id = context.Subscription?.Id ?? "",
       session_id = context.Request.Headers.GetValueOrDefault("X-Session-Id", "")
     }))</set-body>
@@ -172,7 +173,7 @@ user.
 | APIM section | TrustGuard call | What you can stop | Enforcement |
 | --- | --- | --- | --- |
 | `<inbound>` | `protocol: llm`, `direction: input`, `{ "input": "<raw request body>" }` | Jailbreaks ([Prompt Guard](/trustguard/detectors/content-security#prompt-guard)); secrets and PII in the prompt ([DLP](/trustguard/detectors/data-loss-prevention)) | **Block** returns `403`; `transform` rewrites the body |
-| `<outbound>` | `protocol: llm`, `direction: output`, `{ "input": "<raw response body>" }` | Leaked system prompts, toxic or off-topic completions | **Block** returns `403` |
+| `<outbound>` | `protocol: llm`, `direction: output`, `{ "messages": [{ "role": "assistant", "content": "<raw response body>" }] }` | Leaked system prompts, toxic or off-topic completions | **Block** returns `403` |
 
 Both sections call [`POST /v1/evaluate`](/trustguard/api/evaluate) with the
 collector `tgk_…` key, and the policy's
@@ -182,7 +183,10 @@ that sends `input`. TrustGuard returns `200` for every successful evaluation,
 including a `block` verdict. The APIM policy returns the 403.
 
 The complete serialized body, including the provider envelope, is sent as
-`payload.input`.
+`payload.input` on inbound and as the `content` of an `assistant` message on
+outbound. Do not send the response body as `payload.input`: `input` is read as
+the user's message, and Toxicity Detection and Custom Moderation
+read only `assistant` text on Output, so they skip it without inspecting it.
 TrustGuard also accepts a full provider body directly; the documented policy does
 not parse one out.
 
