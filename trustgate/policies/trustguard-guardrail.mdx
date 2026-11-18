@@ -271,11 +271,14 @@ only this one, so a client can tell the two legs apart without reading the body.
 A refusal that is not a verdict on the content does not carry it: the ones
 below.
 
-On a streamed response that this policy stops after it has started, the status
-is already `200`. The stream ends with `finish_reason` `content_filter` and an
-error event whose object carries `"direction": "output"`, for OpenAI-shaped and
-Responses clients. Anthropic, Gemini, Cohere and Bedrock clients get their usual
-stream ending, without the field.
+A streamed response this policy blocks is not a `403`, wherever the finding
+lands: the status is `200` and the stream ends on a content filter. For
+OpenAI-shaped and Responses clients the closing error event carries `message`
+and `direction` as above, and `reason`, `plugin`, `detector_name` or
+`gate_name`, `trace_id` and `request_id`; its `type` is `content_filter`.
+Gemini clients get the same fields in the error's `google.rpc.ErrorInfo`, and
+Anthropic clients a `stop_reason` of `refusal`. How each client detects it is in
+[Detecting a block in a stream](/trustgate/policies/guardrails#detecting-a-block-in-a-stream).
 
 The other refusal has its own body:
 
@@ -386,8 +389,8 @@ call is released uninspected and the stream is marked degraded with
 
 - **A streamed response is inspected while it streams, and what the client
   already received stays with it.** The gateway holds the start of the answer
-  until TrustGuard has seen it, so a block there is a `403` before anything is
-  sent. A block later in the stream ends it as described in
+  until TrustGuard has seen it, so a block there ends the stream before any text
+  is sent. A block later in the stream ends it the same way, as described in
   [What the caller receives](#what-the-caller-receives), but the text delivered
   before the cut cannot be taken back.
 - **On a long streamed response, each check reads only the latest 256 KiB.**

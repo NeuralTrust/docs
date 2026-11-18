@@ -14,8 +14,64 @@ TrustGuard, OpenAI Moderation, Google Model Armor and Regex Replace check a
 streamed response as it is generated. The gateway holds each stretch of text
 briefly, checks it, and only then lets it through. A violation stops the stream
 at that point, but the text released before it has already reached the reader.
-A response short enough to fit in the hold is refused with `403` before
-streaming starts.
+A violation in the first stretch stops it before any text is sent.
+
+### Detecting a block in a stream
+
+A block on a streamed response is never an HTTP error, wherever in the answer it
+lands. The status is `200`, and the stream ends the way the client's API ends a
+content-filtered answer, so your code handles one case:
+
+| Client API | How the stream ends |
+|---|---|
+| OpenAI Chat Completions, Mistral | A chunk with `finish_reason` `content_filter`, then an error event, then `[DONE]`. The SDKs raise it while you iterate. |
+| OpenAI Responses | `response.incomplete` with reason `content_filter`, then an `error` event. |
+| Gemini | `finishReason` `PROHIBITED_CONTENT`, then an error whose `details` hold a `google.rpc.ErrorInfo`. |
+| Anthropic | `stop_reason` `refusal`. No exception: the SDK returns the message. |
+| Cohere | `finish_reason` `ERROR` on `message-end`. |
+| Bedrock native | An exception frame. The SDK raises it while you iterate. |
+
+The error object carries `"direction": "output"`, and, when the policy names the
+finding, the same fields as its non-streamed refusal: `reason`, `plugin`,
+`detector_name` or `gate_name`, `trace_id` and `request_id`. On Gemini they are
+the `metadata` of the `ErrorInfo`. The error's `type` (`code` on Responses) is
+`content_filter`.
+
+<CodeGroup>
+```python OpenAI SDK or LangChain
+import openai
+
+try:
+    for chunk in client.chat.completions.create(model=model, messages=messages, stream=True):
+        ...
+except openai.APIError as e:
+    if isinstance(e.body, dict) and e.body.get("direction") == "output":
+        ...  # a guardrail blocked the answer
+    else:
+        raise
+```
+
+```python Anthropic SDK
+with client.messages.stream(model=model, max_tokens=1024, messages=messages) as stream:
+    message = stream.get_final_message()
+if message.stop_reason == "refusal":
+    ...  # a guardrail blocked the answer
+```
+</CodeGroup>
+
+Check `direction`, not only the exception class: an upstream that fails
+mid-stream also ends in an error event, without `direction`. LangChain's
+`ChatOpenAI` raises the same `openai.APIError`.
+
+When the block lands in the first stretch, nothing has been sent yet, so the
+`200` also carries `X-NeuralTrust-Block-Direction: output`. Load balancers and
+APM tools see a `200` either way; count streamed blocks from **Activity**, where
+the request is flagged and the policy records `blocked`.
+
+A refusal that is not a decision on the content still comes back as an HTTP
+error before anything is sent: text or a tool call the gateway could not inspect
+in a mode that fails closed, a mask the stream cannot apply, or a TrustGuard
+rate limit (`429`).
 
 TrustGuard also holds streamed tool calls when it inspects the response. On an
 OpenAI-shaped Chat Completions stream, and on Mistral, it keeps the arguments
