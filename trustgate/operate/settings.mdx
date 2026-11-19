@@ -1,52 +1,208 @@
 ---
-title: "Settings"
-description: "What belongs to the gateway itself: its URLs, how its traffic is labeled, how it was deployed, who may call the Admin API, which identity providers it trusts, and its transport floor."
+title: "Gateway settings"
+sidebarTitle: "Gateway settings"
+description: "The day-2 tasks on a gateway itself: hand clients the right URLs, re-credential or move a private data plane, give automation API access, trust an identity provider, set the TLS floor, and delete a gateway."
 ---
 
-Everything under a gateway's settings is about the gateway as a thing — not about
-what routes through it. Six tabs.
+<p className="nt-lead">
+  Settings is where you change the gateway itself, not what routes through it.
+  Most visits are for one of the tasks below. Find yours, then follow its steps.
+</p>
 
-## General
+All of it lives under **Settings → Agent Gateway** in the console.
 
-The gateway's identity and addresses. Its **LLM Gateway** and **MCP Gateway** URLs
-— derived from the name and your platform domain on SaaS, or the public address of
-your private plane on Hybrid — and the **Employee portal** MCP URL people point clients at.
-An **Environment** label (production, staging, development) that drives badge
-colours and warning banners everywhere the gateway appears, so a production
-gateway looks like one.
+| I want to… | Tab | Go to |
+| --- | --- | --- |
+| Give an SDK, agent or MCP client the address to call | General | [Hand clients the right URLs](#hand-clients-the-right-urls) |
+| Fix MCP tool calls that never resolve on a private gateway | General | [Hand clients the right URLs](#hand-clients-the-right-urls) |
+| Mark a gateway as production, staging or development | General | [Label the environment](#label-the-environment) |
+| Reinstall a private data plane, or replace its tokens | Deployment | [Re-credential a private data plane](#re-credential-a-private-data-plane) |
+| Move a private data plane to another cluster | Deployment | [Move a private data plane](#move-a-private-data-plane) |
+| Let CI, Terraform or a script manage the gateway | Admin API | [Give automation API access](#give-automation-api-access) |
+| Cut off an admin credential that leaked | Admin API | [Rotate or revoke a credential](#rotate-or-revoke-a-credential) |
+| Let services that hold an Okta or Entra ID token call the gateway | Machine identity | [Trust an identity provider](#trust-an-identity-provider) |
+| Reject old TLS clients, or turn on HSTS | Networking | [Set the transport floor](#set-the-transport-floor) |
+| Remove a gateway | — | [Delete a gateway](#delete-a-gateway) |
 
-## Deployment
+## Hand clients the right URLs
 
-**Mode** — SaaS or Private — is set at creation and cannot change without
-recreating the gateway. Region, and the running version with an update offered
-when one exists. For a private gateway, **Install config** re-issues tokens and
-produces a fresh `values.yaml` and Helm command; this is where you come back when
-a data plane has to be reinstalled or moved.
+**General** shows the three addresses clients use:
 
-## Admin API
+| URL | Who uses it | How to connect |
+| --- | --- | --- |
+| **LLM Gateway** | SDKs, frameworks and agents that call models | [Connect an LLM client](/trustgate/llm/connect) |
+| **MCP Gateway** | MCP clients and agents that call tools | [Connect an agent](/trustgate/mcp/connect) |
+| **Employee portal** | People who connect their own MCP client to the tools you published | [Employee portal](/trustgate/mcp/store) |
 
-Credentials for automation that calls the control-plane API. Each is a client ID
-and secret exchanged for a short-lived access token, bound to this gateway, with
-an explicit set of scopes. The secret is shown once.
+On a **SaaS** gateway these are derived from the gateway's name and your
+platform domain. There is nothing to set; copy them.
 
-**Rotate** issues a new secret and invalidates the old one immediately. **Revoke**
-stops new tokens at once, but a token already issued keeps working until it
-expires — the token lifetime is the revocation window. The full contract, scopes
-and token exchange are in the [API reference](/trustgate/api/credentials).
+On a **private** gateway they are the public addresses of your data plane, and
+you set them yourself. The install wizard fills both from a single **Dataplane
+URL**, which works for LLM traffic and silently breaks MCP. Set them separately
+once the data plane is serving traffic:
 
-## Machine identity
+<Steps>
+  <Step title="Expose both entry points">
+    Publish the LLM entry point (port `8081`) and the MCP entry point (port
+    `8082`) on separate hostnames, for example `gateway.example.com` and
+    `mcp.example.com` — see
+    [Expose both entry points](/neuraltrust/deployment/hybrid#expose-both-entry-points).
+  </Step>
+  <Step title="Set both URLs">
+    In **General**, set **LLM Gateway** to the `8081` hostname and **MCP
+    Gateway** to the `8082` hostname, then save.
+  </Step>
+  <Step title="Allow NeuralTrust to reach them">
+    The console calls these URLs from one NeuralTrust source IP. Admit it at
+    your edge for both hostnames — see [Hybrid → Inbound](/neuraltrust/deployment/hybrid#inbound).
+  </Step>
+</Steps>
 
-Trust anchors for the applications that call this gateway: the external identity
-providers whose tokens it accepts. This is where "let services holding an Okta
-token call the gateway" is configured — see [Authentication](/trustgate/concepts/auth).
+<Warning>
+A private gateway with one URL for both shows no error anywhere. MCP tool calls
+simply never resolve. If MCP tool calls hang while LLM traffic works, check
+this first.
+</Warning>
 
-## Networking
+## Label the environment
 
-The transport floor: **minimum TLS version** — older clients are rejected — and
-**HSTS** for browser connections, with max-age, subdomains and preload.
+Set **Environment** in **General** to production, staging or development. The
+label drives badge colours and warning banners everywhere the gateway appears,
+so a production gateway is visibly one before anyone changes it. It changes
+nothing about how traffic is handled.
 
-## Deleting a gateway
+## Re-credential a private data plane
 
-Permanent, and it takes every application, policy and trace the gateway owns with
-it. The console asks for the gateway's name. If it is the organisation's only
-gateway, nothing else in TrustGate works until another exists.
+Do this when a data plane's tokens may have leaked, when you reinstall it from
+scratch, or as the first step of [moving it](#move-a-private-data-plane).
+
+<Steps>
+  <Step title="Issue a new install configuration">
+    In **Deployment**, choose **Install config**. It re-issues the gateway's
+    config-sync token and DataAgent enrollment token, and produces a fresh
+    `values.yaml` and Helm command. Take only the two tokens from it — see
+    [Translate the wizard output](/neuraltrust/deployment/console-setup#translate-the-wizard-output).
+  </Step>
+  <Step title="Replace the two Secrets">
+    The previous tokens stop working as soon as new ones are issued, so do this
+    right away. The data plane keeps serving its last-known-good configuration
+    in the meantime, but it stops receiving changes.
+
+    ```bash
+    kubectl create secret generic agentgateway-config-sync -n neuraltrust \
+      --from-literal=CONFIG_SYNC_TOKEN='<new-config-sync-token>' \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+    kubectl create secret generic dataagent-enrolment-trustgate -n neuraltrust \
+      --from-literal=ENROLMENT_TOKEN='<new-enrolment-jwt>' \
+      --dry-run=client -o yaml | kubectl apply -f -
+    ```
+  </Step>
+  <Step title="Restart the pods that read them">
+    ```bash
+    kubectl -n neuraltrust rollout restart \
+      deploy/agentgateway-proxy deploy/agentgateway-mcp deploy/dataagent
+    ```
+
+    The gateway reports Ready only after it has pulled configuration with the
+    new token. A pod that stays `Running` but never `Ready` most often means a
+    token pasted with trailing whitespace — see
+    [Hybrid → Verify](/neuraltrust/deployment/hybrid#verify).
+  </Step>
+</Steps>
+
+The firewall JWT is not re-issued here: the console shows it only once, when it
+creates the instance. **Deployment** also shows the gateway's mode, its region,
+and the running version, with an update offered when one exists. The mode —
+SaaS or Private — is fixed at creation; changing it means creating a new
+gateway.
+
+## Move a private data plane
+
+A move is a re-credential plus a second install. Plan for a short window in
+which the old cluster serves its last-known-good configuration while the new one
+comes up.
+
+1. **Re-credential** as above, and keep the new tokens for the new cluster.
+   The old cluster's tokens stop working at this point.
+2. **Install** the data plane in the new cluster with those tokens — follow the
+   [TrustGate data plane](/neuraltrust/deployment/trustgate) guide, or
+   [Hybrid](/neuraltrust/deployment/hybrid) if TrustGuard moves too.
+3. **Point DNS** for the LLM and MCP hostnames at the new cluster. If the
+   hostnames change, update both URLs in [General](#hand-clients-the-right-urls).
+4. **Decommission** the old cluster once traffic has drained from it.
+
+## Give automation API access
+
+**Admin API** holds machine credentials: a client ID and secret your automation
+exchanges for a short-lived access token to call the control-plane API.
+
+<Steps>
+  <Step title="Create the credential">
+    Choose **New credential**, name it after the system that will use it — CI,
+    Terraform, a script — and pick only the scopes it needs. Each credential is
+    bound to this one gateway.
+  </Step>
+  <Step title="Store the secret">
+    The client secret is shown **once**. Put it in your secret manager before
+    closing the dialog; it cannot be shown again.
+  </Step>
+  <Step title="Exchange it for tokens">
+    Your automation trades the pair for an access token whenever it needs one
+    — see [Exchange the credential for a token](/trustgate/api/credentials#exchange-the-credential-for-a-token).
+  </Step>
+</Steps>
+
+### Rotate or revoke a credential
+
+| | **Rotate** | **Revoke** |
+| --- | --- | --- |
+| Use it when | The secret is due for rotation, or leaked and the credential is still needed | The credential is no longer needed, or must stop working now |
+| The old secret | Stops working immediately; you get a new one | Stops working immediately; the credential is gone |
+| Access tokens already issued | Keep working until they expire | Keep working until they expire |
+
+TrustGate verifies access tokens offline, so the token lifetime is also the
+revocation window. Deploy the new secret before rotating if your automation
+cannot tolerate a failed token request. Both actions are recorded in the
+[audit log](/platform/audit-logs). The full contract is in
+[Rotate and revoke](/trustgate/api/credentials#rotate-and-revoke).
+
+## Trust an identity provider
+
+**Machine identity** lists the identity providers whose tokens this gateway
+accepts — Okta, Entra ID and others. Adding one here is half the job: it makes
+the provider a **trust anchor** for the gateway, and each application then
+selects it and narrows who gets in with its **allowed client IDs**.
+
+1. Add the provider under **Machine identity**.
+2. In each application that should accept its tokens, select it and list the
+   client IDs to admit.
+
+See [Authentication](/trustgate/concepts/auth#trust-anchors-are-the-gateways-admission-is-the-applications)
+for the model, and the [Okta](/trustgate/concepts/authorization/okta) and
+[Entra ID](/trustgate/concepts/authorization/entra-id) guides for each
+provider's setup.
+
+## Set the transport floor
+
+**Networking** sets the **minimum TLS version** the gateway accepts — clients
+below it are rejected — and **HSTS** for browser connections, with max-age,
+subdomains and preload.
+
+<Warning>
+Raise the TLS floor only after checking your oldest clients: they fail the
+handshake, not a request. HSTS preload is hard to undo, because browsers ship
+the preload list and removing a domain from it takes months.
+</Warning>
+
+## Delete a gateway
+
+Deletion is permanent and takes every application, policy and trace the
+gateway owns with it. The console asks you to type the gateway's name. If it is
+the organisation's only gateway, nothing else in TrustGate works until another
+exists.
+
+Deleting a private gateway does not touch your cluster. Remove its data plane
+yourself: set `global.products.trustgate: false` and upgrade the release, or
+uninstall the release if it runs nothing else.
