@@ -24,7 +24,7 @@ rule.
 | Phase | Part of the payload | Detectors that read it |
 |---|---|---|
 | Input | **System and developer instructions** | Data Loss Prevention |
-| Input | **User message** | Prompt Guard, Toxicity Detection, Custom Moderation, Data Loss Prevention |
+| Input | **User message** | Prompt Guard, Multi-turn Guard, Toxicity Detection, Custom Moderation, Data Loss Prevention |
 | Input | **URLs in the user message** | URL Analyzer (on the fetched page) |
 | Input | **Files attached to the user message** | Document Analyzer (on the extracted text) |
 | Input | **Tool definitions** — tool and parameter descriptions | Indirect Prompt Injection, Data Loss Prevention |
@@ -47,7 +47,8 @@ Two consequences are worth knowing before you write rules:
   [Agent & MCP security](/trustguard/detectors/agent-mcp-security#where-it-looks).
 - **Input selection differs by detector.** Prompt Guard scores every `role:user`
   turn and any assistant turn replayed in the request. Each segment is separate
-  and the highest score wins. Toxicity Detection and Custom Moderation score
+  and the highest score wins. Multi-turn Guard reads the user turns together, in
+  order, as one conversation. Toxicity Detection and Custom Moderation score
   only the latest user message on Input.
 
 ## Detector by detector
@@ -72,6 +73,21 @@ instructions — OpenAI `developer` messages, Responses `instructions`, Anthropi
 `system`, Gemini `systemInstruction`, and Bedrock system — are skipped because
 scoring them produces false positives. Tool definitions and tool results belong
 to [Indirect Prompt Injection](/trustguard/detectors/agent-mcp-security).
+
+### Multi-turn Guard
+
+Reads **the user's messages only**, oldest first, and scores them as one
+sequence rather than one by one:
+
+- **The user turns in the request**, when the request carries the conversation.
+- **The earlier user turns of the same session**, when the integration sends only
+  the latest message. TrustGuard keeps them, encrypted, for one hour after the
+  session's last turn by default, and links them through a stable session ID.
+
+It is Input only, on LLM and A2A traffic. It needs at least two user turns, so
+the first message of a conversation is skipped. It does not read assistant
+replies, system or developer instructions, tool definitions or tool results. See
+[Multi-turn Guard](/trustguard/detectors/content-security#multi-turn-guard).
 
 ### Toxicity Detection and Custom Moderation
 
