@@ -1,12 +1,12 @@
 ---
 title: "Content security detectors"
-description: "Jailbreak detection, toxicity, custom topic moderation, and document/URL screening for indirect prompt injection and PII. Configured from the console."
+description: "Jailbreak detection, multi-turn attack detection, toxicity, custom topic moderation, and document/URL screening for indirect prompt injection and PII. Configured from the console."
 ---
 
 Content-security detectors are the LLM-aware core of TrustGuard. They score
-prompts for jailbreaks, and prompts and model output for toxicity and off-topic
-content, and they screen documents and URLs for **indirect prompt injection**
-and PII.
+prompts for jailbreaks, conversations for attacks built up over several turns,
+prompts and model output for toxicity and off-topic content, and they screen
+documents and URLs for **indirect prompt injection** and PII.
 
 Create them in the console under **Detectors**, then attach them from a
 [policy](/trustguard/concepts/policies) to decide what happens when they match.
@@ -14,6 +14,7 @@ Create them in the console under **Detectors**, then attach them from a
 | Console card | Sides | Protocols | Configuration tab shows |
 |---|---|---|---|
 | **Prompt Guard** | Input | All | Protection Sensitivity |
+| **Multi-turn Guard** | Input | LLM, A2A | Protection Sensitivity |
 | **Toxicity Detection** | Input, Output | All | Protection Sensitivity |
 | **Custom Moderation** | Input, Output | All | Topics you define + Protection Sensitivity |
 | **URL Analyzer** | Input | LLM, MCP | Domains + two linked detectors |
@@ -148,6 +149,64 @@ Move to **Strict** when you see attempts getting through in **Activity** — not
 before. Strict on a public chatbot will also flag people quoting an article
 about prompt injection, or testing your agent out of curiosity, and a stream of
 those trains everyone to ignore the findings.
+
+## Multi-turn Guard
+
+### The risk
+
+An attack that no single message gives away. The person builds up to it over
+several turns: a story whose stakes rise with every message, a forbidden request
+split into pieces that each look harmless, a cipher or a role-play agreed early
+on and used later. Patterns such as Crescendo and Echo Chamber work this way.
+
+Each message can pass [Prompt Guard](#prompt-guard), because on its own it is
+harmless. The attack is in the sequence.
+
+### What it looks for
+
+Whether the conversation, read in order, is an attack that depends on its earlier
+turns. It scores the sequence, not each message, so a request that only makes
+sense as the last step of an escalation is caught even when every step is mild.
+
+Attacks that fit in one message are Prompt Guard's job, not this detector's. Run
+the two together.
+
+### Where it looks
+
+**Input only**, and **only the user's messages**, oldest first. It does not read
+the assistant's replies, the system prompt, tool definitions or tool results. An
+Output rule is skipped and has no effect.
+
+It needs earlier turns to have something to judge:
+
+- **When the request carries the conversation**, as chat APIs do with the
+  message history, it reads the user turns in it.
+- **When the integration sends only the latest message**, TrustGuard keeps the
+  earlier user messages of the same session, encrypted, for one hour after the
+  session's last turn by default (`session_ttl` through the API, up to seven
+  days) and never longer than your retention period. That only
+  works with a stable session ID: the `session_id` you send to the
+  [Evaluate API](/trustguard/api/evaluate), or the conversation key your
+  integration passes. A session ID that TrustGuard generates because none was
+  sent cannot link one request to the next.
+
+It runs on LLM traffic and on A2A conversations, where the session is the A2A
+context. MCP traffic is skipped.
+
+The first message of a conversation is skipped: with a single user turn there is
+nothing to read as a sequence yet. If the stored turns of a session cannot be
+read, it scores only the user turns the request itself carries; with fewer than
+two, it skips the request rather than block it.
+
+A message this detector **blocks** never reached the model, so it is not kept as
+part of the conversation and does not count against the turns that follow. A
+message it only **reports** did reach the model and is kept.
+
+### Configure
+
+**Protection Sensitivity**, and nothing else. Start on **Balanced**, with the
+policy in **Observe**, and read the findings in **Activity** before you enforce:
+a long, legitimate conversation that drifts across topics is the case to check.
 
 ## Toxicity Detection
 
@@ -487,6 +546,8 @@ switch to forget, and no file-size or language list to tune.
 
 - **Prompt Guard** is the baseline for any chat traffic. If you deploy one
   detector, deploy this one.
+- **Multi-turn Guard** next to Prompt Guard for conversational agents and
+  copilots, where an attack can be spread over a long session.
 - **Toxicity Detection** on output when your agent talks to the public; on input
   when abuse of the service is the concern.
 - **Custom Moderation** for scope control — keeping your agent off the subjects
