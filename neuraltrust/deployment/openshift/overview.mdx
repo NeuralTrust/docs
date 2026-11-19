@@ -3,7 +3,7 @@ title: OpenShift
 description: OpenShift prerequisites, Routes, and SecurityContextConstraints for the NeuralTrust chart.
 ---
 
-The same [`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform) chart installs on OpenShift as on any other Kubernetes distribution. Three things differ: the chart renders native **Routes** instead of Ingress, wildcard Routes need cluster-level admission, and one workload needs an SCC decision. Everything else — Secrets, values, `helm upgrade --install` — is identical.
+The same [`neuraltrust-platform`](https://github.com/NeuralTrust/neuraltrust-platform) chart installs on OpenShift as on any other Kubernetes distribution. Three things differ: the endpoints are served by the OpenShift router as **Routes**, TrustGate's wildcard Routes need cluster-level admission, and the Firewall needs an SCC decision when it runs in your cluster. Everything else — Secrets, values, `ntctl install` or `helm upgrade --install` — is identical.
 
 Every topology is supported. Install by following [Hybrid](/neuraltrust/deployment/hybrid) or [Self-hosted](/neuraltrust/deployment/external) as written — namespace, Secrets, values file, `helm upgrade --install`, verification — and apply the OpenShift specifics on this page as you go.
 
@@ -17,7 +17,7 @@ Every topology is supported. Install by following [Hybrid](/neuraltrust/deployme
 | Domain | A wildcard apps domain such as `apps.example.com` |
 | Datastores | Reachable PostgreSQL and Redis — [minimum sizes](/neuraltrust/deployment/configuration#managed-stores) |
 
-Start from the chart's tracked [`values-openshift.yaml`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-openshift.yaml), which you get by unpacking the chart or from the [chart repository](https://github.com/NeuralTrust/neuraltrust-platform). A companion [OpenShift guide](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/README-OPENSHIFT.md) is maintained next to the chart.
+A companion [OpenShift guide](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/README-OPENSHIFT.md) is maintained next to the chart.
 
 ## Prepare a project
 
@@ -36,7 +36,18 @@ oc secrets link builder gcr-secret --for=pull -n neuraltrust
 
 ## Select the platform
 
-Two values switch the chart to OpenShift behaviour:
+[ntctl](/neuraltrust/deployment/ntctl) detects OpenShift from the cluster and
+sets the platform for you. Log in with `oc login`, then install as the
+[Hybrid](/neuraltrust/deployment/hybrid) or
+[Self-hosted](/neuraltrust/deployment/external) page says, passing the cluster's
+apps wildcard suffix as the base domain:
+
+```bash
+ntctl install --domain apps.example.com                  # Hybrid
+ntctl install --mode external --domain apps.example.com  # Self-hosted
+```
+
+With Helm, these values switch the chart to OpenShift behaviour:
 
 ```yaml
 global:
@@ -46,7 +57,7 @@ global:
     provider: openshift
 ```
 
-`values-openshift.yaml` is a **platform overlay, not a complete install** — it selects the topology only. Layer it over a values file that selects products, with the OpenShift file last so its `platform` wins:
+For **Hybrid**, the chart's tracked [`values-openshift.yaml`](https://github.com/NeuralTrust/neuraltrust-platform/blob/main/values-openshift.yaml) sets them, together with `global.deploymentMode: hybrid`. It is an overlay, not a complete install: layer it over a values file that selects products, with the OpenShift file last so its settings win:
 
 ```bash
 helm upgrade --install neuraltrust-platform \
@@ -58,6 +69,8 @@ helm upgrade --install neuraltrust-platform \
   --set global.domain=apps.example.com
 ```
 
+For **Self-hosted**, do not use `values-openshift.yaml`, because it switches the install to Hybrid. Put `global.platform: openshift` and `global.domain` in your own values file instead.
+
 Render before you install, declaring the Route API so the OpenShift objects appear:
 
 ```bash
@@ -68,7 +81,10 @@ helm template neuraltrust-platform <chart> \
 
 ## Routes
 
-With `global.platform: openshift`, the chart renders native Routes for the gateway, MCP, and — in External mode — the console and APIs. To standardise on Kubernetes Ingress instead, set `agentgateway.ingress.resourceType: ingress`.
+With `global.platform: openshift`, the console, its API and TrustGuard are
+Ingresses with the `openshift-default` class, which the router serves as edge
+Routes. TrustGate's gateway and MCP render native Routes; to standardise them on
+Kubernetes Ingress instead, set `agentgateway.ingress.resourceType: ingress`.
 
 Dynamic gateway subdomains (`*.llm.<domain>`, `*.mcp.<domain>`) render as Routes with `wildcardPolicy: Subdomain`. The chart cannot configure the IngressController, so a cluster administrator has to admit wildcards first:
 
@@ -82,11 +98,22 @@ The router certificate must also cover those wildcard hosts. If you would rather
 
 ### Route certificates
 
-A Route is readable by anyone holding `route/get`, so the chart never copies private keys into one. Setting an ingress `tls.secretName` renders `spec.tls.externalCertificate` pointing at your Secret, which requires **OpenShift 4.17+** and read access for the router service account. On older clusters, rely on the router's default wildcard certificate.
+By default the endpoints use the router's own certificate. An Ingress without a
+`tls.secretName` carries no `tls` block, so the router serves its default
+wildcard certificate, which already covers hosts under the apps domain. The
+chart does not put its self-signed placeholder certificate on OpenShift
+endpoints.
+
+To use your own certificate, set the component's `ingress.tls.secretName`. On
+the Routes the chart renders itself, a Route is readable by anyone holding
+`route/get`, so the chart never copies private keys into one: it renders
+`spec.tls.externalCertificate` pointing at your Secret, which requires
+**OpenShift 4.17+** and read access for the router service account. On older
+clusters, rely on the router's default wildcard certificate.
 
 ## SecurityContextConstraints
 
-Most workloads run non-root with all capabilities dropped and are compatible with `restricted-v2` as-is. The chart also drops its fixed `runAsUser`/`fsGroup` from in-cluster PostgreSQL when `global.platform: openshift`, so the platform-assigned UID applies. Two workloads need a decision:
+Every workload a default install renders runs non-root with all capabilities dropped and is compatible with `restricted-v2` as-is, including the hook Jobs that run before an install or upgrade. With `global.platform: openshift`, the chart drops its fixed `runAsUser`/`fsGroup` from in-cluster PostgreSQL and from those Jobs, so the platform-assigned UID applies. No SCC grant is needed unless the Firewall runs in your cluster. Two workloads need a decision then:
 
 | Workload | Why | Options |
 | --- | --- | --- |
@@ -101,18 +128,24 @@ oc adm policy add-scc-to-user anyuid -z firewall -n neuraltrust
 
 Keep `restricted-v2` for everything else. If your policy forbids `anyuid` outright, raise it before install, or use the NeuralTrust-hosted Firewall — the default — so no Firewall pod runs in your cluster. See [Firewall](/neuraltrust/deployment/configuration#firewall).
 
+If admission refuses a pod, its workload shows no pods at all, only a `FailedCreate` event. `ntctl doctor` reports it as `NT-DR-016` — see [Pods are never created](/neuraltrust/deployment/troubleshooting#pods-are-never-created).
+
 ## Expose the entry points
+
+`ntctl install` lists the Routes with whether a router admitted them, and the hosts the cluster's wildcard DNS already covers, so no DNS records are needed when the base domain is the apps domain. With Helm, check them with:
 
 ```bash
 oc get route -n neuraltrust
 ```
 
-Cluster wildcard DNS and certificates may already cover the Route hosts; for custom hosts, follow cluster ingress policy. In Hybrid you expose two:
+For hosts outside the apps domain, follow cluster ingress policy for DNS and certificates. In Hybrid you expose two:
 
 - The LLM/proxy Route, targeting the proxy Service's named `http` port (Service port `80`, TrustGate container port `8081`)
 - The MCP Route, targeting the MCP Service's named `http` port (Service port `80`, TrustGate container port `8082`)
 
-Then set both URLs in the console, as in [Hybrid → Expose both entry points](/neuraltrust/deployment/hybrid#expose-both-entry-points). External additionally renders Routes for the console, its API, and the gateway admin surface.
+Then set both URLs in the console, as in [Hybrid → Expose both entry points](/neuraltrust/deployment/hybrid#expose-both-entry-points).
+
+Self-hosted serves the console at `app.<domain>` and its API at `api.<domain>`, plus `trustguard.<domain>` (the evaluation endpoint) and `trustguard-admin.<domain>` for TrustGuard, `data-plane-api.<domain>` when the data-plane API is deployed, and TrustGate's gateway, MCP and admin hosts when TrustGate is installed. Plan network access and certificates for each host the install renders.
 
 ## Also plan for
 

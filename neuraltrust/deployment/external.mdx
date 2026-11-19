@@ -91,7 +91,7 @@ chart in one release.
 | TrustGate MCP `:8082` | MCP entry point |
 | TrustGuard data plane | Runtime safety evaluation |
 | Firewall (gateway + 5 workers) | Prompt and response classifiers. Runs here only with `global.firewall.deploy: true`, and is then the largest memory consumer in the data path; by default TrustGuard calls the NeuralTrust-hosted Firewall — see [Firewall](/neuraltrust/deployment/configuration#firewall) |
-| data-plane-api | Red-teaming and evaluation API |
+| data-plane-api | TrustTest red teaming and evaluation API. Runs only with `global.products.dataPlane: true`; see [data-plane API](/neuraltrust/deployment/configuration#data-plane-api) |
 
 ### Control plane
 
@@ -111,7 +111,8 @@ chart in one release.
 | DataCore | Query API over ClickHouse plus PostgreSQL metadata |
 | AlertEngine API + worker | Evaluates alert rules and forwards to SIEM and integrations |
 
-Every product deploys unless you turn it off, and DataAgent never runs.
+TrustGate and TrustGuard deploy unless you turn them off, the data-plane API
+deploys only when you turn it on, and DataAgent never runs.
 
 ### TrustGuard only
 
@@ -128,9 +129,9 @@ removes TrustGate's workloads, hosts and Secrets, plus what only TrustGate uses:
 the in-cluster Firewall's `complexity` worker, MCP OAuth and the Admin API
 machine credentials.
 
-Leave `dataPlane` on: the console reads runtime activity from the data-plane
-API. The audit trail does not depend on it; audit events are sent as OTLP logs
-and shown under Telemetry → Logs.
+The console does not need the data-plane API: runtime activity and requests are
+read through DataCore, and audit events are sent as OTLP logs and shown under
+Telemetry → Logs.
 
 ## Prerequisites
 
@@ -354,18 +355,24 @@ neither, `helm upgrade` stops with an error that names both options.
 ntctl install --mode external
 ```
 
-A Self-hosted install runs every product, so ntctl does not ask which ones, and
-it needs no console sign-in and no tokens. It asks for the base domain, the
+A Self-hosted install runs TrustGate and TrustGuard, so ntctl does not ask for a
+product list, and it needs no console sign-in and no tokens. It asks whether to
+deploy the opt-in data-plane API (No by default; `--data-plane-api` answers it). It asks for the base domain, the
 platform (detected from the cluster), where images come from, the console's
 first administrator, how the console sends email (`none` by default, or Resend,
 SMTP or Amazon SES), and whether the Firewall runs in your cluster or at
-NeuralTrust with the firewall key NeuralTrust sends you. It keeps the
-administrator in the `onprem-superadmin` Secret, out of the Helm release
+NeuralTrust with the firewall key NeuralTrust sends you. To skip that question,
+create the `trustguard-firewall` Secret
+[with the firewall key](#install) before you run it, or export
+`NT_FIREWALL_JWT`: ntctl then uses the NeuralTrust-hosted Firewall. It checks
+the key before changing anything, and `ntctl preflight` does the same. It keeps
+the administrator in the `onprem-superadmin` Secret, out of the Helm release
 history.
 
 It then checks the cluster, shows what it is about to apply, creates the
-Secrets, installs, waits until every workload is Ready, prints the DNS records,
-and writes the values it used, without credentials, to
+Secrets, installs, waits until every workload is Ready, prints the DNS records
+(on OpenShift, the Routes and the hosts the cluster's wildcard DNS already
+covers), and writes the values it used, without credentials, to
 `neuraltrust-values.yaml`. The ordering described in the Helm path's last step
 still applies: the console serves once its migrations have run.
 
@@ -373,7 +380,7 @@ Without questions, for a pipeline:
 
 ```bash
 export ONPREM_SUPERADMIN_EMAIL=admin@example.com ONPREM_SUPERADMIN_PASSWORD=...
-export NT_FIREWALL_JWT=...        # unset: the Firewall runs in your cluster
+export NT_FIREWALL_JWT=...        # or create trustguard-firewall; with neither, the Firewall runs in your cluster
 export NT_REGISTRY_KEY_FILE=./neuraltrust-registry-key.json
 
 ntctl install --yes --mode external --domain platform.example.com
@@ -528,8 +535,9 @@ kubectl -n neuraltrust logs deploy/agentgateway-admin | grep -i 'migration\|list
 ```
 
 You should see the full inventory: the request path (`agentgateway-proxy`,
-`agentgateway-mcp`, `trustguard-data-plane`, `data-plane-api`, plus `firewall`
-and its workers with `global.firewall.deploy: true`), the in-cluster control plane (`agentgateway-admin`,
+`agentgateway-mcp`, `trustguard-data-plane`, plus `firewall` and its workers
+with `global.firewall.deploy: true`, and `data-plane-api` with
+`global.products.dataPlane: true`), the in-cluster control plane (`agentgateway-admin`,
 `trustguard-control-plane`, `control-plane-api`, `control-plane-app`), and the
 analytics stack (`clickstack-collector`, `clickhouse`, `datacore`,
 `alertengine-api`, `alertengine-worker`). No `dataagent` pod appears.

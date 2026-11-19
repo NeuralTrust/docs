@@ -27,12 +27,14 @@ each finding. Pass `--namespace` and `--release` if yours are not the defaults.
 | `NT-DR-013` | Pods cannot be scheduled, with the scheduler's reason | [Pods stay Pending](#pods-stay-pending) |
 | `NT-DR-014` | A container was killed for exceeding its memory limit | [OOMKilled](#oomkilled) |
 | `NT-DR-015` | A container runs but never becomes ready. It shows the probe's failures and the last errors, with a fix for the causes it recognises: a config-sync token from another control plane, refused database credentials, an untrusted certificate | [Running but never Ready](#running-but-never-ready-data-planes) |
+| `NT-DR-016` | A Job, ReplicaSet, StatefulSet or DaemonSet cannot create its pods because admission refuses them: an OpenShift SecurityContextConstraint, or the namespace's Pod Security level. It names the service account | [Pods are never created](#pods-are-never-created) |
 | `NT-DR-020` | A volume is not bound | [A volume is not bound](#a-volume-is-not-bound) |
 | `NT-DR-021` | A Job failed, such as a database bootstrap hook; its last log lines are shown | [A hook Job failed](#a-hook-job-failed) |
 | `NT-DR-022` | Ingresses have no address yet | [No address on the endpoints](#no-address-on-the-endpoints) |
 | `NT-DR-023` | HTTPRoutes are not accepted by their Gateway, with the controller's reason | [No address on the endpoints](#no-address-on-the-endpoints) |
 | `NT-DR-024` | Information: Secrets from earlier chart versions that nothing reads any more, with the command that deletes them | [Secrets left by earlier charts](/neuraltrust/deployment/upgrades#secrets-left-by-earlier-charts) |
 | `NT-DR-025` | `platform-secrets` is rendered by the chart and applied by Argo CD, or another tool that renders without reading the cluster, so every hard refresh generates new signing and encryption keys | [Keys change on every sync](#keys-change-on-every-sync) |
+| `NT-DR-026` | OpenShift Routes that no router has admitted, with the router's reason | [No address on the endpoints](#no-address-on-the-endpoints) |
 | `NT-PF-*` | A preflight check failed against what is deployed | [Preflight](/neuraltrust/deployment/validation#preflight) |
 
 When an install or upgrade made with ntctl does not become ready, ntctl prints
@@ -147,6 +149,30 @@ over `workerDefaults.resources`, or run fewer detectors. See
 
 Every workload reads its own `imagePullSecrets`, then `global.imagePullSecrets`, then `gcr-secret`. Check that the Secret exists in the release namespace and that no component key overrides the global list: `helm template … | grep -A2 imagePullSecrets`.
 
+### Pods are never created
+
+A workload shows no pods at all, and `kubectl get events` shows `FailedCreate`
+on its Job, ReplicaSet, StatefulSet or DaemonSet: admission refused the pod
+before it existed, so there is no pod to describe. `ntctl doctor` reports it as
+`NT-DR-016`, naming the service account, and `ntctl install` and
+`ntctl upgrade` print it as soon as they see it.
+
+- **OpenShift**, `unable to validate against any security context constraint`:
+  the pod asks for something the namespace's SCC does not allow, usually a fixed
+  `runAsUser` outside the project's UID range under `restricted-v2`. Every
+  workload the chart renders runs under `restricted-v2` except the Firewall when
+  it runs in your cluster; see
+  [SecurityContextConstraints](/neuraltrust/deployment/openshift/overview#securitycontextconstraints).
+  For anything else, grant an SCC to that one service account rather than to
+  the namespace:
+  `oc adm policy add-scc-to-user nonroot-v2 -z <service-account> -n neuraltrust`.
+- **Pod Security admission**, `violates PodSecurity`: the namespace's
+  `pod-security.kubernetes.io/enforce` level refuses the pod. Lower the level if
+  your policy allows, or set the pod's security context to meet it.
+
+An install that is still waiting continues on its own once the pod is
+admitted.
+
 ### A volume is not bound
 
 The PersistentVolumeClaim names a StorageClass that does not exist, or the
@@ -172,6 +198,11 @@ address. With `--gateway` or `global.ingress.provider: gateway-api`, the
 HTTPRoutes attach to an existing Gateway: `ntctl doctor` shows the Gateway
 controller's reason when it does not accept them, usually a listener that does
 not admit the namespace or a hostname outside the listener's.
+
+On OpenShift the router serves each Ingress as a Route. `ntctl doctor` reports a
+Route no router has admitted as `NT-DR-026`, with the router's reason:
+`HostAlreadyClaimed` means another Route, often in another namespace, already
+owns the host.
 
 ## Config sync
 

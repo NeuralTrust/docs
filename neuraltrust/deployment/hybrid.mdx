@@ -55,7 +55,7 @@ Have each of these ready. The install fails, or half-works, without them.
 | Plane | Where it runs | What it covers |
 | --- | --- | --- |
 | **Control plane** | NeuralTrust SaaS, in your tenant's region | Console, configuration, analytics |
-| **Data plane** | Your environment | TrustGate, TrustGuard, data-plane API, DataAgent |
+| **Data plane** | Your environment | TrustGate, TrustGuard, DataAgent, and the opt-in data-plane API |
 | **Inference plane** | NeuralTrust SaaS, EU or US (or your environment, opt-in) | Firewall: the ML detectors behind TrustGuard — see [Inference plane](/neuraltrust/deployment/inference-plane) |
 
 ### How the planes connect
@@ -96,12 +96,13 @@ payloads stay in your PostgreSQL.
 | `agentgateway-mcp` (TrustGate) | 8082 | The same, for MCP tool traffic | MCP tool calls fail |
 | `trustguard-data-plane` | 8081 | Evaluates prompts and responses against detectors | Protection checks fail |
 | `firewall` gateway + workers | 8000 | ML classifiers behind a gateway API. Runs here only with `global.firewall.deploy: true`; by default TrustGuard calls the NeuralTrust-hosted Firewall. In-cluster, it is the largest memory consumer in the data path | ML-backed detectors fail |
-| `data-plane-api` | 8080 | Red teaming and evaluation API | TrustTest runs fail |
+| `data-plane-api` | 8080 | TrustTest red teaming and evaluation API. Runs here only with `global.products.dataPlane: true`; see [data-plane API](/neuraltrust/deployment/configuration#data-plane-api) | TrustTest runs fail |
 | `dataagent` (one per product) | 8080 health only | Answers authorized queries from SaaS over an outbound stream, and hosts the telemetry egress collector | Dashboards that read your data go blank |
 
 Products are selected with `global.products.trustgate`,
 `global.products.trustguard`, and `global.products.dataPlane`. All default to
-**off** and at least one must be `true`.
+**off** and at least one must be `true`. Select `dataPlane` only if you run
+TrustTest red teaming.
 
 DataAgent is worth understanding because it is unusual: it exposes **no inbound
 service**. It dials out to DataBridge and holds the stream open, and queries
@@ -321,7 +322,7 @@ export NT_POSTGRES_URL='postgres://user:password@db.example.com:5432/neuraltrust
 export NT_REDIS_URL='rediss://:password@cache.example.com:6380'
 
 ntctl install --yes --domain platform.example.com \
-  --products trustgate,trustguard,dataPlane
+  --products trustgate,trustguard
 ```
 
 Leave out `NT_POSTGRES_URL` and `NT_REDIS_URL` to run both in the cluster. For a
@@ -464,7 +465,6 @@ global:
   products:
     trustgate: true
     trustguard: true
-    dataPlane: true
 
 agentgateway:
   configSync:
@@ -503,7 +503,8 @@ global:
 For a subset of products, drop the flags you do not need and use the matching
 tracked slice — `values-trustgate.yaml.example`,
 `values-trustguard.yaml.example`, or `values-red-teaming.yaml.example`
-(data-plane API only, which needs no DataAgent and no config-sync). The
+(the opt-in data-plane API for TrustTest red teaming, which needs no DataAgent
+and no config-sync). The
 single-product installs are walked through in
 [TrustGate data plane](/neuraltrust/deployment/trustgate) and
 [TrustGuard data plane](/neuraltrust/deployment/trustguard). Every switch is in
@@ -568,10 +569,11 @@ and the DNS records to create. When something is not Ready,
 [`ntctl doctor`](/neuraltrust/deployment/troubleshooting#start-with-ntctl-doctor)
 says why.
 
-With all three products enabled you should see `agentgateway-proxy`,
-`agentgateway-mcp`, `trustguard-data-plane`, `data-plane-api`, `dataagent`, and
+With TrustGate and TrustGuard enabled you should see `agentgateway-proxy`,
+`agentgateway-mcp`, `trustguard-data-plane`, `dataagent`, and
 `dataagent-trustguard`, plus `firewall` and its workers with
-`global.firewall.deploy: true`. In-cluster
+`global.firewall.deploy: true`, and `data-plane-api` with
+`global.products.dataPlane: true`. In-cluster
 `control-plane-postgresql` and `redis` appear only while `deploy: true`.
 
 A pod that is `Running` but never `Ready` is the signature of config-sync
@@ -598,7 +600,7 @@ Hostnames derive from `global.domain`:
 | TrustGate LLM gateway | `gateway.<domain>` and `*.llm.<domain>` |
 | TrustGate MCP | `mcp.<domain>` and `*.mcp.<domain>` |
 | TrustGuard | `trustguard.<domain>` |
-| data-plane API | `data-plane-api.<domain>` |
+| data-plane API (opt-in) | `data-plane-api.<domain>` |
 
 TrustGate listens on two ports for two different protocols, and they need
 separate hostnames in production:
