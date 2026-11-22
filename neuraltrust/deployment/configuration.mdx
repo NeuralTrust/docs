@@ -16,9 +16,10 @@ in the chart.
 ## Values cheat sheet
 
 The switches that matter most. In Hybrid, `global.products` is opt-in: set a
-product to `true` to run it. In External and Central it is opt-out: set a
-product to `false` to leave it out
+product to `true` to run it. In External and Central, TrustGate and TrustGuard
+are opt-out: set a product to `false` to leave it out
 ([TrustGuard only](/neuraltrust/deployment/external#trustguard-only)).
+`global.products.dataPlane` is opt-in in every mode.
 
 | Value | Guidance | Effect |
 | --- | --- | --- |
@@ -26,7 +27,7 @@ product to `false` to leave it out
 | `global.controlPlane.domain` | Empty for NeuralTrust SaaS | A bare DNS suffix enrols this data plane into your own central control plane instead. |
 | `global.products.trustgate` | `true` to run TrustGate | Renders the TrustGate proxy and MCP data plane. Hybrid needs at least one product. |
 | `global.products.trustguard` | `true` to run TrustGuard | Renders the TrustGuard data plane. In Hybrid it calls the NeuralTrust-hosted Firewall unless `global.firewall.deploy: true`; see [Firewall](#firewall). |
-| `global.products.dataPlane` | `true` for the red-teaming shim | Renders the data-plane API. Needs no DataAgent and no config sync. |
+| `global.products.dataPlane` | `true` only for TrustTest red teaming | Renders the data-plane API, which serves TrustTest red teaming and evaluation. Off unless set, in Hybrid, External and Central. Needs no DataAgent and no config sync. |
 | `global.postgresql.deploy` | **`false` in production** | `true` runs an in-cluster store, which is the proof-of-concept default. |
 | `global.redis.deploy` | **`false` in production** | Same for Redis. |
 | `agentgateway.configSync.existingSecret` | Reference your Secret | TrustGate config-sync token. Config sync is on by default in Hybrid — do not restate `enabled: true`. |
@@ -39,6 +40,7 @@ product to `false` to leave it out
 | `global.imageRegistryScope` | `all` | Also moves the OTel collector images onto `global.imageRegistry`. |
 | `global.autoGenerateSecrets` | `true` | Chart owns the credentials it can generate. |
 | `global.preserveExistingSecrets` | `false` | For GitOps: pre-create every Secret and set `true`. |
+| `global.podLabels` / `global.podAnnotations` | Empty by default | Labels and annotations added to every pod the chart runs — see [Pod labels and annotations](#pod-labels-and-annotations). |
 | `global.observability.operationalTelemetry` | `false` by default; recommended `true` | TrustGate and TrustGuard export their own health traces and metrics — see [Operational telemetry](#operational-telemetry). |
 
 Leave `watchdog.enabled` off unless NeuralTrust asks you to enable it.
@@ -390,6 +392,92 @@ With two clusters active/passive, put one global LLM URL and one global MCP URL
 in front of both clusters' Ingress resources and configure those stable URLs in
 the console.
 
+## Pod labels and annotations
+
+Add your own labels and annotations to every pod the chart runs: Deployments,
+StatefulSets, hook Jobs and CronJobs. Common uses are a group label that a
+NetworkPolicy selects on, a cost-allocation label, and an annotation a mesh or
+an agent reads.
+
+```yaml
+global:
+  podLabels:
+    example.com/communication-flow: platform
+  podAnnotations:
+    example.com/owner: platform-team
+```
+
+They go on the pod template only, never on a selector. Each change rolls the
+affected pods on the next `helm upgrade`, and no resource is renamed or
+replaced, except the PostgreSQL bootstrap Job (below). With both maps empty, the
+render is unchanged.
+
+### Precedence
+
+Each pod merges these layers. When two layers set the same key, the later one wins.
+
+| Layer | Values | Applies to |
+| --- | --- | --- |
+| 1 | `global.podLabels`, `global.podAnnotations` | Every pod |
+| 2 | The component's own `podLabels`, `podAnnotations` | That component's pods |
+| 3 | `global.jobs.podLabels`, `global.jobs.podAnnotations` | Job and CronJob pods only |
+| 4 | Keys the chart sets itself | Always win |
+
+Component keys:
+
+| Component | Values |
+| --- | --- |
+| A subchart: `agentgateway`, `trustguard`, `firewall`, `alertengine`, `datacore`, `dataagent`, `databridge`, `clickhouse`, `clickstack-ingest-gateway`, `clickstack-otel-collector`, `control-plane-api`, `control-plane-app`, `data-plane-api`, `watchdog` | `<subchart>.podLabels`, `<subchart>.podAnnotations` |
+| One DataAgent | `agentgateway.dataagent.*` or `trustguard.dataagent.*` |
+| In-cluster PostgreSQL and its bootstrap Job | `global.postgresql.podLabels`, `global.postgresql.podAnnotations` |
+| In-cluster Redis | `global.redis.podLabels`, `global.redis.podAnnotations` |
+| OpenTelemetry collector | `global.observability.collector.podLabels`, `global.observability.collector.podAnnotations` |
+
+A subchart's map covers every pod in it: for example, the admin, proxy and MCP
+pods for `agentgateway`, and the gateway and every worker for `firewall`.
+
+### Reserved keys
+
+The render fails, naming the values path, when a map sets a key the chart owns:
+
+- **Labels:** `app.kubernetes.io/*`, `helm.sh/*`, `app`, `plane` and
+  `azure.workload.identity/use`. Some of these are selectors, which Kubernetes
+  never lets you change on a live Deployment.
+- **Annotations:** `checksum/*`, which the chart uses to roll pods when their
+  configuration changes.
+
+### Jobs and sidecars
+
+A sidecar that never exits keeps a Job pod running, so the Job never succeeds
+and the next `helm upgrade` can wait on it. Set the injection opt-out for Jobs
+only:
+
+```yaml
+global:
+  podLabels:
+    sidecar.istio.io/inject: "true"
+  jobs:
+    podLabels:
+      sidecar.istio.io/inject: "false"
+```
+
+Native sidecars, available on Kubernetes 1.29 and later when the mesh is
+configured to use them, exit with the Job and need no opt-out.
+
+<Warning>
+Running the chart inside a service mesh is not validated yet. Init containers
+that reach PostgreSQL or ClickHouse before the sidecar is ready can stay in
+`Init` with a classic sidecar. Test injection in a non-production namespace first.
+</Warning>
+
+### PostgreSQL bootstrap Job
+
+A Job's pod template cannot change in place, so the bootstrap Job's name
+includes a hash of its pod inputs. Setting labels or annotations that reach it
+renames the Job once, and Helm replaces it. The Job runs once more, as it does
+on every new chart version, which is harmless. Installs that never set these
+maps keep their Job name.
+
 ## Firewall
 
 The Firewall holds the ML detectors TrustGuard calls. In every mode it is
@@ -636,6 +724,7 @@ chart and the wizard generate.
 | `MCP_OAUTH_CLIENT_NAME` | One name per environment | The `client_name` TrustGate registers with upstream MCP authorization servers through dynamic client registration — what users see on the upstream consent screen. Defaults to `TrustGate MCP Gateway`. Changing it re-registers the cached clients, and grants held by the previous registration can no longer be refreshed. |
 | `PLAYGROUND_TOKEN_PUBLIC_KEYS` | Usually empty in Hybrid | RS256 public keys that verify playground and diagnostics tokens minted by the control plane; a bare PEM or a JSON array of `{kid, pem}`. Falls back to `ADMIN_M2M_PUBLIC_KEYS` when unset. Config-sync data planes also receive these keys in the snapshot. |
 | `PROXY_SERVE_HYBRID_GATEWAYS` | Leave the default | Whether this proxy serves gateways entitled as `data_plane=hybrid`. Defaults to the value of `CONFIG_SYNC_DATA_PLANE_ENABLED`, so a config-sync data plane serves them and a hosted proxy answers **421** for them instead. Set `true` only on a customer-run data plane that is not DB-less. |
+| `PROVIDER_MAX_RETRIES` | Leave the default | Extra attempts on the same backend after a 5xx, 429 or transport error. Defaults to `0`: one client request is one provider call, and a call that timed out is never retried on the same backend. Charts before v4.4.0 shipped `2`; to keep that behaviour, set it in `agentgateway.dataPlane.extraEnv` (and `agentgateway.mcp.extraEnv` if needed). |
 | `PROVIDER_ALLOW_PRIVATE_NETWORKS` | Leave unset on your own install | Whether gateways may reach model providers and guardrail services such as Azure Content Safety on private, loopback or link-local addresses. Defaults to `true`, because a self-run gateway normally reaches your private model hosts and private endpoints. Set `false` if people you do not fully trust can configure gateways, so they cannot aim TrustGate at your internal network. |
 | `MODEL_ARMOR_ALLOW_AMBIENT_IDENTITY` | Leave unset on your own install | Whether Model Armor policies may authenticate as the gateway's own cloud identity (Workload Identity, application default credentials or service-account impersonation) instead of a service-account key. Defaults to `true`. Set `false` under the same condition as above, so nobody who configures a gateway can borrow its identity. |
 
