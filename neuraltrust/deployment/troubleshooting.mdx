@@ -243,6 +243,33 @@ There is a second, independent limit: after **four** failed passwords the accoun
 
 `NEXT_PUBLIC_APP_URL` is inlined into the JavaScript bundle at image build time and cannot be set at runtime. The SSO screens resolve the origin from the browser and are correct; the **SCIM tenant URL** and the `meta.location` returned to your IdP are not. Until the build accepts a runtime origin, enter the SCIM tenant URL in your IdP by hand rather than copying it from the screen.
 
+### Creating a gateway fails: "a NeuralTrust service was unavailable"
+
+The full message is *We could not finish setting up this gateway because a
+NeuralTrust service was unavailable. Nothing was created — please try again, and
+contact us if it keeps failing.*
+
+On Self-hosted, this is where choosing **Private** in **New Gateway** ends. A
+private gateway's data plane runs in another cluster, and only a
+[Central](/neuraltrust/deployment/central) control plane can serve one. In External
+mode DataCore has no key to sign its install tokens, so it answers
+`POST /v1/admin/credentials` with HTTP 501 `not implemented` and the console removes
+what it had created. Retrying does not help. Confirm it in the console's log:
+
+```bash
+kubectl -n neuraltrust logs deploy/control-plane-app | grep 'DataCore request failed'
+```
+
+A line for `/v1/admin/credentials/` with status `501` is this case. Create the
+gateway again and choose **SaaS**, which on Self-hosted is this cluster's own data
+plane — see [Gateways run on this cluster](/neuraltrust/deployment/external#gateways-run-on-this-cluster).
+**New TrustGuard** works the same way: choose **SaaS** there too.
+
+On Central the same 501 means `CONFIG_SYNC_SIGNING_SECRET` is missing from the
+platform Secret — see [Central → Secrets](/neuraltrust/deployment/central#secrets).
+With any other status, AgentGateway admin or DataCore failed; check
+`deploy/agentgateway-admin` and `deploy/datacore`.
+
 ### Console starts but every dashboard is empty
 
 Check DataCore, which serves dashboard metrics in external mode:
