@@ -1,0 +1,49 @@
+# Sample DB-less configuration: one LLM route (Kong AI Proxy) and one MCP route, both
+# guarded by TrustGuard. Secrets come from environment variables of the Kong process
+# through Kong's env vault ({vault://env/trustguard-api-key} reads TRUSTGUARD_API_KEY).
+_format_version: "3.0"
+
+plugins:
+  # Applied to every route. Override per route or service if needed.
+  - name: neuraltrust-trustguard
+    config:
+      api_key: "{vault://env/trustguard-api-key}"
+      trustguard_url: https://trustguard.neuraltrust.ai
+      fail_mode: closed
+      mask_request: true
+      mask_response: true
+
+consumers:
+  - username: chat-frontend         # sent to TrustGuard as consumer_id
+    keyauth_credentials:
+      - key: change-me              # demo only: create real credentials through your usual workflow
+
+services:
+  # 1. LLM: clients POST OpenAI-style chat requests to https://<kong>/llm
+  - name: llm
+    url: https://api.openai.com     # ai-proxy sets the real upstream
+    routes:
+      - name: llm
+        paths: ["/llm"]
+        protocols: [http, https]
+    plugins:
+      - name: key-auth
+      - name: ai-proxy
+        config:
+          route_type: llm/v1/chat
+          auth:
+            header_name: Authorization
+            header_value: "{vault://env/openai-auth-header}"   # env OPENAI_AUTH_HEADER="Bearer sk-..."
+          model:
+            provider: openai
+            name: gpt-4o-mini
+
+  # 2. MCP server (streamable HTTP): clients connect to https://<kong>/bank-mcp/mcp
+  - name: bank-mcp
+    url: http://bank-mcp.internal:8080
+    routes:
+      - name: bank-mcp
+        paths: ["/bank-mcp"]
+        protocols: [http, https]
+    plugins:
+      - name: key-auth
