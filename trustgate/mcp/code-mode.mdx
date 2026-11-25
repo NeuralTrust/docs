@@ -1,0 +1,117 @@
+---
+title: "Code Mode"
+description: "Let MCP clients run a short program on the gateway that calls several tools in one step and returns one result."
+---
+
+A task that takes several tool calls — list the issues, read each one's
+comments, count the unanswered — normally costs the agent one call per step,
+and every intermediate result goes through its context. With **Code Mode**,
+the agent writes those steps as a short JavaScript program. The gateway runs
+it and hands back only what the program returns.
+
+```js
+const { issues } = await tools.linear_list_issues({ state: "started" });
+const comments = await Promise.all(
+  issues.map(i => tools.linear_list_comments({ issueId: i.id }))
+);
+return issues.filter((i, k) => comments[k].comments.length === 0).map(i => i.id);
+```
+
+Clients need nothing new: to them it is one more tool, whose argument is the
+program.
+
+## Turning it on
+
+In the console, open **Settings → Agent Gateway → General → MCP Code Mode**
+and pick a mode, then **Save**. Only admins can change it. Or through the
+Admin API:
+
+```http
+PUT /v1/gateways/{id}
+{"mcp_code_mode": "read_only"}
+```
+
+| Mode | What clients get |
+|---|---|
+| **Off** (default) | Nothing new. Clients call tools one at a time. |
+| **Read only** | `trustgate_query`: programs that call tools that only read. |
+| **Full** | `trustgate_query` and `trustgate_execute`: programs that can call any tool the user can call, writes included. Clients ask the user before running one. |
+
+<Note>
+Claude's hosted connectors keep the tool list they fetched when the person
+connected. After changing the mode, people see the new tools once they
+reconnect.
+</Note>
+
+## Listing only the gateway's tools
+
+When a client sees the user's tools in its list, the model tends to call them
+one by one, even when a program would do the task in one call. To steer it to
+programs, set **Tool listing** to **Gateway tools only**, under MCP Code Mode in
+the same settings, or `{"mcp_tool_listing": "gateway"}` through the Admin API.
+
+Clients are then listed only the gateway's tools. The model finds the user's
+tools with `trustgate_search` and calls them with `trustgate_call`, or several
+at once from a program.
+
+The trade-offs:
+
+- **A single call costs a search first.**
+- **Approval in the client becomes coarser.** The client asks once for
+  `trustgate_call` instead of once per tool. The gateway's policies still apply
+  to every call.
+
+## Which tools a read-only program can call
+
+`trustgate_query` calls a tool only when it reads:
+
+- its MCP server marks it read-only (`readOnlyHint`) and does not mark it as
+  reaching outside the user's data (`openWorldHint`, such as a web search), or
+- an admin marks it read-only on the server.
+
+Any other tool is refused inside the program, and is never called.
+
+Many servers do not mark their tools. To open one of them to read-only
+programs, edit the server in **Registry → MCP** and tick its tools under
+**Code Mode: read-only tools**. Tools the server already marks read-only are
+ticked and locked. Through the Admin API, it is the server's
+`mcp_target.read_only_tools`, with the tools' own names (`list_issues`, not
+`linear_list_issues`).
+
+## Governance
+
+Every call a program makes is governed exactly like a direct call to that
+tool:
+
+- **The application's tools.** Its tool restrictions and its users' access.
+- **Consent.** A tool that needs the person to connect stops the program, and
+  the client shows the connect link as usual.
+- **Policies.** Request and response policies run on each call. The program's
+  final result passes the response policies once more, since a program can
+  combine or reshape what it read.
+- **Rate limits.** Each call counts.
+
+Programs run in an isolated sandbox. They have no network, file or
+environment access and can only reach the user's tools.
+
+## Limits
+
+| Limit | Value |
+|---|---|
+| Run time, tool calls included | 30 seconds |
+| Tool calls per program | 50, up to 4 at once |
+| Program size | 20 KB |
+| Result | 25 KB |
+| Memory | 64 MB |
+
+A program that fails gets back why, with the calls it made, so the agent can
+fix it and try again.
+
+## Activity and usage
+
+A program appears in Activity as one `trustgate_query` or `trustgate_execute`
+request. Its provider is the server its calls went to, or the servers when
+there are several.
+
+Usage counts each call that reached its tool as one request. The program
+itself is not counted.
