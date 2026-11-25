@@ -24,8 +24,9 @@ return issues.filter((i, k) => lists[k].comments.length === 0).map(i => i.id);
 ```
 
 To the client, a program is one more tool call: nothing to install, and nothing
-to change in the agent. Every call the program makes is checked by the gateway
-like a direct call.
+to change in the agent. The whole surface is two tools: `trustgate_search` to
+find the user's tools, and `trustgate_execute` to run a program that calls them.
+Every call the program makes is checked by the gateway like a direct call.
 
 ## Why it matters
 
@@ -71,7 +72,7 @@ sequenceDiagram
   participant U as MCP servers
   M->>G: trustgate_search "comments on a Linear issue"
   G-->>M: matching tools, with their signatures
-  M->>G: trustgate_query { code }
+  M->>G: trustgate_execute { code }
   G->>S: run the program
   S->>G: tools.linear_list_issues({…})
   G->>U: tools/call, after access and policy checks
@@ -103,12 +104,11 @@ sequenceDiagram
     A client that already lists the user's tools can skip this step.
   </Step>
   <Step title="It writes a program">
-    The model calls `trustgate_query`, or `trustgate_execute` for a program that
-    writes, with the program as its only argument:
+    The model calls `trustgate_execute` with the program as its only argument:
 
     ```json
     {
-      "name": "trustgate_query",
+      "name": "trustgate_execute",
       "arguments": {
         "code": "const { issues } = await tools.linear_list_issues({ state: \"started\", assignee: \"me\" });\nconst lists = await Promise.all(issues.map(i => tools.linear_list_comments({ issueId: i.id })));\nreturn issues.filter((i, k) => lists[k].comments.length === 0).map(i => i.id);"
       }
@@ -116,7 +116,9 @@ sequenceDiagram
     ```
 
     The code is the body of an async function: it can `await`, and it ends with
-    `return`.
+    `return`. `trustgate_execute` is marked destructive, since a program may
+    call tools that write, so clients that confirm such tools show the person
+    the program before it runs.
   </Step>
   <Step title="The gateway runs it">
     The program runs in a sandbox on the gateway. Each `tools.<name>(…)` call
@@ -154,7 +156,7 @@ sequenceDiagram
 
 Code Mode tells the model in three places:
 
-- **The tool descriptions.** `trustgate_query` says to use it instead of several
+- **The tool description.** `trustgate_execute` says to use it instead of several
   calls when a task needs a loop, a filter, a join or a count.
 - **The connection instructions.** The gateway's `initialize` instructions say
   the same.
@@ -214,7 +216,7 @@ The error's `name` says why the call failed:
 | `name` | The call |
 |---|---|
 | `ToolError` | reached the tool, and the tool returned an error, or the server could not be reached. `e.data` holds the tool's structured error when it sent one. |
-| `NotAllowedError` | was refused before it ran. Either the program is read-only and the tool writes or reaches outside the user's data, or the application may not use the tool. |
+| `NotAllowedError` | was refused before it ran: the application may not use the tool. |
 | `NotFoundError` | names no tool the user has. The message lists the closest names. |
 | `PolicyError` | was refused by one of the gateway's policies. |
 
@@ -231,12 +233,12 @@ before the program stopped:
 
 ```text
 TypeError: cannot read property 'id' of undefined
-at <anonymous> (query.js:1:63)
+at <anonymous> (program.js:1:63)
 
 Calls made before it stopped (1):
 - linear_list_issues: ok
 
-Fix the program and call trustgate_query again.
+Fix the program and call trustgate_execute again.
 ```
 
 The model fixes the program and runs it again, usually in the next turn.
@@ -331,11 +333,10 @@ names](/trustgate/mcp/overview#tool-names)).
 
     Returns `[["Design review", "Vendor call"]]`.
   </Accordion>
-  <Accordion title="Write in bulk (Full mode): comment on every unassigned urgent issue">
+  <Accordion title="Write in bulk: comment on every unassigned urgent issue">
     *"Ask for an owner on every urgent issue nobody has picked up."* A program
-    that writes runs with `trustgate_execute`, which is offered in **Full**
-    mode only. The tool is marked destructive, so clients that confirm such
-    tools show the person the program and ask first.
+    can write as well as read. Clients that confirm destructive tools show the
+    person this program and ask before it runs.
 
     ```js
     const { issues } = await tools.linear_list_issues({ priority: "urgent" });
@@ -363,7 +364,7 @@ The gateway measures every program it runs:
 Without the program, the model would have read the first. With it, the model
 read only the second.
 
-**Activity.** Open a `trustgate_query` or `trustgate_execute` request. Its
+**Activity.** Open a `trustgate_execute` request. Its
 details add two rows:
 
 | | |
@@ -371,12 +372,12 @@ details add two rows:
 | Program | 55 tool calls · read 125 KB, returned 21 B |
 | Kept out of context | ~32K tokens |
 
-**Analytics → MCP.** Once a program has run in the selected range, the tab
-adds three cards for the gateway or application:
+**Analytics.** Once a program has run in the selected range, for the gateway
+or application:
 
-- **Code Mode programs**, with the tool calls they made;
-- **Tokens kept out of context**, with the bytes read and returned;
-- **Round trips saved**: the tool calls, less one per program.
+- **Cost** adds **Tokens Saved**, the tokens programs kept out of context.
+- **MCP** adds **Round trips saved** to its first row of cards: the tool calls
+  programs made, less one per program.
 
 ### How the estimate is made
 
@@ -403,28 +404,31 @@ estimate as a lower bound, for two reasons:
 ## Turning it on
 
 In the console, open **Settings → Agent Gateway → General → MCP Code Mode**,
-pick a mode and **Save**. Only admins can change it. Through the Admin API:
+pick **On** and **Save**. Only admins can change it. Through the Admin API:
 
 ```http
 PUT /v1/gateways/{id}
-{"mcp_code_mode": "read_only"}
+{"mcp_code_mode": "on"}
 ```
 
 | Mode | What clients get |
 |---|---|
 | **Off** (default) | Nothing new. Clients call tools one at a time. |
-| **Read only** | `trustgate_query`, for programs that only read. |
-| **Full** | `trustgate_query`, and `trustgate_execute` for programs that may also create, change or delete. `trustgate_execute` is marked destructive, so clients that confirm such tools ask the person before running a program. |
-
-Start with **Read only**: it covers most multi-step questions, and a program
-cannot change anything.
+| **On** | `trustgate_execute`, which runs programs that call any tool the user can, each call checked by the gateway. |
 
 <Note>
 Claude's hosted connectors keep the tool list they fetched when the person
-connected. After changing the mode, people see the new tools once they
+connected. After turning Code Mode on, people see `trustgate_execute` once they
 reconnect. Until then, their model can still run a program by calling
-`trustgate_query` through `trustgate_call`, as the gateway's instructions tell
+`trustgate_execute` through `trustgate_call`, as the gateway's instructions tell
 it.
+</Note>
+
+<Note>
+Earlier versions also offered `trustgate_query`, for programs limited to tools
+their servers marked read-only. It is retired: a gateway set to **Read only**
+or **Full** is now **On**, and a client that still calls `trustgate_query` is
+told to send the same program to `trustgate_execute`.
 </Note>
 
 ## Getting models to use programs
@@ -440,7 +444,7 @@ call. Two things help:
   `trustgate_search` and calls them with `trustgate_call`, or several at once
   from a program.
 - **Ask for it.** A prompt that names the tool works with any listing, for
-  example *"use trustgate_query to…"*.
+  example *"use trustgate_execute to…"*.
 
 Listing only the gateway's tools has two costs:
 
@@ -448,29 +452,6 @@ Listing only the gateway's tools has two costs:
 - **Approval in the client is coarser.** The client asks once for
   `trustgate_call`, not once per tool. The gateway's policies still apply to
   every call.
-
-## Which tools a read-only program can call
-
-`trustgate_query` calls a tool only when the tool reads:
-
-- its MCP server marks it read-only (`readOnlyHint`), and does not mark it as
-  reaching outside the user's data (`openWorldHint`, such as a web search); or
-- an admin marks it read-only on the server.
-
-Any other tool is refused inside the program with a `NotAllowedError`, and is
-never called.
-
-Open-world tools are left out even when they only read. A program could
-otherwise pass what it read from private tools as an argument to a public one,
-such as a web search query, and data would leave without anything having
-written.
-
-Many servers do not mark their tools. To open one of them to read-only
-programs, edit the server in **Registry → MCP** and tick its tools under
-**Code Mode: read-only tools**. Tools the server already marks read-only are
-ticked and locked. Through the Admin API, it is the server's
-`mcp_target.read_only_tools`, with the tools' own names (`list_issues`, not
-`linear_list_issues`).
 
 ## Governance and security
 
@@ -488,6 +469,27 @@ The program itself runs in an isolated sandbox inside the gateway. It has no
 network, file system, environment variables or clock to wait on. It is limited
 in time, memory and calls, and is discarded when it ends. The only way out is a
 call to the user's tools, and each such call is checked as above.
+
+### Why there is no read-only mode
+
+A program can call tools that write. Limiting programs to tools that only read
+would rest on what each server says about its own tools (MCP's `readOnlyHint`
+and `openWorldHint`). Those claims are not verified, and servers make them
+differently: one marks its channel reads as reaching outside, another marks
+nothing at all. A rule built on them refuses ordinary reads, and lets through
+whatever a server mislabels.
+
+The controls that hold are the gateway's own, and they apply to every call a
+program makes:
+
+- **To keep an application's agents from writing**, restrict the application to
+  the tools that read. A tool outside its restrictions does not exist for its
+  programs either.
+- **To check what is written**, use request policies. They see each call's
+  arguments, whether a program or the model made it.
+- **To have a person confirm**, rely on the client: `trustgate_execute` is
+  marked destructive, so clients that confirm such tools show the program
+  first.
 
 ## Limits
 
@@ -507,8 +509,7 @@ less: pick the fields you need, slice, count or summarize in the program."*
 
 ## Activity and usage
 
-A program appears in Activity as one `trustgate_query` or `trustgate_execute`
-request. Its provider is the server its calls went to, or the list of servers
+A program appears in Activity as one `trustgate_execute` request. Its provider is the server its calls went to, or the list of servers
 when there were several. Its details show the [calls and
 savings](#measuring-the-savings).
 
@@ -524,11 +525,10 @@ client had made it. The program itself is not counted.
     [Tool listing to Gateway tools only](#getting-models-to-use-programs), or
     ask for a program in the prompt.
   </Accordion>
-  <Accordion title="NotAllowedError: the tool may change something">
-    `trustgate_query` only calls tools that read. If the tool only reads but
-    its server does not say so, mark it read-only under **Registry → MCP →
-    Code Mode: read-only tools**. If it writes, use `trustgate_execute`, in
-    **Full** mode.
+  <Accordion title="NotAllowedError: not one of the tools this connection may call">
+    The application's tool restrictions leave the tool out, for programs as
+    for direct calls. Add it to the application's tools if its agents should
+    use it.
   </Accordion>
   <Accordion title="NotFoundError: not one of the user's tools">
     The name must be the published one, such as `linear_list_issues`, not
