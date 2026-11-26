@@ -215,7 +215,7 @@ The error's `name` says why the call failed:
 
 | `name` | The call |
 |---|---|
-| `ToolError` | reached the tool, and the tool returned an error, or the server could not be reached. `e.data` holds the tool's structured error when it sent one. |
+| `ToolError` | reached the tool, and the tool returned an error, or the server could not be reached. `e.data` holds the tool's structured error when it sent one. A failure inside the gateway is said as it would be to a client (`internal error`), without its detail. |
 | `NotAllowedError` | was refused before it ran: the application may not use the tool. |
 | `NotFoundError` | names no tool the user has. The message lists the closest names. |
 | `PolicyError` | was refused by one of the gateway's policies. |
@@ -224,6 +224,13 @@ Two things stop the whole program instead, because the person must act. A tool
 that needs the person to connect their account first returns the connect link
 to the client, exactly as a direct call would. A rate limit returns the rate
 limit error.
+
+<Note>
+A program that stops early, for either of these or because it ran out of time,
+has already made the calls before that point. Nothing is undone, and running
+the program again makes them again. A program that writes can check first
+(does the comment already exist?) so that running it twice is safe.
+</Note>
 
 ### When a program fails
 
@@ -454,14 +461,20 @@ call it makes goes through the same checks:
 - **The application's tools.** Its tool restrictions, and its users' access.
 - **Consent.** A tool that needs the person to connect first stops the program,
   and the client shows the connect link as usual.
-- **Policies.** Request and response policies run on each call. The program's
-  final result passes the response policies once more.
+- **Policies.** Request and response policies run on each call, under the
+  policies that apply to that server and tool. What the program hands back
+  passes the response policies once more: its result, or its error and logs
+  when it fails. That last check runs every policy that applied to any of its
+  calls, so a policy scoped to one server also sees what the program built from
+  that server's data.
 - **Rate limits.** Each call counts.
 
 The program itself runs in an isolated sandbox inside the gateway. It has no
 network, file system, environment variables or clock to wait on. It is limited
-in time, memory and calls, and is discarded when it ends. The only way out is a
-call to the user's tools, and each such call is checked as above.
+in time, computation, memory and calls, and is discarded when it ends. The only
+way out is a call to the user's tools, and each such call is checked as above.
+The gateway does not trust what the program reports back: it checks every limit
+again on its side.
 
 ### Why there is no read-only mode
 
@@ -484,18 +497,30 @@ program makes:
   marked destructive, so clients that confirm such tools show the program
   first.
 
+<Warning>
+A client's own rules for single tools do not reach the calls inside a program.
+The client sees one tool, `trustgate_execute`. Allowing it without asking
+(Claude Code's "always allow", for example) allows every tool the user can
+call, whatever the client's rules say about each one. Rules that must hold
+belong in the gateway: the application's tool restrictions and its policies.
+</Warning>
+
 ## Limits
 
 | Limit | Value |
 |---|---|
 | Run time, tool calls included | 30 seconds, or less when the gateway's write timeout is shorter |
+| Computation (running JavaScript, waits on calls excluded) | 5 seconds |
 | Tool calls per program | 50, up to 4 at once |
 | One call's result, as the program receives it | 4 MB |
+| One call's arguments | 4 MB |
 | Program size | 20 KB |
 | Return value | 25 KB |
+| Error message | 4 KB |
 | Logs | 100 lines of up to 1,000 characters |
 | Memory | 64 MB |
-| Programs running at once, per gateway replica | 8 |
+| Programs running at once, per gateway replica | 8, and at most 2 of the same gateway |
+| Wait for a free slot | 5 seconds |
 
 Each limit fails with a message that says what to change. For example, *"Return
 less: pick the fields you need, slice, count or summarize in the program."*
