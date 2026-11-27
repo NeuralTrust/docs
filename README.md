@@ -15,6 +15,7 @@ More about the platform at [neuraltrust.ai](https://neuraltrust.ai/).
 | **TrustGate** | Open-source AI gateway for LLM and agent traffic — multi-provider routing, load balancing, policies, and MCP. |
 | **TrustGuard** | Runtime security. Inspects prompts and responses inline for jailbreaks, PII, toxicity and tool abuse, then blocks or redacts. |
 | **TrustTest** | Red-teaming and evaluation. Attack your own LLM applications and measure safety and reliability before rollout. |
+| **TrustForce** | Employee security. Phishing simulations, security training, and email security for the threats that reach the inbox, with a risk score per person. |
 
 Around them sits the platform: users and SSO, audit logs, SIEM export, custom domains
 and feature flags, shared by every product.
